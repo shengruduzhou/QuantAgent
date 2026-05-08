@@ -22,19 +22,22 @@ QMT 只做行情、查询、下单、撤单、回报
 ## 当前已有内容
 
 ```text
-configs/strategy.default.yaml          默认策略参数
+configs/strategy.default.yaml          A 股策略参数（含板块涨跌停表）
 configs/training/short_alpha.yaml      短线 Alpha 训练配置
 docs/production_ai_quant_blueprint.md  中文生产级技术方案
 docs/ai_quant_os_v2.md                 Agent 与 target weight 架构边界
 docs/math_optimization_layer.md        数学优化层说明
+docs/sota_upgrade_v3.md                SOTA 升级清单（AFML / PSR / HRP / iTransformer / QMT）
 src/quantagent/data/                   特征、标签、数据集构建
-src/quantagent/models/                 Alpha Transformer 模型骨架
-src/quantagent/training/               loss、walk-forward、训练入口
-src/quantagent/quant_math/             IC、Regime、风险、成本、优化器
-src/quantagent/fundamental/            DCF、Reverse DCF、质量和财务风险
-src/quantagent/agents/                 Agent 结构化输出和仲裁
-src/quantagent/strategy/               信号融合、风控门、仓位 sizing
-tests/                                 核心决策层测试
+src/quantagent/models/                 Alpha Transformer + iTransformer + PatchTST
+src/quantagent/training/               loss（含 differentiable Spearman）、walk-forward、训练入口
+src/quantagent/quant_math/             IC（HAC）、Regime（HMM）、Cov（Ledoit-Wolf）、HRP、Conformal、Triple-Barrier、PurgedCV、PSR/DSR
+src/quantagent/fundamental/            DCF、Reverse DCF、质量、F/Z/M Score
+src/quantagent/agents/                 仲裁、BL 视图适配、Debate 协议、Policy/Commodity/Flow Agent
+src/quantagent/strategy/               score 融合、风控门、仓位 sizing
+src/quantagent/backtest/               事件驱动 A 股 T+1 回测器
+src/quantagent/execution/              BrokerBase / OrderManager / QMT Gateway / KillSwitch
+tests/                                 核心决策层 + SOTA 数学层 + Agent + 回测测试
 ```
 
 ## 训练短线 Alpha 的流程
@@ -123,3 +126,4 @@ Phase 7: QMT Gateway 小资金实盘
 详细方案见 [docs/production_ai_quant_blueprint.md](docs/production_ai_quant_blueprint.md)。
 AI Quant OS v2 见 [docs/ai_quant_os_v2.md](docs/ai_quant_os_v2.md)。
 数学层说明见 [docs/math_optimization_layer.md](docs/math_optimization_layer.md)。
+v3 SOTA 升级清单见 [docs/sota_upgrade_v3.md](docs/sota_upgrade_v3.md)。

@@ -1,9 +1,11 @@
 universe:
-  market: us_equity
-  benchmark: SPY
+  market: cn_equity
+  benchmark: 000300.SH
   rebalance_frequency: daily
-  min_market_cap_usd: 1000000000
-  min_avg_dollar_volume_20d: 20000000
+  min_amount_20d_rmb: 50000000
+  exclude_st: true
+  exclude_suspended: true
+  exclude_listed_days_lt: 250
 
 scores:
   short_weight: 0.35
@@ -26,9 +28,21 @@ position_sizing:
   high_conviction_weight: 0.06
   cash_buffer_weight: 0.05
 
+ashare:
+  lot_size: 100
+  t_plus_one: true
+  block_buy_limit_up: true
+  block_force_sell_limit_down: true
+  star_board_limit: 0.20
+  chinext_limit: 0.20
+  st_limit: 0.05
+  bse_limit: 0.30
+  default_limit: 0.10
+
 training:
   lookback_days: 60
   horizons: [1, 5, 20]
   label: future_excess_return
-  validation: walk_forward
+  validation: purged_kfold
   primary_metric: rank_ic
+  embargo_days: 5

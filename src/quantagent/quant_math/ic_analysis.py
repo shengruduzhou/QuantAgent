@@ -11,8 +11,10 @@ def ic_by_date(
     date_column: str = "trade_date",
     method: str = "pearson",
 ) -> pd.Series:
-    return frame.groupby(date_column).apply(
-        lambda x: x[signal_column].corr(x[return_column], method=method)
+    subset = frame[[date_column, signal_column, return_column]]
+    return subset.groupby(date_column).apply(
+        lambda x: x[signal_column].corr(x[return_column], method=method),
+        include_groups=False,
     )
 
 
@@ -25,7 +27,10 @@ def rank_ic_by_date(
     return ic_by_date(frame, signal_column, return_column, date_column, method="spearman")
 
 
-def ic_summary(ic: pd.Series) -> dict[str, float]:
+def ic_summary(ic: pd.Series, max_lag: int | None = None) -> dict[str, float]:
+    """IC summary with Newey-West HAC t-stat for autocorrelated IC series."""
+    from quantagent.quant_math.performance import newey_west_t_stat
+
     clean = ic.replace([np.inf, -np.inf], np.nan).dropna()
     if clean.empty:
         return {
@@ -34,14 +39,17 @@ def ic_summary(ic: pd.Series) -> dict[str, float]:
             "ir": np.nan,
             "positive_ratio": np.nan,
             "t_stat": np.nan,
+            "t_stat_nw": np.nan,
         }
     std = clean.std(ddof=1)
+    naive_t = float(clean.mean() / (std / np.sqrt(len(clean)))) if std else np.nan
     return {
         "mean": float(clean.mean()),
         "std": float(std),
         "ir": float(clean.mean() / std) if std and not np.isnan(std) else np.nan,
         "positive_ratio": float((clean > 0).mean()),
-        "t_stat": float(clean.mean() / (std / np.sqrt(len(clean)))) if std else np.nan,
+        "t_stat": naive_t,
+        "t_stat_nw": newey_west_t_stat(clean, max_lag=max_lag),
     }
 
 

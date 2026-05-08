@@ -3,7 +3,7 @@ from __future__ import annotations
 from quantagent.domain.schemas import ModelScores, RiskLimits, SignalDecision
 from quantagent.strategy.position_sizing import PositionSizingConfig, target_weight
 from quantagent.strategy.risk_gate import risk_gate
-from quantagent.strategy.signal_fusion import FusionWeights, fuse_scores
+from quantagent.strategy.score_fusion import FusionWeights, fuse_scores
 
 
 def decide_trade(

@@ -22,15 +22,16 @@ def agent_reliability_weights(
     if missing:
         raise ValueError(f"Missing agent stats columns: {sorted(missing)}")
     score = (
-        alpha * agent_stats[ir_column].fillna(0.0)
-        + beta * agent_stats[evidence_quality_column].fillna(0.0)
-        - gamma * agent_stats[error_column].fillna(0.0)
+        alpha * agent_stats[ir_column].fillna(0.0).to_numpy()
+        + beta * agent_stats[evidence_quality_column].fillna(0.0).to_numpy()
+        - gamma * agent_stats[error_column].fillna(0.0).to_numpy()
     )
-    stable = score - score.max()
+    stable = score - np.max(score)
     raw = np.exp(stable)
+    names = agent_stats[agent_column].to_numpy()
     if raw.sum() <= 0:
-        return pd.Series(1.0 / len(agent_stats), index=agent_stats[agent_column])
-    return pd.Series(raw / raw.sum(), index=agent_stats[agent_column])
+        return pd.Series(np.full(len(names), 1.0 / len(names)), index=names)
+    return pd.Series(raw / raw.sum(), index=names)
 
 
 def aggregate_agent_signals(

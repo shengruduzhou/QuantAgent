@@ -11,8 +11,10 @@ def rank_ic_by_date(
     date_column: str = "trade_date",
 ) -> pd.Series:
     """Daily Spearman rank correlation between predictions and realized returns."""
-    return frame.groupby(date_column).apply(
-        lambda x: x[prediction_column].rank().corr(x[target_column].rank())
+    subset = frame[[date_column, prediction_column, target_column]]
+    return subset.groupby(date_column).apply(
+        lambda x: x[prediction_column].rank().corr(x[target_column].rank()),
+        include_groups=False,
     )
 
 

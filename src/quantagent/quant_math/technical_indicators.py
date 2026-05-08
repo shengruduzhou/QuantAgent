@@ -52,7 +52,10 @@ def add_advanced_technical_indicators(
     frame["volume_zscore_20d"] = grouped["volume"].transform(_zscore_20)
     frame["amount_zscore_20d"] = frame.groupby(symbol_column)["amount"].transform(_zscore_20)
     frame["amount_mean_20d"] = frame.groupby(symbol_column)["amount"].transform(lambda x: x.rolling(20).mean())
-    frame["amihud_20d"] = frame.groupby(symbol_column).apply(_amihud).reset_index(level=0, drop=True)
+    illiquidity = frame["ret_1d"].abs() / (frame["amount"] + 1e-12)
+    frame["amihud_20d"] = illiquidity.groupby(frame[symbol_column]).transform(
+        lambda x: x.rolling(20).mean()
+    )
     return frame.replace([np.inf, -np.inf], np.nan)
 
 
@@ -110,6 +113,3 @@ def _zscore_20(series: pd.Series) -> pd.Series:
     return (series - series.rolling(20).mean()) / (series.rolling(20).std() + 1e-12)
 
 
-def _amihud(group: pd.DataFrame) -> pd.Series:
-    illiquidity = group["ret_1d"].abs() / (group["amount"] + 1e-12)
-    return illiquidity.rolling(20).mean()

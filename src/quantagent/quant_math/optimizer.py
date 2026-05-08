@@ -113,9 +113,11 @@ class ContinuousMeanVarianceOptimizer:
         if self.config.long_only:
             constraints.append(weights >= 0)
         if sector is not None and max_sector_weight is not None:
-            for _, sector_symbols in sector.groupby(sector).groups.items():
-                idx = [alpha.index.get_loc(symbol) for symbol in sector_symbols]
-                constraints.append(cp.sum(weights[idx]) <= max_sector_weight)
+            sector_array = sector.to_numpy()
+            for sector_label in pd.unique(sector_array):
+                idx = np.where(sector_array == sector_label)[0]
+                if idx.size > 0:
+                    constraints.append(cp.sum(weights[idx]) <= max_sector_weight)
         if beta is not None and beta_target is not None and beta_limit is not None:
             portfolio_beta = beta.to_numpy() @ weights
             constraints.append(portfolio_beta <= beta_target + beta_limit)

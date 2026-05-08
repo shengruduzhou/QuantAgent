@@ -34,7 +34,7 @@ def precision_weighted_alpha(
             weight = raw / raw.sum()
         return float((weight * group[alpha_column]).sum())
 
-    return data.groupby(symbol_column).apply(_fuse)
+    return data.groupby(symbol_column).apply(_fuse, include_groups=False)
 
 
 def ensemble_confidence(alpha_predictions: pd.DataFrame, symbol_column: str = "symbol") -> pd.Series:

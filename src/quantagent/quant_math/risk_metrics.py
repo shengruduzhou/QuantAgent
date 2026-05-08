@@ -35,13 +35,15 @@ def drawdown(nav: pd.Series) -> pd.Series:
     return nav / peak - 1.0
 
 
-def drawdown_risk_multiplier(current_drawdown: float) -> float:
-    if current_drawdown <= -0.15:
+def drawdown_risk_multiplier(
+    current_drawdown: float,
+    kill_switch: float = -0.15,
+    half_life: float = 0.06,
+) -> float:
+    """Continuous gauss-style decay: 1.0 at peak -> 0.0 at kill_switch."""
+    if current_drawdown <= kill_switch:
         return 0.0
-    if current_drawdown <= -0.12:
-        return 0.0
-    if current_drawdown <= -0.08:
-        return 0.4
-    if current_drawdown <= -0.05:
-        return 0.7
-    return 1.0
+    if current_drawdown >= 0.0:
+        return 1.0
+    decay = float(np.exp(-(current_drawdown / half_life) ** 2))
+    return max(0.0, min(1.0, decay))
