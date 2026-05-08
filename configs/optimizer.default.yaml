@@ -1,0 +1,37 @@
+objective:
+  risk_aversion: 8.0
+  turnover_penalty: 0.2
+  cost_penalty: 1.0
+
+constraints:
+  long_only: true
+  max_total_weight: 0.95
+  cash_min: 0.05
+  max_position_weight: 0.08
+  max_sector_weight: 0.25
+  max_turnover: 0.20
+  max_order_adv_ratio: 0.05
+  beta_target: 1.0
+  beta_limit: 0.2
+
+risk:
+  var_confidence: 0.95
+  max_daily_var: 0.015
+  max_daily_cvar: 0.02
+  drawdown_reduce_1: -0.05
+  drawdown_reduce_2: -0.08
+  drawdown_stop_new: -0.12
+  drawdown_kill_switch: -0.15
+
+cost:
+  commission_bps: 2.5
+  sell_tax_bps: 5.0
+  slippage_bps: 5.0
+  impact_coefficient: 0.001
+  impact_exponent: 0.5
+
+ashare:
+  lot_size: 100
+  t_plus_one: true
+  block_buy_limit_up: true
+  block_force_sell_limit_down: true

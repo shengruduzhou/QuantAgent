@@ -1,0 +1,53 @@
+data:
+  input_path: data/processed/daily_features.parquet
+  checkpoint_dir: models/checkpoints/short_alpha
+  date_column: trade_date
+  symbol_column: symbol
+
+market:
+  market: cn_equity
+  benchmark: 000300.SH
+  lot_size: 100
+
+features:
+  lookback_days: 60
+  horizons: [1, 5, 20]
+  columns:
+    - ret_1d
+    - ret_5d
+    - ret_20d
+    - volume_zscore_20d
+    - amount_zscore_20d
+    - volatility_20d
+    - ma_gap_5d
+    - ma_gap_20d
+    - rsi_14d
+    - bollinger_zscore_20d
+    - benchmark_ret_1d
+
+labels:
+  columns:
+    - future_1d_excess_return
+    - future_5d_excess_return
+    - future_20d_excess_return
+    - future_5d_volatility
+    - future_20d_drawdown
+
+model:
+  d_model: 128
+  nhead: 8
+  num_layers: 4
+  dropout: 0.1
+
+training:
+  train_start: "2016-01-01"
+  train_end: "2021-12-31"
+  valid_start: "2022-01-01"
+  valid_end: "2022-12-31"
+  batch_size: 256
+  epochs: 30
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  amp: true
+  num_workers: 2
+  seed: 42

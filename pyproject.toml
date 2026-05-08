@@ -1,0 +1,44 @@
+[project]
+name = "quantagent"
+version = "0.1.0"
+description = "Production-oriented AI quant research, backtesting, and live-trading scaffold."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+training = [
+  "torch>=2.3",
+  "transformers>=4.43",
+  "scikit-learn>=1.5",
+  "pyarrow>=16.0",
+]
+research = [
+  "pyqlib>=0.9.6",
+  "vectorbt>=0.26",
+]
+optimization = [
+  "cvxpy>=1.4",
+]
+
+[project.scripts]
+quantagent = "quantagent.cli:app"
+quantagent-build-daily-features = "quantagent.data.build_daily_features:main"
+quantagent-train-short-alpha = "quantagent.training.train_short_alpha:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

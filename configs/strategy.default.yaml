@@ -1,0 +1,34 @@
+universe:
+  market: us_equity
+  benchmark: SPY
+  rebalance_frequency: daily
+  min_market_cap_usd: 1000000000
+  min_avg_dollar_volume_20d: 20000000
+
+scores:
+  short_weight: 0.35
+  long_weight: 0.30
+  news_weight: 0.15
+  llm_weight: 0.10
+  risk_weight: -0.20
+
+risk_gate:
+  allow_buy_min_long_score: 75
+  allow_buy_min_short_score: 65
+  max_risk_score_for_buy: 40
+  force_reduce_risk_score: 70
+  block_long_score_below: 50
+
+position_sizing:
+  max_single_name_weight: 0.08
+  max_sector_weight: 0.25
+  base_weight: 0.03
+  high_conviction_weight: 0.06
+  cash_buffer_weight: 0.05
+
+training:
+  lookback_days: 60
+  horizons: [1, 5, 20]
+  label: future_excess_return
+  validation: walk_forward
+  primary_metric: rank_ic
