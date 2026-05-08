@@ -330,3 +330,38 @@ AI 预测 + 统计检验 + 概率置信度 + Regime 调整
 ```
 
 详细说明见 `docs/math_optimization_layer.md`。
+
+## 13. AI Quant OS v2 架构修正
+
+最新架构把系统定义为：
+
+```text
+数学信号和组合优化为执行核心
+LLM 多 Agent 为信息抽取与解释核心
+基本面估值和宏观政策为长期约束
+风控为最高优先级
+```
+
+硬约束：
+
+```text
+1. LLM / Multi-Agent 不直接决定买卖。
+2. 所有 Agent 输出结构化 AgentSignal。
+3. 所有研究层输出最终统一为 TargetWeight。
+4. 没有样本外验证的策略不能上线。
+5. QMT 只作为后续 execution gateway。
+```
+
+当前已新增 Phase 1 不训练基线：
+
+```text
+technical_indicators.py  RSI / MACD / Bollinger / ATR / ADX / Donchian / VWAP
+rule_signals.py          均值回归和动量突破规则信号
+valuation.py             DCF / Reverse DCF / relative valuation
+quality.py               Quality score / Fraud risk / LongScore
+arbitration.py           Agent 置信度、证据质量、历史误差加权仲裁
+weight_adapter.py        short weight + long weight -> TargetWeight
+performance.py           Sharpe / Sortino / MaxDD / Calmar / hit ratio / profit factor
+```
+
+详细边界见 `docs/ai_quant_os_v2.md`。

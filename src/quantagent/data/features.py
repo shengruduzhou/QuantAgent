@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quantagent.quant_math.technical_indicators import add_advanced_technical_indicators
+
 
 REQUIRED_PRICE_COLUMNS = {
     "trade_date",
@@ -46,6 +48,10 @@ def add_technical_features(prices: pd.DataFrame) -> pd.DataFrame:
     frame["ma_gap_20d"] = frame["close"] / ma_20 - 1.0
     frame["bollinger_zscore_20d"] = (frame["close"] - ma_20) / (std_20 + 1e-12)
     frame["rsi_14d"] = grouped["close"].transform(_rsi_14)
+    advanced = add_advanced_technical_indicators(frame)
+    for column in advanced.columns:
+        if column not in frame.columns:
+            frame[column] = advanced[column]
     return frame.replace([np.inf, -np.inf], np.nan)
 
 

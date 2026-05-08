@@ -1,0 +1,45 @@
+interfaces:
+  primary_output: target_weight
+  agents_may_emit_orders: false
+  qmt_stage: future_execution_gateway
+
+short_horizon:
+  horizons: [1, 3, 5, 10, 20]
+  rule_signals:
+    mean_reversion:
+      rsi_oversold: 25
+      bollinger_window: 20
+      bollinger_std: 2
+      max_adx_for_dip_buy: 30
+    momentum_breakout:
+      donchian_window: 20
+      rsi_min: 50
+      rsi_max: 75
+      min_rv_ratio: 1.0
+  max_abs_weight: 0.04
+  vol_target_daily: 0.012
+
+long_horizon:
+  horizons: [63, 126, 252, 756, 1260]
+  max_weight: 0.08
+  score_weights:
+    valuation: 0.25
+    quality: 0.20
+    growth: 0.15
+    policy: 0.15
+    ownership: 0.10
+    medium_term_technical: 0.10
+    risk: -0.20
+
+agent_arbitration:
+  method: softmax_reliability
+  ir_weight: 1.0
+  evidence_quality_weight: 1.0
+  error_penalty: 1.0
+
+validation:
+  walk_forward: true
+  purged_cv: true
+  rank_ic_required: true
+  cost_after_return_required: true
+  minimum_out_of_sample_ratio: 0.5

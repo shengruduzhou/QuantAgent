@@ -25,10 +25,14 @@ QMT 只做行情、查询、下单、撤单、回报
 configs/strategy.default.yaml          默认策略参数
 configs/training/short_alpha.yaml      短线 Alpha 训练配置
 docs/production_ai_quant_blueprint.md  中文生产级技术方案
+docs/ai_quant_os_v2.md                 Agent 与 target weight 架构边界
+docs/math_optimization_layer.md        数学优化层说明
 src/quantagent/data/                   特征、标签、数据集构建
 src/quantagent/models/                 Alpha Transformer 模型骨架
 src/quantagent/training/               loss、walk-forward、训练入口
 src/quantagent/quant_math/             IC、Regime、风险、成本、优化器
+src/quantagent/fundamental/            DCF、Reverse DCF、质量和财务风险
+src/quantagent/agents/                 Agent 结构化输出和仲裁
 src/quantagent/strategy/               信号融合、风控门、仓位 sizing
 tests/                                 核心决策层测试
 ```
@@ -70,6 +74,31 @@ quantagent-train-short-alpha --config configs/training/short_alpha.yaml
 models/checkpoints/short_alpha/best.pt
 ```
 
+## 不训练基线
+
+Phase 1 可以先跑不训练版本，用于建立可解释、可回测的 baseline：
+
+```text
+OHLCV
+  -> RSI / MACD / Bollinger / ATR / ADX / Donchian / VWAP
+  -> mean-reversion / momentum-breakout rule signal
+  -> DCF / Reverse DCF / quality / fraud risk
+  -> AgentSignal evidence arbitration
+  -> TargetWeight
+  -> optimizer
+```
+
+关键文件：
+
+```text
+src/quantagent/quant_math/technical_indicators.py
+src/quantagent/strategy/rule_signals.py
+src/quantagent/strategy/weight_adapter.py
+src/quantagent/fundamental/valuation.py
+src/quantagent/fundamental/quality.py
+src/quantagent/agents/arbitration.py
+```
+
 ## 快速验证
 
 ```powershell
@@ -92,4 +121,5 @@ Phase 7: QMT Gateway 小资金实盘
 ```
 
 详细方案见 [docs/production_ai_quant_blueprint.md](docs/production_ai_quant_blueprint.md)。
+AI Quant OS v2 见 [docs/ai_quant_os_v2.md](docs/ai_quant_os_v2.md)。
 数学层说明见 [docs/math_optimization_layer.md](docs/math_optimization_layer.md)。

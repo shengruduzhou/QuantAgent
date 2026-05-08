@@ -41,6 +41,42 @@ class AlphaPrediction:
 
 
 @dataclass(frozen=True)
+class EvidenceItem:
+    source: str
+    title: str
+    url: str | None = None
+    published_at: str | None = None
+    excerpt: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentSignal:
+    """Structured Agent output. Agents never emit orders."""
+
+    agent_name: str
+    symbol: str
+    horizon_days: int
+    signal_strength: float
+    confidence: float
+    evidence_quality: float
+    risk_penalty: float = 0.0
+    evidence: tuple[EvidenceItem, ...] = ()
+    tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TargetWeight:
+    """Weight-centric interface shared by research, backtest, paper, and live execution."""
+
+    symbol: str
+    target_weight: float
+    horizon_days: int
+    confidence: float
+    source: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class RiskLimits:
     allow_buy_min_long_score: float = 75.0
     allow_buy_min_short_score: float = 65.0
