@@ -1,0 +1,13 @@
+library: alpha101
+horizons: [1, 3, 5, 10, 20]
+preprocessing:
+  winsorize: true
+  n_mad: 5.0
+  zscore: true
+  neutralize: false
+  mask_untradable: true
+evaluation:
+  quantiles: 5
+  min_rank_ic: 0.02
+  cost_bps: 8.0
+

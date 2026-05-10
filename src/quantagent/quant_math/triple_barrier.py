@@ -16,7 +16,7 @@ class BarrierConfig:
 
 
 def daily_volatility(close: pd.Series, span: int = 20) -> pd.Series:
-    """Lopez de Prado AFML §3.1 EWMA vol of log returns."""
+    """Lopez de Prado AFML section 3.1 EWMA vol of log returns."""
     log_ret = np.log(close).diff()
     return log_ret.ewm(span=span, adjust=False).std()
 
@@ -70,7 +70,7 @@ def triple_barrier_labels(
 
 
 def sample_weights_by_uniqueness(events: pd.DataFrame, close_index: pd.Index) -> pd.Series:
-    """AFML §4.4 average uniqueness weight: 1 / mean(num concurrent events)."""
+    """AFML section 4.4 average uniqueness weight: 1 / mean(num concurrent events)."""
     num_co = pd.Series(0, index=close_index, dtype=float)
     for t0, row in events.iterrows():
         t1 = row["t1"]

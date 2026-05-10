@@ -1,0 +1,13 @@
+standardize: true
+neutralize: true
+industry_column: industry
+weighting:
+  rolling_icir_weight: 0.40
+  decay_weight: 0.20
+  turnover_adjusted_alpha_weight: 0.25
+  capacity_weight: 0.15
+  bayesian_shrinkage: 0.25
+crowding:
+  correlation_threshold: 0.70
+output_column: composite_factor_score
+

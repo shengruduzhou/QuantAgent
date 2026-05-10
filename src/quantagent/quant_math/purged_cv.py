@@ -23,7 +23,7 @@ def purged_kfold_split(
     label_end_times: pd.Series,
     config: PurgedKFoldConfig | None = None,
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Lopez de Prado AFML §7.4 purged K-fold with embargo.
+    """Lopez de Prado AFML section 7.4 purged K-fold with embargo.
 
     times: index timestamps (sample t0).
     label_end_times: t1 for each sample.
@@ -60,7 +60,7 @@ def combinatorial_purged_split(
     n_test_groups: int = 2,
     embargo_pct: float = 0.01,
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """AFML §12 CPCV: choose n_test_groups out of n_splits as test."""
+    """AFML section 12 CPCV: choose n_test_groups out of n_splits as test."""
     n = len(times)
     boundaries = np.linspace(0, n, n_splits + 1, dtype=int)
     groups = [np.arange(boundaries[i], boundaries[i + 1]) for i in range(n_splits)]

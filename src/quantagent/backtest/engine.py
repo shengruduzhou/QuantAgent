@@ -138,6 +138,8 @@ class EventDrivenBacktester:
         returns = nav_series.pct_change().dropna()
         holdings = pd.DataFrame(weight_curve).set_index("trade_date") if weight_curve else pd.DataFrame()
         trades = pd.DataFrame(trade_log)
+        sleeve_diagnostics = target_weights.attrs.get("sleeve_diagnostics", {}) if hasattr(target_weights, "attrs") else {}
+        stop_loss_diagnostics = target_weights.attrs.get("stop_loss_diagnostics", {}) if hasattr(target_weights, "attrs") else {}
         return BacktestResult(
             nav_curve=nav_series,
             daily_returns=returns,
@@ -147,6 +149,9 @@ class EventDrivenBacktester:
                 "final_nav": float(nav),
                 "total_return": float(nav / self.config.initial_nav - 1.0),
                 "trade_count": float(len(trades)),
+                "sleeve_count": float(sleeve_diagnostics.get("sleeve_count", 0.0)),
+                "stop_event_count": float(stop_loss_diagnostics.get("stop_event_count", 0.0)),
+                "blocked_exit_count": float(stop_loss_diagnostics.get("blocked_exit_count", 0.0)),
             },
         )
 

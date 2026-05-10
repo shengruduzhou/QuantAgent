@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from quantagent.domain.schemas import ModelScores, RiskLimits, TradeAction
+from quantagent.portfolio.position_state import StopDecision
 
 
 def risk_gate(scores: ModelScores, limits: RiskLimits | None = None) -> tuple[TradeAction, str]:
@@ -20,3 +21,11 @@ def risk_gate(scores: ModelScores, limits: RiskLimits | None = None) -> tuple[Tr
         return TradeAction.BUY, "long, short, and risk gates allow new exposure"
 
     return TradeAction.HOLD, "signal is not strong enough for new exposure"
+
+
+def stop_decision_to_action(decision: StopDecision) -> tuple[TradeAction, str]:
+    if decision.blocked_exit:
+        return TradeAction.BLOCK, decision.reason
+    if decision.should_exit:
+        return TradeAction.EXIT, decision.reason
+    return TradeAction.HOLD, decision.reason

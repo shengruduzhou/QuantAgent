@@ -1,0 +1,23 @@
+library: cicc_ashare
+window: 20
+daily_schema:
+  - trade_date
+  - symbol
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - amount
+intraday_schema:
+  - trade_date
+  - datetime
+  - symbol
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - amount
+unsupported_policy: mark_unavailable
+
