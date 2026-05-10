@@ -123,6 +123,96 @@ def run_v3_backtest(
     typer.echo(f"wrote {output_path}")
 
 
+@app.command("build-features-v4")
+def build_features_v4(
+    output_path: Path = Path("data/processed/v4_features.csv"),
+) -> None:
+    from quantagent.services.build_features_service import build_features_v4 as build_service
+
+    result = build_service()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result.frame.to_csv(output_path, index=False)
+    typer.echo(f"wrote {len(result.frame)} v4 feature rows to {output_path}")
+
+
+@app.command("train-v4")
+def train_v4() -> None:
+    from quantagent.services.train_v4_service import train_v4_synthetic
+
+    metadata = train_v4_synthetic()
+    typer.echo(metadata)
+
+
+@app.command("infer-v4")
+def infer_v4(
+    feature_path: Path | None = None,
+    output_path: Path = Path("data/processed/v4_signals.csv"),
+) -> None:
+    from quantagent.services.build_features_service import build_features_v4 as build_service
+    from quantagent.services.daily_signal_service import infer_v4_alpha
+
+    features = pd.read_csv(feature_path) if feature_path else build_service().frame
+    signals = infer_v4_alpha(features)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    signals.to_csv(output_path, index=False)
+    typer.echo(f"wrote {len(signals)} v4 signals to {output_path}")
+
+
+@app.command("build-portfolio-v4")
+def build_portfolio_v4(
+    signal_path: Path | None = None,
+    output_path: Path = Path("data/processed/v4_target_weights.csv"),
+    mode: str = "long_only_enhancement",
+) -> None:
+    from quantagent.services.build_features_service import build_features_v4 as build_service
+    from quantagent.services.daily_signal_service import infer_v4_alpha
+    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
+
+    signals = pd.read_csv(signal_path) if signal_path else infer_v4_alpha(build_service().frame)
+    result = portfolio_service(signals, mode=mode)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result.target_weights.rename("target_weight").reset_index().rename(columns={"index": "symbol"}).to_csv(output_path, index=False)
+    typer.echo(f"wrote {len(result.target_weights)} target weights to {output_path}")
+
+
+@app.command("backtest-v4")
+def backtest_v4(
+    output_path: Path = Path("data/processed/v4_backtest_report.csv"),
+) -> None:
+    from quantagent.backtest.engine import EventDrivenBacktester
+    from quantagent.services.build_features_service import build_features_v4 as build_service
+    from quantagent.services.daily_signal_service import infer_v4_alpha
+    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
+
+    features = build_service().frame
+    signals = infer_v4_alpha(features)
+    portfolio = portfolio_service(signals)
+    dates = sorted(pd.to_datetime(features["trade_date"]).drop_duplicates())
+    weights = pd.DataFrame(0.0, index=dates, columns=portfolio.target_weights.index)
+    weights.iloc[-10:] = portfolio.target_weights
+    result = EventDrivenBacktester().run(weights, features[["trade_date", "symbol", "open", "high", "low", "close", "volume", "amount"]])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([result.report | result.diagnostics]).to_csv(output_path, index=False)
+    typer.echo(f"wrote v4 backtest report to {output_path}")
+
+
+@app.command("paper-trade-v4")
+def paper_trade_v4(
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.build_features_service import build_features_v4 as build_service
+    from quantagent.services.daily_signal_service import infer_v4_alpha
+    from quantagent.services.paper_trading_service import generate_dry_run_order_intents
+    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
+
+    features = build_service().frame
+    signals = infer_v4_alpha(features)
+    portfolio = portfolio_service(signals)
+    latest = features.sort_values("trade_date").groupby("symbol").tail(1).set_index("symbol")
+    intents = generate_dry_run_order_intents(portfolio.target_weights, latest["close"]) if dry_run else []
+    typer.echo(f"generated {len(intents)} dry-run order intents")
+
+
 @app.command("generate-factor-report")
 def generate_factor_report(
     input_path: Path,

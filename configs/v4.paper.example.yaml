@@ -1,0 +1,20 @@
+extends: configs/v4.default.yaml
+
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  require_kill_switch: true
+  require_reconciliation: true
+
+portfolio:
+  max_name_weight: 0.03
+  max_sector_weight: 0.20
+  max_turnover: 0.15
+  target_beta: 1.0
+  cost_aware: true
+
+execution:
+  broker: qmt
+  dry_run: true
+  idempotency: true
+  audit_log_dir: logs/execution

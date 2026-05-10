@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.domain.schemas import AgentSignal, EvidenceItem
+from quantagent.agents.views_schema import EvidenceRecord
 
 
 @dataclass(frozen=True)
@@ -63,3 +64,36 @@ def policy_signals(
             )
         )
     return signals
+
+
+def policy_evidence_records(
+    events: list[PolicyEvent],
+    sector_map: pd.Series,
+    horizon_days: int = 20,
+    reference_date: pd.Timestamp | None = None,
+) -> list[EvidenceRecord]:
+    ref = reference_date or pd.Timestamp.utcnow().normalize()
+    records: list[EvidenceRecord] = []
+    for event in events:
+        days = max(0.0, (ref - pd.Timestamp(event.published_at)).days)
+        decay = max(1.0, horizon_days / 2.0)
+        for sector in event.sectors:
+            symbols = sector_map[sector_map == sector].index
+            for symbol in symbols:
+                records.append(
+                    EvidenceRecord(
+                        source="policy_agent",
+                        timestamp=str(pd.Timestamp(event.published_at).isoformat()),
+                        symbol=str(symbol),
+                        sector=sector,
+                        event_type="policy",
+                        horizon_days=horizon_days,
+                        direction=float(np.sign(event.polarity)),
+                        magnitude=float(abs(event.polarity)),
+                        confidence=float(min(1.0, np.exp(-days / decay))),
+                        decay_half_life=decay,
+                        rationale=event.headline,
+                        raw_reference=event.source,
+                    )
+                )
+    return records

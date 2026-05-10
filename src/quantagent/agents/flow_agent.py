@@ -5,6 +5,7 @@ import pandas as pd
 
 from quantagent.ashare.fund_flow import build_flow_feature_frame, flow_signals_from_features
 from quantagent.domain.schemas import AgentSignal
+from quantagent.agents.views_schema import EvidenceRecord
 
 
 def northbound_flow_signals(
@@ -114,6 +115,25 @@ def combined_flow_signal_by_symbol(signals: list[AgentSignal]) -> pd.DataFrame:
     data["weight"] = data["confidence"] * data["evidence_quality"]
     grouped = data.groupby("symbol", sort=False)
     return grouped.apply(_weighted_signal_row, include_groups=False).reset_index()
+
+
+def flow_evidence_records(signals: list[AgentSignal], timestamp: str) -> list[EvidenceRecord]:
+    return [
+        EvidenceRecord(
+            source=signal.agent_name,
+            timestamp=timestamp,
+            symbol=signal.symbol,
+            event_type="fund_flow",
+            horizon_days=signal.horizon_days,
+            direction=float(np.sign(signal.signal_strength)),
+            magnitude=float(abs(signal.signal_strength)),
+            confidence=signal.confidence,
+            decay_half_life=max(1.0, signal.horizon_days / 2.0),
+            rationale="flow signal",
+            raw_reference={"tags": signal.tags},
+        )
+        for signal in signals
+    ]
 
 
 def _weighted_signal_row(group: pd.DataFrame) -> pd.Series:

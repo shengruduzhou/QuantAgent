@@ -1,31 +1,17 @@
-# CICC-Style A-Share High-Frequency Factor Library
+# CICC A-share Factor Library / 中金风格 A 股因子库
 
-The module implements daily-compatible approximations first and exposes minute/level2 hooks through the intraday schema. If intraday bars are unavailable, intraday-only factors are returned in the `unavailable` field instead of raising.
+本页说明 CICC-like high-frequency 和 daily-compatible 因子在 V4 中的位置。它们作为 FeatureStore 的可选 factor sources，不要求外部 API。
 
-## Categories
+## 因子组 / Factor Groups
 
-1. `momentum_reversal`: close-to-VWAP proxy for late-day return, top-volume-bar return when minute bars exist.
-2. `volatility`: intraday skew and kurtosis when minute bars exist.
-3. `high_order_shape`: intraday return shape placeholders from skew/kurtosis.
-4. `liquidity`: daily Amihud fallback and minute Amihud when available.
-5. `price_volume_correlation`: close-volume correlation and lead-lag price-volume correlation.
-6. `chip_distribution`: turnover concentration.
-7. `crowding`: FFT volume concentration when intraday volume exists.
-8. `money_flow`: amount z-score, money-flow strength, opening and closing flow ratios.
+V4 synthetic flow 会复用 `compute_cicc_high_freq_factors`，包括 last 30min return、daily Amihud、close-volume correlation、turnover concentration、money-flow strength 等 daily-compatible factors。
 
-## A-Share Assumptions
+## 点时一致 / Point-in-time
 
-Daily inputs must include `trade_date, symbol, open, high, low, close, volume, amount`. Intraday inputs add `datetime`. Suspensions, ST flags, T+1, lot size, and price-limit rules should be applied in the downstream tradability and backtest layers.
+这些因子只使用当前及历史 OHLCV/minute aggregate 信息。FeatureStore 输出会按 `trade_date, symbol` 稳定排序，并附带 `feature_version` 和 `asof_time`。
 
-## Daily Fallback Logic
+## 测试 / Tests
 
-- `last_30min_return` falls back to `close / daily_vwap - 1`.
-- `daily_amihud` uses absolute daily return divided by RMB amount.
-- `opening_flow_ratio` uses open gap times amount intensity.
-- `closing_flow_ratio` uses close-to-VWAP displacement times amount intensity.
-- `top_volume_bar_return`, `intraday_skew`, `intraday_kurtosis`, `amihud_1min`, and `crowding_fft_ratio` are marked unavailable without intraday bars.
-
-## Future Extension
-
-Minute and level2 adapters should preserve the same long-form output: `trade_date, symbol, factor_name, factor_value`. Level2 fields can add order-book imbalance, large-order sweep pressure, cancel-rate crowding, and queue-position liquidity without changing the registry contract.
-
+```powershell
+python -m pytest tests/test_cicc_factors.py tests/test_feature_store_v4.py
+```

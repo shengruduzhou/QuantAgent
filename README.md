@@ -1,129 +1,62 @@
-# QuantAgent
+# QuantAgent V4 / 大 A AI Quant OS
 
-QuantAgent 是一个面向生产级 AI 量化系统的工程骨架。当前阶段只专注于**训练模型和验证 Alpha**，QMT / MiniQMT 会在后续作为独立交易网关接入，不进入模型训练代码。
+QuantAgent V4 是一个面向大 A 市场的 AI Quant OS 最小可落地闭环。它不是 LLM trading demo，而是把 research、point-in-time feature store、multi-tower model、factor governance、portfolio optimizer、A-share backtest 和 QMT dry-run execution-preparation 连接起来。
 
-核心拆分：
+## 核心边界 / Core Boundary
 
-```text
-训练与研究层：数据、因子、标签、短线 Alpha、长线评分、风险模型、文本模型
-策略决策层：信号融合、风控门、目标仓位
-执行网关层：QMT / IBKR / Alpaca 等 broker adapter，后续再接
-```
-
-重要原则：
+系统默认不启用 live trading。LLM Agents 只输出 structured evidence 和 AgentView；Optimizer 只输出 target weights；OrderManager 才能把 target weights 转成 order intents；QMTGateway 默认 dry-run。
 
 ```text
-模型不直接下单
-策略不直接调用 QMT
-QMT 只做行情、查询、下单、撤单、回报
-当前第一阶段只训练模型，不接实盘账户
+FeatureStore -> V4MultiTowerModel -> AgentView -> blend_alpha_and_views
+-> solve_v4_portfolio -> EventDrivenBacktester -> OrderManager -> QMTGateway(dry-run)
 ```
 
-## 当前已有内容
+## V4 功能 / V4 Capabilities
 
-```text
-configs/strategy.default.yaml          A 股策略参数（含板块涨跌停表）
-configs/training/short_alpha.yaml      短线 Alpha 训练配置
-docs/production_ai_quant_blueprint.md  中文生产级技术方案
-docs/ai_quant_os_v2.md                 Agent 与 target weight 架构边界
-docs/math_optimization_layer.md        数学优化层说明
-docs/sota_upgrade_v3.md                SOTA 升级清单（AFML / PSR / HRP / iTransformer / QMT）
-src/quantagent/data/                   特征、标签、数据集构建
-src/quantagent/models/                 Alpha Transformer + iTransformer + PatchTST
-src/quantagent/training/               loss（含 differentiable Spearman）、walk-forward、训练入口
-src/quantagent/quant_math/             IC（HAC）、Regime（HMM）、Cov（Ledoit-Wolf）、HRP、Conformal、Triple-Barrier、PurgedCV、PSR/DSR
-src/quantagent/fundamental/            DCF、Reverse DCF、质量、F/Z/M Score
-src/quantagent/agents/                 仲裁、BL 视图适配、Debate 协议、Policy/Commodity/Flow Agent
-src/quantagent/strategy/               score 融合、风控门、仓位 sizing
-src/quantagent/backtest/               事件驱动 A 股 T+1 回测器
-src/quantagent/execution/              BrokerBase / OrderManager / QMT Gateway / KillSwitch
-tests/                                 核心决策层 + SOTA 数学层 + Agent + 回测测试
-```
+- 数据层 / Data Layer：`FeatureStore`、`PITJoiner`、`EventStore`、`UniverseBuilder` 支持 synthetic offline flow。
+- A 股规则 / A-share Rules：`AshareRuleEngine` 支持主板、创业板、科创板、北交所、ETF、可转债 placeholder、futures hedge placeholder。
+- 因子治理 / Factor Governance：`FactorDAG`、`FactorLifecycleReport`、group metrics 支持 active/degraded/retired/watch。
+- 模型层 / Model Layer：`V4MultiTowerModel` 包含 sequence tower、snapshot tower、structured event tower 和 quantile heads。
+- Agent 层 / Agent Layer：`EvidenceRecord`、`AgentView`、`AgentRouter`、BL posterior adapter，全程不产生 orders。
+- 组合层 / Portfolio Layer：`blend_alpha_and_views` 与 `solve_v4_portfolio` 输出 target weights、cost、turnover、rejected symbols。
+- 回测层 / Backtest Layer：V4 backtester 支持 T+1、limit rules、suspension、partial fill、reject reasons、cost attribution。
+- 执行准备 / Execution Preparation：`QMTGateway` 默认 dry-run，支持 idempotency、audit logs、query stubs、kill switch。
 
-## 训练短线 Alpha 的流程
-
-准备两个文件：
-
-```text
-data/raw/prices.parquet      个股日频 OHLCV
-data/raw/benchmark.parquet   基准指数日频 OHLCV，例如 000300.SH
-```
-
-最低字段：
-
-```text
-trade_date,symbol,open,high,low,close,volume,amount
-```
-
-构建特征和标签：
+## 快速验证 / Quick Check
 
 ```powershell
-quantagent-build-daily-features `
-  --prices data/raw/prices.parquet `
-  --benchmark data/raw/benchmark.parquet `
-  --benchmark-symbol 000300.SH `
-  --output data/processed/daily_features.parquet
+python -m pytest tests/
+python -m pytest tests/test_ashare_rules_v4.py tests/test_v4_services.py
 ```
 
-训练短线模型：
+如果本地只暴露 Python launcher，可以使用：
 
 ```powershell
-quantagent-train-short-alpha --config configs/training/short_alpha.yaml
+py -3.12 -m pytest tests/
 ```
 
-输出：
-
-```text
-models/checkpoints/short_alpha/best.pt
-```
-
-## 不训练基线
-
-Phase 1 可以先跑不训练版本，用于建立可解释、可回测的 baseline：
-
-```text
-OHLCV
-  -> RSI / MACD / Bollinger / ATR / ADX / Donchian / VWAP
-  -> mean-reversion / momentum-breakout rule signal
-  -> DCF / Reverse DCF / quality / fraud risk
-  -> AgentSignal evidence arbitration
-  -> TargetWeight
-  -> optimizer
-```
-
-关键文件：
-
-```text
-src/quantagent/quant_math/technical_indicators.py
-src/quantagent/strategy/rule_signals.py
-src/quantagent/strategy/weight_adapter.py
-src/quantagent/fundamental/valuation.py
-src/quantagent/fundamental/quality.py
-src/quantagent/agents/arbitration.py
-```
-
-## 快速验证
+## CLI 示例 / CLI Examples
 
 ```powershell
-python -m pytest
-python -m quantagent.cli demo-decision --ticker 300750.SZ
+quantagent build-features-v4
+quantagent infer-v4
+quantagent build-portfolio-v4
+quantagent backtest-v4
+quantagent paper-trade-v4 --dry-run
 ```
 
-当前本机环境还没有可用的 `python` / `py` 命令，所以我暂时无法在这台机器上执行测试。安装 Python 3.11+ 后即可验证。
+所有命令默认使用 synthetic fixtures 或本地小文件，不需要 internet、broker 或真实账户。
 
-## 技术路线
+## 安全声明 / Safety Notice
 
-```text
-Phase 1: 日频短线 Alpha Transformer / TCN
-Phase 2: walk-forward 回测和 Rank IC / ICIR 评估
-Phase 3: 概率化 Alpha 融合、Regime 调整、组合优化
-Phase 4: 长线 Fundamental Ranking Model
-Phase 5: 新闻、财报、政策文本模型
-Phase 6: paper trading
-Phase 7: QMT Gateway 小资金实盘
-```
+本文档和代码不构成投资建议 / financial advice。V4 默认 `live_trading_enabled=false` 且 `dry_run=true`。任何真实 QMT submit path 必须显式关闭 dry-run，并通过 RiskGate、KillSwitch、reconciliation 和审计。
 
-详细方案见 [docs/production_ai_quant_blueprint.md](docs/production_ai_quant_blueprint.md)。
-AI Quant OS v2 见 [docs/ai_quant_os_v2.md](docs/ai_quant_os_v2.md)。
-数学层说明见 [docs/math_optimization_layer.md](docs/math_optimization_layer.md)。
-v3 SOTA 升级清单见 [docs/sota_upgrade_v3.md](docs/sota_upgrade_v3.md)。
+## 文档入口 / Docs
+
+- [V4 架构 / Architecture](docs/v4_architecture.md)
+- [数据与 Feature Store / Data](docs/v4_data_and_feature_store.md)
+- [模型训练 / Model Training](docs/v4_model_training.md)
+- [Agent Views / Structured Evidence](docs/v4_agent_views.md)
+- [组合与回测 / Portfolio Backtest](docs/v4_portfolio_backtest.md)
+- [QMT 执行准备 / Execution](docs/v4_execution_qmt.md)
+- [Roadmap / 路线图](docs/v4_roadmap.md)

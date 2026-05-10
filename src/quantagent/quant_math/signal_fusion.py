@@ -72,3 +72,37 @@ def black_litterman_posterior(
     posterior_cov_inv = tau_sigma_inv + p.T @ omega_inv @ p
     posterior_mean = np.linalg.pinv(posterior_cov_inv) @ (tau_sigma_inv @ pi + p.T @ omega_inv @ q)
     return pd.Series(posterior_mean, index=symbols)
+
+
+def blend_alpha_and_views(
+    model_alpha: pd.Series,
+    conformal_low: pd.Series | None = None,
+    conformal_high: pd.Series | None = None,
+    factor_gate_confidence: pd.Series | None = None,
+    agent_posterior: pd.Series | None = None,
+    regime_multiplier: float | pd.Series = 1.0,
+    risk_confidence: pd.Series | None = None,
+) -> pd.DataFrame:
+    symbols = model_alpha.index
+    alpha = model_alpha.astype(float).copy()
+    if agent_posterior is not None:
+        alpha = 0.7 * alpha + 0.3 * agent_posterior.reindex(symbols).fillna(alpha)
+    if conformal_low is not None and conformal_high is not None:
+        width = (conformal_high.reindex(symbols) - conformal_low.reindex(symbols)).abs()
+        interval_confidence = 1.0 / (1.0 + width.fillna(width.median() if width.notna().any() else 0.0))
+    else:
+        interval_confidence = pd.Series(1.0, index=symbols)
+    gate = factor_gate_confidence.reindex(symbols).fillna(1.0) if factor_gate_confidence is not None else pd.Series(1.0, index=symbols)
+    risk = risk_confidence.reindex(symbols).fillna(1.0) if risk_confidence is not None else pd.Series(1.0, index=symbols)
+    regime = regime_multiplier.reindex(symbols).fillna(1.0) if isinstance(regime_multiplier, pd.Series) else pd.Series(float(regime_multiplier), index=symbols)
+    confidence = (interval_confidence * gate * risk).clip(0.0, 1.0)
+    blended = alpha * confidence * regime
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "model_alpha": model_alpha.to_numpy(dtype=float),
+            "blended_alpha": blended.to_numpy(dtype=float),
+            "confidence": confidence.to_numpy(dtype=float),
+            "regime_multiplier": regime.to_numpy(dtype=float),
+        }
+    ).sort_values("symbol").reset_index(drop=True)

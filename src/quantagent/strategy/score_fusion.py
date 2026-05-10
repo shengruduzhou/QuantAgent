@@ -28,3 +28,8 @@ def fuse_scores(scores: ModelScores, weights: FusionWeights | None = None) -> fl
         + weights.risk_weight * clamp_score(scores.risk_score)
     )
     return clamp_score(final_score)
+
+
+def confidence_adjusted_score(raw_score: float, confidence: float, risk_score: float = 0.0) -> float:
+    adjusted = clamp_score(raw_score) * max(0.0, min(1.0, confidence)) - 0.2 * clamp_score(risk_score)
+    return clamp_score(adjusted)

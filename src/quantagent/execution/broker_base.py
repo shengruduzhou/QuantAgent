@@ -33,6 +33,28 @@ class Order:
     order_type: OrderType
     price: float | None = None
     note: str = ""
+    signal_id: str = ""
+    model_version: str = ""
+    feature_version: str = ""
+    strategy_version: str = ""
+    risk_check_result: str = "not_checked"
+    timestamp: str = ""
+
+
+@dataclass(frozen=True)
+class OrderIntent:
+    intent_id: str
+    symbol: str
+    side: OrderSide
+    quantity: int
+    target_weight: float
+    reference_price: float
+    signal_id: str
+    model_version: str
+    feature_version: str
+    strategy_version: str
+    risk_check_result: str
+    timestamp: str
 
 
 @dataclass(frozen=True)

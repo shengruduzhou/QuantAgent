@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.domain.schemas import AgentSignal
+from quantagent.agents.views_schema import EvidenceRecord
 
 
 COMMODITY_SECTOR_BETA = {
@@ -44,3 +45,33 @@ def commodity_shock_signals(
                     )
                 )
     return signals
+
+
+def commodity_evidence_records(
+    commodity_returns: pd.Series,
+    sector_map: pd.Series,
+    timestamp: str,
+    horizon_days: int = 10,
+    threshold: float = 0.02,
+) -> list[EvidenceRecord]:
+    records: list[EvidenceRecord] = []
+    for signal in commodity_shock_signals(commodity_returns, sector_map, horizon_days=horizon_days, threshold=threshold):
+        commodity = signal.tags[1] if len(signal.tags) > 1 else "commodity"
+        sector = signal.tags[2] if len(signal.tags) > 2 else None
+        records.append(
+            EvidenceRecord(
+                source=signal.agent_name,
+                timestamp=timestamp,
+                symbol=signal.symbol,
+                sector=sector,
+                event_type="commodity_shock",
+                horizon_days=signal.horizon_days,
+                direction=float(np.sign(signal.signal_strength)),
+                magnitude=float(abs(signal.signal_strength)),
+                confidence=signal.confidence,
+                decay_half_life=max(1.0, horizon_days / 2.0),
+                rationale=f"{commodity} shock",
+                raw_reference={"commodity": commodity},
+            )
+        )
+    return records

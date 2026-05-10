@@ -63,3 +63,9 @@ def listmle_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 def daily_rank_correlation_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Backwards-compatible alias to differentiable Spearman loss."""
     return differentiable_spearman_loss(pred, target)
+
+
+def pinball_loss(pred: torch.Tensor, target: torch.Tensor, quantile: float) -> torch.Tensor:
+    """Quantile regression pinball loss."""
+    diff = target - pred
+    return torch.maximum(quantile * diff, (quantile - 1.0) * diff).mean()

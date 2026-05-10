@@ -22,6 +22,8 @@ class AlphaTransformer(nn.Module):
         output_dim: int = 5,
     ) -> None:
         super().__init__()
+        self.output_dim = output_dim
+        self.supports_mask = False
         self.input_proj = nn.Linear(num_features, d_model)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,

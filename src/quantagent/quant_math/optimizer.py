@@ -26,6 +26,30 @@ class OptimizerResult:
     diagnostics: dict[str, float] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class V4PortfolioConfig:
+    mode: str = "long_only_enhancement"
+    max_name_weight: float = 0.05
+    max_sector_weight: float = 0.30
+    max_turnover: float = 0.30
+    target_beta: float = 1.0
+    beta_limit: float = 0.2
+    cost_aware: bool = True
+    no_buy_limit_up: bool = True
+    no_sell_limit_down: bool = True
+
+
+@dataclass(frozen=True)
+class V4PortfolioResult:
+    target_weights: pd.Series
+    expected_turnover: float
+    expected_cost: float
+    active_risk_proxy: float
+    constraint_diagnostics: dict[str, float | str]
+    rejected_symbols: dict[str, str]
+    status: str
+
+
 class ContinuousMeanVarianceOptimizer:
     """Mean-variance optimizer with cost, turnover, and exposure constraints."""
 
@@ -193,3 +217,85 @@ def _positive_semidefinite(matrix: np.ndarray) -> np.ndarray:
     if eig_min < 1e-10:
         matrix = matrix + np.eye(matrix.shape[0]) * (abs(eig_min) + 1e-8)
     return matrix
+
+
+def solve_v4_portfolio(
+    alpha: pd.Series,
+    covariance: pd.DataFrame,
+    current_weights: pd.Series | None = None,
+    cost: pd.Series | None = None,
+    sector: pd.Series | None = None,
+    beta: pd.Series | None = None,
+    tradability: pd.DataFrame | None = None,
+    config: V4PortfolioConfig | None = None,
+) -> V4PortfolioResult:
+    cfg = config or V4PortfolioConfig()
+    rejected: dict[str, str] = {}
+    clean_alpha = alpha.dropna().astype(float)
+    if tradability is not None and not tradability.empty:
+        for _, row in tradability.iterrows():
+            symbol = str(row["symbol"])
+            if symbol not in clean_alpha.index:
+                continue
+            if cfg.no_buy_limit_up and bool(row.get("is_limit_up", False)) and clean_alpha.loc[symbol] > 0:
+                rejected[symbol] = "limit_up_no_buy"
+            if cfg.no_sell_limit_down and bool(row.get("is_limit_down", False)) and clean_alpha.loc[symbol] < 0:
+                rejected[symbol] = "limit_down_no_sell"
+            if bool(row.get("is_suspended", row.get("suspended", False))):
+                rejected[symbol] = "suspended"
+        clean_alpha = clean_alpha.drop(index=[s for s in rejected if s in clean_alpha.index])
+    if cfg.mode == "hedged_alpha":
+        clean_alpha = clean_alpha - clean_alpha.mean()
+    elif cfg.mode == "market_neutral_placeholder":
+        clean_alpha = clean_alpha - clean_alpha.mean()
+    optimizer = ContinuousMeanVarianceOptimizer(
+        OptimizerConfig(
+            max_position_weight=cfg.max_name_weight,
+            max_total_weight=1.0 if cfg.mode == "long_only_enhancement" else 0.5,
+            max_turnover=cfg.max_turnover,
+            long_only=cfg.mode == "long_only_enhancement",
+            cost_penalty=1.0 if cfg.cost_aware else 0.0,
+        )
+    )
+    upper = pd.Series(cfg.max_name_weight, index=clean_alpha.index)
+    result = optimizer.solve(
+        clean_alpha,
+        covariance,
+        current_weights=current_weights,
+        cost=cost,
+        sector=sector,
+        max_sector_weight=cfg.max_sector_weight,
+        beta=beta,
+        beta_target=cfg.target_beta if beta is not None and cfg.mode == "long_only_enhancement" else None,
+        beta_limit=cfg.beta_limit,
+        upper_bounds=upper,
+    )
+    weights = result.weights
+    if cfg.mode in {"hedged_alpha", "market_neutral_placeholder"} and not weights.empty:
+        weights = weights - weights.mean()
+        gross = weights.abs().sum()
+        if gross > 1.0:
+            weights = weights / gross
+    current = current_weights.reindex(weights.index).fillna(0.0) if current_weights is not None else pd.Series(0.0, index=weights.index)
+    turnover = float((weights - current).abs().sum())
+    cost_series = cost.reindex(weights.index).fillna(0.0) if cost is not None else pd.Series(0.0, index=weights.index)
+    expected_cost = float(((weights - current).abs() * cost_series).sum())
+    cov = covariance.reindex(index=weights.index, columns=weights.index).fillna(0.0)
+    active_risk = float(np.sqrt(max(weights.to_numpy() @ cov.to_numpy() @ weights.to_numpy(), 0.0))) if len(weights) else 0.0
+    diagnostics: dict[str, float | str] = {
+        **result.diagnostics,
+        "mode": cfg.mode,
+        "expected_turnover": turnover,
+        "expected_cost": expected_cost,
+        "active_risk_proxy": active_risk,
+        "rejected_count": float(len(rejected)),
+    }
+    return V4PortfolioResult(
+        target_weights=weights.sort_index(),
+        expected_turnover=turnover,
+        expected_cost=expected_cost,
+        active_risk_proxy=active_risk,
+        constraint_diagnostics=diagnostics,
+        rejected_symbols=rejected,
+        status=result.status,
+    )

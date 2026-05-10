@@ -18,12 +18,26 @@ class FactorMeta:
     description: str
     source: str
     compute: FactorCompute | None = field(default=None, repr=False, compare=False)
+    group: str | None = None
+    frequency: str = "daily"
+    lookback: int = 20
+    pit_safe: bool = True
+    expected_direction: int | None = None
+    neutralization_group: str | None = None
+    capacity_proxy: str | None = None
+    crowding_proxy: str | None = None
+    owner: str = "quantagent"
+    version: str = "v4.0"
 
     def __post_init__(self) -> None:
         if self.direction not in {-1, 0, 1}:
             raise ValueError("direction must be -1, 0, or 1")
         if self.horizon_days <= 0:
             raise ValueError("horizon_days must be positive")
+        if self.group is None:
+            self.group = self.category
+        if self.expected_direction is None:
+            self.expected_direction = self.direction
 
 
 @dataclass(frozen=True)

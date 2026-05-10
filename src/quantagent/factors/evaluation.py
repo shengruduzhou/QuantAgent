@@ -279,6 +279,38 @@ def factor_summary_table(
     return pd.DataFrame([row.__dict__ for row in rows])
 
 
+def factor_group_metrics(
+    frame: pd.DataFrame,
+    factor_columns: list[str],
+    return_column: str,
+    group_map: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    rows: list[dict[str, float | str]] = []
+    for column in factor_columns:
+        ic = information_coefficient(frame, column, return_column)
+        rows.append(
+            {
+                "factor_name": column,
+                "group": (group_map or {}).get(column, "ungrouped"),
+                "rank_ic": ic.summary.mean_rank_ic,
+                "rank_icir": ic.summary.rank_icir,
+                "positive_ratio": ic.summary.positive_ratio,
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["group", "mean_rank_ic", "mean_rank_icir", "positive_ratio"])
+    data = pd.DataFrame(rows)
+    return (
+        data.groupby("group", sort=True)
+        .agg(
+            mean_rank_ic=("rank_ic", "mean"),
+            mean_rank_icir=("rank_icir", "mean"),
+            positive_ratio=("positive_ratio", "mean"),
+        )
+        .reset_index()
+    )
+
+
 def _corr_by_date(
     frame: pd.DataFrame,
     factor_column: str,
@@ -317,4 +349,3 @@ def _quantile_labels(series: pd.Series, quantiles: int) -> pd.Series:
     ranks = valid.rank(method="first", pct=True)
     out.loc[valid.index] = np.ceil(ranks * quantiles).clip(1, quantiles)
     return out
-

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.domain.schemas import AgentSignal
+from quantagent.agents.views_schema import AgentView
 from quantagent.quant_math.signal_fusion import black_litterman_posterior
 
 
@@ -58,6 +59,46 @@ def agent_signals_to_bl_views(
         sharp = max(signal.confidence * signal.evidence_quality * (ir ** 2), 1e-3)
         omega[k] = max(vol_i ** 2 / sharp, config.min_omega)
     return p, q, omega
+
+
+def agent_views_to_bl_views(
+    views: list[AgentView],
+    universe: pd.Index,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    valid = [view for view in views if set(view.symbols).intersection(set(universe))]
+    if not valid:
+        return np.zeros((0, len(universe))), np.zeros(0), np.zeros((0, 0))
+    sym_to_idx = {symbol: i for i, symbol in enumerate(universe)}
+    p = np.zeros((len(valid), len(universe)))
+    q = np.zeros(len(valid))
+    omega = np.zeros(len(valid))
+    for row, view in enumerate(valid):
+        for symbol, value in view.exposure.items():
+            if symbol in sym_to_idx:
+                p[row, sym_to_idx[symbol]] = float(value)
+        q[row] = float(view.q)
+        omega[row] = max(float(view.omega), 1e-12)
+    return p, q, omega
+
+
+def posterior_alpha_from_agent_views(
+    prior_returns: pd.Series,
+    covariance: pd.DataFrame,
+    views: list[AgentView],
+    config: BLViewConfig | None = None,
+) -> pd.Series:
+    config = config or BLViewConfig()
+    p, q, omega = agent_views_to_bl_views(views, prior_returns.index)
+    if p.shape[0] == 0:
+        return prior_returns.copy()
+    return black_litterman_posterior(
+        prior_returns,
+        covariance,
+        pick_matrix=p,
+        views=q,
+        view_uncertainty=omega,
+        tau=config.tau,
+    )
 
 
 def posterior_alpha_from_agents(

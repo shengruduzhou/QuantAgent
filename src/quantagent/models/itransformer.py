@@ -27,6 +27,8 @@ class iTransformer(nn.Module):
         output_dim: int = 5,
     ) -> None:
         super().__init__()
+        self.output_dim = output_dim
+        self.supports_mask = False
         self.token_proj = nn.Linear(lookback, d_model)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -111,6 +113,8 @@ class PatchTSTAlpha(nn.Module):
         output_dim: int = 5,
     ) -> None:
         super().__init__()
+        self.output_dim = output_dim
+        self.supports_mask = False
         self.backbone = PatchTSTBackbone(
             lookback=lookback,
             patch_len=patch_len,

@@ -1,99 +1,35 @@
-# AI Quant OS v2
+# AI Quant OS v2 / V2 设计回顾
 
-This project now treats LLM and multi-agent systems as evidence processors, not order generators.
+V2 的核心价值是把 LLM 和 multi-agent 系统定位为 evidence processors，而不是 order generators。V4 保留这个边界，并把 `AgentSignal` 升级到 `EvidenceRecord` 和 `AgentView`。
 
-## Core Contract
+## 核心合约 / Core Contract
 
-Every research component ultimately emits one of these structured objects:
+研究组件输出结构化对象：`AgentSignal`、`AlphaPrediction`、`TargetWeight`。V4 进一步要求 Agent 输出 `EvidenceRecord`，再由 `AgentRouter` 转成 Black-Litterman views、portfolio constraints、risk warnings 或 no-trade flags。
 
-```text
-AgentSignal    -> evidence-backed signal, confidence, risk penalty
-AlphaPrediction -> probabilistic alpha, volatility, downside risk, confidence
-TargetWeight   -> target portfolio weight, not an order
-```
-
-Forbidden:
+禁止路径 / Forbidden path：
 
 ```text
 LLM -> market order
-Agent vote -> final trade
-News sentiment -> direct alpha without validation
-Backtest-free strategy -> production execution
+Agent vote -> broker submit
+Optimizer -> broker order
 ```
 
-Allowed:
+允许路径 / Allowed path：
 
 ```text
-LLM -> structured event
-Agent debate -> evidence and risk tags
+LLM -> structured evidence
 Model -> probabilistic alpha
 Optimizer -> target weights
-RiskGate -> approval or blocking
-QMT -> execution only, later
+OrderManager -> dry-run order intents
+QMTGateway -> dry-run audit by default
 ```
 
-## Repository Roles
+## 与 V4 的关系 / V4 Relation
 
-TradingAgents is mapped to the short-horizon event desk:
+V2 是边界定义，V4 是可运行闭环。V4 增加 point-in-time feature store、A-share rule engine、multi-tower model、factor lifecycle、event-driven backtest 和 QMT dry-run gateway。
 
-```text
-Technical Signal Agent
-Event Shock Agent
-Statistical Regime Agent
-Microstructure Agent
-Short Risk Agent
-Trader Agent that emits target weights only
+## 测试 / Tests
+
+```powershell
+python -m pytest tests/test_agent_views_v4.py tests/test_v4_services.py
 ```
-
-ai-hedge-fund is mapped to the long-horizon fundamental desk:
-
-```text
-DCF / Reverse DCF
-Quality and moat
-Growth and TAM
-Policy alignment
-Ownership flow
-Tail risk and fraud risk
-Long thesis memory
-```
-
-The original personality-style agents should become testable factor models.
-
-## Phase 1: No-Training System
-
-The first runnable version should use:
-
-```text
-OHLCV technical indicators
-Rule signals
-Fundamental DCF / reverse DCF
-Quality and fraud risk scores
-Regime filter
-Transaction cost model
-Continuous optimizer
-Risk report
-```
-
-This gets the system to a backtestable, explainable baseline before GPU training.
-
-## Phase 2+
-
-```text
-Phase 2: LightGBM / CatBoost ranker, purged CV, dynamic agent weights
-Phase 3: PatchTST / iTransformer / TSMixer, event embeddings, anomaly models
-Phase 4: constrained RL with target-weight action space
-Phase 5: paper trading and QMT execution gateway
-```
-
-## Weight-Centric Flow
-
-```text
-features
-  -> short_rule_signal / long_horizon_score / agent_signal
-  -> raw weights
-  -> optimizer target weights
-  -> A-share rounding and risk gate
-  -> future QMT Gateway
-```
-
-QMT is intentionally absent from this layer.

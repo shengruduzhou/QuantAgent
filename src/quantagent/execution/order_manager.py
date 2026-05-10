@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from hashlib import sha1
 from typing import Iterable
 from uuid import uuid4
 
@@ -10,12 +11,13 @@ import pandas as pd
 from quantagent.execution.broker_base import (
     BrokerBase,
     Order,
+    OrderIntent,
     OrderSide,
     OrderState,
     OrderStatus,
     OrderType,
 )
-from quantagent.quant_math.constraints import weights_to_lot_shares
+from quantagent.quant_math.ashare import AshareRuleEngine
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class OrderManagerConfig:
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
     max_participation_rate: float = 0.05
+    strategy_version: str = "v4.0"
 
 
 @dataclass
@@ -41,6 +44,7 @@ class OrderManager:
 
     broker: BrokerBase
     config: OrderManagerConfig = field(default_factory=OrderManagerConfig)
+    rule_engine: AshareRuleEngine = field(default_factory=AshareRuleEngine)
     history: dict[str, OrderRecord] = field(default_factory=dict)
     counts_today: dict[str, int] = field(default_factory=dict)
 
@@ -48,30 +52,78 @@ class OrderManager:
         self.counts_today.clear()
 
     def reconcile(self, target_weights: pd.Series, prices: pd.Series, nav: float) -> list[OrderState]:
-        target_shares = weights_to_lot_shares(target_weights, nav, prices, self.config.lot_size)
         positions = {p.symbol: p for p in self.broker.query_positions()}
+        intents = self.target_weights_to_order_intents(target_weights, prices, nav, positions=positions)
         orders: list[Order] = []
-        for symbol, desired in target_shares.items():
-            current = positions.get(symbol)
-            current_shares = current.available_shares + current.frozen_shares if current else 0
-            delta = int(desired) - current_shares
-            if delta == 0:
+        for intent in intents:
+            if self.counts_today.get(intent.symbol, 0) >= self.config.max_orders_per_symbol_per_day:
                 continue
-            if self.counts_today.get(symbol, 0) >= self.config.max_orders_per_symbol_per_day:
-                continue
-            side = OrderSide.BUY if delta > 0 else OrderSide.SELL
             orders.append(
                 Order(
-                    client_order_id=self._make_id(symbol, side),
-                    symbol=symbol,
-                    side=side,
-                    quantity=abs(delta),
+                    client_order_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    quantity=intent.quantity,
                     order_type=OrderType.LIMIT,
-                    price=float(prices.loc[symbol]) if symbol in prices.index else None,
-                    note=f"target_weight_reconcile_{datetime.utcnow().isoformat()}",
+                    price=intent.reference_price,
+                    note="target_weight_reconcile",
+                    signal_id=intent.signal_id,
+                    model_version=intent.model_version,
+                    feature_version=intent.feature_version,
+                    strategy_version=intent.strategy_version,
+                    risk_check_result=intent.risk_check_result,
+                    timestamp=intent.timestamp,
                 )
             )
         return list(self._submit_all(orders))
+
+    def target_weights_to_order_intents(
+        self,
+        target_weights: pd.Series,
+        prices: pd.Series,
+        nav: float,
+        positions: dict[str, object] | None = None,
+        signal_id: str = "manual",
+        model_version: str = "unknown",
+        feature_version: str = "unknown",
+        risk_check_result: str = "not_checked",
+    ) -> list[OrderIntent]:
+        positions = positions or {p.symbol: p for p in self.broker.query_positions()}
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        intents: list[OrderIntent] = []
+        for symbol, weight in target_weights.reindex(prices.index).fillna(0.0).items():
+            price = float(prices.loc[symbol])
+            if price <= 0 or nav <= 0:
+                continue
+            current = positions.get(str(symbol))
+            current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0
+            raw_target = float(weight) * nav / price
+            if raw_target >= current_shares:
+                side = OrderSide.BUY
+                quantity = self.rule_engine.round_order_quantity(str(symbol), "buy", raw_target - current_shares)
+            else:
+                side = OrderSide.SELL
+                quantity = self.rule_engine.round_order_quantity(str(symbol), "sell", current_shares - raw_target)
+            if quantity <= 0:
+                continue
+            intent_id = self._make_id(str(symbol), side, signal_id=signal_id, model_version=model_version)
+            intents.append(
+                OrderIntent(
+                    intent_id=intent_id,
+                    symbol=str(symbol),
+                    side=side,
+                    quantity=quantity,
+                    target_weight=float(weight),
+                    reference_price=price,
+                    signal_id=signal_id,
+                    model_version=model_version,
+                    feature_version=feature_version,
+                    strategy_version=self.config.strategy_version,
+                    risk_check_result=risk_check_result,
+                    timestamp=now,
+                )
+            )
+        return intents
 
     def cancel_all_open(self) -> list[OrderState]:
         results: list[OrderState] = []
@@ -100,5 +152,7 @@ class OrderManager:
             self.history[order.client_order_id] = OrderRecord(order=order, state=state, submitted_at=record.submitted_at, last_updated_at=now)
 
     @staticmethod
-    def _make_id(symbol: str, side: OrderSide) -> str:
-        return f"{symbol}-{side.value}-{uuid4().hex[:10]}"
+    def _make_id(symbol: str, side: OrderSide, signal_id: str = "", model_version: str = "") -> str:
+        seed = f"{symbol}-{side.value}-{signal_id}-{model_version}"
+        suffix = uuid4().hex[:10] if not signal_id else sha1(seed.encode("utf-8")).hexdigest()[:10]
+        return f"{symbol}-{side.value}-{suffix}"
