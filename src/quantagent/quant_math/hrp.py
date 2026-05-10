@@ -39,8 +39,8 @@ def hrp_weights(returns: pd.DataFrame) -> pd.Series:
     """Hierarchical Risk Parity weights (Lopez de Prado 2016)."""
     if returns.shape[1] == 0:
         return pd.Series(dtype=float)
-    cov = returns.cov().to_numpy()
-    corr = returns.corr().fillna(0.0).to_numpy()
+    cov = returns.cov().to_numpy(copy=True)
+    corr = returns.corr().fillna(0.0).to_numpy(copy=True)
     np.fill_diagonal(corr, 1.0)
     distance = np.sqrt(0.5 * (1.0 - corr))
     np.fill_diagonal(distance, 0.0)
@@ -76,7 +76,7 @@ def herc_weights(
     """Hierarchical Equal Risk Contribution (Raffinot 2018) with vol or CVaR."""
     if returns.shape[1] == 0:
         return pd.Series(dtype=float)
-    corr = returns.corr().fillna(0.0).to_numpy()
+    corr = returns.corr().fillna(0.0).to_numpy(copy=True)
     np.fill_diagonal(corr, 1.0)
     distance = np.sqrt(0.5 * (1.0 - corr))
     np.fill_diagonal(distance, 0.0)

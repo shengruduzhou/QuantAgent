@@ -28,7 +28,7 @@ def test_financial_statement_agent_outputs_signal_not_order():
     statements = pd.DataFrame(
         {
             "symbol": ["A"] * 5,
-            "report_date": pd.date_range("2025-01-01", periods=5, freq="Q"),
+            "report_date": pd.date_range("2025-01-01", periods=5, freq="QE"),
             "revenue": [100, 110, 120, 130, 145],
             "cogs": [50, 54, 58, 62, 68],
             "receivables": [10, 11, 12, 13, 14],
@@ -45,4 +45,3 @@ def test_financial_statement_agent_outputs_signal_not_order():
     output = FinancialStatementAgent().run("A", statements, 50.0, _dcf())
     assert output.signal.symbol == "A"
     assert "fundamental" in output.signal.tags
-

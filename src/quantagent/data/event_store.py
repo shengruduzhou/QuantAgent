@@ -108,7 +108,7 @@ class EventStore:
                     "event_sentiment": float(np.dot(weight, events["sentiment_score"].fillna(0.0)) / denom),
                     "event_policy_exposure": float(np.dot(weight, events["policy_exposure"].fillna(0.0)) / denom),
                     "event_confidence": float(events["confidence"].mean()),
-                    "event_decay": float(decay[-1]),
+                    "event_decay": float(decay.iloc[-1]),
                     "event_recency": float(age_days.iloc[-1]),
                 }
             )
