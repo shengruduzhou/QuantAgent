@@ -106,23 +106,6 @@ def build_sector_rotation(
     typer.echo(f"wrote {output_path}")
 
 
-@app.command("run-v3-backtest")
-def run_v3_backtest(
-    weights_path: Path,
-    prices_path: Path,
-    output_path: Path,
-) -> None:
-    from quantagent.backtest.engine import EventDrivenBacktester
-
-    weights = pd.read_csv(weights_path)
-    weights["trade_date"] = pd.to_datetime(weights["trade_date"])
-    target_weights = weights.set_index("trade_date")
-    result = EventDrivenBacktester().run(target_weights, pd.read_csv(prices_path))
-    diagnostics = pd.DataFrame([result.diagnostics])
-    diagnostics.to_csv(output_path, index=False)
-    typer.echo(f"wrote {output_path}")
-
-
 @app.command("build-features-v4")
 def build_features_v4(
     output_path: Path = Path("data/processed/v4_features.csv"),
@@ -264,10 +247,6 @@ def build_flow_features_entry() -> None:
 
 def build_sector_rotation_entry() -> None:
     typer.run(build_sector_rotation)
-
-
-def run_v3_backtest_entry() -> None:
-    typer.run(run_v3_backtest)
 
 
 def generate_factor_report_entry() -> None:

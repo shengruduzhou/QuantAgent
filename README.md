@@ -1,6 +1,8 @@
-# QuantAgent V4 / 大 A AI Quant OS
+# QuantAgent V4 → V5 / 大 A AI Quant OS
 
-QuantAgent V4 是一个面向大 A 市场的 AI Quant OS 最小可落地闭环。它不是 LLM trading demo，而是把 research、point-in-time feature store、multi-tower model、factor governance、portfolio optimizer、A-share backtest 和 QMT dry-run execution-preparation 连接起来。
+QuantAgent 是一个面向大 A 市场的 AI Quant OS 最小可落地闭环。它不是 LLM trading demo，而是把 research、point-in-time feature store、multi-tower model、factor governance、portfolio optimizer、A-share backtest 和 QMT dry-run execution-preparation 连接起来。
+
+> **V5 设计已落地**：见 [docs/v5_design.md](docs/v5_design.md)。V5 在 V4 骨架上做了「结构性减法 + 模型 / 因子 / agent 智能化」：MoE 多塔融合、可学习因子门控、Conformal 校准、Agent 在线可信度、Regime-aware 优化器、HRP 兜底。V4 路径完全兼容并继续可用。
 
 ## 核心边界 / Core Boundary
 
@@ -53,6 +55,7 @@ quantagent paper-trade-v4 --dry-run
 
 ## 文档入口 / Docs
 
+- [V5 设计 / V5 Design](docs/v5_design.md) ← **当前演进目标**
 - [V4 架构 / Architecture](docs/v4_architecture.md)
 - [数据与 Feature Store / Data](docs/v4_data_and_feature_store.md)
 - [模型训练 / Model Training](docs/v4_model_training.md)

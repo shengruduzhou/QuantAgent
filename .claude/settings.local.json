@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"E:/AI量化/QuantAgent/\" 2>&1 | head -50)",
+      "PowerShell(python -c \"import sys; print\\(sys.version\\)\")",
+      "PowerShell(python -c \"import pypdf; print\\('pypdf', pypdf.__version__\\)\" 2>&1)",
+      "PowerShell(python -c \"import pdfplumber; print\\('pdfplumber', pdfplumber.__version__\\)\" 2>&1)",
+      "PowerShell(python -c \"import PyPDF2; print\\('PyPDF2', PyPDF2.__version__\\)\" 2>&1)",
+      "Bash(pip install *)",
+      "Bash(python -c ' *)",
+      "Bash(cat \"C:\\\\\\\\Users\\\\\\\\shanh\\\\\\\\.claude\\\\\\\\projects\\\\\\\\E--Project-QuantAgent\\\\\\\\456f069d-7ed1-4479-b1d1-7c7794f8ee60\\\\\\\\tool-results\\\\\\\\bum39kbfp.txt\")",
+      "Bash(python -m pytest tests/ -x --tb=short)",
+      "Bash(python -c \"import torch; print\\('torch', torch.__version__\\)\")",
+      "Bash(python -m pytest tests/ --tb=short -q)"
+    ]
+  }
+}

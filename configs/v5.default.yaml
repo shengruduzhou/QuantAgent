@@ -1,0 +1,137 @@
+market:
+  region: CN
+  universe: CSI300
+  benchmark: 000300.SH
+  mode: auto  # auto | long_only_enhancement | hedged_alpha | market_neutral_placeholder
+
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  require_kill_switch: true
+  require_reconciliation: true
+
+data:
+  point_in_time: true
+  cache_dir: data/cache
+  event_cutoff: "15:00:00"
+  audit_pit: true
+
+features:
+  enable_alpha101: true
+  enable_cicc_high_freq: true
+  enable_sector_rotation: true
+  enable_fund_flow: true
+  enable_event_policy: true
+  enable_sentiment: true
+  factor_groups:
+    - price_volume
+    - micro_structure
+    - breadth_rotation
+    - fundamental
+    - flow
+    - event_policy
+
+factor_lifecycle:
+  ic_window: 60
+  retire_ic_threshold: 0.005
+  watch_ic_threshold: 0.015
+  capacity_min_rmb: 50000000
+  crowding_z_max: 2.5
+  consume_model_gate: true   # use V5 model factor_gate to weight composite
+
+model:
+  architecture: v5_multitower
+  sequence_backbone: itransformer  # simple_seq | alpha_transformer | itransformer | patchtst
+  snapshot_backbone: tabular_resnet
+  event_backbone: structured_event_tower
+  hidden_dim: 64
+  tower_dim: 64
+  dropout: 0.1
+  num_experts: 3
+  regime_dim: 4
+  factor_group_dim: 6
+  quantiles: [0.1, 0.9]
+  ssl_pretraining: true
+
+training:
+  batch_size: 64
+  epochs: 3
+  device: cpu
+  use_amp: false
+  walk_forward: true
+  purged_cv: true
+  cpcv: true
+  embargo_days: 5
+  loss_weights:
+    rank: 1.0
+    huber: 0.5
+    cls: 0.3
+    quantile: 0.4
+    factor_gate: 0.2
+    turnover: 0.3
+    risk: 0.3
+    consistency: 0.2
+    ssl: 0.1
+
+conformal:
+  enabled: true
+  mode: cqr            # split | cqr
+  alpha: 0.1           # target 90% coverage
+  drift_tolerance: 0.05
+  severe_drift_action: degrade_to_paper_only
+
+agents:
+  enable_policy: true
+  enable_flow: true
+  enable_commodity: true
+  enable_sector_rotation: true
+  enable_financial_statement: true
+  enable_sentiment: true
+  reliability:
+    halflife_days: 20
+    min_score: 0.10
+    max_score: 1.50
+    cold_start: 0.50
+  arbitration:
+    method: bayesian   # bayesian | confidence_sum
+
+portfolio:
+  max_name_weight: 0.05
+  max_sector_weight: 0.30
+  max_turnover: 0.30
+  target_beta: 1.0
+  cost_aware: true
+  fallback:
+    hrp_min_assets: 8
+
+regime:
+  detector: hmm        # hmm | rule
+  hmm_states: 3
+  bull_risk_multiplier: 0.85
+  range_risk_multiplier: 1.00
+  high_vol_risk_multiplier: 1.60
+  bear_risk_multiplier: 1.50
+  crisis_risk_multiplier: 2.50
+
+execution:
+  broker: qmt
+  dry_run: true
+  idempotency: true
+  audit_log_dir: logs/execution
+  audit_fields:
+    - feature_version
+    - model_version
+    - view_ids
+    - regime
+    - calibration_coverage
+
+release:
+  require_ablation: true
+  ablation_modules:
+    - event_tower
+    - factor_gate
+    - conformal
+    - agent_views
+    - cost_penalty
+    - optimizer_constraint
+  min_full_to_ablation_sharpe_ratio: 1.05
