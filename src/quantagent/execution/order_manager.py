@@ -144,7 +144,7 @@ class OrderManager:
             yield state
 
     def _update(self, order: Order, state: OrderState) -> None:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         record = self.history.get(order.client_order_id)
         if record is None:
             self.history[order.client_order_id] = OrderRecord(order=order, state=state, submitted_at=now, last_updated_at=now)

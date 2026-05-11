@@ -1,0 +1,58 @@
+scenarios:
+  - name: "2018_bear_market_replay"
+    start_date: "2018-01-01"
+    end_date: "2018-12-31"
+    universe: "CSI300"
+    regime_hint: "bear_trend"
+    account_nav: 1000000
+    data_mode: "real_external"
+  - name: "2020_covid_volatility_replay"
+    start_date: "2020-01-01"
+    end_date: "2020-06-30"
+    universe: "CSI500"
+    regime_hint: "high_volatility"
+    account_nav: 1000000
+    data_mode: "real_external"
+  - name: "2021_growth_to_value_replay"
+    start_date: "2021-01-01"
+    end_date: "2021-12-31"
+    universe: "CSI800"
+    regime_hint: "style_rotation"
+    account_nav: 2000000
+    data_mode: "real_external"
+  - name: "2022_bear_and_policy_replay"
+    start_date: "2022-01-01"
+    end_date: "2022-12-31"
+    universe: "CSI300"
+    regime_hint: "policy_and_bear"
+    account_nav: 2000000
+    data_mode: "real_external"
+  - name: "2023_range_bound_replay"
+    start_date: "2023-01-01"
+    end_date: "2023-12-31"
+    universe: "CSI500"
+    regime_hint: "range_bound"
+    account_nav: 1000000
+    data_mode: "real_external"
+  - name: "2024_defensive_replay"
+    start_date: "2024-01-01"
+    end_date: "2024-12-31"
+    universe: "CSI300"
+    regime_hint: "low_confidence_market"
+    account_nav: 1000000
+    data_mode: "real_external"
+  - name: "2025_recent_market_replay"
+    start_date: "2025-01-01"
+    end_date: "2025-12-31"
+    universe: "CSI800"
+    regime_hint: "recent_market"
+    account_nav: 3000000
+    data_mode: "real_external"
+  - name: "mock_recent_replay"
+    start_date: "2026-01-02"
+    end_date: "2026-03-31"
+    universe: "CSI300"
+    regime_hint: "mock_smoke"
+    account_nav: 1000000
+    data_mode: "mock"
+

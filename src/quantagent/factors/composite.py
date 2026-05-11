@@ -100,6 +100,33 @@ def combine_weight_models(
     return bayesian_shrinkage_weights(raw, prior_strength=shrinkage)
 
 
+def combine_with_model_gate(
+    statistical_weights: pd.Series,
+    model_gate: pd.Series,
+    lifecycle_scores: pd.Series | None = None,
+    crowding_penalty: pd.Series | None = None,
+    gate_strength: float = 1.0,
+) -> pd.Series:
+    """Blend statistical factor weights with the lagged model factor gate.
+
+    The model gate is intended to be produced after inference and consumed by
+    the next tradable feature build. Callers are responsible for passing a
+    point-in-time, lagged gate snapshot.
+    """
+    all_index = statistical_weights.index.union(model_gate.index)
+    stat = _normalize_weights(statistical_weights.reindex(all_index).fillna(0.0).clip(lower=0.0))
+    gate = _normalize_weights(model_gate.reindex(all_index).fillna(0.0).clip(lower=0.0))
+    strength = float(np.clip(gate_strength, 0.0, 1.0))
+    blended = (1.0 - strength) * stat + strength * gate
+    if lifecycle_scores is not None:
+        lifecycle = lifecycle_scores.reindex(all_index).fillna(1.0).clip(lower=0.0)
+        blended = blended * lifecycle
+    if crowding_penalty is not None:
+        crowding = crowding_penalty.reindex(all_index).fillna(1.0).clip(lower=0.0)
+        blended = blended * crowding
+    return _normalize_weights(blended)
+
+
 def _normalize_weights(raw: pd.Series) -> pd.Series:
     clean = raw.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     total = clean.sum()

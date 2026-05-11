@@ -1,0 +1,89 @@
+market:
+  region: CN
+  universe: CSI300
+  benchmark: 000300.SH
+  mode: auto
+
+safety:
+  live_trading_enabled: false
+  real_broker_enabled: false
+  virtual_broker_only: true
+  dry_run: true
+  require_kill_switch: true
+  require_reconciliation: true
+  forbid_agent_orders: true
+
+data:
+  provider: mock
+  allow_external_network: true
+  cache_dir: data/cache/v6
+  point_in_time: true
+  event_cutoff: "15:00:00"
+  audit_pit: true
+  min_data_quality_score: 0.85
+  start_date: "2026-01-02"
+  end_date: "2026-03-31"
+
+model:
+  architecture: v6_multitower
+  sequence_backbone: itransformer
+  hidden_dim: 64
+  tower_dim: 64
+  num_experts: 3
+  regime_dim: 8
+  factor_group_dim: 8
+  horizons: [1, 5, 20]
+  conformal_enabled: true
+  model_registry_dir: artifacts/models/v6
+
+training:
+  allow_real_market_data: true
+  allow_real_news_data: true
+  walk_forward: true
+  purged_cv: true
+  cpcv: true
+  embargo_days: 5
+  min_train_years: 3
+  validation_years: 1
+  test_years: 1
+  batch_size: 64
+  epochs: 3
+  device: cpu
+
+agents:
+  forbid_orders: true
+  enable_sentiment: true
+  enable_news: true
+  enable_policy: true
+  enable_flow: true
+  enable_commodity: true
+  enable_financial_statement: true
+  reliability:
+    enabled: true
+    halflife_days: 20
+    cold_start: 0.5
+    min_score: 0.1
+    max_score: 1.5
+
+portfolio:
+  use_bl_posterior: true
+  use_conformal_confidence: true
+  use_regime_aware_optimizer: true
+  max_name_weight: 0.05
+  max_sector_weight: 0.30
+  max_turnover: 0.30
+
+execution:
+  broker: virtual
+  virtual_user_id: simulated_user_001
+  initial_cash: 1000000
+  dry_run: true
+  audit_log_dir: logs/v6
+  allow_real_broker: false
+
+reporting:
+  output_dir: reports/v6
+  generate_html: true
+  generate_json: true
+  generate_markdown: true
+

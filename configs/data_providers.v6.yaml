@@ -1,0 +1,28 @@
+providers:
+  default: mock
+  mock:
+    class: quantagent.data.providers.mock_provider.MockProvider
+    point_in_time: true
+    network_required: false
+  local_csv:
+    class: quantagent.data.providers.local_csv_provider.LocalCsvProvider
+    root: data/local
+    fallback: mock
+    network_required: false
+  akshare:
+    class: quantagent.data.providers.akshare_provider.AkShareProvider
+    allow_network: false
+    fallback: mock
+    network_required: true
+  tushare:
+    class: quantagent.data.providers.tushare_provider.TuShareProvider
+    token_env: TUSHARE_TOKEN
+    allow_network: false
+    fallback: mock
+    network_required: true
+
+data_contract:
+  required_market_columns: [trade_date, symbol, open, high, low, close, volume, amount]
+  required_pit_columns: [announcement_time, timestamp]
+  secret_policy: "API keys must come from environment variables or .env ignored by git."
+

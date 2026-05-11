@@ -6,6 +6,7 @@ from hashlib import sha1
 import numpy as np
 import pandas as pd
 
+from quantagent.agents.agent_reliability import AgentReliability
 from quantagent.agents.views_schema import AgentView, EvidenceRecord
 
 
@@ -20,9 +21,17 @@ class RoutedAgentOutput:
 class AgentRouter:
     """Map structured evidence into BL views, constraints, and risk flags."""
 
-    def __init__(self, base_view_scale: float = 0.03, min_omega: float = 1e-6) -> None:
+    def __init__(
+        self,
+        base_view_scale: float = 0.03,
+        min_omega: float = 1e-6,
+        reliability: AgentReliability | None = None,
+        base_omega: float | None = None,
+    ) -> None:
         self.base_view_scale = base_view_scale
         self.min_omega = min_omega
+        self.reliability = reliability or AgentReliability()
+        self.base_omega = base_omega if base_omega is not None else base_view_scale**2
 
     def route(self, evidence: list[EvidenceRecord], universe: pd.Index | list[str]) -> RoutedAgentOutput:
         universe_index = pd.Index(universe)
@@ -45,8 +54,9 @@ class AgentRouter:
                 constraints.append({"symbols": tuple(symbols), "type": "neutral_view", "source": record.source})
                 continue
             exposure = {symbol: direction / len(symbols) for symbol in symbols}
-            q = direction * abs(record.magnitude) * confidence * self.base_view_scale
-            omega = max((1.0 - confidence + 1e-3) ** 2 * self.base_view_scale**2, self.min_omega)
+            reliability = float(self.reliability.score(record.source))
+            q = direction * abs(record.magnitude) * confidence * self.base_view_scale * reliability
+            omega = max(self.base_omega * (1.0 - confidence + 1e-3) / max(reliability, 0.1), self.min_omega)
             view = AgentView(
                 view_id=self._view_id(record, symbols),
                 symbols=tuple(symbols),
@@ -54,7 +64,7 @@ class AgentRouter:
                 q=float(q),
                 omega=float(omega),
                 confidence=confidence,
-                constraints={},
+                constraints={"reliability": reliability},
                 expires_at=None,
                 evidence=(record,),
             )

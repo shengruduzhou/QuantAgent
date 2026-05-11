@@ -17,3 +17,12 @@ data/features/
 data/labels/
 models/checkpoints/
 reports/
+!/reports/
+/reports/*
+!/reports/v6/
+/reports/v6/*
+!/reports/v6/v6_readiness_report.md
+!/reports/v6/v6_readiness_report.json
+
+.claude/
+logs/

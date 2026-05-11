@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import asdict, is_dataclass
 
 import pandas as pd
 import typer
@@ -196,6 +197,172 @@ def paper_trade_v4(
     typer.echo(f"generated {len(intents)} dry-run order intents")
 
 
+@app.command("build-features-v6")
+def build_features_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    start_date: str | None = None,
+    end_date: str | None = None,
+    universe: str | None = None,
+    output_dir: Path = Path("data/processed"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import build_features_v6
+
+    del dry_run
+    result = build_features_v6(config, start_date=start_date, end_date=end_date, universe=universe)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "v6_features.csv"
+    result.frame.to_csv(output_path, index=False)
+    typer.echo(f"status=ok rows={len(result.frame)} feature_version={result.feature_version} output={output_path}")
+
+
+@app.command("train-v6")
+def train_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    output_dir: Path = Path("artifacts/models/v6"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import build_features_v6, train_v6_multitower
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    features = build_features_v6(cfg)
+    result = train_v6_multitower(features.frame, cfg.get("model", {}), output_dir=output_dir, dry_run=dry_run)
+    typer.echo(_json(result))
+
+
+@app.command("validate-v6")
+def validate_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    output_dir: Path | None = None,
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import load_v6_config, validate_v6
+
+    cfg = load_v6_config(config)
+    if output_dir is not None:
+        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    typer.echo(_json(validate_v6(cfg)))
+
+
+@app.command("infer-v6")
+def infer_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    date: str | None = typer.Option(None, "--date"),
+    output_dir: Path = Path("data/processed"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import infer_v6, load_v6_config
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    result = infer_v6(cfg, trade_date=date)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "v6_inference.csv"
+    result.to_csv(output_path, index=False)
+    typer.echo(f"status=ok rows={len(result)} output={output_path}")
+
+
+@app.command("build-portfolio-v6")
+def build_portfolio_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    date: str | None = typer.Option(None, "--date"),
+    output_dir: Path = Path("data/processed"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import build_portfolio_v6, load_v6_config
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    result = build_portfolio_v6(cfg, trade_date=date)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "v6_target_weights.csv"
+    result["target_weights"].rename("target_weight").reset_index().rename(columns={"index": "symbol"}).to_csv(output_path, index=False)
+    typer.echo(f"status=ok weights={len(result['target_weights'])} output={output_path}")
+
+
+@app.command("backtest-v6")
+def backtest_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    start_date: str | None = None,
+    end_date: str | None = None,
+    output_dir: Path = Path("reports/v6"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import load_v6_config, run_backtest_v6
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    result = run_backtest_v6(cfg, start_date=start_date, end_date=end_date)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "v6_backtest_report.json"
+    output_path.write_text(_json(result), encoding="utf-8")
+    typer.echo(f"status=ok output={output_path}")
+
+
+@app.command("replay-v6")
+def replay_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    scenario: str = "mock_recent_replay",
+    output_dir: Path | None = None,
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import load_v6_config, run_historical_live_replay_v6
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    if output_dir is not None:
+        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
+    result = run_historical_live_replay_v6(cfg, scenario_name=scenario)
+    typer.echo(_json(result))
+
+
+@app.command("paper-trade-v6")
+def paper_trade_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    date: str | None = typer.Option(None, "--date"),
+    output_dir: Path | None = None,
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import load_v6_config, run_paper_trade_v6
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("execution", {})["dry_run"] = dry_run
+    if output_dir is not None:
+        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
+    result = run_paper_trade_v6(cfg, trade_date=date)
+    typer.echo(f"status=ok orders={len(result['order_states'])} account_value={result['account_value']:.2f} audit={result['audit_path']}")
+
+
+@app.command("audit-replay-v6")
+def audit_replay_v6_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    audit_path: Path = Path("logs/v6/virtual_broker_audit.jsonl"),
+    output_dir: Path | None = None,
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import audit_replay_v6
+
+    del config, output_dir, dry_run
+    typer.echo(_json(audit_replay_v6(audit_path)))
+
+
+@app.command("generate-v6-report")
+def generate_v6_report_cli(
+    config: Path = Path("configs/v6.default.yaml"),
+    output_dir: Path = Path("reports/v6"),
+    dry_run: bool = True,
+) -> None:
+    from quantagent.services.v6_pipeline_service import generate_v6_report, load_v6_config
+
+    cfg = load_v6_config(config)
+    cfg.setdefault("safety", {})["dry_run"] = dry_run
+    result = generate_v6_report(cfg, output_dir=output_dir)
+    typer.echo(_json(result))
+
+
 @app.command("generate-factor-report")
 def generate_factor_report(
     input_path: Path,
@@ -255,6 +422,23 @@ def generate_factor_report_entry() -> None:
 
 def generate_valuation_report_entry() -> None:
     typer.run(generate_valuation_report)
+
+
+def _json(value: object) -> str:
+    import json
+
+    def default(obj: object) -> object:
+        if is_dataclass(obj):
+            return asdict(obj)
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, pd.Series):
+            return obj.to_dict()
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict("records")
+        return str(obj)
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=default)
 
 
 if __name__ == "__main__":

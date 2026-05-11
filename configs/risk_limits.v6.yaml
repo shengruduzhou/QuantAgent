@@ -1,0 +1,19 @@
+risk_limits:
+  max_name_weight: 0.05
+  max_sector_weight: 0.30
+  max_turnover: 0.30
+  max_order_value: 100000
+  max_daily_loss: 0.03
+  max_drawdown: 0.15
+  max_orders_per_day: 200
+  no_buy_limit_up: true
+  no_sell_limit_down: true
+  no_trade_suspended: true
+  no_trade_st_if_configured: true
+  min_lot_size: 100
+  cash_constraint: true
+  leverage_constraint: 1.0
+  conformal_uncertainty_threshold: 0.08
+  data_quality_threshold: 0.85
+  model_drift_threshold: 0.30
+

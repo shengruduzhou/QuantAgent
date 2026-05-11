@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from quantagent.portfolio.position_state import StopDecision
+from quantagent.risk.kill_switch import KillSwitch
 
 
 @dataclass(frozen=True)
@@ -30,16 +31,22 @@ def evaluate_kill_switch(
     gross_exposure: float,
     limits: KillSwitchLimits | None = None,
 ) -> KillSwitchVerdict:
-    """Hard cutoff: if any threshold breaches, stop new orders for the day."""
+    """Compatibility wrapper around the unified V6 KillSwitch."""
     limits = limits or KillSwitchLimits()
-    if daily_pnl_pct <= -limits.max_daily_loss_pct:
-        return KillSwitchVerdict(True, f"daily_loss_breached:{daily_pnl_pct:.4f}")
-    if rolling_drawdown_pct <= -limits.max_drawdown_pct:
-        return KillSwitchVerdict(True, f"drawdown_breached:{rolling_drawdown_pct:.4f}")
+    switch = KillSwitch()
+    switch.evaluate(
+        daily_loss=daily_pnl_pct,
+        drawdown=rolling_drawdown_pct,
+        turnover=0.0,
+        max_daily_loss=limits.max_daily_loss_pct,
+        max_drawdown=limits.max_drawdown_pct,
+    )
     if max_single_position_weight > limits.max_position_breach:
         return KillSwitchVerdict(True, f"position_breach:{max_single_position_weight:.4f}")
     if gross_exposure > limits.max_gross_exposure:
         return KillSwitchVerdict(True, f"gross_exposure_breach:{gross_exposure:.4f}")
+    if switch.triggered:
+        return KillSwitchVerdict(True, switch.reasons[0])
     return KillSwitchVerdict(False, "ok")
 
 
@@ -79,7 +86,9 @@ def evaluate_v4_kill_switch(
     if stale_data:
         return KillSwitchVerdict(True, "stale_data")
     if reject_rate > limits.max_reject_rate:
-        return KillSwitchVerdict(True, f"abnormal_reject_rate:{reject_rate:.4f}")
+        switch = KillSwitch()
+        switch.evaluate(rejection_rate=reject_rate, max_rejection_rate=limits.max_reject_rate)
+        return KillSwitchVerdict(True, switch.reasons[0] if switch.reasons else f"abnormal_reject_rate:{reject_rate:.4f}")
     if strategy_loss_pct <= -limits.max_strategy_loss_pct:
         return KillSwitchVerdict(True, f"strategy_loss_breached:{strategy_loss_pct:.4f}")
     base = evaluate_kill_switch(daily_pnl_pct, rolling_drawdown_pct, 0.0, gross_exposure, limits)

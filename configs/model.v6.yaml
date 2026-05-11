@@ -1,0 +1,22 @@
+model:
+  architecture: v6_multitower
+  sequence_backbone: itransformer
+  hidden_dim: 64
+  tower_dim: 64
+  num_experts: 3
+  regime_dim: 8
+  factor_group_dim: 8
+  horizons: [1, 5, 20]
+  losses:
+    rank: 1.0
+    huber: 1.0
+    direction_bce: 0.5
+    quantile_pinball: 0.5
+    factor_gate: 0.2
+    turnover_penalty: 0.1
+    risk_penalty: 0.2
+    multi_horizon_consistency: 0.2
+  conformal:
+    enabled: true
+    alpha: 0.1
+
