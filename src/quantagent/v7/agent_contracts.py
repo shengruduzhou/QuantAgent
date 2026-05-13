@@ -22,21 +22,27 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("PolicyDocument", "PolicyTaxonomy", "as_of_date"),
         outputs=("EvidenceRecord", "ThemePolicyScore"),
         existing_extension_points=("src/quantagent/agents/policy_agent.py", "src/quantagent/data/event_store.py"),
-        new_modules=("src/quantagent/policy/v7_policy_parser.py",),
+        new_modules=(
+            "src/quantagent/themes/policy_crawler.py",
+            "src/quantagent/themes/policy_parser.py",
+        ),
     ),
     AgentSpec(
         name="theme_discovery_agent",
         responsibility="Detect theme strength, lifecycle stage, crowding, bubble risk, and invalidation evidence.",
         inputs=("EvidenceRecord", "MarketBreadth", "SectorFlow", "IndustryFundamentalPanel"),
         outputs=("ThemeProfile", "EvidenceRecord", "RiskFlag"),
-        new_modules=("src/quantagent/theme/discovery.py",),
+        new_modules=(
+            "src/quantagent/themes/theme_extractor.py",
+            "src/quantagent/themes/theme_lifecycle.py",
+        ),
     ),
     AgentSpec(
         name="industry_chain_graph_agent",
         responsibility="Expand a theme into chain nodes, relation types, bottlenecks, substitution paths, and listed-company mappings.",
         inputs=("ThemeProfile", "IndustryChainSeed", "EvidenceRecord"),
         outputs=("ChainNode", "ChainEdge", "EvidenceRecord"),
-        new_modules=("src/quantagent/theme/industry_chain_graph.py",),
+        new_modules=("src/quantagent/themes/industry_chain_graph.py",),
     ),
     AgentSpec(
         name="thematic_universe_builder",
@@ -44,7 +50,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("BaseUniverse", "ChainNode", "ChainEdge", "EvidenceRecord", "FundamentalScore", "MarketState"),
         outputs=("ThematicUniverseMember", "Constraint", "RiskFlag"),
         existing_extension_points=("src/quantagent/data/universe.py",),
-        new_modules=("src/quantagent/theme/universe_builder.py",),
+        new_modules=("src/quantagent/themes/theme_universe_builder.py",),
     ),
     AgentSpec(
         name="fundamental_due_diligence_agent",
@@ -52,6 +58,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("FinancialStatement", "Announcement", "IndustryData", "ThematicUniverseMember"),
         outputs=("FundamentalScore", "EvidenceRecord", "RiskFlag"),
         existing_extension_points=("src/quantagent/fundamental/scores.py", "src/quantagent/fundamental/quality.py"),
+        new_modules=("src/quantagent/fundamental/financial_statement_agent.py",),
     ),
     AgentSpec(
         name="valuation_agent",
@@ -59,6 +66,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("FundamentalPanel", "IndustryValuationPanel", "ThemeProfile"),
         outputs=("ValuationScore", "EvidenceRecord", "RiskFlag"),
         existing_extension_points=("src/quantagent/fundamental/valuation.py",),
+        new_modules=("src/quantagent/fundamental/valuation_agent.py",),
     ),
     AgentSpec(
         name="financial_fraud_risk_agent",
@@ -66,6 +74,10 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("FinancialStatement", "RegulatoryDisclosure", "AuditOpinion", "PriceActionAroundDisclosure"),
         outputs=("FraudRiskScore", "EvidenceRecord", "RiskFlag"),
         existing_extension_points=("src/quantagent/fundamental/forensic_accounting.py",),
+        new_modules=(
+            "src/quantagent/fundamental/fraud_risk_agent.py",
+            "src/quantagent/fundamental/confidence_adjuster.py",
+        ),
     ),
     AgentSpec(
         name="news_credibility_agent",
@@ -123,13 +135,17 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("ThematicUniverseMember", "MultiHorizonAlpha", "TechnicalTimingPlan", "MarketRegimeSnapshot", "RiskFlag"),
         outputs=("PortfolioPlan", "Constraint"),
         existing_extension_points=("src/quantagent/portfolio/allocator.py", "src/quantagent/portfolio/v6_portfolio_service.py"),
+        new_modules=("src/quantagent/portfolio/strategic_tactical_allocator.py",),
     ),
     AgentSpec(
         name="hedge_decision_agent",
         responsibility="Choose cash, exposure reduction, concentration reduction, defensive replacement, or legal hedge tools.",
         inputs=("PortfolioPlan", "MarketRegimeSnapshot", "RiskGateReport", "BacktestAttributionReport"),
         outputs=("HedgeDecision", "Constraint", "RiskFlag"),
-        new_modules=("src/quantagent/risk/hedge_decision.py",),
+        new_modules=(
+            "src/quantagent/portfolio/hedge_decision_engine.py",
+            "src/quantagent/portfolio/sector_etf_allocator.py",
+        ),
     ),
     AgentSpec(
         name="ashare_execution_agent",
@@ -137,6 +153,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("PortfolioPlan", "MarketState", "PositionState", "CostModel"),
         outputs=("ExecutionConstraintReport", "Constraint", "RiskFlag"),
         existing_extension_points=("src/quantagent/backtest/engine.py", "src/quantagent/execution/virtual_broker.py"),
+        new_modules=("src/quantagent/backtest/tplus1_engine.py",),
     ),
     AgentSpec(
         name="risk_gate_agent",
@@ -151,6 +168,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("PortfolioPlan", "EvidenceRecord", "MarketPanel", "ExecutionConstraintReport"),
         outputs=("BacktestAttributionReport", "EvidenceRecord"),
         existing_extension_points=("src/quantagent/backtest/engine.py", "src/quantagent/quant_math/factor_attribution.py"),
+        new_modules=("src/quantagent/backtest/event_driven_theme_backtester.py",),
     ),
     AgentSpec(
         name="audit_agent",

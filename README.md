@@ -32,6 +32,15 @@ C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall src
 git diff --check
 ```
 
+## V7 CLI / 命令入口
+
+```powershell
+quantagent validate-v7 --config configs/v7.default.yaml
+quantagent run-daily-v7 --config configs/v7.default.yaml --date 2026-05-14 --output-dir reports/v7
+```
+
+`run-daily-v7` 当前使用 deterministic synthetic inputs 跑通政策解析、Theme Discovery、industry chain graph、dynamic thematic universe、fundamental / fraud scoring、multi-horizon alpha、sleeve allocation、hedge decision、execution constraints、Risk Gate、theme backtest attribution 和 Audit Log。它不会生成真实交易订单。
+
 ## 配置 / Config
 
 V7 默认配置入口是 `configs/v7.default.yaml`。V6 的 `configs/v6.default.yaml`、provider、risk limits、replay scenarios 和 model configs 仍可作为现有实现基础，但新功能应优先向 V7 schema、DAG 和 Agent contract 对齐。

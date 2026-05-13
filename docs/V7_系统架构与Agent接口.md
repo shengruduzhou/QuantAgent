@@ -39,15 +39,13 @@ src/quantagent/v7/
   dag.py                     # Daily DAG task graph
   scoring.py                 # Lifecycle, news, fraud, universe and execution scoring helpers
 
-src/quantagent/policy/
-  v7_policy_parser.py        # policy title, authority, subsidy, pilot city, target year parser
-  authority.py               # central/ministry/local/media authority scoring
-
-src/quantagent/theme/
-  discovery.py               # Theme Discovery algorithm
-  lifecycle.py               # theme lifecycle and invalidation state machine
-  industry_chain_graph.py    # chain nodes and relation graph
-  universe_builder.py        # dynamic thematic stock pool
+src/quantagent/themes/
+  policy_crawler.py          # local/provider-normalized PolicyDocument ingestion, no network in tests
+  policy_parser.py           # title, authority, subsidy, pilot, target year and keyword parser
+  theme_extractor.py         # Theme Discovery algorithm
+  theme_lifecycle.py         # lifecycle and expiry state machine
+  industry_chain_graph.py    # AI compute chain nodes and relation graph
+  theme_universe_builder.py  # dynamic thematic stock pool
 
 src/quantagent/credibility/
   news.py                    # News Credibility scoring
@@ -58,17 +56,35 @@ src/quantagent/research/
   fraud_risk.py
   stock_research_card.py
 
+src/quantagent/fundamental/
+  financial_statement_agent.py
+  fraud_risk_agent.py
+  order_contract_agent.py
+  valuation_agent.py
+  confidence_adjuster.py
+
 src/quantagent/models/
   v7_multi_horizon.py        # 1D/5D/20D/60D/120D/126D alpha
   v7_alpha_outputs.py
 
+src/quantagent/portfolio/
+  strategic_tactical_allocator.py
+  hedge_decision_engine.py
+  sector_etf_allocator.py
+
 src/quantagent/risk/
-  hedge_decision.py
   v7_risk_acceptance.py
+
+src/quantagent/backtest/
+  tplus1_engine.py
+  event_driven_theme_backtester.py
 
 src/quantagent/reports/
   v7_daily_report.py
   v7_audit_report.py
+
+src/quantagent/services/
+  v7_pipeline_service.py     # deterministic synthetic V7 closed-loop service and validation
 ```
 
 ## EvidenceRecord Schema / 证据结构
@@ -272,7 +288,7 @@ class V7Agent:
 | Multi-Horizon Alpha Agent | FeatureStore, Evidence, FactorApplicability | MultiHorizonAlpha | `models/v6_model_system.py` | `models/v7_multi_horizon.py` |
 | Technical Timing Agent | OHLCV, Alpha, ThemeProfile | TechnicalTimingPlan | `quant_math/technical_indicators.py` | wrapper |
 | Portfolio Construction Agent | Alpha, Timing, Risk, Universe | PortfolioPlan target_weights | `portfolio/allocator.py` | wrapper |
-| Hedge Decision Agent | PortfolioPlan, Regime, Risk | HedgeDecision | new | `risk/hedge_decision.py` |
+| Hedge Decision Agent | PortfolioPlan, Regime, Risk | HedgeDecision | new | `portfolio/hedge_decision_engine.py` |
 | A-Share Execution Agent | PortfolioPlan, MarketState, PositionState | ExecutionConstraintReport | `backtest/engine.py` | wrapper |
 | Risk Gate Agent | PortfolioPlan, ExecutionReport, FraudRisk | RiskGateReport | `risk/risk_gate.py` | wrapper |
 | Backtest & Attribution Agent | PortfolioPlan, MarketPanel, Evidence | BacktestAttributionReport | `backtest/engine.py` | attribution extension |

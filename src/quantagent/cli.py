@@ -363,6 +363,30 @@ def generate_v6_report_cli(
     typer.echo(_json(result))
 
 
+@app.command("validate-v7")
+def validate_v7_cli(
+    config: Path = Path("configs/v7.default.yaml"),
+) -> None:
+    from quantagent.services.v7_pipeline_service import validate_v7
+
+    typer.echo(_json(validate_v7(config)))
+
+
+@app.command("run-daily-v7")
+def run_daily_v7_cli(
+    config: Path = Path("configs/v7.default.yaml"),
+    date: str = typer.Option("2026-05-14", "--date"),
+    output_dir: Path = Path("reports/v7"),
+) -> None:
+    from quantagent.services.v7_pipeline_service import run_daily_v7_research
+
+    result = run_daily_v7_research(config, as_of_date=date)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "v7_daily_research_report.json"
+    output_path.write_text(_json(result), encoding="utf-8")
+    typer.echo(f"status=ok themes={len(result['theme_ranking'])} targets={len(result['portfolio_plan']['target_weights'])} output={output_path}")
+
+
 @app.command("generate-factor-report")
 def generate_factor_report(
     input_path: Path,
