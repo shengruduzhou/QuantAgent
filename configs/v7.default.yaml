@@ -1,0 +1,73 @@
+version: v7
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  virtual_broker_only: true
+  agents_can_emit_orders: false
+  optimizer_output: target_weights
+  order_intent_owner: OrderManager
+  require_risk_gate_before_execution: true
+  require_kill_switch_before_execution: true
+  require_reconciliation_before_broker_submit: true
+data:
+  point_in_time_required: true
+  max_prediction_horizon_days: 126
+  supported_horizons_days: [1, 5, 20, 60, 120, 126]
+  default_provider_mode: mock_or_local
+evidence:
+  min_source_reliability_for_trade_signal: 0.5
+  min_cross_validation_count_for_core_pool: 2
+  stale_theme_revalidation_days: 20
+agents:
+  policy_agent: enabled
+  theme_discovery_agent: enabled
+  industry_chain_graph_agent: enabled
+  thematic_universe_builder: enabled
+  fundamental_due_diligence_agent: enabled
+  valuation_agent: enabled
+  financial_fraud_risk_agent: enabled
+  news_credibility_agent: enabled
+  sentiment_agent: enabled
+  market_regime_agent: enabled
+  sector_rotation_agent: enabled
+  factor_applicability_agent: enabled
+  multi_horizon_alpha_agent: enabled
+  technical_timing_agent: enabled
+  portfolio_construction_agent: enabled
+  hedge_decision_agent: enabled
+  ashare_execution_agent: enabled
+  risk_gate_agent: enabled
+  backtest_attribution_agent: enabled
+  audit_agent: enabled
+portfolio:
+  sleeves:
+    long_fundamental: 0.25
+    medium_theme: 0.30
+    short_event: 0.10
+    sector_rotation: 0.10
+    hedge: 0.05
+    cash_buffer: 0.20
+  max_single_name_weight: 0.06
+  max_sector_weight: 0.30
+  max_theme_weight: 0.35
+  max_turnover: 0.35
+risk:
+  high_fraud_risk_block_threshold: 80
+  medium_fraud_risk_reduce_threshold: 60
+  high_bubble_risk_reduce_threshold: 0.75
+  min_liquidity_score: 25
+  max_model_uncertainty: 0.70
+execution:
+  market: ashare
+  lot_size: 100
+  t_plus_one: true
+  block_buy_limit_up: true
+  block_sell_limit_down: true
+  block_suspended: true
+  block_st: true
+  volume_participation_cap: 0.10
+  next_bar_execution: true
+audit:
+  write_evidence_hashes: true
+  write_agent_contribution: true
+  write_risk_gate_result: true
