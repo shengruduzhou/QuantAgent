@@ -48,7 +48,7 @@ src/quantagent/themes/
   theme_universe_builder.py  # dynamic thematic stock pool
 
 src/quantagent/credibility/
-  news.py                    # News Credibility scoring
+  news_credibility_agent.py  # primary-source, rumor, duplicate and cross-validation scoring
   source_registry.py         # source reliability registry
 
 src/quantagent/research/
@@ -64,7 +64,7 @@ src/quantagent/fundamental/
   confidence_adjuster.py
 
 src/quantagent/models/
-  v7_multi_horizon.py        # 1D/5D/20D/60D/120D/126D alpha
+  v7_multi_horizon.py        # feature-driven 1D/5D/20D/60D/120D/126D alpha baseline
   v7_alpha_outputs.py
 
 src/quantagent/portfolio/

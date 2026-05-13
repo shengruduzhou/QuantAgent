@@ -8,10 +8,16 @@ import pandas as pd
 import yaml
 
 from quantagent.backtest.event_driven_theme_backtester import EventDrivenThemeBacktester
+from quantagent.credibility.news_credibility_agent import score_news_credibility
+from quantagent.data.providers.base import ProviderRequest
+from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider
+from quantagent.factors.factor_applicability_agent import validate_factor_applicability
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
 from quantagent.fundamental.fraud_risk_agent import score_fraud_risk
+from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.hedge_decision_engine import decide_v7_hedge
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
+from quantagent.themes.company_exposure_mapper import map_company_exposures
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_parser import parse_policy_document
@@ -66,31 +72,52 @@ def validate_v7(config: str | Path | dict[str, Any] | None = None) -> dict[str, 
 
 def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_of_date: str = "2026-05-14") -> dict[str, Any]:
     cfg = load_v7_config(config)
-    documents = local_policy_documents(cfg.get("synthetic_policy_documents", _synthetic_policy_records(as_of_date)))
+    bundle = _load_local_bundle(cfg, as_of_date)
+    policy_rows = _frame_or_records(bundle.policies.frame, cfg.get("synthetic_policy_documents", _synthetic_policy_records(as_of_date)))
+    documents = local_policy_documents(policy_rows)
     parsed = [parse_policy_document(document) for document in documents]
-    theme_profiles, evidence = discover_themes(parsed, as_of_date, _synthetic_market_theme_metrics())
+    news_scores = score_news_credibility(bundle.news.frame)
+    theme_profiles, evidence = discover_themes(
+        parsed,
+        as_of_date,
+        _frame_or(bundle.theme_metrics.frame, _synthetic_market_theme_metrics()),
+    )
     primary_theme = max(theme_profiles, key=lambda item: item.theme_strength)
     chain_nodes, chain_edges = build_industry_chain_graph(primary_theme)
 
-    fraud_scores = score_fraud_risk(_synthetic_financials())
+    financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials())
+    fraud_scores = score_fraud_risk(financials_raw)
     fraud_by_symbol = {score.symbol: score for score in fraud_scores}
-    financials = _synthetic_financials()
+    financials = financials_raw.copy()
     financials["fraud_risk_score"] = financials["symbol"].map(lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score)
     fundamental_scores = score_financial_statements(financials)
     fundamentals = {score.symbol: score for score in fundamental_scores}
 
+    base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe())
+    company_theme_map = bundle.company_theme_map.frame
+    if company_theme_map.empty:
+        profiles = _frame_or(bundle.company_profiles.frame, pd.DataFrame())
+        if not profiles.empty:
+            company_theme_map = map_company_exposures(profiles, primary_theme.theme_name, chain_nodes, evidence, as_of_date=as_of_date)
+    company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(as_of_date))
+    market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state())
     universe_members = build_thematic_universe(
-        base_universe=_synthetic_base_universe(),
-        company_theme_map=_synthetic_company_theme_map(as_of_date),
+        base_universe=base_universe,
+        company_theme_map=company_theme_map,
         theme_profiles=theme_profiles,
         chain_nodes=chain_nodes,
         fundamentals=fundamentals,
-        market_state=_synthetic_market_state(),
+        market_state=market_state,
         as_of_date=as_of_date,
     )
-    alphas = _build_synthetic_alphas(universe_members)
-    timing = _build_timing(universe_members)
     market = _synthetic_market_regime()
+    factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date)
+    factor_columns = _factor_columns(factor_frame)
+    factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
+    alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
+    if not alphas:
+        alphas = _build_synthetic_alphas(universe_members)
+    timing = _build_timing(universe_members)
     portfolio = construct_v7_portfolio(universe_members, alphas, market, timing)
     hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=primary_theme.crowding_score)
     execution_reports = _execution_reports(portfolio)
@@ -99,7 +126,12 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     audit = AuditLogRecord(
         decision_id=f"v7-{as_of_date}",
         timestamp=as_of_date,
-        input_data_versions={"policy": "synthetic.v7", "market": "synthetic.v7", "financials": "synthetic.v7"},
+        input_data_versions={
+            "policy": bundle.policies.source,
+            "market": bundle.market_panel.source,
+            "financials": bundle.fundamentals.source,
+            "company_theme_map": bundle.company_theme_map.source,
+        },
         model_version="v7.synthetic.multi_horizon",
         feature_version="v7.synthetic.features",
         evidence_hashes=tuple(record.hash for record in evidence if record.hash),
@@ -121,6 +153,8 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         },
         "thematic_universe": [_to_dict(member) for member in universe_members],
         "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
+        "factor_applicability": [_to_dict(item) for item in factor_applicability],
+        "news_credibility": [_to_dict(item) for item in news_scores],
         "portfolio_plan": _to_dict(portfolio),
         "hedge_decision": _to_dict(hedge),
         "execution_constraints": [_to_dict(report) for report in execution_reports],
@@ -129,6 +163,81 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         "audit_log": _to_dict(audit),
         "order_boundary": "agents_and_optimizer_emit_no_orders; OrderManager is the only order-intent owner",
     }
+
+
+def _load_local_bundle(cfg: dict[str, Any], as_of_date: str):
+    data_cfg = cfg.get("data", {})
+    root = data_cfg.get("v7_root", "data/v7")
+    request = ProviderRequest(
+        start_date=str(data_cfg.get("start_date", "1900-01-01")),
+        end_date=str(data_cfg.get("end_date", as_of_date)),
+        symbols=tuple(data_cfg.get("symbols", ())),
+        universe=data_cfg.get("universe"),
+    )
+    return LocalV7ResearchProvider(root).load_bundle(request, as_of_date)
+
+
+def _frame_or(frame: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    return frame if frame is not None and not frame.empty else fallback
+
+
+def _frame_or_records(frame: pd.DataFrame, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return frame.to_dict("records") if frame is not None and not frame.empty else fallback
+
+
+def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, financials: pd.DataFrame, market_state: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
+    base = bundle.factors.frame if not bundle.factors.frame.empty else bundle.market_panel.frame
+    if base is None or base.empty:
+        base = pd.DataFrame({"trade_date": [as_of_date for _ in universe_members], "symbol": [member.symbol for member in universe_members], "close": [10.0 + i for i, _ in enumerate(universe_members)], "amount": [1_000_000.0 for _ in universe_members]})
+    data = base.copy()
+    if "trade_date" not in data.columns:
+        data["trade_date"] = as_of_date
+    member_frame = pd.DataFrame(
+        [
+            {
+                "symbol": member.symbol,
+                "theme": member.theme,
+                "theme_strength": next((profile.theme_strength for profile in theme_profiles if profile.theme_name == member.theme), 0.0) * 100.0,
+                "policy_strength": next((profile.policy_strength for profile in theme_profiles if profile.theme_name == member.theme), 0.0) * 100.0,
+                "industry_fundamental_strength": next((profile.industry_fundamental_strength for profile in theme_profiles if profile.theme_name == member.theme), 0.0) * 100.0,
+                "exposure_score": member.exposure_score,
+                "fundamental_score": member.fundamental_score,
+                "quality_score": member.quality_score,
+                "valuation_score": member.valuation_score,
+                "fraud_risk_score": member.fraud_risk_score,
+            }
+            for member in universe_members
+        ]
+    )
+    data = data.merge(member_frame, on="symbol", how="left", suffixes=("", "_member"))
+    data = data.merge(market_state[["symbol", "market_attention_score", "liquidity_score"]].drop_duplicates("symbol"), on="symbol", how="left") if not market_state.empty and "symbol" in market_state.columns else data
+    if "close" in data.columns:
+        data = data.sort_values(["symbol", "trade_date"])
+        data["ret_1d"] = data.groupby("symbol")["close"].pct_change().fillna(0.0)
+        data["ret_5d"] = data.groupby("symbol")["close"].pct_change(5).fillna(data["ret_1d"])
+        data["ret_20d"] = data.groupby("symbol")["close"].pct_change(20).fillna(data["ret_5d"])
+        data["momentum_20d"] = data["ret_20d"]
+        data["volatility_20d"] = data.groupby("symbol")["ret_1d"].transform(lambda item: item.rolling(20, min_periods=2).std()).fillna(0.20)
+    if "sector_rotation_score" not in data.columns:
+        data["sector_rotation_score"] = data.get("market_attention_score", pd.Series(50.0, index=data.index)).fillna(50.0) / 100.0
+    return data
+
+
+def _factor_columns(frame: pd.DataFrame) -> list[str]:
+    excluded = {
+        "trade_date",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "theme",
+        "sector",
+        "watchlist_status",
+    }
+    return [column for column in frame.select_dtypes("number").columns if column not in excluded and not column.startswith("forward_return_")]
 
 
 def _synthetic_policy_records(as_of_date: str) -> list[dict[str, Any]]:

@@ -23,6 +23,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         outputs=("EvidenceRecord", "ThemePolicyScore"),
         existing_extension_points=("src/quantagent/agents/policy_agent.py", "src/quantagent/data/event_store.py"),
         new_modules=(
+            "src/quantagent/data/providers/official_policy_provider.py",
             "src/quantagent/themes/policy_crawler.py",
             "src/quantagent/themes/policy_parser.py",
         ),
@@ -42,7 +43,10 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         responsibility="Expand a theme into chain nodes, relation types, bottlenecks, substitution paths, and listed-company mappings.",
         inputs=("ThemeProfile", "IndustryChainSeed", "EvidenceRecord"),
         outputs=("ChainNode", "ChainEdge", "EvidenceRecord"),
-        new_modules=("src/quantagent/themes/industry_chain_graph.py",),
+        new_modules=(
+            "src/quantagent/themes/industry_chain_graph.py",
+            "src/quantagent/themes/company_exposure_mapper.py",
+        ),
     ),
     AgentSpec(
         name="thematic_universe_builder",
@@ -85,6 +89,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("NewsItem", "Announcement", "PolicyDocument", "IndustryData"),
         outputs=("NewsCredibilityScore", "EvidenceRecord", "RiskFlag"),
         existing_extension_points=("src/quantagent/agents/news_agent.py",),
+        new_modules=("src/quantagent/credibility/news_credibility_agent.py",),
     ),
     AgentSpec(
         name="sentiment_agent",
@@ -113,6 +118,7 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         inputs=("FactorLifecycleReport", "ThematicUniverseMember", "MarketRegimeSnapshot"),
         outputs=("FactorApplicability", "Constraint", "RiskFlag"),
         existing_extension_points=("src/quantagent/factors/lifecycle.py", "src/quantagent/factors/governance.py"),
+        new_modules=("src/quantagent/factors/factor_applicability_agent.py",),
     ),
     AgentSpec(
         name="multi_horizon_alpha_agent",
