@@ -5,7 +5,7 @@ from hashlib import sha1
 import numpy as np
 import pandas as pd
 
-from quantagent.v7.schemas import EventType, NewsCredibilityScore
+from quantagent.v7.schemas import EvidenceRecord, EventType, NewsCredibilityScore, SourceType
 from quantagent.v7.scoring import news_confidence_score
 
 
@@ -75,6 +75,43 @@ def score_news_credibility(news: pd.DataFrame) -> list[NewsCredibilityScore]:
     return scores
 
 
+def news_scores_to_evidence(scores: list[NewsCredibilityScore], as_of_date: str) -> list[EvidenceRecord]:
+    """Convert credible news scores into short/medium horizon V7 evidence."""
+    records: list[EvidenceRecord] = []
+    for score in scores:
+        if score.confidence < 0.35:
+            continue
+        affected_symbols = score.affected_symbols or (None,)
+        for symbol in affected_symbols:
+            evidence_id = f"news:{score.news_id}:{symbol or score.affected_theme or 'market'}"
+            records.append(
+                EvidenceRecord(
+                    evidence_id=evidence_id,
+                    source=score.source,
+                    source_type=_source_type(score),
+                    source_authority_level=score.source_reliability,
+                    timestamp=as_of_date,
+                    published_at=as_of_date,
+                    symbol=symbol,
+                    theme=score.affected_theme,
+                    event_type=score.event_type,
+                    direction=1.0 if score.sentiment_score >= 0 else -1.0,
+                    magnitude=min(1.0, abs(score.sentiment_score) + score.fundamental_impact_score),
+                    confidence=score.confidence,
+                    evidence_quality=score.confidence,
+                    source_reliability=score.source_reliability,
+                    cross_validation_count=score.cross_validation_count,
+                    decay_half_life=score.decay_half_life,
+                    horizon_days=score.horizon_days,
+                    rationale=score.rationale,
+                    raw_reference={"news_id": score.news_id, "rumor_risk": score.rumor_risk},
+                    point_in_time_valid=True,
+                    risk_flags=score.contradiction_flags + (("rumor_risk",) if score.rumor_risk >= 0.6 else ()),
+                ).with_hash()
+            )
+    return records
+
+
 def _duplicate_counts(news: pd.DataFrame) -> dict[str, int]:
     counts: dict[str, int] = {}
     for _, row in news.iterrows():
@@ -100,3 +137,11 @@ def _event_type(value: str, sentiment: float) -> EventType:
         return EventType(value)
     except ValueError:
         return EventType.SENTIMENT_POSITIVE if sentiment >= 0 else EventType.SENTIMENT_NEGATIVE
+
+
+def _source_type(score: NewsCredibilityScore) -> SourceType:
+    if score.is_official:
+        return SourceType.COMPANY_ANNOUNCEMENT if score.affected_symbols else SourceType.OFFICIAL_POLICY
+    if score.source_reliability <= 0.30:
+        return SourceType.SOCIAL_MEDIA
+    return SourceType.NEWS

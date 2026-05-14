@@ -17,6 +17,14 @@ data:
   allow_synthetic_fallback: true
   allow_network: false
   v7_root: data/v7
+  tradingview_urls: []
+  qlib_provider_uri:
+  qlib_region: cn
+policy_extraction:
+  enabled: false
+  endpoint: https://api.openai.com/v1/chat/completions
+  model: gpt-4.1-mini
+  api_key_env: OPENAI_API_KEY
 evidence:
   min_source_reliability_for_trade_signal: 0.5
   min_cross_validation_count_for_core_pool: 2

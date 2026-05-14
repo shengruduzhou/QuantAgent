@@ -86,6 +86,8 @@ src/quantagent/reports/
 src/quantagent/services/
   v7_pipeline_service.py     # strict/mock V7 closed-loop service and validation
   v7_datahub.py              # strict_local / online / mock PIT data boundary
+  agents/schema_extraction_client.py # remote schema extraction, no local heavy LLM
+  data/providers/tradingview_provider.py # public page sentiment context only
 ```
 
 ## EvidenceRecord Schema / 证据结构

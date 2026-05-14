@@ -80,6 +80,12 @@ class UniverseBucket(str, Enum):
     EXCLUSION = "exclusion_pool"
 
 
+class InvestmentHorizonBucket(str, Enum):
+    SHORT_TERM = "short_term"
+    MEDIUM_TERM = "medium_term"
+    LONG_TERM = "long_term"
+
+
 class SleeveType(str, Enum):
     LONG_FUNDAMENTAL = "long_fundamental"
     MEDIUM_THEME = "medium_theme"
@@ -220,6 +226,25 @@ class ThematicUniverseMember:
 
 
 @dataclass(frozen=True)
+class StockPoolSelectionReport:
+    theme_name: str
+    horizon_bucket: InvestmentHorizonBucket
+    expected_horizon_days: int
+    lifecycle_stage: ThemeLifecycleStage
+    core_symbols: tuple[str, ...]
+    strong_symbols: tuple[str, ...]
+    satellite_symbols: tuple[str, ...]
+    watchlist_symbols: tuple[str, ...]
+    exclusion_symbols: tuple[str, ...]
+    direct_relation_symbols: tuple[str, ...]
+    strong_relation_symbols: tuple[str, ...]
+    false_association_symbols: tuple[str, ...]
+    applicable_factor_names: tuple[str, ...]
+    revalidation_interval_days: int
+    selection_rationale: str
+
+
+@dataclass(frozen=True)
 class FundamentalScore:
     symbol: str
     fundamental_score: float
@@ -235,6 +260,39 @@ class FundamentalScore:
     rationale: str
     key_risks: tuple[str, ...] = ()
     required_follow_up: tuple[str, ...] = ()
+    market_cap: float | None = None
+    free_float_market_cap: float | None = None
+    pe_ttm: float | None = None
+    pb: float | None = None
+    ps_ttm: float | None = None
+    ev_ebitda: float | None = None
+    peg: float | None = None
+    industry_valuation_percentile: float | None = None
+    history_valuation_percentile: float | None = None
+    valuation_bubble_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class FundamentalDueDiligenceReport:
+    symbol: str
+    as_of_date: str
+    price: float | None
+    total_shares: float | None
+    market_cap: float | None
+    free_float_market_cap: float | None
+    estimated_intrinsic_value_per_share: float | None
+    margin_of_safety: float
+    quality_score: float
+    growth_score: float
+    valuation_score: float
+    earnings_visibility_score: float
+    fraud_risk_score: float
+    confidence: float
+    investment_horizon_days: int
+    valuation_flags: tuple[str, ...] = ()
+    fraud_flags: tuple[str, ...] = ()
+    required_follow_up: tuple[str, ...] = ()
+    rationale: str = ""
 
 
 @dataclass(frozen=True)
@@ -321,6 +379,11 @@ class FactorApplicability:
     factor_lifecycle_stage: str
     last_validated_at: str
     invalidation_condition: str
+    validation_sample_count: int = 0
+    validation_symbol_count: int = 0
+    validation_date_count: int = 0
+    walk_forward_pass_rate: float = 0.0
+    validation_method: str = "walk_forward_pit"
 
 
 @dataclass(frozen=True)
@@ -367,6 +430,7 @@ class PortfolioPlan:
     position_reason: dict[str, str] = field(default_factory=dict)
     sector_weights: dict[str, float] = field(default_factory=dict)
     theme_weights: dict[str, float] = field(default_factory=dict)
+    sleeve_target_weights: dict[SleeveType, dict[str, float]] = field(default_factory=dict)
     constraint_notes: tuple[str, ...] = ()
 
 

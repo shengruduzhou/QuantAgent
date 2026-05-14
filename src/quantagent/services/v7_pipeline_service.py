@@ -9,12 +9,14 @@ import pandas as pd
 import yaml
 
 from quantagent.backtest.event_driven_theme_backtester import EventDrivenThemeBacktester
-from quantagent.credibility.news_credibility_agent import score_news_credibility
+from quantagent.credibility.news_credibility_agent import news_scores_to_evidence, score_news_credibility
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.v7_datahub import V7DataHub, V7DataHubResult
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
+from quantagent.fundamental.due_diligence import build_fundamental_due_diligence
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
 from quantagent.fundamental.fraud_risk_agent import score_fraud_risk
+from quantagent.fundamental.order_contract_agent import order_contract_evidence
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.hedge_decision_engine import decide_v7_hedge
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
@@ -22,6 +24,8 @@ from quantagent.themes.company_exposure_mapper import map_company_exposures
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_parser import parse_policy_document
+from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
+from quantagent.themes.stock_pool_selector import build_stock_pool_selection
 from quantagent.themes.theme_extractor import discover_themes
 from quantagent.themes.theme_universe_builder import build_thematic_universe
 from quantagent.v7.dag import validate_dag
@@ -84,19 +88,27 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     documents = local_policy_documents(policy_rows)
     parsed = [parse_policy_document(document) for document in documents]
+    schema_evidence, schema_warnings = extract_policy_schema_evidence(
+        documents,
+        as_of_date,
+        cfg.get("policy_extraction", {}) | {"allow_network": bool(cfg.get("data", {}).get("allow_network", False))},
+    )
     news_scores = score_news_credibility(bundle.news.frame)
+    announcement_evidence = order_contract_evidence(bundle.announcements.frame, as_of_date)
+    news_evidence = news_scores_to_evidence(news_scores, as_of_date)
     theme_profiles, evidence = discover_themes(
         parsed,
         as_of_date,
         _frame_or(bundle.theme_metrics.frame, _synthetic_market_theme_metrics(), allow_synthetic),
+        extra_evidence=schema_evidence + announcement_evidence + news_evidence,
     )
     selected_themes = _select_theme_profiles(theme_profiles, cfg)
-    chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile) for profile in selected_themes}
+    chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile, evidence) for profile in selected_themes}
     all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
     all_chain_edges = [edge for _, edges in chain_by_theme.values() for edge in edges]
 
     financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials(), allow_synthetic)
-    financials = financials_raw.copy()
+    financials = _fundamental_input_frame(financials_raw, market_state=bundle.market_state.frame, market_panel=bundle.market_panel.frame)
     if financials.empty:
         fraud_scores = []
         fundamental_scores = []
@@ -107,6 +119,12 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score if str(symbol) in fraud_by_symbol else 50.0
         )
         fundamental_scores = score_financial_statements(financials)
+    fundamental_due_diligence = build_fundamental_due_diligence(
+        financials,
+        fundamental_scores,
+        fraud_scores,
+        as_of_date,
+    )
     fundamentals = {score.symbol: score for score in fundamental_scores}
 
     base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe(), allow_synthetic)
@@ -136,6 +154,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date, allow_synthetic)
     factor_columns = _factor_columns(factor_frame)
     factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
+    stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, factor_applicability, as_of_date)
     alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
     if not alphas and allow_synthetic:
         alphas = _build_synthetic_alphas(universe_members)
@@ -176,7 +195,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         "data_mode": {
             "provider_mode": hub_result.provider_mode,
             "allow_synthetic_fallback": allow_synthetic,
-            "warnings": list(hub_result.warnings),
+            "warnings": list(hub_result.warnings + schema_warnings),
         },
         "market_summary": {
             "market_regime": market.market_regime.value,
@@ -198,7 +217,9 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
                 for theme, (nodes, edges) in chain_by_theme.items()
             },
         },
+        "stock_pool_selection": [_to_dict(report) for report in stock_pool_selection],
         "thematic_universe": [_to_dict(member) for member in universe_members],
+        "fundamental_due_diligence": [_to_dict(report) for report in fundamental_due_diligence],
         "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
         "factor_applicability": [_to_dict(item) for item in factor_applicability],
         "news_credibility": [_to_dict(item) for item in news_scores],
@@ -291,6 +312,48 @@ def _dedupe_members(members: list) -> list:
     return sorted(best_by_key.values(), key=lambda item: (item.theme, item.watchlist_status.value, -item.exposure_score, item.symbol))
 
 
+def _fundamental_input_frame(financials: pd.DataFrame, market_state: pd.DataFrame, market_panel: pd.DataFrame) -> pd.DataFrame:
+    if financials is None or financials.empty:
+        return pd.DataFrame()
+    data = financials.copy()
+    latest_market = _latest_symbol_rows(market_panel)
+    latest_state = _latest_symbol_rows(market_state)
+    for source in (latest_market, latest_state):
+        if source.empty or "symbol" not in source.columns:
+            continue
+        add_columns = [
+            column
+            for column in (
+                "symbol",
+                "close",
+                "price",
+                "total_share_capital",
+                "total_shares",
+                "free_float_shares",
+                "float_shares",
+                "market_cap",
+                "free_float_market_cap",
+                "industry",
+                "sector",
+            )
+            if (column == "symbol" and column in source.columns) or (column in source.columns and column not in data.columns)
+        ]
+        if len(add_columns) > 1:
+            data = data.merge(source[add_columns].drop_duplicates("symbol"), on="symbol", how="left", suffixes=("", "_market"))
+    return data
+
+
+def _latest_symbol_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty or "symbol" not in frame.columns:
+        return pd.DataFrame()
+    data = frame.copy()
+    date_column = "trade_date" if "trade_date" in data.columns else "available_at" if "available_at" in data.columns else None
+    if date_column is None:
+        return data.drop_duplicates("symbol", keep="last")
+    data[date_column] = pd.to_datetime(data[date_column])
+    return data.sort_values(["symbol", date_column]).groupby("symbol", sort=False).tail(1)
+
+
 def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, financials: pd.DataFrame, market_state: pd.DataFrame, as_of_date: str, allow_synthetic: bool) -> pd.DataFrame:
     base = bundle.factors.frame if not bundle.factors.frame.empty else bundle.market_panel.frame
     if base is None or base.empty:
@@ -318,6 +381,33 @@ def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, 
         ]
     )
     data = data.merge(member_frame, on="symbol", how="left", suffixes=("", "_member"))
+    if financials is not None and not financials.empty and "symbol" in financials.columns:
+        financial_latest = financials.copy()
+        if "report_date" in financial_latest.columns:
+            financial_latest["report_date"] = pd.to_datetime(financial_latest["report_date"])
+            financial_latest = financial_latest.sort_values(["symbol", "report_date"]).groupby("symbol", sort=False).tail(1)
+        financial_columns = [
+            column
+            for column in (
+                "symbol",
+                "market_cap",
+                "free_float_market_cap",
+                "pe_ttm",
+                "pb",
+                "ps_ttm",
+                "ev_ebitda",
+                "peg",
+                "industry_valuation_percentile",
+                "history_valuation_percentile",
+                "valuation_bubble_score",
+                "margin_of_safety",
+                "order_visibility_score",
+                "capacity_release_score",
+                "customer_validation_score",
+            )
+            if column in financial_latest.columns
+        ]
+        data = data.merge(financial_latest[financial_columns].drop_duplicates("symbol"), on="symbol", how="left", suffixes=("", "_financial"))
     if not market_state.empty and "symbol" in market_state.columns:
         market_columns = [column for column in ("symbol", "market_attention_score", "liquidity_score") if column in market_state.columns]
         data = data.merge(market_state[market_columns].drop_duplicates("symbol"), on="symbol", how="left")

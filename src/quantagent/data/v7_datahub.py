@@ -5,10 +5,12 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from quantagent.data.providers.base import ProviderRequest, ProviderResult
+from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.providers.disclosure_provider import DisclosureWebProvider
 from quantagent.data.providers.news_provider import NewsWebProvider
 from quantagent.data.providers.policy_web_provider import PolicyWebProvider
+from quantagent.data.providers.qlib_provider import QlibProvider
+from quantagent.data.providers.tradingview_provider import TradingViewPublicProvider
 from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider, V7ResearchDataBundle
 
 
@@ -28,6 +30,9 @@ class V7DataHubConfig:
     policy_urls: tuple[str, ...] = ()
     news_urls: tuple[str, ...] = ()
     disclosure_urls: tuple[str, ...] = ()
+    tradingview_urls: tuple[str, ...] = ()
+    qlib_provider_uri: str | None = None
+    qlib_region: str = "cn"
     required_tables: tuple[str, ...] = ("policies", "base_universe", "market_state")
 
 
@@ -92,6 +97,7 @@ class V7DataHub:
         policies = bundle.policies
         news = bundle.news
         announcements = bundle.announcements
+        market_panel = bundle.market_panel
         if self.config.policy_urls:
             policies = _prefer_non_empty(
                 policies,
@@ -119,6 +125,22 @@ class V7DataHub:
                     as_of_date=as_of_date,
                 ),
             )
+        if self.config.tradingview_urls:
+            tradingview = TradingViewPublicProvider(allow_network=self.config.allow_network).fetch_public_pages(
+                request,
+                self.config.tradingview_urls,
+                as_of_date=as_of_date,
+            )
+            news = _merge_frames(news, tradingview)
+        if self.config.qlib_provider_uri:
+            try:
+                qlib_market = QlibProvider(
+                    provider_uri=self.config.qlib_provider_uri,
+                    region=self.config.qlib_region,
+                ).daily_ohlcv(request)
+                market_panel = _prefer_non_empty(market_panel, qlib_market)
+            except ProviderUnavailable as exc:
+                market_panel = _append_warning(market_panel, f"qlib_unavailable:{exc}")
         return V7ResearchDataBundle(
             policies=policies,
             theme_metrics=bundle.theme_metrics,
@@ -128,7 +150,7 @@ class V7DataHub:
             fundamentals=bundle.fundamentals,
             news=news,
             market_state=bundle.market_state,
-            market_panel=bundle.market_panel,
+            market_panel=market_panel,
             factors=bundle.factors,
             positions=bundle.positions,
             announcements=announcements,
@@ -154,6 +176,9 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
         policy_urls=tuple(str(item) for item in config.get("policy_urls", ())),
         news_urls=tuple(str(item) for item in config.get("news_urls", ())),
         disclosure_urls=tuple(str(item) for item in config.get("disclosure_urls", ())),
+        tradingview_urls=tuple(str(item) for item in config.get("tradingview_urls", ())),
+        qlib_provider_uri=str(config["qlib_provider_uri"]) if config.get("qlib_provider_uri") else None,
+        qlib_region=str(config.get("qlib_region", "cn")),
         required_tables=tuple(str(item) for item in config.get("required_tables", ("policies", "base_universe", "market_state"))),
     )
 
@@ -174,6 +199,33 @@ def _prefer_non_empty(primary: ProviderResult, secondary: ProviderResult) -> Pro
         quality_score=min(primary.quality_score, secondary.quality_score),
         warnings=primary.warnings + secondary.warnings,
         metadata=primary.metadata | {"secondary": secondary.metadata},
+    )
+
+
+def _merge_frames(primary: ProviderResult, secondary: ProviderResult) -> ProviderResult:
+    if _empty_result(primary):
+        return secondary
+    if _empty_result(secondary):
+        return primary
+    frame = pd.concat([primary.frame, secondary.frame], ignore_index=True, sort=False)
+    return ProviderResult(
+        frame,
+        source=f"{primary.source}|{secondary.source}",
+        point_in_time=primary.point_in_time and secondary.point_in_time,
+        quality_score=min(primary.quality_score, secondary.quality_score),
+        warnings=primary.warnings + secondary.warnings,
+        metadata=primary.metadata | {"secondary": secondary.metadata},
+    )
+
+
+def _append_warning(result: ProviderResult, warning: str) -> ProviderResult:
+    return ProviderResult(
+        result.frame,
+        source=result.source,
+        point_in_time=result.point_in_time,
+        quality_score=result.quality_score,
+        warnings=result.warnings + (warning,),
+        metadata=result.metadata,
     )
 
 

@@ -5,14 +5,20 @@ import pandas as pd
 from quantagent.credibility.news_credibility_agent import score_news_credibility
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.providers.policy_web_provider import PolicyWebProvider
+from quantagent.data.providers.tradingview_provider import TradingViewPublicProvider
 from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider
 from quantagent.data.v7_datahub import V7DataHub, V7DataQualityError
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
+from quantagent.fundamental.due_diligence import build_fundamental_due_diligence
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
 from quantagent.themes.company_exposure_mapper import map_company_exposures
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
+from quantagent.themes.policy_crawler import local_policy_documents
+from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
+from quantagent.themes.stock_pool_selector import build_stock_pool_selection
 from quantagent.v7.schemas import MarketRegime, MarketRegimeSnapshot, MultiHorizonAlpha, ThematicUniverseMember, ThemeLifecycleStage, ThemeProfile, UniverseBucket, ChainRelationType
+from quantagent.v7.schemas import FactorApplicability, FundamentalScore, FraudRiskScore, InvestmentHorizonBucket
 
 
 def _theme_profile() -> ThemeProfile:
@@ -110,6 +116,37 @@ def test_policy_web_provider_degrades_when_network_disabled():
     assert "disabled" in result.warnings[0]
 
 
+def test_tradingview_public_provider_is_disabled_by_default():
+    result = TradingViewPublicProvider(allow_network=False).fetch_public_pages(
+        ProviderRequest("2026-05-01", "2026-05-31"),
+        ["https://www.tradingview.com/symbols/SSE-600000/"],
+        as_of_date="2026-05-14",
+    )
+
+    assert result.frame.empty
+    assert result.quality_score == 0.0
+    assert "disabled" in result.warnings[0]
+
+
+def test_remote_policy_schema_extraction_is_optional_and_disabled():
+    docs = local_policy_documents(
+        [
+            {
+                "document_id": "p1",
+                "title": "AI compute policy",
+                "body": "Support GPU and server infrastructure.",
+                "source": "gov",
+                "source_level": "central",
+                "published_at": "2026-05-14",
+            }
+        ]
+    )
+    evidence, warnings = extract_policy_schema_evidence(docs, "2026-05-14", {"enabled": False})
+
+    assert evidence == []
+    assert "disabled" in warnings[0]
+
+
 def test_company_exposure_mapper_infers_chain_node_from_profile_text():
     nodes, _ = build_industry_chain_graph(_theme_profile())
     profiles = pd.DataFrame(
@@ -159,6 +196,8 @@ def test_factor_applicability_validates_by_theme_and_horizon():
     assert reports
     assert any(report.factor_lifecycle_stage in {"production", "validation"} for report in reports)
     assert any(report.horizon_days == 1 for report in reports)
+    assert all(report.validation_method.startswith("walk_forward_pit_embargo") for report in reports)
+    assert all(report.validation_sample_count > 0 for report in reports)
 
 
 def test_v7_multi_horizon_model_uses_feature_inputs_for_long_horizon():
@@ -187,6 +226,104 @@ def test_v7_multi_horizon_model_uses_feature_inputs_for_long_horizon():
     assert alpha.alpha_120d > alpha.alpha_1d
     assert alpha.confidence > 0
     assert "long_fundamental" in alpha.factor_contribution
+
+
+def test_stock_pool_selection_reports_horizon_relation_and_factor_scope():
+    members = [
+        _member("600001.SH", bucket=UniverseBucket.CORE_BENEFICIARY),
+        replace(
+            _member("002371.SZ", bucket=UniverseBucket.STRONG_CORRELATION),
+            exposure_type=ChainRelationType.INFRASTRUCTURE_DEPENDENCY,
+        ),
+        replace(
+            _member("000858.SZ", bucket=UniverseBucket.EXCLUSION),
+            exposure_type=ChainRelationType.FALSE_ASSOCIATION,
+            fraud_risk_score=85.0,
+        ),
+    ]
+    factors = [
+        FactorApplicability(
+            factor_name="long_quality_value",
+            factor_category="quality",
+            applicable_universe=("core_beneficiary_pool",),
+            applicable_sector=("server",),
+            applicable_theme=("ai_compute",),
+            applicable_market_regime=(MarketRegime.POLICY_DRIVEN,),
+            horizon_days=120,
+            decay_half_life=60.0,
+            rank_ic=0.05,
+            rank_icir=0.20,
+            hit_rate=0.58,
+            turnover=0.10,
+            capacity=10_000_000.0,
+            crowding_score=0.30,
+            factor_lifecycle_stage="validation",
+            last_validated_at="2026-05-14",
+            invalidation_condition="latest sliced ICIR turns negative",
+        )
+    ]
+
+    reports = build_stock_pool_selection(members, [_theme_profile()], factors, as_of_date="2026-05-14")
+
+    report = reports[0]
+    assert report.horizon_bucket == InvestmentHorizonBucket.LONG_TERM
+    assert report.core_symbols == ("600001.SH",)
+    assert "002371.SZ" in report.strong_relation_symbols
+    assert "000858.SZ" in report.false_association_symbols
+    assert report.applicable_factor_names == ("long_quality_value",)
+
+
+def test_fundamental_due_diligence_calculates_market_cap_and_discounts_fraud():
+    financials = pd.DataFrame(
+        [
+            {
+                "symbol": "600001.SH",
+                "report_date": "2026-03-31",
+                "close": 20.0,
+                "total_share_capital": 1_000_000_000.0,
+                "revenue": 100.0,
+                "net_income": 8.0,
+                "operating_cash_flow": 2.0,
+                "total_assets": 180.0,
+            }
+        ]
+    )
+    fundamental = FundamentalScore(
+        symbol="600001.SH",
+        fundamental_score=70.0,
+        quality_score=65.0,
+        growth_score=60.0,
+        valuation_score=45.0,
+        earnings_visibility_score=62.0,
+        fraud_risk_score=85.0,
+        management_risk_score=40.0,
+        margin_of_safety=-0.10,
+        investment_horizon=120,
+        confidence=0.80,
+        rationale="synthetic report",
+    )
+    fraud = FraudRiskScore(
+        symbol="600001.SH",
+        beneish_m_score=None,
+        piotroski_f_score=None,
+        altman_z_score=None,
+        accruals_quality_score=30.0,
+        cashflow_quality_score=25.0,
+        receivables_risk_score=80.0,
+        inventory_risk_score=40.0,
+        related_party_risk_score=20.0,
+        regulatory_penalty_score=90.0,
+        audit_opinion_score=10.0,
+        overall_fraud_risk_score=85.0,
+        risk_flags=("high_fraud_risk",),
+    )
+
+    report = build_fundamental_due_diligence(financials, [fundamental], [fraud], "2026-05-14")[0]
+
+    assert report.market_cap == 20_000_000_000.0
+    assert report.estimated_intrinsic_value_per_share == 18.0
+    assert report.confidence < 0.20
+    assert "high_fraud_risk" in report.fraud_flags
 
 
 def test_v7_portfolio_enforces_sector_and_theme_caps():
@@ -236,4 +373,5 @@ def test_v7_portfolio_enforces_sector_and_theme_caps():
 
     assert portfolio.sector_weights["technology"] <= 0.1200001
     assert portfolio.theme_weights["ai_compute"] <= 0.1500001
+    assert portfolio.sleeve_target_weights
     assert any(note.startswith("sector_cap_applied") for note in portfolio.constraint_notes)

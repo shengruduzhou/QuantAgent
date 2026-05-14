@@ -93,8 +93,11 @@ def test_v7_daily_service_returns_closed_loop_without_orders():
     assert validation["status"] == "passed"
     assert result["data_mode"]["provider_mode"] == "mock"
     assert result["theme_ranking"]
+    assert result["stock_pool_selection"]
     assert result["thematic_universe"]
+    assert result["fundamental_due_diligence"]
     assert result["portfolio_plan"]["target_weights"]
+    assert result["portfolio_plan"]["sleeve_target_weights"]
     assert len(result["selected_themes"]) >= 2
     assert len(result["industry_chain"]["by_theme"]) >= 2
     assert "OrderIntent" not in str(result)

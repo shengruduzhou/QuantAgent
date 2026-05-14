@@ -42,6 +42,12 @@ quantagent run-daily-v7 --config configs/v7.mock.yaml --date 2026-05-14 --output
 
 `configs/v7.default.yaml` 默认是 `strict_local`，缺少 PIT policies、base_universe、market_state 或 company-theme 数据时会拒绝 synthetic fallback，避免把 mock research 伪装成真实研究。`configs/v7.mock.yaml` 才使用 deterministic synthetic inputs，用于离线 smoke test、Theme Discovery、industry chain graph、dynamic thematic universe、multi-horizon alpha、A-share execution constraints、Risk Gate 和 Audit Log 验证；两种模式都不会生成真实交易订单。
 
+## 数据与远程抽取 / Data And Remote Extraction
+
+V7 支持显式 `online` 数据模式接入 policy/news/disclosure/TradingView public pages、Qlib、AkShare 和 TuShare provider。网络调用默认关闭，必须配置 `allow_network=true`；TradingView public pages 只作为 sentiment context，不作为官方行情或基本面真值。
+
+`policy_extraction` 是 OpenAI-compatible remote schema extraction seam，默认 `enabled=false`。启用后它只把红头文件、公告和新闻抽取成 `EvidenceRecord`、theme、sub-theme、chain nodes、confidence 和 risk flags，不允许输出 order 或 trade advice。
+
 ## 配置 / Config
 
 V7 默认配置入口是 `configs/v7.default.yaml`。V6 的 `configs/v6.default.yaml`、provider、risk limits、replay scenarios 和 model configs 仍可作为现有实现基础，但新功能应优先向 V7 schema、DAG 和 Agent contract 对齐。

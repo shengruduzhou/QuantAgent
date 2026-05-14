@@ -6,6 +6,7 @@ from quantagent.data.providers.mock_provider import MockProvider
 from quantagent.data.providers.news_provider import NewsWebProvider
 from quantagent.data.providers.policy_web_provider import PolicyWebProvider
 from quantagent.data.providers.qlib_provider import QlibProvider
+from quantagent.data.providers.tradingview_provider import TradingViewPublicProvider
 from quantagent.data.providers.tushare_live_provider import TuShareLiveProvider
 from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider, V7ResearchDataBundle
 
@@ -20,6 +21,7 @@ __all__ = [
     "NewsWebProvider",
     "PolicyWebProvider",
     "QlibProvider",
+    "TradingViewPublicProvider",
     "TuShareLiveProvider",
     "V7ResearchDataBundle",
 ]

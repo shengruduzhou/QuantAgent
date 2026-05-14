@@ -100,6 +100,7 @@ def construct_v7_portfolio(
     target_weights = {symbol: float(weight * scale) for symbol, weight in sorted(target_weights.items()) if weight > 0}
     sector_weights = _group_weights(target_weights, member_by_symbol, "sector")
     theme_weights = _group_weights(target_weights, member_by_symbol, "theme")
+    sleeve_target_weights = _sleeve_target_weights(target_weights, member_by_symbol, alphas, market)
     return PortfolioPlan(
         sleeve_weights=sleeve_weights,
         target_weights=target_weights,
@@ -112,6 +113,7 @@ def construct_v7_portfolio(
         position_reason={symbol: reasons[symbol] for symbol in target_weights if symbol in reasons},
         sector_weights=sector_weights,
         theme_weights=theme_weights,
+        sleeve_target_weights=sleeve_target_weights,
         constraint_notes=tuple(notes),
     )
 
@@ -146,6 +148,42 @@ def _horizon_blend(member: ThematicUniverseMember, alpha: MultiHorizonAlpha) -> 
     if member.watchlist_status == UniverseBucket.STRONG_CORRELATION:
         return 100.0 * (0.20 * alpha.alpha_5d + 0.35 * alpha.alpha_20d + 0.30 * alpha.alpha_60d + 0.15 * alpha.alpha_120d)
     return 100.0 * (0.45 * alpha.alpha_1d + 0.35 * alpha.alpha_5d + 0.20 * alpha.alpha_20d)
+
+
+def _sleeve_target_weights(
+    weights: dict[str, float],
+    members: dict[str, ThematicUniverseMember],
+    alphas: dict[str, MultiHorizonAlpha],
+    market: MarketRegimeSnapshot,
+) -> dict[SleeveType, dict[str, float]]:
+    sleeves: dict[SleeveType, dict[str, float]] = {}
+    for symbol, weight in weights.items():
+        member = members.get(symbol)
+        if member is None:
+            continue
+        sleeve = _classify_sleeve(member, alphas.get(symbol), market)
+        sleeves.setdefault(sleeve, {})[symbol] = float(weight)
+    return sleeves
+
+
+def _classify_sleeve(
+    member: ThematicUniverseMember,
+    alpha: MultiHorizonAlpha | None,
+    market: MarketRegimeSnapshot,
+) -> SleeveType:
+    if alpha is not None:
+        short_score = max(alpha.alpha_1d, alpha.alpha_5d)
+        long_score = max(alpha.alpha_60d, alpha.alpha_120d, alpha.alpha_126d)
+        if short_score > long_score * 1.35 and member.membership_ttl_days <= 20:
+            return SleeveType.SHORT_EVENT
+    if member.watchlist_status == UniverseBucket.CORE_BENEFICIARY and member.membership_ttl_days >= 60:
+        return SleeveType.LONG_FUNDAMENTAL
+    sector_score = market.sector_rotation_score.get(member.sector or "", 0.0)
+    if sector_score >= 0.65 and member.watchlist_status != UniverseBucket.CORE_BENEFICIARY:
+        return SleeveType.SECTOR_ROTATION
+    if member.watchlist_status == UniverseBucket.OPTIONAL_SATELLITE:
+        return SleeveType.SHORT_EVENT
+    return SleeveType.MEDIUM_THEME
 
 
 def _enforce_group_cap(

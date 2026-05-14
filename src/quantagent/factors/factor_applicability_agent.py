@@ -15,6 +15,12 @@ class FactorApplicabilityConfig:
     min_rank_icir: float = 0.05
     min_hit_rate: float = 0.50
     max_crowding_score: float = 0.80
+    min_sample_count: int = 30
+    min_symbol_count: int = 5
+    min_date_count: int = 8
+    walk_forward_splits: int = 3
+    min_walk_forward_pass_rate: float = 0.50
+    embargo_days: int = 5
     amount_column: str = "amount"
     price_column: str = "close"
 
@@ -58,13 +64,23 @@ def validate_factor_applicability(
             if clean.empty:
                 continue
             global_metrics = _factor_metrics(clean, factor, return_column, config)
+            sample_count, symbol_count, date_count = _validation_counts(clean)
+            walk_forward_pass_rate = _walk_forward_pass_rate(clean, factor, return_column, config)
             theme_scores = _slice_scores(clean, "theme", factor, return_column, config)
             sector_scores = _slice_scores(clean, "sector", factor, return_column, config)
             universe_scores = _slice_scores(clean, "watchlist_status", factor, return_column, config)
             applicable_themes = tuple(name for name, metrics in theme_scores.items() if _is_applicable(metrics, config))
             applicable_sectors = tuple(name for name, metrics in sector_scores.items() if _is_applicable(metrics, config))
             applicable_universe = tuple(name for name, metrics in universe_scores.items() if _is_applicable(metrics, config))
-            stage = _lifecycle_stage(global_metrics, bool(applicable_themes or applicable_sectors or applicable_universe), config)
+            sample_ok = sample_count >= config.min_sample_count and symbol_count >= config.min_symbol_count and date_count >= config.min_date_count
+            walk_ok = walk_forward_pass_rate >= config.min_walk_forward_pass_rate
+            stage = _lifecycle_stage(
+                global_metrics,
+                bool(applicable_themes or applicable_sectors or applicable_universe),
+                sample_ok,
+                walk_ok,
+                config,
+            )
             results.append(
                 FactorApplicability(
                     factor_name=factor,
@@ -84,6 +100,11 @@ def validate_factor_applicability(
                     factor_lifecycle_stage=stage,
                     last_validated_at=str(pd.Timestamp(clean["trade_date"].max()).date()),
                     invalidation_condition=_invalidation_condition(factor, horizon),
+                    validation_sample_count=sample_count,
+                    validation_symbol_count=symbol_count,
+                    validation_date_count=date_count,
+                    walk_forward_pass_rate=walk_forward_pass_rate,
+                    validation_method=f"walk_forward_pit_embargo_{config.embargo_days}d",
                 )
             )
     return results
@@ -121,6 +142,39 @@ def _factor_metrics(frame: pd.DataFrame, factor: str, return_column: str, config
     }
 
 
+def _validation_counts(frame: pd.DataFrame) -> tuple[int, int, int]:
+    return (
+        int(len(frame)),
+        int(frame["symbol"].nunique()) if "symbol" in frame.columns else 0,
+        int(pd.to_datetime(frame["trade_date"]).nunique()) if "trade_date" in frame.columns else 0,
+    )
+
+
+def _walk_forward_pass_rate(frame: pd.DataFrame, factor: str, return_column: str, config: FactorApplicabilityConfig) -> float:
+    if "trade_date" not in frame.columns:
+        return 0.0
+    data = frame.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"])
+    unique_dates = sorted(data["trade_date"].dropna().unique())
+    min_dates = config.min_date_count + config.embargo_days + 1
+    if len(unique_dates) < min_dates:
+        return 0.0
+    splits = max(1, min(config.walk_forward_splits, len(unique_dates) - config.embargo_days - 1))
+    pass_flags: list[bool] = []
+    for split_index in range(1, splits + 1):
+        cut = int(len(unique_dates) * split_index / (splits + 1))
+        train_dates = unique_dates[:cut]
+        test_dates = unique_dates[min(cut + config.embargo_days, len(unique_dates) - 1) :]
+        if len(train_dates) < config.min_date_count or not test_dates:
+            continue
+        train = data[data["trade_date"].isin(train_dates)]
+        test = data[data["trade_date"].isin(test_dates)]
+        train_metrics = _factor_metrics(train, factor, return_column, config)
+        test_metrics = _factor_metrics(test, factor, return_column, config)
+        pass_flags.append(_is_applicable(train_metrics, config) and _is_applicable(test_metrics, config))
+    return float(np.mean(pass_flags)) if pass_flags else 0.0
+
+
 def _slice_scores(frame: pd.DataFrame, column: str, factor: str, return_column: str, config: FactorApplicabilityConfig) -> dict[str, dict[str, float]]:
     if column not in frame.columns:
         return {}
@@ -140,7 +194,17 @@ def _is_applicable(metrics: dict[str, float], config: FactorApplicabilityConfig)
     )
 
 
-def _lifecycle_stage(metrics: dict[str, float], has_applicable_slice: bool, config: FactorApplicabilityConfig) -> str:
+def _lifecycle_stage(
+    metrics: dict[str, float],
+    has_applicable_slice: bool,
+    sample_ok: bool,
+    walk_ok: bool,
+    config: FactorApplicabilityConfig,
+) -> str:
+    if not sample_ok:
+        return "insufficient_sample"
+    if not walk_ok:
+        return "validation"
     if metrics["crowding_score"] > config.max_crowding_score:
         return "crowded"
     if metrics["rank_icir"] < -0.05 or metrics["hit_rate"] < 0.45:
