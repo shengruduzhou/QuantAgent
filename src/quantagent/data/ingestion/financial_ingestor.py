@@ -25,7 +25,7 @@ from quantagent.data.ingestion.daily_evidence_job import (
     EvidenceIngestor,
     attach_source_profile,
 )
-from quantagent.data.ingestion.source_registry import SourceCredibilityRegistry, SourceTier
+from quantagent.data.ingestion.source_registry import SourceCredibilityRegistry
 from quantagent.data.providers.financial_cache import FinancialCacheConfig, FinancialStatementCache
 
 

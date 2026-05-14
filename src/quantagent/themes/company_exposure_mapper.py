@@ -55,18 +55,6 @@ _LEGAL_DISCLAIMER_PATTERNS = (
 )
 
 
-_BOTTLENECK_NODE_IDS = {
-    "gpu", "domestic_gpu", "hbm", "advanced_packaging",
-    "semiconductor_equipment", "foundry", "lithography",
-    "rare_earth", "key_material",
-}
-
-_DIRECT_PRODUCT_NODE_IDS = {
-    "server", "gpu", "domestic_gpu", "foundry", "energy_storage",
-    "ev_battery", "innovative_drug", "satellite", "commercial_rocket",
-}
-
-
 @dataclass(frozen=True)
 class ExposureMapperConfig:
     direct_revenue_threshold: float = 0.15
@@ -77,6 +65,10 @@ class ExposureMapperConfig:
     primary_revenue_field: str = "revenue_exposure_estimate"
     profit_field: str = "profit_exposure_estimate"
     fallback_keywords_from_node_name: bool = True
+    bottleneck_score_threshold: float = 0.70
+    domestic_substitution_score_threshold: float = 0.70
+    direct_product_dependency_threshold: float = 0.65
+    direct_product_demand_visibility_threshold: float = 0.55
 
 
 def map_company_exposures(
@@ -114,6 +106,7 @@ def map_company_exposures(
     config = config or ExposureMapperConfig()
     evidence = evidence or []
     keyword_map = node_keywords or _derive_keywords_from_evidence(chain_nodes, evidence, config)
+    nodes_by_id = {node.node_id: node for node in chain_nodes}
     rows: list[dict[str, object]] = []
     evidence_index = _index_evidence_by_symbol(evidence)
     for _, company in company_profiles.iterrows():
@@ -129,6 +122,7 @@ def map_company_exposures(
             continue
         # Bind to highest-scoring chain node
         node_id = max(scores.items(), key=lambda item: item[1])[0]
+        node = nodes_by_id.get(node_id)
         node_score = scores[node_id]
         revenue_exposure = _structured_exposure(company, node_id, "revenue", config)
         profit_exposure = _structured_exposure(company, node_id, "profit", config)
@@ -148,7 +142,7 @@ def map_company_exposures(
         evidence_count = order_count + announcement_count + news_count
         company_disclaimed = _has_disclaimer(text)
         relation, confidence = _classify(
-            node_id=node_id,
+            node=node,
             node_score=node_score,
             revenue_exposure=revenue_exposure,
             order_count=order_count,
@@ -287,7 +281,7 @@ def _has_disclaimer(text: str) -> bool:
 
 
 def _classify(
-    node_id: str,
+    node: ChainNode | None,
     node_score: float,
     revenue_exposure: float,
     order_count: int,
@@ -301,15 +295,41 @@ def _classify(
     company_evidence_count = order_count + announcement_count
     has_revenue = revenue_exposure >= config.strong_revenue_threshold
     direct_revenue = revenue_exposure >= config.direct_revenue_threshold
+    # When the chain node has no quantified scores (legacy / minimal node),
+    # we trust company revenue + order evidence to decide direct vs supplier
+    # rather than relying on a hard-coded node-id allow-list.
+    has_quantified_scores = node is not None and (
+        node.dependency_strength > 0.0
+        or node.bottleneck_score > 0.0
+        or node.domestic_substitution_score > 0.0
+        or node.demand_visibility > 0.0
+    )
+    if has_quantified_scores:
+        is_direct_product = (
+            node.dependency_strength >= config.direct_product_dependency_threshold
+            and node.demand_visibility >= config.direct_product_demand_visibility_threshold
+        )
+        is_bottleneck = (
+            node.bottleneck_score >= config.bottleneck_score_threshold
+            or node.domestic_substitution_score >= config.domestic_substitution_score_threshold
+            or node.supply_shortage_score >= config.bottleneck_score_threshold
+        )
+    else:
+        # Legacy fallback: classify as direct when revenue + orders both
+        # signal that the company genuinely sells the product. The bottleneck
+        # branch is unavailable in this mode (cannot be inferred safely
+        # without scores).
+        is_direct_product = direct_revenue and order_count >= 1
+        is_bottleneck = False
     if (
         direct_revenue
         and company_evidence_count >= config.min_evidence_for_direct
-        and node_id in _DIRECT_PRODUCT_NODE_IDS
+        and is_direct_product
     ):
         return ChainRelationType.DIRECT_EXPOSURE, min(0.95, 0.55 + revenue_exposure)
     if (
         direct_revenue
-        and node_id in _BOTTLENECK_NODE_IDS
+        and is_bottleneck
         and company_evidence_count >= config.min_evidence_for_direct
     ):
         return ChainRelationType.CRITICAL_BOTTLENECK, min(0.95, 0.55 + revenue_exposure)

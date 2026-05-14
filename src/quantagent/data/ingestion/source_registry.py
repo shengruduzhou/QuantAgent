@@ -75,12 +75,23 @@ class SourceProfile:
     source_type: str = "news"
     reliability_override: float | None = None
     aliases: tuple[str, ...] = ()
+    discovery_urls: tuple[str, ...] = ()
+    rss_urls: tuple[str, ...] = ()
+    sitemap_urls: tuple[str, ...] = ()
 
     @property
     def reliability(self) -> float:
         if self.reliability_override is not None:
             return float(self.reliability_override)
         return _TIER_BASELINE.get(self.tier, 0.40)
+
+    @property
+    def discovery_endpoints(self) -> tuple[str, ...]:
+        endpoints: list[str] = []
+        endpoints.extend(self.rss_urls)
+        endpoints.extend(self.sitemap_urls)
+        endpoints.extend(self.discovery_urls)
+        return tuple(endpoints)
 
     def authority_score(self) -> float:
         if self.tier == SourceTier.OFFICIAL_PRIMARY:
@@ -175,6 +186,9 @@ def merge_user_profiles(
                     float(entry["reliability_override"]) if "reliability_override" in entry else None
                 ),
                 aliases=tuple(str(item) for item in entry.get("aliases", ())),
+                discovery_urls=tuple(str(item) for item in entry.get("discovery_urls", ())),
+                rss_urls=tuple(str(item) for item in entry.get("rss_urls", ())),
+                sitemap_urls=tuple(str(item) for item in entry.get("sitemap_urls", ())),
             )
         except (KeyError, ValueError):
             continue
@@ -185,18 +199,18 @@ def merge_user_profiles(
 def _default_profiles() -> tuple[SourceProfile, ...]:
     return (
         # 国务院 / 部委 / 央行
-        SourceProfile("gov.cn", "www.gov.cn", SourceTier.OFFICIAL_PRIMARY, is_primary=True, is_official=True, poll_minutes=60, allow_same_day_available_at=True, source_type="policy", aliases=("国务院",)),
-        SourceProfile("ndrc.gov.cn", "www.ndrc.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("发改委",)),
-        SourceProfile("miit.gov.cn", "www.miit.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("工信部",)),
-        SourceProfile("most.gov.cn", "www.most.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("科技部",)),
-        SourceProfile("mof.gov.cn", "www.mof.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("财政部",)),
-        SourceProfile("pbc.gov.cn", "www.pbc.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("人民银行",)),
+        SourceProfile("gov.cn", "www.gov.cn", SourceTier.OFFICIAL_PRIMARY, is_primary=True, is_official=True, poll_minutes=60, allow_same_day_available_at=True, source_type="policy", aliases=("国务院",), discovery_urls=("https://www.gov.cn/zhengce/",)),
+        SourceProfile("ndrc.gov.cn", "www.ndrc.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("发改委",), discovery_urls=("https://www.ndrc.gov.cn/xxgk/zcfb/",)),
+        SourceProfile("miit.gov.cn", "www.miit.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("工信部",), discovery_urls=("https://www.miit.gov.cn/zwgk/zcwj/",)),
+        SourceProfile("most.gov.cn", "www.most.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("科技部",), discovery_urls=("https://www.most.gov.cn/xxgk/xinxifenlei/fdzdgknr/fgzc/",)),
+        SourceProfile("mof.gov.cn", "www.mof.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("财政部",), discovery_urls=("https://www.mof.gov.cn/zhengwuxinxi/",)),
+        SourceProfile("pbc.gov.cn", "www.pbc.gov.cn", SourceTier.OFFICIAL_SECONDARY, is_primary=True, is_official=True, source_type="policy", aliases=("人民银行",), discovery_urls=("http://www.pbc.gov.cn/zhengcehuobisi/",)),
         # 监管处罚 / 交易所披露
-        SourceProfile("csrc.gov.cn", "www.csrc.gov.cn", SourceTier.REGULATORY_PENALTY, is_primary=True, is_official=True, source_type="regulatory", aliases=("证监会",)),
-        SourceProfile("sse.com.cn", "www.sse.com.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, allow_same_day_available_at=False, source_type="disclosure", aliases=("上交所",)),
-        SourceProfile("szse.cn", "www.szse.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, source_type="disclosure", aliases=("深交所",)),
+        SourceProfile("csrc.gov.cn", "www.csrc.gov.cn", SourceTier.REGULATORY_PENALTY, is_primary=True, is_official=True, source_type="regulatory", aliases=("证监会",), discovery_urls=("http://www.csrc.gov.cn/csrc/c100028/zfxxgk_zdgk.shtml",)),
+        SourceProfile("sse.com.cn", "www.sse.com.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, allow_same_day_available_at=False, source_type="disclosure", aliases=("上交所",), discovery_urls=("http://www.sse.com.cn/disclosure/listedinfo/announcement/",)),
+        SourceProfile("szse.cn", "www.szse.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, source_type="disclosure", aliases=("深交所",), discovery_urls=("http://www.szse.cn/disclosure/listed/notice/",)),
         SourceProfile("bse.cn", "www.bse.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, source_type="disclosure", aliases=("北交所",)),
-        SourceProfile("cninfo.com.cn", "www.cninfo.com.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, source_type="disclosure", aliases=("巨潮资讯",)),
+        SourceProfile("cninfo.com.cn", "www.cninfo.com.cn", SourceTier.EXCHANGE_DISCLOSURE, is_primary=True, is_official=True, source_type="disclosure", aliases=("巨潮资讯",), discovery_urls=("http://www.cninfo.com.cn/new/disclosure/",)),
         # 监管媒体
         SourceProfile("xinhua", "www.xinhuanet.com", SourceTier.REGULATED_MEDIA, is_primary=False, is_official=True, source_type="news", aliases=("新华社",)),
         SourceProfile("people", "www.people.com.cn", SourceTier.REGULATED_MEDIA, is_primary=False, is_official=True, source_type="news", aliases=("人民日报",)),

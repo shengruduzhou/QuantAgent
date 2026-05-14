@@ -46,10 +46,18 @@ from quantagent.fundamental.intrinsic_valuation import (
     value_universe,
 )
 from quantagent.fundamental.order_contract_agent import order_contract_evidence
+from quantagent.models.v7_classical_alpha import (
+    ClassicalAlphaConfig,
+    predict_v7_classical_alpha,
+)
 from quantagent.models.v7_deep_alpha import V7DeepAlphaConfig, predict_v7_deep_alpha
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.hedge_decision_engine import decide_v7_hedge
 from quantagent.portfolio.hedge_instrument_selector import HedgeRecommendation, select_hedge
+from quantagent.portfolio.retail_hedge_feasibility import (
+    RetailAccountCapabilities,
+    filter_recommendation_for_retail,
+)
 from quantagent.portfolio.portfolio_beta_model import (
     benchmark_returns_from_close,
     portfolio_beta,
@@ -67,7 +75,6 @@ from quantagent.strategy.long_short_allocator import (
     allocate_long_short,
 )
 from quantagent.themes.company_exposure_mapper import map_company_exposures
-from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.industry_chain_reasoner import (
     IndustryChainReasonerConfig,
     reason_industry_chain_for_themes,
@@ -75,6 +82,11 @@ from quantagent.themes.industry_chain_reasoner import (
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_parser import parse_policy_document
 from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
+from quantagent.themes.stock_pool_gate import (
+    StockPoolGateConfig,
+    apply_stock_pool_gate,
+    gate_summary,
+)
 from quantagent.themes.stock_pool_selector import build_stock_pool_selection
 from quantagent.themes.theme_extractor import discover_themes
 from quantagent.themes.theme_universe_builder import build_thematic_universe
@@ -164,32 +176,18 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     selected_themes = _select_theme_profiles(theme_profiles, cfg)
     reasoner_cfg = cfg.get("industry_chain_reasoner", {}) or {}
-    use_dynamic_reasoner = bool(reasoner_cfg.get("use_dynamic_reasoner", True))
-    strict_no_template = bool(reasoner_cfg.get("strict_no_template_fallback", True))
-    chain_reasoner_results: dict[str, Any] = {}
-    if use_dynamic_reasoner:
-        reasoner_config = IndustryChainReasonerConfig(
-            min_evidence_count_for_node=int(reasoner_cfg.get("min_evidence_count_for_node", 1)),
-            min_evidence_count_for_strong_edge=int(reasoner_cfg.get("min_evidence_count_for_strong_edge", 2)),
-            weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
-            use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
-            and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
-            strict_no_template_fallback=strict_no_template,
-        )
-        chain_reasoner_results = reason_industry_chain_for_themes(selected_themes, evidence, reasoner_config, llm_client)
-        chain_by_theme = {
-            theme: (list(result.nodes), list(result.edges)) for theme, result in chain_reasoner_results.items()
-        }
-        if not strict_no_template:
-            for theme, (nodes, edges) in chain_by_theme.items():
-                if not nodes:
-                    template_nodes, template_edges = build_industry_chain_graph(
-                        next(profile for profile in selected_themes if profile.theme_name == theme),
-                        evidence,
-                    )
-                    chain_by_theme[theme] = (template_nodes, template_edges)
-    else:
-        chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile, evidence) for profile in selected_themes}
+    reasoner_config = IndustryChainReasonerConfig(
+        min_evidence_count_for_node=int(reasoner_cfg.get("min_evidence_count_for_node", 1)),
+        min_evidence_count_for_strong_edge=int(reasoner_cfg.get("min_evidence_count_for_strong_edge", 2)),
+        weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
+        use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
+        and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
+        strict_no_template_fallback=bool(reasoner_cfg.get("strict_no_template_fallback", True)),
+    )
+    chain_reasoner_results = reason_industry_chain_for_themes(selected_themes, evidence, reasoner_config, llm_client)
+    chain_by_theme = {
+        theme: (list(result.nodes), list(result.edges)) for theme, result in chain_reasoner_results.items()
+    }
     all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
     all_chain_edges = [edge for _, edges in chain_by_theme.values() for edge in edges]
 
@@ -315,12 +313,49 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, production_applicability, as_of_date)
 
-    use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", True))
+    gate_cfg = cfg.get("stock_pool_gate", {}) or {}
+    if bool(gate_cfg.get("enabled", True)):
+        gated_members, gate_drop_log = apply_stock_pool_gate(
+            universe_members,
+            stock_pool_selection,
+            StockPoolGateConfig(
+                allow_satellite_if_confidence_above=float(
+                    gate_cfg.get("allow_satellite_if_confidence_above", 0.75)
+                ),
+                require_factor_coverage=bool(gate_cfg.get("require_factor_coverage", True)),
+                block_false_association=bool(gate_cfg.get("block_false_association", True)),
+            ),
+        )
+        if gated_members:
+            alpha_members = gated_members
+        else:
+            alpha_members = universe_members
+            gate_drop_log["__gate_disabled__"] = "empty_after_gate_falling_back_to_full_universe"
+    else:
+        alpha_members = universe_members
+        gate_drop_log = {}
+
+    alpha_cfg = cfg.get("alpha_model", {}) or {}
+    use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", False))
+    use_classical_alpha = bool(alpha_cfg.get("enabled", True))
     deep_cfg = cfg.get("deep_alpha_model", {}) or {}
-    if use_deep_alpha:
+    if use_classical_alpha:
+        alphas = predict_v7_classical_alpha(
+            factor_frame,
+            alpha_members,
+            production_applicability,
+            ClassicalAlphaConfig(
+                model=str(alpha_cfg.get("model", "ridge")),
+                alpha=float(alpha_cfg.get("alpha", 1.0)),
+                l1_ratio=float(alpha_cfg.get("l1_ratio", 0.5)),
+                min_train_rows=int(alpha_cfg.get("min_train_rows", 30)),
+                fraud_penalty_weight=float(alpha_cfg.get("fraud_penalty_weight", 0.30)),
+            ),
+        )
+    elif use_deep_alpha:
         alphas = predict_v7_deep_alpha(
             factor_frame,
-            universe_members,
+            alpha_members,
             production_applicability,
             V7DeepAlphaConfig(
                 hidden_size=int(deep_cfg.get("hidden_size", 16)),
@@ -330,9 +365,9 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             ),
         )
     else:
-        alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, production_applicability)
+        alphas = predict_v7_multi_horizon_alpha(factor_frame, alpha_members, production_applicability)
     if not alphas and allow_synthetic:
-        alphas = _build_synthetic_alphas(universe_members)
+        alphas = _build_synthetic_alphas(alpha_members)
 
     retail_cfg = cfg.get("retail_hft_risk", {}) or {}
     if bool(retail_cfg.get("enabled", True)):
@@ -348,13 +383,13 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         alphas = apply_retail_hft_penalty(alphas, retail_hft_reports)
     else:
         retail_hft_reports = []
-    timing = _build_timing(universe_members)
+    timing = _build_timing(alpha_members)
     portfolio_cfg = cfg.get("portfolio", {})
     allocator_cfg = cfg.get("long_short_allocator", {}) or {}
     long_short_allocation = (
         allocate_long_short(
             alphas,
-            universe_members,
+            alpha_members,
             market,
             None,
             LongShortAllocatorConfig(
@@ -368,7 +403,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     sleeve_weights_override = _sleeve_weights_from_long_short(long_short_allocation, allocator_cfg)
     portfolio = construct_v7_portfolio(
-        universe_members,
+        alpha_members,
         alphas,
         market,
         timing,
@@ -379,13 +414,16 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         turnover_limit=float(portfolio_cfg.get("max_turnover", portfolio_cfg.get("turnover_limit", 0.35))),
         sleeve_weights_override=sleeve_weights_override,
     )
-    portfolio, lifecycle_notes = _apply_lifecycle_caps(portfolio, universe_members)
+    portfolio, lifecycle_notes = _apply_lifecycle_caps(portfolio, alpha_members)
     theme_crowding = _average_theme_crowding(selected_themes)
     hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=theme_crowding)
     hedge_recommendation = _select_tool_hedge(portfolio, hedge, market, bundle.market_panel.frame, cfg)
+    retail_hedge_result = _apply_retail_hedge_feasibility(hedge_recommendation, cfg)
+    if retail_hedge_result is not None:
+        hedge_recommendation = retail_hedge_result.recommendation
     execution_reports = _execution_reports(portfolio, market_state, bundle.positions.frame, cfg.get("execution", {}))
-    risk_report = _risk_gate_report(universe_members, portfolio, execution_reports, hedge)
-    backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, universe_members, allow_synthetic)
+    risk_report = _risk_gate_report(alpha_members, portfolio, execution_reports, hedge)
+    backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, alpha_members, allow_synthetic)
     audit = AuditLogRecord(
         decision_id=f"v7-{as_of_date}",
         timestamp=as_of_date,
@@ -428,6 +466,11 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             },
         },
         "stock_pool_selection": [_to_dict(report) for report in stock_pool_selection],
+        "stock_pool_gate": {
+            "kept_symbols": [member.symbol for member in alpha_members],
+            "dropped_symbols": gate_drop_log,
+            "drop_summary": gate_summary(gate_drop_log),
+        },
         "thematic_universe": [_to_dict(member) for member in universe_members],
         "fundamental_due_diligence": [_to_dict(report) for report in fundamental_due_diligence],
         "intrinsic_valuation": [_to_dict(report) for report in valuation_reports],
@@ -461,6 +504,15 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         "lifecycle_caps_applied": lifecycle_notes,
         "hedge_decision": _to_dict(hedge),
         "tool_hedge": _to_dict(hedge_recommendation) if hedge_recommendation is not None else {},
+        "retail_hedge_feasibility": (
+            {
+                "feasibility_score": retail_hedge_result.feasibility_score,
+                "blocked_actions": list(retail_hedge_result.blocked_actions),
+                "audit_notes": list(retail_hedge_result.audit_notes),
+            }
+            if retail_hedge_result is not None
+            else {}
+        ),
         "execution_constraints": [_to_dict(report) for report in execution_reports],
         "risk_report": _to_dict(risk_report),
         "backtest_attribution": _to_dict(backtest),
@@ -525,6 +577,30 @@ def _apply_lifecycle_caps(portfolio, universe_members: list) -> tuple[Any, list[
     except TypeError:
         return portfolio, notes
     return updated, notes
+
+
+def _apply_retail_hedge_feasibility(
+    recommendation: HedgeRecommendation | None,
+    cfg: dict[str, Any],
+):
+    """Re-filter the hedge recommendation for retail account capabilities."""
+
+    if recommendation is None:
+        return None
+    feasibility_cfg = cfg.get("retail_hedge_feasibility", {}) or {}
+    if not bool(feasibility_cfg.get("enabled", True)):
+        return None
+    capabilities = RetailAccountCapabilities(
+        can_short_individual_stock=bool(feasibility_cfg.get("can_short_individual_stock", False)),
+        can_short_index_futures=bool(feasibility_cfg.get("can_short_index_futures", False)),
+        can_trade_options=bool(feasibility_cfg.get("can_trade_options", False)),
+        can_buy_etf_inverse=bool(feasibility_cfg.get("can_buy_etf_inverse", True)),
+        can_hold_cash=bool(feasibility_cfg.get("can_hold_cash", True)),
+        can_reduce_gross_exposure=bool(feasibility_cfg.get("can_reduce_gross_exposure", True)),
+        allow_intraday_hedge=bool(feasibility_cfg.get("allow_intraday_hedge", False)),
+        margin_account=bool(feasibility_cfg.get("margin_account", False)),
+    )
+    return filter_recommendation_for_retail(recommendation, capabilities)
 
 
 def _select_tool_hedge(

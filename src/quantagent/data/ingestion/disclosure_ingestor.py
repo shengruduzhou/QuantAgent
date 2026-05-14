@@ -25,7 +25,10 @@ from quantagent.data.ingestion.daily_evidence_job import (
     EvidenceIngestor,
     attach_source_profile,
 )
+from quantagent.data.ingestion.policy_ingestor import _documents_to_frame
 from quantagent.data.ingestion.source_registry import SourceCredibilityRegistry
+from quantagent.data.providers.base import ProviderUnavailable
+from quantagent.data.providers.web_crawler import PublicWebCrawler
 
 
 _DEFAULT_EVENT_PATTERNS = {
@@ -87,6 +90,8 @@ class DisclosureIngestor(EvidenceIngestor):
     name: str = "disclosure"
     source_type: str = "disclosure"
     allow_network: bool = False
+    active_discovery: bool = False
+    max_articles_per_source: int = 25
     local_cache_root: str = "data/v7/evidence/disclosure"
     chain_node_keyword_map: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
@@ -108,6 +113,10 @@ class DisclosureIngestor(EvidenceIngestor):
         registry: SourceCredibilityRegistry,
     ) -> pd.DataFrame:
         frame = self._read_local_cache(config.as_of_date)
+        if self.allow_network and self.active_discovery:
+            discovered = self._discover_remote(config.as_of_date, registry)
+            if not discovered.empty:
+                frame = pd.concat([frame, discovered], ignore_index=True, sort=False)
         if frame.empty:
             return frame
         frame = self._tag_events(frame)
@@ -123,6 +132,27 @@ class DisclosureIngestor(EvidenceIngestor):
             )
             frame.loc[future_only, "available_at"] = shifted.dt.strftime("%Y-%m-%d")
         return frame
+
+    def _discover_remote(self, as_of_date: str, registry: SourceCredibilityRegistry) -> pd.DataFrame:
+        index_urls: list[str] = []
+        for profile in registry.by_source_type("disclosure"):
+            index_urls.extend(profile.discovery_endpoints)
+        if not index_urls:
+            return pd.DataFrame()
+        crawler = PublicWebCrawler(
+            allow_network=self.allow_network,
+            max_links_per_index=self.max_articles_per_source,
+        )
+        try:
+            documents = crawler.discover_documents(
+                index_urls,
+                as_of_date=as_of_date,
+                source_type="disclosure",
+                source_reliability=0.92,
+            )
+        except ProviderUnavailable:
+            return pd.DataFrame()
+        return _documents_to_frame(documents)
 
     def _read_local_cache(self, as_of_date: str) -> pd.DataFrame:
         root = Path(self.local_cache_root)

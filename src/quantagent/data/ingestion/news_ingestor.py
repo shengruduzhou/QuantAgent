@@ -18,6 +18,7 @@ from quantagent.data.ingestion.daily_evidence_job import (
     EvidenceIngestor,
     attach_source_profile,
 )
+from quantagent.data.ingestion.policy_ingestor import _documents_to_frame
 from quantagent.data.ingestion.source_registry import SourceCredibilityRegistry
 from quantagent.data.providers.base import ProviderUnavailable
 from quantagent.data.providers.web_crawler import PublicWebCrawler
@@ -29,6 +30,8 @@ class NewsIngestor(EvidenceIngestor):
     source_type: str = "news"
     allow_network: bool = False
     urls: tuple[str, ...] = ()
+    active_discovery: bool = False
+    max_articles_per_source: int = 25
     local_cache_root: str = "data/v7/evidence/news"
     keyword_to_theme: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
@@ -63,6 +66,10 @@ class NewsIngestor(EvidenceIngestor):
             crawled = self._fetch_remote(config.as_of_date)
             if not crawled.empty:
                 local_frame = pd.concat([local_frame, crawled], ignore_index=True, sort=False)
+        if self.allow_network and self.active_discovery:
+            discovered = self._discover_remote(config.as_of_date, registry)
+            if not discovered.empty:
+                local_frame = pd.concat([local_frame, discovered], ignore_index=True, sort=False)
         if local_frame.empty:
             return local_frame
         local_frame = self._tag_themes(local_frame)
@@ -98,20 +105,28 @@ class NewsIngestor(EvidenceIngestor):
             )
         except ProviderUnavailable:
             return pd.DataFrame()
-        rows: list[dict[str, object]] = []
-        for doc in documents:
-            rows.append(
-                {
-                    "source_name": doc.source,
-                    "url": doc.url,
-                    "title": doc.title,
-                    "body": doc.body,
-                    "published_at": doc.published_at,
-                    "available_at": doc.available_at,
-                    "raw_hash": doc.content_hash,
-                }
+        return _documents_to_frame(documents)
+
+    def _discover_remote(self, as_of_date: str, registry: SourceCredibilityRegistry) -> pd.DataFrame:
+        index_urls: list[str] = []
+        for profile in registry.by_source_type("news"):
+            index_urls.extend(profile.discovery_endpoints)
+        if not index_urls:
+            return pd.DataFrame()
+        crawler = PublicWebCrawler(
+            allow_network=self.allow_network,
+            max_links_per_index=self.max_articles_per_source,
+        )
+        try:
+            documents = crawler.discover_documents(
+                index_urls,
+                as_of_date=as_of_date,
+                source_type="news",
+                source_reliability=0.62,
             )
-        return pd.DataFrame(rows)
+        except ProviderUnavailable:
+            return pd.DataFrame()
+        return _documents_to_frame(documents)
 
     def _tag_themes(self, frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:

@@ -55,9 +55,44 @@ EVIDENCE_COLUMNS: tuple[str, ...] = (
     "confidence",
     "cross_validation_count",
     "contradiction_count",
+    "horizon_days",
+    "decay_half_life",
+    "rumor_risk_flag",
+    "affected_symbols",
     "raw_hash",
     "point_in_time_valid",
 )
+
+
+_EVENT_TYPE_HORIZON_TABLE: dict[str, tuple[int, float]] = {
+    "policy_support": (120, 90.0),
+    "subsidy": (90, 60.0),
+    "industrial_plan": (180, 120.0),
+    "demand_growth": (60, 45.0),
+    "supply_shortage": (60, 30.0),
+    "order_confirmed": (60, 45.0),
+    "earnings_growth": (60, 60.0),
+    "margin_expansion": (90, 60.0),
+    "valuation_repair": (40, 30.0),
+    "capital_inflow": (20, 15.0),
+    "sentiment_positive": (5, 3.0),
+    "sentiment_negative": (5, 3.0),
+    "regulatory_penalty": (60, 30.0),
+    "fraud_risk": (120, 60.0),
+    "accounting_anomaly": (90, 45.0),
+    "audit_opinion": (180, 90.0),
+    "liquidity_risk": (5, 2.0),
+    "theme_rotation": (20, 10.0),
+    "bubble_warning": (20, 10.0),
+    "no_trade": (1, 1.0),
+    "hedge_signal": (5, 2.0),
+    "financial_statement": (90, 60.0),
+    "inquiry_letter": (60, 30.0),
+    "restatement": (120, 60.0),
+    "shareholder_change": (20, 10.0),
+    "goodwill_impairment": (60, 30.0),
+    "pledge": (20, 10.0),
+}
 
 
 @dataclass(frozen=True)
@@ -76,6 +111,8 @@ class DailyEvidenceJobConfig:
         "regulatory_penalty",
     )
     available_lag_days: int = 1
+    write_to_store: bool = True
+    store_root: str = "data/v7/evidence/store"
 
 
 @dataclass(frozen=True)
@@ -129,6 +166,7 @@ class DailyEvidenceJob:
         unified = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=EVIDENCE_COLUMNS)
         unified = enforce_pit(unified, config.as_of_date)
         cached_path = _maybe_cache(unified, config)
+        store_paths = _maybe_write_store(unified, config)
         return DailyEvidenceJobResult(
             frame=unified,
             per_ingestor_rows=per_ingestor,
@@ -137,6 +175,7 @@ class DailyEvidenceJob:
                 "as_of_date": config.as_of_date,
                 "rows": str(len(unified)),
                 "cache_path": str(cached_path) if cached_path else "",
+                "store_partitions": ",".join(str(path.parent) for path in store_paths) if store_paths else "",
             },
         )
 
@@ -179,7 +218,30 @@ def normalise_evidence_frame(
         data["evidence_id"] = data.apply(lambda row: _stable_evidence_id(row, ingestor_name), axis=1)
     if "raw_hash" not in data.columns or data["raw_hash"].isna().any():
         data["raw_hash"] = data.apply(lambda row: _stable_raw_hash(row), axis=1)
+    _fill_decay_columns(data)
+    if data["affected_symbols"].isna().any():
+        data["affected_symbols"] = data["affected_symbols"].fillna(data["symbol"].fillna(""))
+    if data["rumor_risk_flag"].isna().any():
+        data["rumor_risk_flag"] = data["rumor_risk_flag"].fillna(False)
+    if data["cross_validation_count"].isna().any():
+        data["cross_validation_count"] = data["cross_validation_count"].fillna(0).astype(int)
+    if data["contradiction_count"].isna().any():
+        data["contradiction_count"] = data["contradiction_count"].fillna(0).astype(int)
     return data[list(EVIDENCE_COLUMNS)]
+
+
+def _fill_decay_columns(data: pd.DataFrame) -> None:
+    event_types = data["event_type"].fillna("no_trade").astype(str)
+    horizons = data["horizon_days"].copy()
+    decays = data["decay_half_life"].copy()
+    for index, event in event_types.items():
+        horizon, decay = _EVENT_TYPE_HORIZON_TABLE.get(event, (20, 14.0))
+        if pd.isna(horizons.at[index]):
+            horizons.at[index] = horizon
+        if pd.isna(decays.at[index]):
+            decays.at[index] = decay
+    data["horizon_days"] = horizons.astype(int)
+    data["decay_half_life"] = decays.astype(float)
 
 
 def enforce_pit(frame: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
@@ -208,6 +270,16 @@ def _maybe_cache(frame: pd.DataFrame, config: DailyEvidenceJobConfig) -> Path | 
     path = root / f"evidence_{config.as_of_date}.csv"
     frame.to_csv(path, index=False)
     return path
+
+
+def _maybe_write_store(frame: pd.DataFrame, config: DailyEvidenceJobConfig) -> list[Path]:
+    if frame is None or frame.empty or not config.write_to_store:
+        return []
+    # Defer the import so EvidenceStore stays optional in fully-offline tests.
+    from quantagent.data.ingestion.evidence_store import EvidenceStore, EvidenceStoreConfig
+
+    store = EvidenceStore(EvidenceStoreConfig(root=config.store_root))
+    return store.write(frame)
 
 
 def attach_source_profile(

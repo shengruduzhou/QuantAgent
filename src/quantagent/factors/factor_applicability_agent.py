@@ -40,7 +40,7 @@ def validate_factor_applicability(
     member_frame = _member_frame(universe_members)
     if not member_frame.empty:
         data = data.merge(member_frame, on="symbol", how="left", suffixes=("", "_member"))
-        for column in ("theme", "sector", "watchlist_status"):
+        for column in ("theme", "sector", "chain_node", "watchlist_status"):
             member_column = f"{column}_member"
             if member_column in data.columns:
                 if column in data.columns:
@@ -56,7 +56,8 @@ def validate_factor_applicability(
             return_column = f"forward_return_{horizon}d"
             if return_column not in data.columns:
                 continue
-            required_columns = ["trade_date", "symbol", factor, return_column, "theme", "sector", "watchlist_status"]
+            required_columns = ["trade_date", "symbol", factor, return_column, "theme", "sector", "chain_node", "watchlist_status"]
+            required_columns = [column for column in required_columns if column in data.columns]
             if config.amount_column in data.columns:
                 required_columns.append(config.amount_column)
             clean = data[required_columns].replace([np.inf, -np.inf], np.nan)
@@ -112,13 +113,18 @@ def validate_factor_applicability(
 
 def _member_frame(members: list[ThematicUniverseMember]) -> pd.DataFrame:
     if not members:
-        return pd.DataFrame(columns=["symbol", "theme", "sector", "watchlist_status"])
+        return pd.DataFrame(columns=["symbol", "theme", "sector", "chain_node", "watchlist_status"])
     return pd.DataFrame(
         [
             {
                 "symbol": member.symbol,
                 "theme": member.theme,
-                "sector": member.chain_node,
+                # Sector and chain_node are different concepts. Earlier
+                # versions overloaded ``sector`` with ``chain_node`` which
+                # broke the per-sector factor applicability slice — every
+                # company looked like it belonged to its chain node bucket.
+                "sector": member.sector or "unknown",
+                "chain_node": member.chain_node,
                 "watchlist_status": member.watchlist_status.value,
             }
             for member in members

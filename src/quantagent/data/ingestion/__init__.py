@@ -18,6 +18,7 @@ from quantagent.data.ingestion.daily_evidence_job import (
     normalise_evidence_frame,
 )
 from quantagent.data.ingestion.disclosure_ingestor import DisclosureIngestor
+from quantagent.data.ingestion.evidence_store import EvidenceStore, EvidenceStoreConfig
 from quantagent.data.ingestion.financial_ingestor import FinancialIngestor
 from quantagent.data.ingestion.news_ingestor import NewsIngestor
 from quantagent.data.ingestion.order_contract_ingestor import OrderContractIngestor
@@ -38,6 +39,8 @@ __all__ = [
     "DisclosureIngestor",
     "EVIDENCE_COLUMNS",
     "EvidenceIngestor",
+    "EvidenceStore",
+    "EvidenceStoreConfig",
     "FinancialIngestor",
     "NewsIngestor",
     "OrderContractIngestor",

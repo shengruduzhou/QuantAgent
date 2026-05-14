@@ -17,7 +17,7 @@ from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
 from quantagent.themes.stock_pool_selector import build_stock_pool_selection
-from quantagent.v7.schemas import MarketRegime, MarketRegimeSnapshot, MultiHorizonAlpha, ThematicUniverseMember, ThemeLifecycleStage, ThemeProfile, UniverseBucket, ChainRelationType
+from quantagent.v7.schemas import ChainNode, MarketRegime, MarketRegimeSnapshot, MultiHorizonAlpha, ThematicUniverseMember, ThemeLifecycleStage, ThemeProfile, UniverseBucket, ChainRelationType
 from quantagent.v7.schemas import FactorApplicability, FundamentalScore, FraudRiskScore, InvestmentHorizonBucket
 
 
@@ -148,7 +148,17 @@ def test_remote_policy_schema_extraction_is_optional_and_disabled():
 
 
 def test_company_exposure_mapper_infers_chain_node_from_profile_text():
-    nodes, _ = build_industry_chain_graph(_theme_profile())
+    # Industry chain is now evidence-driven; supply a deterministic ChainNode
+    # list as input so the test focuses on the mapper, not the reasoner.
+    nodes = [
+        ChainNode(
+            node_id="server",
+            node_name="AI server",
+            dependency_strength=0.85,
+            demand_visibility=0.80,
+            policy_support_score=0.75,
+        )
+    ]
     profiles = pd.DataFrame(
         [
             {

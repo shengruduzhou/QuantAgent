@@ -56,6 +56,22 @@ industry_chain_reasoner:
 factor_applicability:
   hard_gate: false
   production_stages: [production, validation, insufficient_sample]
+stock_pool_gate:
+  enabled: false
+  allow_satellite_if_confidence_above: 0.55
+  require_factor_coverage: false
+  block_false_association: true
+alpha_model:
+  enabled: true
+  model: ridge
+  alpha: 1.0
+  l1_ratio: 0.5
+  min_train_rows: 5
+  fraud_penalty_weight: 0.30
+retail_hedge_feasibility:
+  enabled: true
+deep_alpha_model:
+  enabled: false
 walk_forward_sleeve_allocator:
   enabled: false
 evidence:

@@ -30,7 +30,9 @@ def test_policy_to_theme_to_industry_chain_pipeline_builds_real_pool():
     themes, evidence = discover_themes(parsed, "2026-05-14")
     assert themes, "AI-driven theme discovery must surface at least one theme"
     ai_theme = themes[0]
-    nodes, edges = build_industry_chain_graph(ai_theme)
+    # Industry chain is now evidence-driven; pass the policy evidence so the
+    # reasoner has something to anchor the nodes against.
+    nodes, edges = build_industry_chain_graph(ai_theme, evidence)
 
     assert ai_theme.theme_name, "theme must have a non-empty AI-derived name"
     assert ai_theme.policy_strength > 0.0
@@ -51,9 +53,9 @@ def test_theme_universe_distinguishes_core_from_false_association():
             }
         ]
     )
-    themes, _ = discover_themes([parse_policy_document(doc) for doc in docs], "2026-05-14")
+    themes, evidence = discover_themes([parse_policy_document(doc) for doc in docs], "2026-05-14")
     primary_theme = themes[0].theme_name
-    nodes, _ = build_industry_chain_graph(themes[0])
+    nodes, _ = build_industry_chain_graph(themes[0], evidence)
     fundamental_rows = pd.DataFrame(
         [
             {"symbol": "600001.SH", "report_date": "2026-03-31", "theme_revenue_exposure": 80, "revenue_growth": 0.25, "profit_growth": 0.20, "roe": 0.12, "roa": 0.06, "gross_margin": 0.25, "operating_cash_flow": 10, "net_income": 8, "debt_to_asset": 0.4, "order_visibility_score": 80, "capacity_release_score": 75, "customer_validation_score": 75, "receivables": 10, "revenue": 100, "inventory": 15, "cogs": 70, "total_assets": 180, "capex": -8},

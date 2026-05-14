@@ -40,11 +40,11 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
     ),
     AgentSpec(
         name="industry_chain_graph_agent",
-        responsibility="Expand a theme into chain nodes, relation types, bottlenecks, substitution paths, and listed-company mappings.",
-        inputs=("ThemeProfile", "IndustryChainSeed", "EvidenceRecord"),
+        responsibility="Reason an evidence-driven industry chain from policy/disclosure/news data — no static templates.",
+        inputs=("ThemeProfile", "EvidenceRecord"),
         outputs=("ChainNode", "ChainEdge", "EvidenceRecord"),
         new_modules=(
-            "src/quantagent/themes/industry_chain_graph.py",
+            "src/quantagent/themes/industry_chain_reasoner.py",
             "src/quantagent/themes/company_exposure_mapper.py",
         ),
     ),

@@ -66,6 +66,28 @@ industry_chain_reasoner:
 factor_applicability:
   hard_gate: true
   production_stages: [production, validation]
+stock_pool_gate:
+  enabled: true
+  allow_satellite_if_confidence_above: 0.75
+  require_factor_coverage: true
+  block_false_association: true
+alpha_model:
+  enabled: true
+  model: ridge
+  alpha: 1.0
+  l1_ratio: 0.5
+  min_train_rows: 30
+  fraud_penalty_weight: 0.30
+retail_hedge_feasibility:
+  enabled: true
+  can_short_individual_stock: false
+  can_short_index_futures: false
+  can_trade_options: false
+  can_buy_etf_inverse: true
+  can_hold_cash: true
+  can_reduce_gross_exposure: true
+  allow_intraday_hedge: false
+  margin_account: false
 walk_forward_sleeve_allocator:
   enabled: true
   walk_forward_splits: 4
@@ -95,7 +117,7 @@ retail_hft_risk:
   max_penalty: 0.85
   institutional_volume_zscore_warning: 2.0
 deep_alpha_model:
-  enabled: true
+  enabled: false
   hidden_size: 16
   seed: 1729
   use_torch_if_available: true
@@ -119,16 +141,24 @@ lifecycle_trading_rules:
 ingestion:
   enabled: true
   cache_root: data/v7/evidence
+  store_root: data/v7/evidence/store
+  write_to_store: true
   available_lag_days: 1
   enabled_sources: [policy, disclosure, news, financial, order_contract, regulatory_penalty]
   policy:
     urls: []
     allow_network: false
+    active_discovery: true
+    max_articles_per_source: 25
   disclosure:
     allow_network: false
+    active_discovery: true
+    max_articles_per_source: 25
   news:
     urls: []
     allow_network: false
+    active_discovery: true
+    max_articles_per_source: 25
   source_registry: []
 evidence:
   min_source_reliability_for_trade_signal: 0.5
