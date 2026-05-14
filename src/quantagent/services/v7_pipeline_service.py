@@ -23,6 +23,7 @@ from quantagent.agents.llm_orchestrator import (
 from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
 from quantagent.backtest.event_driven_theme_backtester import EventDrivenThemeBacktester
 from quantagent.credibility.news_credibility_agent import news_scores_to_evidence, score_news_credibility
+from quantagent.credibility.news_cross_validator import attach_cross_validation_fields, cross_validate
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.v7_datahub import V7DataHub, V7DataHubResult
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
@@ -48,7 +49,14 @@ from quantagent.fundamental.order_contract_agent import order_contract_evidence
 from quantagent.models.v7_deep_alpha import V7DeepAlphaConfig, predict_v7_deep_alpha
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.hedge_decision_engine import decide_v7_hedge
+from quantagent.portfolio.hedge_instrument_selector import HedgeRecommendation, select_hedge
+from quantagent.portfolio.portfolio_beta_model import (
+    benchmark_returns_from_close,
+    portfolio_beta,
+    returns_panel_from_close,
+)
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
+from quantagent.themes.lifecycle_trading_rules import apply_lifecycle_caps
 from quantagent.risk.retail_hft_risk import (
     RetailHFTRiskConfig,
     apply_retail_hft_penalty,
@@ -143,6 +151,9 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     ai_news_scores = orchestrator.score_news_batch(bundle.news.frame)
     news_scores = _merge_news_credibility(score_news_credibility(bundle.news.frame), ai_news_scores)
+    cross_validation_summaries = cross_validate(bundle.news.frame) if not bundle.news.frame.empty else []
+    if cross_validation_summaries:
+        news_scores = attach_cross_validation_fields(news_scores, cross_validation_summaries)
     announcement_evidence = order_contract_evidence(bundle.announcements.frame, as_of_date)
     news_evidence = news_scores_to_evidence(news_scores, as_of_date)
     theme_profiles, evidence = discover_themes(
@@ -339,6 +350,23 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         retail_hft_reports = []
     timing = _build_timing(universe_members)
     portfolio_cfg = cfg.get("portfolio", {})
+    allocator_cfg = cfg.get("long_short_allocator", {}) or {}
+    long_short_allocation = (
+        allocate_long_short(
+            alphas,
+            universe_members,
+            market,
+            None,
+            LongShortAllocatorConfig(
+                long_horizon_confidence_threshold=float(allocator_cfg.get("long_horizon_confidence_threshold", 0.45)),
+                short_horizon_confidence_threshold=float(allocator_cfg.get("short_horizon_confidence_threshold", 0.55)),
+                hedge_scale=float(allocator_cfg.get("hedge_scale", 0.30)),
+            ),
+        )
+        if bool(allocator_cfg.get("enabled", True))
+        else None
+    )
+    sleeve_weights_override = _sleeve_weights_from_long_short(long_short_allocation, allocator_cfg)
     portfolio = construct_v7_portfolio(
         universe_members,
         alphas,
@@ -349,25 +377,12 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         max_sector_weight=float(portfolio_cfg.get("max_sector_weight", 0.30)),
         max_theme_weight=float(portfolio_cfg.get("max_theme_weight", 0.35)),
         turnover_limit=float(portfolio_cfg.get("max_turnover", portfolio_cfg.get("turnover_limit", 0.35))),
+        sleeve_weights_override=sleeve_weights_override,
     )
+    portfolio, lifecycle_notes = _apply_lifecycle_caps(portfolio, universe_members)
     theme_crowding = _average_theme_crowding(selected_themes)
     hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=theme_crowding)
-    allocator_cfg = cfg.get("long_short_allocator", {}) or {}
-    long_short_allocation = (
-        allocate_long_short(
-            alphas,
-            universe_members,
-            market,
-            hedge,
-            LongShortAllocatorConfig(
-                long_horizon_confidence_threshold=float(allocator_cfg.get("long_horizon_confidence_threshold", 0.45)),
-                short_horizon_confidence_threshold=float(allocator_cfg.get("short_horizon_confidence_threshold", 0.55)),
-                hedge_scale=float(allocator_cfg.get("hedge_scale", 0.30)),
-            ),
-        )
-        if bool(allocator_cfg.get("enabled", True))
-        else None
-    )
+    hedge_recommendation = _select_tool_hedge(portfolio, hedge, market, bundle.market_panel.frame, cfg)
     execution_reports = _execution_reports(portfolio, market_state, bundle.positions.frame, cfg.get("execution", {}))
     risk_report = _risk_gate_report(universe_members, portfolio, execution_reports, hedge)
     backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, universe_members, allow_synthetic)
@@ -439,16 +454,117 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
         "factor_applicability": [_to_dict(item) for item in factor_applicability],
         "news_credibility": [_to_dict(item) for item in news_scores],
+        "news_cross_validation": [_to_dict(summary) for summary in cross_validation_summaries],
         "retail_hft_risk": [_to_dict(report) for report in retail_hft_reports],
         "long_short_allocation": _to_dict(long_short_allocation) if long_short_allocation is not None else {},
         "portfolio_plan": _to_dict(portfolio),
+        "lifecycle_caps_applied": lifecycle_notes,
         "hedge_decision": _to_dict(hedge),
+        "tool_hedge": _to_dict(hedge_recommendation) if hedge_recommendation is not None else {},
         "execution_constraints": [_to_dict(report) for report in execution_reports],
         "risk_report": _to_dict(risk_report),
         "backtest_attribution": _to_dict(backtest),
         "audit_log": _to_dict(audit),
         "order_boundary": "agents_and_optimizer_emit_no_orders; OrderManager is the only order-intent owner",
     }
+
+
+def _sleeve_weights_from_long_short(allocation, allocator_cfg: dict[str, Any]) -> dict[str, float] | None:
+    """Translate the long-short allocator output into a sleeve_weights override.
+
+    The long-short allocator returns long_weight / medium_weight /
+    short_weight / hedge_weight / cash_weight as sleeve buckets keyed by
+    sleeve name. We coerce those into the six-sleeve dict that
+    ``construct_v7_portfolio`` understands so the allocator binds the
+    eventual target_weights instead of being a report-only artefact.
+    """
+
+    if allocation is None or not bool(allocator_cfg.get("bind_to_portfolio", True)):
+        return None
+    sleeve_weights = getattr(allocation, "sleeve_weights", None)
+    if not sleeve_weights:
+        return None
+    if hasattr(sleeve_weights, "items"):
+        items = sleeve_weights.items()
+    else:
+        items = ()
+    cleaned: dict[str, float] = {}
+    for key, value in items:
+        try:
+            cleaned[str(getattr(key, "value", key))] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return cleaned or None
+
+
+def _apply_lifecycle_caps(portfolio, universe_members: list) -> tuple[Any, list[str]]:
+    """Trim target_weights so each name respects its theme lifecycle stage caps."""
+
+    if portfolio is None or not getattr(portfolio, "target_weights", None):
+        return portfolio, []
+    member_lifecycle = {
+        member.symbol: member.theme_lifecycle_stage for member in universe_members
+    }
+    member_theme = {member.symbol: member.theme for member in universe_members}
+    new_weights, notes = apply_lifecycle_caps(
+        dict(portfolio.target_weights),
+        member_lifecycle,
+        member_theme,
+    )
+    if new_weights == portfolio.target_weights:
+        return portfolio, notes
+    try:
+        updated = portfolio.__class__(
+            **{
+                field: getattr(portfolio, field)
+                for field in portfolio.__dataclass_fields__
+                if field != "target_weights"
+            },
+            target_weights={symbol: weight for symbol, weight in new_weights.items() if weight > 0.0},
+        )
+    except TypeError:
+        return portfolio, notes
+    return updated, notes
+
+
+def _select_tool_hedge(
+    portfolio,
+    hedge,
+    market,
+    price_panel: pd.DataFrame,
+    cfg: dict[str, Any],
+) -> HedgeRecommendation | None:
+    """Compute a tool-based hedge recommendation from the portfolio + price history."""
+
+    hedge_cfg = cfg.get("tool_hedge", {}) or {}
+    if not bool(hedge_cfg.get("enabled", True)):
+        return None
+    target_weights = dict(getattr(portfolio, "target_weights", {}) or {})
+    if not target_weights:
+        return None
+    if price_panel is None or price_panel.empty:
+        return None
+    benchmark_symbol = str(hedge_cfg.get("benchmark_symbol", "000300.SH"))
+    returns = returns_panel_from_close(price_panel)
+    benchmark = benchmark_returns_from_close(price_panel, benchmark_symbol)
+    if returns.empty:
+        return None
+    if benchmark.empty:
+        # Use cross-sectional average as a synthetic market index
+        synthetic = returns.mean(axis=1).dropna()
+        benchmark = synthetic
+        benchmark.name = benchmark_symbol
+    pb = portfolio_beta(target_weights, returns, benchmark, benchmark_symbol=benchmark_symbol)
+    target_beta = float(hedge_cfg.get("target_beta", 0.30))
+    sector_exposure = dict(getattr(portfolio, "sector_weights", {}) or {})
+    return select_hedge(
+        pb,
+        target_beta=target_beta,
+        hedge_need_score=getattr(hedge, "hedge_need_score", 0.0),
+        sector_exposure=sector_exposure,
+        max_total_hedge_weight=float(hedge_cfg.get("max_total_hedge_weight", 0.25)),
+        bear_market=getattr(market.market_regime, "value", str(market.market_regime)).lower() in {"bear", "risk_off", "liquidity_crunch"},
+    )
 
 
 def _load_datahub_result(cfg: dict[str, Any], as_of_date: str) -> V7DataHubResult:

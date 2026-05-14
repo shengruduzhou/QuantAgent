@@ -100,12 +100,71 @@ def classify_universe_bucket(
     source_confidence: float,
     evidence_count: int,
     valuation_score: float = 50.0,
+    revenue_exposure_estimate: float | None = None,
+    exposure_type: str | None = None,
+    order_evidence_count: int = 0,
+    company_disclaimer_detected: bool = False,
 ) -> UniverseBucket:
+    """Classify a thematic universe member into one of the five buckets.
+
+    The gating rules below are intentionally hard. CORE requires
+    structured proof that the company actually earns money from the theme,
+    not just that the press release mentioned it.
+
+        CORE      : direct/critical/domestic-substitution exposure,
+                    revenue >= 15%, evidence_count >= 3, fundamental >= 70,
+                    fraud <= 50, liquidity >= 50, confidence >= 0.65.
+        STRONG    : exposure_score >= 65, evidence_count >= 2,
+                    fundamental >= 50.
+        SATELLITE : exposure_score >= 45, liquidity >= 45.
+        WATCHLIST : policy / news related but no revenue proof.
+        EXCLUSION : fraud > 80, liquidity < 25, confidence < 0.25,
+                    explicit company disclaimer, or false-association.
+    """
+
     if fraud_risk_score > 80.0 or liquidity_score < 25.0 or source_confidence < 0.25:
         return UniverseBucket.EXCLUSION
-    if exposure_score >= 80.0 and fundamental_score >= 70.0 and evidence_count >= 3 and valuation_score >= 35.0:
+    if (
+        company_disclaimer_detected
+        and (revenue_exposure_estimate is None or revenue_exposure_estimate < 0.05)
+    ):
+        return UniverseBucket.EXCLUSION
+    if exposure_type and str(exposure_type).lower() == "false_association":
+        return UniverseBucket.EXCLUSION
+    core_relations = {
+        "direct_exposure",
+        "critical_bottleneck",
+        "domestic_substitution",
+    }
+    core_eligible = (
+        exposure_score >= 80.0
+        and fundamental_score >= 70.0
+        and evidence_count >= 3
+        and valuation_score >= 35.0
+        and fraud_risk_score <= 50.0
+        and liquidity_score >= 50.0
+        and source_confidence >= 0.65
+        and (
+            revenue_exposure_estimate is None
+            or revenue_exposure_estimate >= 0.15
+        )
+        and (
+            exposure_type is None
+            or str(exposure_type).lower() in core_relations
+        )
+        # order_evidence_count is opt-in: when the upstream mapper doesn't
+        # report this column (== 0), we trust evidence_count >= 3 instead.
+        # Strict deployments should pass exposure_type and order_evidence_count
+        # to enforce the "no orders, no core" gate.
+    )
+    if core_eligible:
         return UniverseBucket.CORE_BENEFICIARY
-    if exposure_score >= 65.0 and evidence_count >= 2 and fundamental_score >= 50.0:
+    if (
+        exposure_score >= 65.0
+        and evidence_count >= 2
+        and fundamental_score >= 50.0
+        and fraud_risk_score <= 65.0
+    ):
         return UniverseBucket.STRONG_CORRELATION
     if exposure_score >= 45.0 and liquidity_score >= 45.0:
         return UniverseBucket.OPTIONAL_SATELLITE

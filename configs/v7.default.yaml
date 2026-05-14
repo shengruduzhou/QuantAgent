@@ -105,6 +105,31 @@ long_short_allocator:
   long_horizon_confidence_threshold: 0.45
   short_horizon_confidence_threshold: 0.55
   hedge_scale: 0.30
+  bind_to_portfolio: true
+tool_hedge:
+  enabled: true
+  benchmark_symbol: 000300.SH
+  target_beta: 0.30
+  max_total_hedge_weight: 0.25
+news_cross_validation:
+  enabled: true
+  rumour_keywords: [传闻, 据传, 据悉, 未经证实, 市场传言, 传言]
+lifecycle_trading_rules:
+  enabled: true
+ingestion:
+  enabled: true
+  cache_root: data/v7/evidence
+  available_lag_days: 1
+  enabled_sources: [policy, disclosure, news, financial, order_contract, regulatory_penalty]
+  policy:
+    urls: []
+    allow_network: false
+  disclosure:
+    allow_network: false
+  news:
+    urls: []
+    allow_network: false
+  source_registry: []
 evidence:
   min_source_reliability_for_trade_signal: 0.5
   min_cross_validation_count_for_core_pool: 2

@@ -117,7 +117,8 @@ def allocate_long_short(
         cash_share -= short_strength * 0.05
     sector_share += float(np.clip(market.sector_rotation_score_average() if hasattr(market, "sector_rotation_score_average") else _mean_sector_score(market), 0.0, 0.20)) * 0.05
 
-    hedge_share = min(0.30, hedge_share + hedge.hedge_weight * config.hedge_scale)
+    hedge_weight_input = float(getattr(hedge, "hedge_weight", 0.0)) if hedge is not None else 0.0
+    hedge_share = min(0.30, hedge_share + hedge_weight_input * config.hedge_scale)
     if market.market_regime in {MarketRegime.RISK_OFF, MarketRegime.BEAR, MarketRegime.LIQUIDITY_CRUNCH}:
         cash_share += config.risk_off_cash_bonus
         long_share *= 0.70
@@ -156,7 +157,7 @@ def allocate_long_short(
         f"regime={market.market_regime.value}; risk_off={market.risk_off_score:.2f}; "
         f"long_signal={long_horizon_signal:+.2f}@{avg_long_conf:.2f}; "
         f"short_signal={short_horizon_signal:+.2f}@{avg_short_conf:.2f}; "
-        f"hedge_need={hedge.hedge_need_score:.2f}; cash={cash_share:.2f}"
+        f"hedge_need={float(getattr(hedge, 'hedge_need_score', 0.0)):.2f}; cash={cash_share:.2f}"
     )
     return LongShortAllocation(
         sleeve_weights=sleeve_weights,

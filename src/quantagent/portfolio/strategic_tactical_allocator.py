@@ -24,9 +24,21 @@ def construct_v7_portfolio(
     max_sector_weight: float = 0.30,
     max_theme_weight: float = 0.35,
     turnover_limit: float = 0.35,
+    sleeve_weights_override: dict[SleeveType, float] | None = None,
 ) -> PortfolioPlan:
+    """Build the V7 portfolio plan.
+
+    ``sleeve_weights_override`` lets upstream components (the walk-forward
+    sleeve allocator or the long-short allocator) bind the sleeve
+    distribution that the portfolio must respect. When omitted, the
+    builder falls back to the deterministic ``_dynamic_sleeves`` prior.
+    """
+
     timing = timing or {}
-    sleeve_weights = _dynamic_sleeves(market)
+    if sleeve_weights_override:
+        sleeve_weights = _normalise_sleeve_override(sleeve_weights_override)
+    else:
+        sleeve_weights = _dynamic_sleeves(market)
     candidates = [member for member in universe if member.watchlist_status not in {UniverseBucket.EXCLUSION, UniverseBucket.WATCHLIST}]
     if not candidates:
         return PortfolioPlan(
@@ -116,6 +128,54 @@ def construct_v7_portfolio(
         sleeve_target_weights=sleeve_target_weights,
         constraint_notes=tuple(notes),
     )
+
+
+def _normalise_sleeve_override(override: dict[SleeveType, float]) -> dict[SleeveType, float]:
+    """Coerce an external sleeve weight dict into the canonical six-sleeve frame.
+
+    Missing sleeves default to 0.0; the resulting weights are renormalised so
+    they sum to 1.0. Cash buffer is guaranteed a minimum of 5% to keep the
+    portfolio in a runnable state when an upstream allocator forgets it.
+    """
+
+    canonical = [
+        SleeveType.LONG_FUNDAMENTAL,
+        SleeveType.MEDIUM_THEME,
+        SleeveType.SHORT_EVENT,
+        SleeveType.SECTOR_ROTATION,
+        SleeveType.HEDGE,
+        SleeveType.CASH_BUFFER,
+    ]
+    weights: dict[SleeveType, float] = {sleeve: 0.0 for sleeve in canonical}
+    for key, value in override.items():
+        if isinstance(key, str):
+            try:
+                sleeve = SleeveType(key)
+            except ValueError:
+                continue
+        else:
+            sleeve = key
+        try:
+            weights[sleeve] = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+    if weights[SleeveType.CASH_BUFFER] < 0.05:
+        weights[SleeveType.CASH_BUFFER] = 0.05
+    total = sum(weights.values())
+    if total <= 0.0:
+        return _dynamic_sleeves_default()
+    return {sleeve: float(weights[sleeve] / total) for sleeve in canonical}
+
+
+def _dynamic_sleeves_default() -> dict[SleeveType, float]:
+    return {
+        SleeveType.LONG_FUNDAMENTAL: 0.25,
+        SleeveType.MEDIUM_THEME: 0.30,
+        SleeveType.SHORT_EVENT: 0.10,
+        SleeveType.SECTOR_ROTATION: 0.10,
+        SleeveType.HEDGE: 0.05,
+        SleeveType.CASH_BUFFER: 0.20,
+    }
 
 
 def _dynamic_sleeves(market: MarketRegimeSnapshot) -> dict[SleeveType, float]:

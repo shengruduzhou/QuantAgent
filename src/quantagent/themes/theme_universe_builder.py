@@ -53,6 +53,9 @@ def build_thematic_universe(
             quality_score = min(quality_score, 40.0)
             source_confidence = min(source_confidence, 0.60)
             data_quality_flags.append("missing_fundamentals_core_block")
+        revenue_exposure_value = _optional_float(row.get("revenue_exposure_estimate"))
+        order_evidence_count = int(row.get("order_evidence_count", 0) or 0)
+        company_disclaimer_detected = bool(row.get("company_disclaimer_detected", False))
         bucket = classify_universe_bucket(
             exposure_score=exposure_score,
             fundamental_score=fundamental_score,
@@ -61,6 +64,10 @@ def build_thematic_universe(
             source_confidence=source_confidence,
             evidence_count=evidence_count,
             valuation_score=valuation_score,
+            revenue_exposure_estimate=revenue_exposure_value,
+            exposure_type=str(row.get("exposure_type", "")),
+            order_evidence_count=order_evidence_count,
+            company_disclaimer_detected=company_disclaimer_detected,
         )
         if not has_fundamental and bucket == UniverseBucket.CORE_BENEFICIARY:
             bucket = UniverseBucket.STRONG_CORRELATION

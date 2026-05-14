@@ -8,17 +8,27 @@ V7 主链：
 
 ```text
 Data Providers (TuShare / AkShare / Local PIT cache)
+  -> Daily Evidence Ingestion Layer
+       PolicyIngestor / DisclosureIngestor / NewsIngestor /
+       FinancialIngestor / OrderContractIngestor / RegulatoryPenaltyIngestor
+  -> Source Credibility Registry (OFFICIAL_PRIMARY → SOCIAL_MEDIA)
   -> Point-in-Time Evidence OS (available_at 严格过滤)
+  -> News Cross-Validator (跨源确认 / 反证 / 同源转载 / 盘后判断)
   -> Policy & Theme Agents (政策红头文件解析、主题发现)
   -> Industry Chain Reasoner (证据驱动产业链图谱，禁用模板回退)
+  -> Evidence-driven Company Exposure Mapper (drops hard-coded alias)
   -> Thematic Universe (核心 / 强相关 / 卫星 / 观察 / 排除)
   -> Fundamental + Fraud + News Credibility Agents
   -> Multi-Horizon Alpha (1 / 5 / 20 / 60 / 120 / 126 天)
   -> Factor Applicability Hard Gate (walk-forward 验证)
+  -> Adaptive Long-Horizon Factor Weights
+       (per theme / sector / lifecycle / regime / horizon)
   -> Market Regime + Sector Rotation
+  -> Long-Short Allocator -> Portfolio (binding sleeve_weights override)
   -> Walk-Forward Sleeve Allocator (long / medium / short / hedge / cash)
+  -> Lifecycle Trading Rules (per-stage caps and exits)
   -> Portfolio Construction
-  -> Hedge Decision Engine
+  -> Hedge Decision Engine + Tool-based Hedge (ETF + cash + beta reduction)
   -> Risk Gate + Kill Switch
   -> A-share Execution Simulation (T+1 / 涨跌停 / 停牌 / ST / 流动性)
   -> OrderManager (唯一允许产生 order intent 的节点)
@@ -48,6 +58,7 @@ Data Providers (TuShare / AkShare / Local PIT cache)
 - V7 架构与 Agent 接口：[`docs/V7_系统架构与Agent接口.md`](docs/V7_系统架构与Agent接口.md)
 - V7 算法、风控、回测与验收：[`docs/V7_算法风控回测与验收.md`](docs/V7_算法风控回测与验收.md)
 - V7 PIT 数据与财务特征：[`docs/V7_PIT数据与财务特征.md`](docs/V7_PIT数据与财务特征.md)
+- V7 证据摄取与交易规则：[`docs/V7_证据摄取与交易规则.md`](docs/V7_证据摄取与交易规则.md)
 
 ## 快速验证 / Quick Validation
 
