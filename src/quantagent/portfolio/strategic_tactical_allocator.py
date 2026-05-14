@@ -19,6 +19,7 @@ def construct_v7_portfolio(
     alphas: dict[str, MultiHorizonAlpha],
     market: MarketRegimeSnapshot,
     timing: dict[str, TechnicalTimingPlan] | None = None,
+    current_weights: dict[str, float] | None = None,
     max_single_name_weight: float = 0.06,
     max_sector_weight: float = 0.30,
     max_theme_weight: float = 0.35,
@@ -38,6 +39,9 @@ def construct_v7_portfolio(
             hedge_weight=sleeve_weights[SleeveType.HEDGE],
             turnover_limit=turnover_limit,
             position_reason={},
+            sector_weights={},
+            theme_weights={},
+            constraint_notes=("no_eligible_universe_members",),
         )
 
     scores: dict[str, float] = {}
@@ -60,12 +64,14 @@ def construct_v7_portfolio(
         )
         if member.watchlist_status == UniverseBucket.OPTIONAL_SATELLITE:
             score *= 0.65
-        scores[member.symbol] = float(max(0.0, score))
-        reasons[member.symbol] = (
-            f"theme={member.theme}, bucket={member.watchlist_status.value}, "
-            f"alpha={horizon_score:.1f}, fundamental={member.fundamental_score:.1f}, "
-            f"fraud={member.fraud_risk_score:.1f}"
-        )
+        score = float(max(0.0, score))
+        if score >= scores.get(member.symbol, -1.0):
+            scores[member.symbol] = score
+            reasons[member.symbol] = (
+                f"theme={member.theme}, bucket={member.watchlist_status.value}, "
+                f"alpha={horizon_score:.1f}, fundamental={member.fundamental_score:.1f}, "
+                f"fraud={member.fraud_risk_score:.1f}"
+            )
 
     risky_capital = max(0.0, 1.0 - sleeve_weights[SleeveType.CASH_BUFFER] - sleeve_weights[SleeveType.HEDGE])
     raw_total = sum(scores.values())
@@ -80,8 +86,20 @@ def construct_v7_portfolio(
             liquidity_cap = bucket_cap * float(np.clip(member.liquidity_score / 60.0, 0.20, 1.0))
             cap = min(max_single_name_weight, bucket_cap, fraud_cap, liquidity_cap)
             target_weights[member.symbol] = min(cap, risky_capital * score / raw_total)
+    notes: list[str] = []
+    member_by_symbol = {member.symbol: member for member in candidates}
+    target_weights, sector_notes = _enforce_group_cap(target_weights, member_by_symbol, "sector", max_sector_weight)
+    target_weights, theme_notes = _enforce_group_cap(target_weights, member_by_symbol, "theme", max_theme_weight)
+    notes.extend(sector_notes)
+    notes.extend(theme_notes)
+    if current_weights:
+        target_weights, turnover_notes = _enforce_turnover_limit(current_weights, target_weights, turnover_limit)
+        target_weights = {symbol: weight for symbol, weight in target_weights.items() if symbol in member_by_symbol}
+        notes.extend(turnover_notes)
     scale = min(1.0, risky_capital / max(sum(target_weights.values()), 1e-12))
     target_weights = {symbol: float(weight * scale) for symbol, weight in sorted(target_weights.items()) if weight > 0}
+    sector_weights = _group_weights(target_weights, member_by_symbol, "sector")
+    theme_weights = _group_weights(target_weights, member_by_symbol, "theme")
     return PortfolioPlan(
         sleeve_weights=sleeve_weights,
         target_weights=target_weights,
@@ -92,6 +110,9 @@ def construct_v7_portfolio(
         hedge_weight=sleeve_weights[SleeveType.HEDGE],
         turnover_limit=turnover_limit,
         position_reason={symbol: reasons[symbol] for symbol in target_weights if symbol in reasons},
+        sector_weights=sector_weights,
+        theme_weights=theme_weights,
+        constraint_notes=tuple(notes),
     )
 
 
@@ -125,3 +146,58 @@ def _horizon_blend(member: ThematicUniverseMember, alpha: MultiHorizonAlpha) -> 
     if member.watchlist_status == UniverseBucket.STRONG_CORRELATION:
         return 100.0 * (0.20 * alpha.alpha_5d + 0.35 * alpha.alpha_20d + 0.30 * alpha.alpha_60d + 0.15 * alpha.alpha_120d)
     return 100.0 * (0.45 * alpha.alpha_1d + 0.35 * alpha.alpha_5d + 0.20 * alpha.alpha_20d)
+
+
+def _enforce_group_cap(
+    weights: dict[str, float],
+    members: dict[str, ThematicUniverseMember],
+    group_field: str,
+    cap: float,
+) -> tuple[dict[str, float], list[str]]:
+    capped = dict(weights)
+    notes: list[str] = []
+    groups = _group_weights(capped, members, group_field)
+    for group, total in groups.items():
+        if group == "unknown" or total <= cap or total <= 0:
+            continue
+        scale = cap / total
+        for symbol, member in members.items():
+            if symbol in capped and _member_group(member, group_field) == group:
+                capped[symbol] *= scale
+        notes.append(f"{group_field}_cap_applied:{group}:{cap:.4f}")
+    return capped, notes
+
+
+def _enforce_turnover_limit(
+    current_weights: dict[str, float],
+    target_weights: dict[str, float],
+    turnover_limit: float,
+) -> tuple[dict[str, float], list[str]]:
+    symbols = set(current_weights) | set(target_weights)
+    turnover = 0.5 * sum(abs(target_weights.get(symbol, 0.0) - current_weights.get(symbol, 0.0)) for symbol in symbols)
+    if turnover <= turnover_limit or turnover <= 0:
+        return dict(target_weights), []
+    blend = turnover_limit / turnover
+    adjusted = {
+        symbol: float(current_weights.get(symbol, 0.0) + (target_weights.get(symbol, 0.0) - current_weights.get(symbol, 0.0)) * blend)
+        for symbol in symbols
+    }
+    return {symbol: weight for symbol, weight in adjusted.items() if weight > 0}, [f"turnover_limit_applied:{turnover_limit:.4f}"]
+
+
+def _group_weights(weights: dict[str, float], members: dict[str, ThematicUniverseMember], group_field: str) -> dict[str, float]:
+    groups: dict[str, float] = {}
+    for symbol, weight in weights.items():
+        group = _member_group(members.get(symbol), group_field)
+        groups[group] = groups.get(group, 0.0) + float(weight)
+    return groups
+
+
+def _member_group(member: ThematicUniverseMember | None, group_field: str) -> str:
+    if member is None:
+        return "unknown"
+    if group_field == "sector":
+        return member.sector or "unknown"
+    if group_field == "theme":
+        return member.theme or "unknown"
+    return "unknown"

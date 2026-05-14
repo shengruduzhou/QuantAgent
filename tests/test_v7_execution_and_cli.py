@@ -36,7 +36,7 @@ def test_tplus1_engine_blocks_limit_down_sell():
 def test_v7_cli_validate_and_daily_smoke(tmp_path):
     runner = CliRunner()
     validate = runner.invoke(app, ["validate-v7", "--config", "configs/v7.default.yaml"])
-    daily = runner.invoke(app, ["run-daily-v7", "--config", "configs/v7.default.yaml", "--date", "2026-05-14", "--output-dir", str(tmp_path)])
+    daily = runner.invoke(app, ["run-daily-v7", "--config", "configs/v7.mock.yaml", "--date", "2026-05-14", "--output-dir", str(tmp_path)])
 
     assert validate.exit_code == 0, validate.output
     assert "passed" in validate.output

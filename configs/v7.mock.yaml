@@ -13,18 +13,16 @@ data:
   point_in_time_required: true
   max_prediction_horizon_days: 126
   supported_horizons_days: [1, 5, 20, 60, 120, 126]
-  provider_mode: strict_local
-  allow_synthetic_fallback: false
+  provider_mode: mock
+  allow_synthetic_fallback: true
   allow_network: false
   v7_root: data/v7
-  required_tables: [policies, base_universe, market_state]
-  policy_urls: []
-  news_urls: []
-  disclosure_urls: []
 evidence:
   min_source_reliability_for_trade_signal: 0.5
   min_cross_validation_count_for_core_pool: 2
   stale_theme_revalidation_days: 20
+themes:
+  min_theme_strength: 0.20
 agents:
   policy_agent: enabled
   theme_discovery_agent: enabled

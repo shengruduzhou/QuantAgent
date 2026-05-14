@@ -3,6 +3,7 @@ import pandas as pd
 from quantagent.fundamental.confidence_adjuster import adjust_confidence
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
 from quantagent.fundamental.fraud_risk_agent import score_fraud_risk
+from quantagent.data.v7_datahub import V7DataQualityError
 from quantagent.services.v7_pipeline_service import run_daily_v7_research, validate_v7
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.policy_crawler import local_policy_documents
@@ -87,14 +88,26 @@ def test_theme_universe_distinguishes_core_from_false_association():
 
 def test_v7_daily_service_returns_closed_loop_without_orders():
     validation = validate_v7("configs/v7.default.yaml")
-    result = run_daily_v7_research("configs/v7.default.yaml", as_of_date="2026-05-14")
+    result = run_daily_v7_research("configs/v7.mock.yaml", as_of_date="2026-05-14")
 
     assert validation["status"] == "passed"
+    assert result["data_mode"]["provider_mode"] == "mock"
     assert result["theme_ranking"]
     assert result["thematic_universe"]
     assert result["portfolio_plan"]["target_weights"]
+    assert len(result["selected_themes"]) >= 2
+    assert len(result["industry_chain"]["by_theme"]) >= 2
     assert "OrderIntent" not in str(result)
     assert "OrderManager" in result["order_boundary"]
+
+
+def test_v7_default_daily_refuses_synthetic_fallback_when_data_missing():
+    try:
+        run_daily_v7_research("configs/v7.default.yaml", as_of_date="2026-05-14")
+    except V7DataQualityError as exc:
+        assert "refusing synthetic fallback" in str(exc)
+    else:
+        raise AssertionError("strict_local default must not fall back to synthetic data")
 
 
 def test_confidence_adjuster_penalizes_high_fraud_risk():

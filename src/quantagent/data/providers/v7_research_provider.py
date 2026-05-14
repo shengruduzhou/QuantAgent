@@ -21,6 +21,8 @@ class V7ResearchDataBundle:
     market_state: ProviderResult
     market_panel: ProviderResult
     factors: ProviderResult
+    positions: ProviderResult
+    announcements: ProviderResult
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -38,6 +40,8 @@ class LocalV7ResearchProvider:
         "market_state": "market_state.csv",
         "market_panel": "market_panel.csv",
         "factors": "factors.csv",
+        "positions": "positions.csv",
+        "announcements": "announcements.csv",
     }
 
     def __init__(self, root: str | Path = "data/v7") -> None:
@@ -56,6 +60,8 @@ class LocalV7ResearchProvider:
             market_state=results["market_state"],
             market_panel=results["market_panel"],
             factors=results["factors"],
+            positions=results["positions"],
+            announcements=results["announcements"],
             metadata={"root": str(self.root), "as_of_date": as_of_date},
         )
 

@@ -37,9 +37,10 @@ git diff --check
 ```powershell
 quantagent validate-v7 --config configs/v7.default.yaml
 quantagent run-daily-v7 --config configs/v7.default.yaml --date 2026-05-14 --output-dir reports/v7
+quantagent run-daily-v7 --config configs/v7.mock.yaml --date 2026-05-14 --output-dir reports/v7
 ```
 
-`run-daily-v7` 当前使用 deterministic synthetic inputs 跑通政策解析、Theme Discovery、industry chain graph、dynamic thematic universe、fundamental / fraud scoring、multi-horizon alpha、sleeve allocation、hedge decision、execution constraints、Risk Gate、theme backtest attribution 和 Audit Log。它不会生成真实交易订单。
+`configs/v7.default.yaml` 默认是 `strict_local`，缺少 PIT policies、base_universe、market_state 或 company-theme 数据时会拒绝 synthetic fallback，避免把 mock research 伪装成真实研究。`configs/v7.mock.yaml` 才使用 deterministic synthetic inputs，用于离线 smoke test、Theme Discovery、industry chain graph、dynamic thematic universe、multi-horizon alpha、A-share execution constraints、Risk Gate 和 Audit Log 验证；两种模式都不会生成真实交易订单。
 
 ## 配置 / Config
 

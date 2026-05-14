@@ -4,13 +4,14 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
 from quantagent.backtest.event_driven_theme_backtester import EventDrivenThemeBacktester
 from quantagent.credibility.news_credibility_agent import score_news_credibility
 from quantagent.data.providers.base import ProviderRequest
-from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider
+from quantagent.data.v7_datahub import V7DataHub, V7DataHubResult
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
 from quantagent.fundamental.fraud_risk_agent import score_fraud_risk
@@ -33,6 +34,7 @@ from quantagent.v7.schemas import (
     MultiHorizonAlpha,
     RiskGateReport,
     TechnicalTimingPlan,
+    ThemeLifecycleStage,
 )
 from quantagent.v7.scoring import execution_feasibility_score
 
@@ -72,57 +74,89 @@ def validate_v7(config: str | Path | dict[str, Any] | None = None) -> dict[str, 
 
 def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_of_date: str = "2026-05-14") -> dict[str, Any]:
     cfg = load_v7_config(config)
-    bundle = _load_local_bundle(cfg, as_of_date)
-    policy_rows = _frame_or_records(bundle.policies.frame, cfg.get("synthetic_policy_documents", _synthetic_policy_records(as_of_date)))
+    hub_result = _load_datahub_result(cfg, as_of_date)
+    bundle = hub_result.bundle
+    allow_synthetic = hub_result.allow_synthetic_fallback
+    policy_rows = _frame_or_records(
+        bundle.policies.frame,
+        cfg.get("synthetic_policy_documents", _synthetic_policy_records(as_of_date)),
+        allow_synthetic,
+    )
     documents = local_policy_documents(policy_rows)
     parsed = [parse_policy_document(document) for document in documents]
     news_scores = score_news_credibility(bundle.news.frame)
     theme_profiles, evidence = discover_themes(
         parsed,
         as_of_date,
-        _frame_or(bundle.theme_metrics.frame, _synthetic_market_theme_metrics()),
+        _frame_or(bundle.theme_metrics.frame, _synthetic_market_theme_metrics(), allow_synthetic),
     )
-    primary_theme = max(theme_profiles, key=lambda item: item.theme_strength)
-    chain_nodes, chain_edges = build_industry_chain_graph(primary_theme)
+    selected_themes = _select_theme_profiles(theme_profiles, cfg)
+    chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile) for profile in selected_themes}
+    all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
+    all_chain_edges = [edge for _, edges in chain_by_theme.values() for edge in edges]
 
-    financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials())
-    fraud_scores = score_fraud_risk(financials_raw)
-    fraud_by_symbol = {score.symbol: score for score in fraud_scores}
+    financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials(), allow_synthetic)
     financials = financials_raw.copy()
-    financials["fraud_risk_score"] = financials["symbol"].map(lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score)
-    fundamental_scores = score_financial_statements(financials)
+    if financials.empty:
+        fraud_scores = []
+        fundamental_scores = []
+    else:
+        fraud_scores = score_fraud_risk(financials)
+        fraud_by_symbol = {score.symbol: score for score in fraud_scores}
+        financials["fraud_risk_score"] = financials["symbol"].map(
+            lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score if str(symbol) in fraud_by_symbol else 50.0
+        )
+        fundamental_scores = score_financial_statements(financials)
     fundamentals = {score.symbol: score for score in fundamental_scores}
 
-    base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe())
+    base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe(), allow_synthetic)
     company_theme_map = bundle.company_theme_map.frame
     if company_theme_map.empty:
-        profiles = _frame_or(bundle.company_profiles.frame, pd.DataFrame())
+        profiles = _frame_or(bundle.company_profiles.frame, pd.DataFrame(), False)
+        mapped_frames = []
         if not profiles.empty:
-            company_theme_map = map_company_exposures(profiles, primary_theme.theme_name, chain_nodes, evidence, as_of_date=as_of_date)
-    company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(as_of_date))
-    market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state())
-    universe_members = build_thematic_universe(
+            for profile in selected_themes:
+                chain_nodes, _ = chain_by_theme[profile.theme_name]
+                mapped = map_company_exposures(profiles, profile.theme_name, chain_nodes, evidence, as_of_date=as_of_date)
+                if not mapped.empty:
+                    mapped_frames.append(mapped)
+        company_theme_map = pd.concat(mapped_frames, ignore_index=True) if mapped_frames else company_theme_map
+    company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(as_of_date), allow_synthetic)
+    market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state(), allow_synthetic)
+    universe_members = _build_multi_theme_universe(
         base_universe=base_universe,
         company_theme_map=company_theme_map,
-        theme_profiles=theme_profiles,
-        chain_nodes=chain_nodes,
+        theme_profiles=selected_themes,
+        chain_by_theme=chain_by_theme,
         fundamentals=fundamentals,
         market_state=market_state,
         as_of_date=as_of_date,
     )
-    market = _synthetic_market_regime()
-    factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date)
+    market = _market_regime_from_data(bundle.market_panel.frame, market_state, universe_members, selected_themes, allow_synthetic)
+    factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date, allow_synthetic)
     factor_columns = _factor_columns(factor_frame)
     factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
     alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
-    if not alphas:
+    if not alphas and allow_synthetic:
         alphas = _build_synthetic_alphas(universe_members)
     timing = _build_timing(universe_members)
-    portfolio = construct_v7_portfolio(universe_members, alphas, market, timing)
-    hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=primary_theme.crowding_score)
-    execution_reports = _execution_reports(portfolio)
+    portfolio_cfg = cfg.get("portfolio", {})
+    portfolio = construct_v7_portfolio(
+        universe_members,
+        alphas,
+        market,
+        timing,
+        current_weights=_current_weights(bundle.positions.frame),
+        max_single_name_weight=float(portfolio_cfg.get("max_single_name_weight", 0.06)),
+        max_sector_weight=float(portfolio_cfg.get("max_sector_weight", 0.30)),
+        max_theme_weight=float(portfolio_cfg.get("max_theme_weight", 0.35)),
+        turnover_limit=float(portfolio_cfg.get("max_turnover", portfolio_cfg.get("turnover_limit", 0.35))),
+    )
+    theme_crowding = _average_theme_crowding(selected_themes)
+    hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=theme_crowding)
+    execution_reports = _execution_reports(portfolio, market_state, bundle.positions.frame, cfg.get("execution", {}))
     risk_report = _risk_gate_report(universe_members, portfolio, execution_reports, hedge)
-    backtest = _run_synthetic_theme_backtest(portfolio)
+    backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, universe_members, allow_synthetic)
     audit = AuditLogRecord(
         decision_id=f"v7-{as_of_date}",
         timestamp=as_of_date,
@@ -132,13 +166,18 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             "financials": bundle.fundamentals.source,
             "company_theme_map": bundle.company_theme_map.source,
         },
-        model_version="v7.synthetic.multi_horizon",
-        feature_version="v7.synthetic.features",
+        model_version="v7.mock.multi_horizon" if allow_synthetic else "v7.strict.multi_horizon",
+        feature_version="v7.mock.features" if allow_synthetic else "v7.pit.features",
         evidence_hashes=tuple(record.hash for record in evidence if record.hash),
         risk_gate_result="passed" if risk_report.risk_passed else "failed",
-        final_decision_reason="V7 synthetic daily research run; no live orders emitted.",
+        final_decision_reason="V7 research run emitted target_weights only; no live orders emitted.",
     )
     return {
+        "data_mode": {
+            "provider_mode": hub_result.provider_mode,
+            "allow_synthetic_fallback": allow_synthetic,
+            "warnings": list(hub_result.warnings),
+        },
         "market_summary": {
             "market_regime": market.market_regime.value,
             "risk_off_score": market.risk_off_score,
@@ -146,10 +185,18 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             "recommended_cash_weight": market.recommended_cash_weight,
             "hedge_need_score": hedge.hedge_need_score,
         },
+        "selected_themes": [profile.theme_name for profile in selected_themes],
         "theme_ranking": [_to_dict(profile) for profile in sorted(theme_profiles, key=lambda item: item.theme_strength, reverse=True)],
         "industry_chain": {
-            "nodes": [_to_dict(node) for node in chain_nodes],
-            "edges": [_to_dict(edge) for edge in chain_edges],
+            "nodes": [_to_dict(node) for node in all_chain_nodes],
+            "edges": [_to_dict(edge) for edge in all_chain_edges],
+            "by_theme": {
+                theme: {
+                    "nodes": [_to_dict(node) for node in nodes],
+                    "edges": [_to_dict(edge) for edge in edges],
+                }
+                for theme, (nodes, edges) in chain_by_theme.items()
+            },
         },
         "thematic_universe": [_to_dict(member) for member in universe_members],
         "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
@@ -165,29 +212,90 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     }
 
 
-def _load_local_bundle(cfg: dict[str, Any], as_of_date: str):
+def _load_datahub_result(cfg: dict[str, Any], as_of_date: str) -> V7DataHubResult:
     data_cfg = cfg.get("data", {})
-    root = data_cfg.get("v7_root", "data/v7")
     request = ProviderRequest(
         start_date=str(data_cfg.get("start_date", "1900-01-01")),
         end_date=str(data_cfg.get("end_date", as_of_date)),
         symbols=tuple(data_cfg.get("symbols", ())),
         universe=data_cfg.get("universe"),
     )
-    return LocalV7ResearchProvider(root).load_bundle(request, as_of_date)
+    return V7DataHub(data_cfg).load(request, as_of_date)
 
 
-def _frame_or(frame: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
-    return frame if frame is not None and not frame.empty else fallback
+def _frame_or(frame: pd.DataFrame, fallback: pd.DataFrame, allow_fallback: bool) -> pd.DataFrame:
+    if frame is not None and not frame.empty:
+        return frame
+    return fallback if allow_fallback else pd.DataFrame()
 
 
-def _frame_or_records(frame: pd.DataFrame, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return frame.to_dict("records") if frame is not None and not frame.empty else fallback
+def _frame_or_records(frame: pd.DataFrame, fallback: list[dict[str, Any]], allow_fallback: bool) -> list[dict[str, Any]]:
+    if frame is not None and not frame.empty:
+        return frame.to_dict("records")
+    return fallback if allow_fallback else []
 
 
-def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, financials: pd.DataFrame, market_state: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
+def _select_theme_profiles(theme_profiles: list, cfg: dict[str, Any]) -> list:
+    if not theme_profiles:
+        return []
+    threshold = float(cfg.get("themes", {}).get("min_theme_strength", 0.20))
+    inactive = {ThemeLifecycleStage.DECAY, ThemeLifecycleStage.INVALIDATED}
+    selected = [
+        profile
+        for profile in theme_profiles
+        if profile.theme_strength >= threshold and profile.lifecycle_stage not in inactive
+    ]
+    return selected or sorted(theme_profiles, key=lambda item: item.theme_strength, reverse=True)[:1]
+
+
+def _build_multi_theme_universe(
+    base_universe: pd.DataFrame,
+    company_theme_map: pd.DataFrame,
+    theme_profiles: list,
+    chain_by_theme: dict[str, tuple[list, list]],
+    fundamentals: dict[str, Any],
+    market_state: pd.DataFrame,
+    as_of_date: str,
+) -> list:
+    members = []
+    if base_universe.empty or company_theme_map.empty:
+        return members
+    for profile in theme_profiles:
+        if "theme" not in company_theme_map.columns:
+            continue
+        theme_map = company_theme_map[company_theme_map["theme"].astype(str) == profile.theme_name]
+        if theme_map.empty:
+            continue
+        chain_nodes, _ = chain_by_theme.get(profile.theme_name, ([], []))
+        members.extend(
+            build_thematic_universe(
+                base_universe=base_universe,
+                company_theme_map=theme_map,
+                theme_profiles=[profile],
+                chain_nodes=chain_nodes,
+                fundamentals=fundamentals,
+                market_state=market_state,
+                as_of_date=as_of_date,
+            )
+        )
+    return _dedupe_members(members)
+
+
+def _dedupe_members(members: list) -> list:
+    best_by_key: dict[tuple[str, str], Any] = {}
+    for member in members:
+        key = (member.symbol, member.theme)
+        current = best_by_key.get(key)
+        if current is None or member.exposure_score > current.exposure_score:
+            best_by_key[key] = member
+    return sorted(best_by_key.values(), key=lambda item: (item.theme, item.watchlist_status.value, -item.exposure_score, item.symbol))
+
+
+def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, financials: pd.DataFrame, market_state: pd.DataFrame, as_of_date: str, allow_synthetic: bool) -> pd.DataFrame:
     base = bundle.factors.frame if not bundle.factors.frame.empty else bundle.market_panel.frame
     if base is None or base.empty:
+        if not allow_synthetic:
+            return pd.DataFrame()
         base = pd.DataFrame({"trade_date": [as_of_date for _ in universe_members], "symbol": [member.symbol for member in universe_members], "close": [10.0 + i for i, _ in enumerate(universe_members)], "amount": [1_000_000.0 for _ in universe_members]})
     data = base.copy()
     if "trade_date" not in data.columns:
@@ -210,7 +318,9 @@ def _feature_frame_for_v7(bundle, universe_members: list, theme_profiles: list, 
         ]
     )
     data = data.merge(member_frame, on="symbol", how="left", suffixes=("", "_member"))
-    data = data.merge(market_state[["symbol", "market_attention_score", "liquidity_score"]].drop_duplicates("symbol"), on="symbol", how="left") if not market_state.empty and "symbol" in market_state.columns else data
+    if not market_state.empty and "symbol" in market_state.columns:
+        market_columns = [column for column in ("symbol", "market_attention_score", "liquidity_score") if column in market_state.columns]
+        data = data.merge(market_state[market_columns].drop_duplicates("symbol"), on="symbol", how="left")
     if "close" in data.columns:
         data = data.sort_values(["symbol", "trade_date"])
         data["ret_1d"] = data.groupby("symbol")["close"].pct_change().fillna(0.0)
@@ -238,6 +348,149 @@ def _factor_columns(frame: pd.DataFrame) -> list[str]:
         "watchlist_status",
     }
     return [column for column in frame.select_dtypes("number").columns if column not in excluded and not column.startswith("forward_return_")]
+
+
+def _market_regime_from_data(
+    market_panel: pd.DataFrame,
+    market_state: pd.DataFrame,
+    universe_members: list,
+    theme_profiles: list,
+    allow_synthetic: bool,
+) -> MarketRegimeSnapshot:
+    if market_panel is None or market_panel.empty:
+        if allow_synthetic:
+            return _synthetic_market_regime()
+        return _market_regime_from_state(market_state, universe_members, theme_profiles)
+    data = market_panel.copy()
+    if "trade_date" in data.columns:
+        data["trade_date"] = pd.to_datetime(data["trade_date"])
+        data = data.sort_values(["symbol", "trade_date"])
+    if "close" in data.columns:
+        data["ret_1d"] = data.groupby("symbol")["close"].pct_change().fillna(0.0)
+        data["ret_20d"] = data.groupby("symbol")["close"].pct_change(20).fillna(data["ret_1d"])
+        data["drawdown"] = data.groupby("symbol")["close"].transform(lambda item: item / item.cummax() - 1.0).fillna(0.0)
+        data["volatility_20d"] = data.groupby("symbol")["ret_1d"].transform(lambda item: item.rolling(20, min_periods=2).std()).fillna(0.0)
+    latest = data.groupby("symbol", sort=False).tail(1) if "symbol" in data.columns else data.tail(1)
+    liquidity = _score_from_columns(latest, ("liquidity_score",), default=0.55)
+    if "amount" in latest.columns:
+        amount_score = float(np.clip(np.log1p(latest["amount"].fillna(0.0).mean()) / np.log1p(1e10), 0.0, 1.0))
+        liquidity = max(liquidity, amount_score)
+    breadth = float((latest.get("ret_20d", pd.Series(dtype=float)).fillna(0.0) > 0).mean()) if "ret_20d" in latest.columns else 0.50
+    volatility = float(np.clip(latest.get("volatility_20d", pd.Series([0.20])).fillna(0.20).mean() / 0.04, 0.0, 1.0))
+    drawdown = float(np.clip(abs(latest.get("drawdown", pd.Series([0.0])).fillna(0.0).min()) / 0.20, 0.0, 1.0))
+    crowding = _average_theme_crowding(theme_profiles)
+    risk_off = float(np.clip(0.35 * volatility + 0.35 * drawdown + 0.20 * (1.0 - breadth) + 0.10 * crowding, 0.0, 1.0))
+    risk_on = float(np.clip(0.40 * breadth + 0.30 * liquidity + 0.20 * (1.0 - risk_off) + 0.10 * _average_theme_strength(theme_profiles), 0.0, 1.0))
+    regime = _classify_market_regime(risk_on, risk_off, volatility, breadth, theme_profiles)
+    return MarketRegimeSnapshot(
+        market_regime=regime,
+        sector_regime=_sector_regime_from_members(universe_members),
+        risk_on_score=risk_on,
+        risk_off_score=risk_off,
+        liquidity_score=liquidity,
+        breadth_score=breadth,
+        volatility_score=volatility,
+        drawdown_risk=drawdown,
+        sector_rotation_score=_sector_rotation_scores(universe_members, market_state),
+        recommended_gross_exposure=float(np.clip(0.75 - 0.35 * risk_off + 0.10 * risk_on, 0.25, 0.85)),
+        recommended_cash_weight=float(np.clip(0.15 + 0.35 * risk_off + 0.10 * (1.0 - liquidity), 0.10, 0.60)),
+        hedge_need_score=float(np.clip(0.20 + 0.50 * risk_off + 0.20 * crowding, 0.0, 1.0)),
+    )
+
+
+def _market_regime_from_state(market_state: pd.DataFrame, universe_members: list, theme_profiles: list) -> MarketRegimeSnapshot:
+    state = market_state if market_state is not None else pd.DataFrame()
+    liquidity = _score_from_columns(state, ("liquidity_score",), default=0.50)
+    attention = _score_from_columns(state, ("market_attention_score",), default=0.50)
+    limit_pressure = _score_from_bool_columns(state, ("is_limit_up", "is_limit_down", "is_suspended"))
+    crowding = _average_theme_crowding(theme_profiles)
+    risk_off = float(np.clip(0.25 + 0.30 * limit_pressure + 0.20 * (1.0 - liquidity) + 0.25 * crowding, 0.0, 1.0))
+    risk_on = float(np.clip(0.25 + 0.35 * attention + 0.25 * liquidity + 0.15 * _average_theme_strength(theme_profiles), 0.0, 1.0))
+    return MarketRegimeSnapshot(
+        market_regime=_classify_market_regime(risk_on, risk_off, 0.35, attention, theme_profiles),
+        sector_regime=_sector_regime_from_members(universe_members),
+        risk_on_score=risk_on,
+        risk_off_score=risk_off,
+        liquidity_score=liquidity,
+        breadth_score=attention,
+        volatility_score=0.35,
+        drawdown_risk=risk_off * 0.50,
+        sector_rotation_score=_sector_rotation_scores(universe_members, state),
+        recommended_gross_exposure=float(np.clip(0.70 - 0.35 * risk_off + 0.10 * risk_on, 0.25, 0.85)),
+        recommended_cash_weight=float(np.clip(0.18 + 0.35 * risk_off, 0.10, 0.60)),
+        hedge_need_score=float(np.clip(0.20 + 0.45 * risk_off + 0.20 * crowding, 0.0, 1.0)),
+    )
+
+
+def _classify_market_regime(risk_on: float, risk_off: float, volatility: float, breadth: float, theme_profiles: list) -> MarketRegime:
+    if risk_off >= 0.70:
+        return MarketRegime.RISK_OFF
+    if volatility >= 0.75:
+        return MarketRegime.HIGH_VOLATILITY
+    if risk_on >= 0.62 and breadth >= 0.55:
+        return MarketRegime.RISK_ON
+    if _average_theme_strength(theme_profiles) >= 0.45:
+        return MarketRegime.POLICY_DRIVEN
+    return MarketRegime.RANGE_BOUND
+
+
+def _score_from_columns(frame: pd.DataFrame, columns: tuple[str, ...], default: float) -> float:
+    if frame is None or frame.empty:
+        return default
+    values = []
+    for column in columns:
+        if column in frame.columns:
+            series = pd.to_numeric(frame[column], errors="coerce").dropna()
+            if not series.empty:
+                value = float(series.mean())
+                values.append(value / 100.0 if value > 1.0 else value)
+    return float(np.clip(np.mean(values), 0.0, 1.0)) if values else default
+
+
+def _score_from_bool_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> float:
+    if frame is None or frame.empty:
+        return 0.0
+    values = []
+    for column in columns:
+        if column in frame.columns:
+            values.append(float(frame[column].fillna(False).astype(bool).mean()))
+    return float(np.clip(np.mean(values), 0.0, 1.0)) if values else 0.0
+
+
+def _sector_regime_from_members(universe_members: list) -> dict[str, str]:
+    sectors: dict[str, list[float]] = {}
+    for member in universe_members:
+        sector = member.sector or "unknown"
+        sectors.setdefault(sector, []).append(member.market_attention_score)
+    return {
+        sector: "capital_inflow" if np.mean(scores) >= 60.0 else "neutral"
+        for sector, scores in sectors.items()
+    }
+
+
+def _sector_rotation_scores(universe_members: list, market_state: pd.DataFrame) -> dict[str, float]:
+    scores: dict[str, list[float]] = {}
+    state_by_symbol = {}
+    if market_state is not None and not market_state.empty and "symbol" in market_state.columns:
+        state_by_symbol = {str(row["symbol"]): row.to_dict() for _, row in market_state.iterrows()}
+    for member in universe_members:
+        sector = member.sector or "unknown"
+        row = state_by_symbol.get(member.symbol, {})
+        value = float(row.get("sector_rotation_score", row.get("market_attention_score", member.market_attention_score)))
+        scores.setdefault(sector, []).append(value / 100.0 if value > 1.0 else value)
+    return {sector: float(np.clip(np.mean(values), 0.0, 1.0)) for sector, values in scores.items()}
+
+
+def _average_theme_crowding(theme_profiles: list) -> float:
+    if not theme_profiles:
+        return 0.0
+    return float(np.clip(np.mean([profile.crowding_score for profile in theme_profiles]), 0.0, 1.0))
+
+
+def _average_theme_strength(theme_profiles: list) -> float:
+    if not theme_profiles:
+        return 0.0
+    return float(np.clip(np.mean([profile.theme_strength for profile in theme_profiles]), 0.0, 1.0))
 
 
 def _synthetic_policy_records(as_of_date: str) -> list[dict[str, Any]]:
@@ -384,37 +637,107 @@ def _build_timing(universe_members: list) -> dict[str, TechnicalTimingPlan]:
     }
 
 
-def _execution_reports(portfolio) -> list[ExecutionConstraintReport]:
-    state = _synthetic_market_state().set_index("symbol")
+def _current_weights(positions: pd.DataFrame) -> dict[str, float]:
+    if positions is None or positions.empty or "symbol" not in positions.columns:
+        return {}
+    weight_column = "current_weight" if "current_weight" in positions.columns else "weight" if "weight" in positions.columns else None
+    if weight_column is None:
+        return {}
+    return {str(row["symbol"]): float(row.get(weight_column, 0.0)) for _, row in positions.iterrows()}
+
+
+def _execution_reports(portfolio, market_state: pd.DataFrame, positions: pd.DataFrame, execution_cfg: dict[str, Any]) -> list[ExecutionConstraintReport]:
+    state = market_state.set_index("symbol") if market_state is not None and not market_state.empty and "symbol" in market_state.columns else pd.DataFrame()
+    position_state = positions.set_index("symbol") if positions is not None and not positions.empty and "symbol" in positions.columns else pd.DataFrame()
+    current_weights = _current_weights(positions)
+    lot_size = int(execution_cfg.get("lot_size", 100))
+    volume_cap = float(execution_cfg.get("volume_participation_cap", 0.10))
     reports: list[ExecutionConstraintReport] = []
     for symbol in portfolio.target_weights:
         row = state.loc[symbol] if symbol in state.index else pd.Series(dtype=object)
+        position = position_state.loc[symbol] if symbol in position_state.index else pd.Series(dtype=object)
+        target_weight = float(portfolio.target_weights.get(symbol, 0.0))
+        current_weight = float(current_weights.get(symbol, 0.0))
+        available_shares = float(position.get("available_shares", position.get("sellable_shares", 0.0)))
+        total_shares = float(position.get("total_shares", position.get("shares", available_shares)))
+        reducing_position = target_weight < current_weight
+        t_plus_one_blocked = bool(execution_cfg.get("t_plus_one", True)) and reducing_position and total_shares > 0 and available_shares <= 0
+        is_limit_up = bool(row.get("is_limit_up", False))
+        is_limit_down = bool(row.get("is_limit_down", False))
+        is_suspended = bool(row.get("is_suspended", False))
+        is_st = bool(row.get("is_st", False))
         feasibility = execution_feasibility_score(
-            bool(row.get("is_suspended", False)),
-            bool(row.get("is_limit_up", False)),
-            bool(row.get("is_limit_down", False)),
+            is_suspended,
+            is_limit_up,
+            is_limit_down,
             float(row.get("liquidity_score", 50.0)),
-            0.05,
+            min(volume_cap, 0.20),
+        )
+        if t_plus_one_blocked or (is_st and bool(execution_cfg.get("block_st", True))):
+            feasibility = min(feasibility, 0.10)
+        rejection_reason = _execution_rejection_reason(
+            is_suspended,
+            is_limit_up,
+            is_limit_down,
+            is_st,
+            t_plus_one_blocked,
+            feasibility,
+            execution_cfg,
         )
         reports.append(
             ExecutionConstraintReport(
                 symbol=symbol,
-                can_buy=feasibility > 0.2 and not bool(row.get("is_limit_up", False)),
-                can_sell=feasibility > 0.2 and not bool(row.get("is_limit_down", False)),
-                t_plus_one_blocked=False,
-                limit_up_no_buy=bool(row.get("is_limit_up", False)),
-                limit_down_no_sell=bool(row.get("is_limit_down", False)),
-                suspended_no_trade=bool(row.get("is_suspended", False)),
-                st_blocked=False,
-                min_lot_size=100,
-                volume_participation_cap=0.10,
-                slippage_bps=5.0,
-                impact_bps=8.0,
+                can_buy=feasibility > 0.2 and not is_limit_up and not is_suspended and not is_st,
+                can_sell=feasibility > 0.2 and not is_limit_down and not is_suspended and not t_plus_one_blocked,
+                t_plus_one_blocked=t_plus_one_blocked,
+                limit_up_no_buy=is_limit_up,
+                limit_down_no_sell=is_limit_down,
+                suspended_no_trade=is_suspended,
+                st_blocked=is_st and bool(execution_cfg.get("block_st", True)),
+                min_lot_size=lot_size,
+                volume_participation_cap=volume_cap,
+                slippage_bps=_slippage_bps(row, target_weight),
+                impact_bps=_impact_bps(row, target_weight, volume_cap),
                 feasibility_score=feasibility,
-                rejection_reason=None if feasibility > 0.2 else "low_execution_feasibility",
+                rejection_reason=rejection_reason,
             )
         )
     return reports
+
+
+def _execution_rejection_reason(
+    is_suspended: bool,
+    is_limit_up: bool,
+    is_limit_down: bool,
+    is_st: bool,
+    t_plus_one_blocked: bool,
+    feasibility: float,
+    execution_cfg: dict[str, Any],
+) -> str | None:
+    if is_suspended and bool(execution_cfg.get("block_suspended", True)):
+        return "suspended_no_trade"
+    if is_st and bool(execution_cfg.get("block_st", True)):
+        return "st_blocked"
+    if is_limit_up and bool(execution_cfg.get("block_buy_limit_up", True)):
+        return "limit_up_no_buy"
+    if is_limit_down and bool(execution_cfg.get("block_sell_limit_down", True)):
+        return "limit_down_no_sell"
+    if t_plus_one_blocked:
+        return "t_plus_one_no_sellable_shares"
+    if feasibility <= 0.2:
+        return "low_execution_feasibility"
+    return None
+
+
+def _slippage_bps(row: pd.Series, target_weight: float) -> float:
+    liquidity = float(row.get("liquidity_score", 50.0))
+    return float(np.clip(12.0 - liquidity / 12.0 + target_weight * 100.0, 2.0, 35.0))
+
+
+def _impact_bps(row: pd.Series, target_weight: float, volume_cap: float) -> float:
+    amount = float(row.get("amount", row.get("turnover_amount", 0.0)) or 0.0)
+    amount_penalty = 20.0 if amount <= 0 else float(np.clip(1e8 / max(amount, 1.0), 0.0, 25.0))
+    return float(np.clip(5.0 + amount_penalty + target_weight * 80.0 + volume_cap * 20.0, 5.0, 60.0))
 
 
 def _risk_gate_report(universe_members: list, portfolio, execution_reports: list[ExecutionConstraintReport], hedge) -> RiskGateReport:
@@ -436,16 +759,89 @@ def _risk_gate_report(universe_members: list, portfolio, execution_reports: list
             rejected[report.symbol] = report.rejection_reason
     if hedge.hedge_need_score > 0.55:
         warnings.append("hedge_need_elevated")
+    kill_switch = hedge.hedge_need_score >= 0.85 or len(blocked) >= max(3, len(portfolio.target_weights))
     return RiskGateReport(
-        risk_passed=not blocked and not rejected,
+        risk_passed=not blocked and not rejected and not kill_switch,
         rejected_symbols=rejected,
         reduced_symbols=reduced,
         blocked_symbols=blocked,
         risk_warnings=tuple(warnings),
         max_allowed_position=max_allowed,
         required_cash_buffer=max(portfolio.cash_weight, hedge.cash_buffer_target),
-        kill_switch_triggered=False,
-        rationale="V7 synthetic risk gate checked fraud, execution feasibility, and hedge need.",
+        kill_switch_triggered=kill_switch,
+        rationale="V7 risk gate checked fraud, A-share execution feasibility, concentration, and hedge need.",
+    )
+
+
+def _run_theme_backtest(portfolio, market_panel: pd.DataFrame, universe_members: list, allow_synthetic: bool) -> BacktestAttributionReport:
+    if market_panel is not None and not market_panel.empty and {"trade_date", "symbol", "open", "high", "low", "close", "volume", "amount"}.issubset(market_panel.columns):
+        prices = market_panel.copy()
+        prices["trade_date"] = pd.to_datetime(prices["trade_date"])
+        dates = sorted(prices["trade_date"].drop_duplicates())
+        symbols = list(portfolio.target_weights)
+        if dates and symbols:
+            weights = pd.DataFrame(0.0, index=dates, columns=symbols)
+            weights.iloc[-1] = pd.Series(portfolio.target_weights)
+            membership = pd.DataFrame(
+                [
+                    {"symbol": member.symbol, "theme": member.theme}
+                    for member in universe_members
+                    if member.symbol in symbols
+                ]
+            ).sort_values(["symbol", "theme"]).drop_duplicates("symbol", keep="first")
+            result = EventDrivenThemeBacktester().run(weights, prices, membership)
+            report = result.base_result.report
+            return BacktestAttributionReport(
+                annual_return=float(report.get("annualized_return", 0.0)),
+                cumulative_return=float(result.base_result.diagnostics.get("total_return", 0.0)),
+                sharpe=float(report.get("sharpe", 0.0)),
+                sortino=float(report.get("sortino", 0.0)),
+                max_drawdown=float(report.get("max_drawdown", 0.0)),
+                calmar=float(report.get("calmar", 0.0)),
+                volatility=float(report.get("volatility", 0.0)),
+                hit_rate=0.0,
+                win_loss_ratio=0.0,
+                turnover=float(report.get("turnover", 0.0)),
+                transaction_cost=float(report.get("cost_attribution", 0.0)),
+                alpha=0.0,
+                beta=0.0,
+                information_ratio=0.0,
+                rank_ic=0.0,
+                rank_icir=0.0,
+                factor_decay={},
+                capacity=float(report.get("capacity_proxy", 0.0)),
+                tail_risk=0.0,
+                drawdown_recovery_days=0,
+                theme_contribution=result.theme_contribution,
+                factor_contribution={},
+                agent_contribution={"event_driven_backtester": 1.0},
+            )
+    if allow_synthetic:
+        return _run_synthetic_theme_backtest(portfolio)
+    return BacktestAttributionReport(
+        annual_return=0.0,
+        cumulative_return=0.0,
+        sharpe=0.0,
+        sortino=0.0,
+        max_drawdown=0.0,
+        calmar=0.0,
+        volatility=0.0,
+        hit_rate=0.0,
+        win_loss_ratio=0.0,
+        turnover=0.0,
+        transaction_cost=0.0,
+        alpha=0.0,
+        beta=0.0,
+        information_ratio=0.0,
+        rank_ic=0.0,
+        rank_icir=0.0,
+        factor_decay={},
+        capacity=0.0,
+        tail_risk=0.0,
+        drawdown_recovery_days=0,
+        theme_contribution={},
+        factor_contribution={},
+        agent_contribution={"backtest_data_missing": 1.0},
     )
 
 

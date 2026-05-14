@@ -1,13 +1,18 @@
+from dataclasses import replace
+
 import pandas as pd
 
 from quantagent.credibility.news_credibility_agent import score_news_credibility
 from quantagent.data.providers.base import ProviderRequest
+from quantagent.data.providers.policy_web_provider import PolicyWebProvider
 from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider
+from quantagent.data.v7_datahub import V7DataHub, V7DataQualityError
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
+from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
 from quantagent.themes.company_exposure_mapper import map_company_exposures
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
-from quantagent.v7.schemas import MarketRegime, ThematicUniverseMember, ThemeLifecycleStage, ThemeProfile, UniverseBucket, ChainRelationType
+from quantagent.v7.schemas import MarketRegime, MarketRegimeSnapshot, MultiHorizonAlpha, ThematicUniverseMember, ThemeLifecycleStage, ThemeProfile, UniverseBucket, ChainRelationType
 
 
 def _theme_profile() -> ThemeProfile:
@@ -72,6 +77,37 @@ def test_local_v7_research_provider_filters_future_rows(tmp_path):
     assert len(bundle.policies.frame) == 1
     assert bundle.policies.frame.iloc[0]["document_id"] == "p1"
     assert "missing_v7_file" in bundle.fundamentals.warnings[0]
+
+
+def test_v7_datahub_strict_requires_core_pit_tables(tmp_path):
+    root = tmp_path / "v7"
+    root.mkdir()
+    (root / "policies.csv").write_text(
+        "document_id,title,body,source,source_level,published_at\n"
+        "p1,AI policy,Support GPU,gov,ministry,2026-05-14\n",
+        encoding="utf-8",
+    )
+    hub = V7DataHub({"v7_root": str(root), "provider_mode": "strict_local", "allow_synthetic_fallback": False})
+
+    try:
+        hub.load(ProviderRequest("2026-05-01", "2026-05-31"), "2026-05-14")
+    except V7DataQualityError as exc:
+        assert "base_universe" in str(exc)
+        assert "market_state" in str(exc)
+    else:
+        raise AssertionError("strict V7 DataHub must fail on missing core PIT tables")
+
+
+def test_policy_web_provider_degrades_when_network_disabled():
+    result = PolicyWebProvider(allow_network=False).fetch_policy_documents(
+        ProviderRequest("2026-05-01", "2026-05-31"),
+        ["https://www.gov.cn/example.html"],
+        as_of_date="2026-05-14",
+    )
+
+    assert result.frame.empty
+    assert result.quality_score == 0.0
+    assert "disabled" in result.warnings[0]
 
 
 def test_company_exposure_mapper_infers_chain_node_from_profile_text():
@@ -151,3 +187,53 @@ def test_v7_multi_horizon_model_uses_feature_inputs_for_long_horizon():
     assert alpha.alpha_120d > alpha.alpha_1d
     assert alpha.confidence > 0
     assert "long_fundamental" in alpha.factor_contribution
+
+
+def test_v7_portfolio_enforces_sector_and_theme_caps():
+    members = [
+        replace(_member(f"S{i}"), sector="technology", theme="ai_compute")
+        for i in range(8)
+    ]
+    alphas = {
+        member.symbol: MultiHorizonAlpha(
+            symbol=member.symbol,
+            alpha_1d=0.3,
+            alpha_5d=0.4,
+            alpha_20d=0.5,
+            alpha_60d=0.6,
+            alpha_120d=0.7,
+            alpha_126d=0.7,
+            expected_return=0.1,
+            expected_excess_return=0.08,
+            volatility_forecast=0.2,
+            downside_risk=0.08,
+            confidence=0.8,
+            conformal_confidence=0.7,
+            prediction_interval_low=-0.05,
+            prediction_interval_high=0.15,
+            rank_score=80,
+            regime_adjusted_score=70,
+            risk_penalty=0.1,
+            final_alpha_score=75,
+        )
+        for member in members
+    }
+    market = MarketRegimeSnapshot(
+        market_regime=MarketRegime.POLICY_DRIVEN,
+        sector_regime={"technology": "capital_inflow"},
+        risk_on_score=0.6,
+        risk_off_score=0.2,
+        liquidity_score=0.7,
+        breadth_score=0.6,
+        volatility_score=0.3,
+        drawdown_risk=0.1,
+        sector_rotation_score={"technology": 0.7},
+        recommended_gross_exposure=0.7,
+        recommended_cash_weight=0.2,
+        hedge_need_score=0.2,
+    )
+    portfolio = construct_v7_portfolio(members, alphas, market, max_sector_weight=0.12, max_theme_weight=0.15)
+
+    assert portfolio.sector_weights["technology"] <= 0.1200001
+    assert portfolio.theme_weights["ai_compute"] <= 0.1500001
+    assert any(note.startswith("sector_cap_applied") for note in portfolio.constraint_notes)

@@ -84,7 +84,8 @@ src/quantagent/reports/
   v7_audit_report.py
 
 src/quantagent/services/
-  v7_pipeline_service.py     # deterministic synthetic V7 closed-loop service and validation
+  v7_pipeline_service.py     # strict/mock V7 closed-loop service and validation
+  v7_datahub.py              # strict_local / online / mock PIT data boundary
 ```
 
 ## EvidenceRecord Schema / 证据结构

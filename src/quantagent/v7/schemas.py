@@ -212,6 +212,11 @@ class ThematicUniverseMember:
     last_validated_at: str
     watchlist_status: UniverseBucket
     removal_reason: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    membership_ttl_days: int = 20
+    validation_status: str = "active"
+    data_quality_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -360,6 +365,9 @@ class PortfolioPlan:
     hedge_weight: float
     turnover_limit: float
     position_reason: dict[str, str] = field(default_factory=dict)
+    sector_weights: dict[str, float] = field(default_factory=dict)
+    theme_weights: dict[str, float] = field(default_factory=dict)
+    constraint_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
