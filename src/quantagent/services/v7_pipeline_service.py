@@ -8,20 +8,62 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from dataclasses import asdict as _asdict_dataclass
+
+from quantagent.agents.llm_orchestrator import (
+    EconomicsOverlay,
+    ForensicsOverlay,
+    LLMOrchestrator,
+    NewsCredibilityAIScore,
+    PolicyAnalysis,
+    SentimentAIResult,
+    SkillToggles,
+    ValuationOverlay,
+)
+from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
 from quantagent.backtest.event_driven_theme_backtester import EventDrivenThemeBacktester
 from quantagent.credibility.news_credibility_agent import news_scores_to_evidence, score_news_credibility
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.v7_datahub import V7DataHub, V7DataHubResult
 from quantagent.factors.factor_applicability_agent import validate_factor_applicability
+from quantagent.factors.long_horizon_factors import (
+    LongHorizonFactorConfig,
+    compute_long_horizon_factors,
+    long_horizon_alpha_score,
+)
 from quantagent.fundamental.due_diligence import build_fundamental_due_diligence
+from quantagent.fundamental.economic_analyzer import (
+    EconomicAnalyzerConfig,
+    analyze_industries,
+    analyze_macro,
+    industry_snapshots_to_company_frame,
+)
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
 from quantagent.fundamental.fraud_risk_agent import score_fraud_risk
+from quantagent.fundamental.intrinsic_valuation import (
+    IntrinsicValuationConfig,
+    value_universe,
+)
 from quantagent.fundamental.order_contract_agent import order_contract_evidence
+from quantagent.models.v7_deep_alpha import V7DeepAlphaConfig, predict_v7_deep_alpha
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.hedge_decision_engine import decide_v7_hedge
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
+from quantagent.risk.retail_hft_risk import (
+    RetailHFTRiskConfig,
+    apply_retail_hft_penalty,
+    score_retail_hft_risk,
+)
+from quantagent.strategy.long_short_allocator import (
+    LongShortAllocatorConfig,
+    allocate_long_short,
+)
 from quantagent.themes.company_exposure_mapper import map_company_exposures
 from quantagent.themes.industry_chain_graph import build_industry_chain_graph
+from quantagent.themes.industry_chain_reasoner import (
+    IndustryChainReasonerConfig,
+    reason_industry_chain_for_themes,
+)
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_parser import parse_policy_document
 from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
@@ -87,13 +129,20 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         allow_synthetic,
     )
     documents = local_policy_documents(policy_rows)
-    parsed = [parse_policy_document(document) for document in documents]
+    llm_client = _build_llm_client(cfg)
+    orchestrator = _build_orchestrator(cfg, llm_client)
+    policy_analyses = orchestrator.analyze_policies(documents)
+    parsed = [
+        parse_policy_document(document, analysis=analysis)
+        for document, analysis in zip(documents, policy_analyses)
+    ]
     schema_evidence, schema_warnings = extract_policy_schema_evidence(
         documents,
         as_of_date,
         cfg.get("policy_extraction", {}) | {"allow_network": bool(cfg.get("data", {}).get("allow_network", False))},
     )
-    news_scores = score_news_credibility(bundle.news.frame)
+    ai_news_scores = orchestrator.score_news_batch(bundle.news.frame)
+    news_scores = _merge_news_credibility(score_news_credibility(bundle.news.frame), ai_news_scores)
     announcement_evidence = order_contract_evidence(bundle.announcements.frame, as_of_date)
     news_evidence = news_scores_to_evidence(news_scores, as_of_date)
     theme_profiles, evidence = discover_themes(
@@ -103,17 +152,43 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         extra_evidence=schema_evidence + announcement_evidence + news_evidence,
     )
     selected_themes = _select_theme_profiles(theme_profiles, cfg)
-    chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile, evidence) for profile in selected_themes}
+    reasoner_cfg = cfg.get("industry_chain_reasoner", {}) or {}
+    use_dynamic_reasoner = bool(reasoner_cfg.get("use_dynamic_reasoner", True))
+    chain_reasoner_results: dict[str, Any] = {}
+    if use_dynamic_reasoner:
+        reasoner_config = IndustryChainReasonerConfig(
+            min_evidence_count_for_node=int(reasoner_cfg.get("min_evidence_count_for_node", 1)),
+            min_evidence_count_for_strong_edge=int(reasoner_cfg.get("min_evidence_count_for_strong_edge", 2)),
+            weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
+            use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
+            and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
+        )
+        chain_reasoner_results = reason_industry_chain_for_themes(selected_themes, evidence, reasoner_config, llm_client)
+        chain_by_theme = {
+            theme: (list(result.nodes), list(result.edges)) for theme, result in chain_reasoner_results.items()
+        }
+        for theme, (nodes, edges) in chain_by_theme.items():
+            if not nodes:
+                template_nodes, template_edges = build_industry_chain_graph(
+                    next(profile for profile in selected_themes if profile.theme_name == theme),
+                    evidence,
+                )
+                chain_by_theme[theme] = (template_nodes, template_edges)
+    else:
+        chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile, evidence) for profile in selected_themes}
     all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
     all_chain_edges = [edge for _, edges in chain_by_theme.values() for edge in edges]
 
     financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials(), allow_synthetic)
     financials = _fundamental_input_frame(financials_raw, market_state=bundle.market_state.frame, market_panel=bundle.market_panel.frame)
+    forensics_overlays: dict[str, ForensicsOverlay] = {}
     if financials.empty:
         fraud_scores = []
         fundamental_scores = []
     else:
         fraud_scores = score_fraud_risk(financials)
+        forensics_overlays = _run_forensics_overlays(orchestrator, financials)
+        fraud_scores = _apply_forensics_overlays(fraud_scores, forensics_overlays)
         fraud_by_symbol = {score.symbol: score for score in fraud_scores}
         financials["fraud_risk_score"] = financials["symbol"].map(
             lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score if str(symbol) in fraud_by_symbol else 50.0
@@ -140,6 +215,8 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
                     mapped_frames.append(mapped)
         company_theme_map = pd.concat(mapped_frames, ignore_index=True) if mapped_frames else company_theme_map
     company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(as_of_date), allow_synthetic)
+    if allow_synthetic:
+        company_theme_map = _align_synthetic_company_theme_map(company_theme_map, selected_themes)
     market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state(), allow_synthetic)
     universe_members = _build_multi_theme_universe(
         base_universe=base_universe,
@@ -151,13 +228,105 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         as_of_date=as_of_date,
     )
     market = _market_regime_from_data(bundle.market_panel.frame, market_state, universe_members, selected_themes, allow_synthetic)
+
+    macro_indicators = _maybe_frame(getattr(bundle, "macro_indicators", None))
+    economic_cfg = cfg.get("economic_analyzer", {}) or {}
+    macro_snapshot = analyze_macro(macro_indicators, as_of_date, EconomicAnalyzerConfig(
+        capacity_utilization_target=float(economic_cfg.get("capacity_utilization_target", 0.80)),
+        inventory_days_warning=float(economic_cfg.get("inventory_days_warning", 90.0)),
+    )) if bool(economic_cfg.get("enabled", True)) else None
+    industry_snapshots = (
+        analyze_industries(financials, selected_themes, macro_snapshot)
+        if macro_snapshot is not None and not financials.empty
+        else []
+    )
+    economics_overlays = _run_economics_overlays(orchestrator, industry_snapshots, macro_snapshot, selected_themes)
+    industry_snapshots = _apply_economics_overlays(industry_snapshots, economics_overlays)
+    economics_company_frame = (
+        industry_snapshots_to_company_frame(financials, industry_snapshots, as_of_date)
+        if industry_snapshots
+        else pd.DataFrame()
+    )
+
+    valuation_cfg = cfg.get("intrinsic_valuation", {}) or {}
+    valuation_reports = (
+        value_universe(
+            financials,
+            market_state,
+            as_of_date,
+            IntrinsicValuationConfig(
+                default_terminal_growth=float(valuation_cfg.get("default_terminal_growth", 0.025)),
+                default_forecast_years=int(valuation_cfg.get("default_forecast_years", 5)),
+                fraud_confidence_haircut_threshold=float(valuation_cfg.get("fraud_confidence_haircut_threshold", 60.0)),
+                fraud_confidence_haircut_strength=float(valuation_cfg.get("fraud_confidence_haircut_strength", 0.60)),
+            ),
+        )
+        if bool(valuation_cfg.get("enabled", True)) and not financials.empty
+        else []
+    )
+    valuation_overlays = _run_valuation_overlays(orchestrator, financials, market_state)
+    valuation_reports = _apply_valuation_overlays(valuation_reports, valuation_overlays)
+    theme_sentiments = _run_theme_sentiments(orchestrator, selected_themes, evidence)
+
+    chain_features_frame = _chain_features_frame(universe_members, chain_by_theme)
+    long_horizon_cfg = cfg.get("long_horizon_factors", {}) or {}
+    long_horizon_factor_frame = (
+        compute_long_horizon_factors(
+            fundamentals=financials,
+            market_state=market_state,
+            price_panel=bundle.market_panel.frame,
+            chain_features=chain_features_frame,
+            economics_features=economics_company_frame,
+            config=LongHorizonFactorConfig(
+                fraud_haircut_threshold=float(long_horizon_cfg.get("fraud_haircut_threshold", 60.0)),
+                fraud_haircut_strength=float(long_horizon_cfg.get("fraud_haircut_strength", 0.50)),
+                policy_decay_half_life_days=float(long_horizon_cfg.get("policy_decay_half_life_days", 90.0)),
+            ),
+        )
+        if bool(long_horizon_cfg.get("enabled", True))
+        else pd.DataFrame()
+    )
+    long_horizon_alpha_frame = long_horizon_alpha_score(long_horizon_factor_frame) if not long_horizon_factor_frame.empty else pd.DataFrame()
+
     factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date, allow_synthetic)
+    factor_frame = _merge_long_horizon_factors(factor_frame, long_horizon_factor_frame, economics_company_frame)
     factor_columns = _factor_columns(factor_frame)
     factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
     stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, factor_applicability, as_of_date)
-    alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
+
+    use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", True))
+    deep_cfg = cfg.get("deep_alpha_model", {}) or {}
+    if use_deep_alpha:
+        alphas = predict_v7_deep_alpha(
+            factor_frame,
+            universe_members,
+            factor_applicability,
+            V7DeepAlphaConfig(
+                hidden_size=int(deep_cfg.get("hidden_size", 16)),
+                seed=int(deep_cfg.get("seed", 1729)),
+                use_torch_if_available=bool(deep_cfg.get("use_torch_if_available", True)),
+                fraud_penalty_weight=float(deep_cfg.get("fraud_penalty_weight", 0.30)),
+            ),
+        )
+    else:
+        alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
     if not alphas and allow_synthetic:
         alphas = _build_synthetic_alphas(universe_members)
+
+    retail_cfg = cfg.get("retail_hft_risk", {}) or {}
+    if bool(retail_cfg.get("enabled", True)):
+        retail_hft_reports = score_retail_hft_risk(
+            bundle.market_panel.frame,
+            market_state,
+            RetailHFTRiskConfig(
+                base_penalty=float(retail_cfg.get("base_penalty", 0.20)),
+                max_penalty=float(retail_cfg.get("max_penalty", 0.85)),
+                institutional_volume_zscore_warning=float(retail_cfg.get("institutional_volume_zscore_warning", 2.0)),
+            ),
+        )
+        alphas = apply_retail_hft_penalty(alphas, retail_hft_reports)
+    else:
+        retail_hft_reports = []
     timing = _build_timing(universe_members)
     portfolio_cfg = cfg.get("portfolio", {})
     portfolio = construct_v7_portfolio(
@@ -173,6 +342,22 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     )
     theme_crowding = _average_theme_crowding(selected_themes)
     hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=theme_crowding)
+    allocator_cfg = cfg.get("long_short_allocator", {}) or {}
+    long_short_allocation = (
+        allocate_long_short(
+            alphas,
+            universe_members,
+            market,
+            hedge,
+            LongShortAllocatorConfig(
+                long_horizon_confidence_threshold=float(allocator_cfg.get("long_horizon_confidence_threshold", 0.45)),
+                short_horizon_confidence_threshold=float(allocator_cfg.get("short_horizon_confidence_threshold", 0.55)),
+                hedge_scale=float(allocator_cfg.get("hedge_scale", 0.30)),
+            ),
+        )
+        if bool(allocator_cfg.get("enabled", True))
+        else None
+    )
     execution_reports = _execution_reports(portfolio, market_state, bundle.positions.frame, cfg.get("execution", {}))
     risk_report = _risk_gate_report(universe_members, portfolio, execution_reports, hedge)
     backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, universe_members, allow_synthetic)
@@ -220,9 +405,32 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         "stock_pool_selection": [_to_dict(report) for report in stock_pool_selection],
         "thematic_universe": [_to_dict(member) for member in universe_members],
         "fundamental_due_diligence": [_to_dict(report) for report in fundamental_due_diligence],
+        "intrinsic_valuation": [_to_dict(report) for report in valuation_reports],
+        "valuation_overlays": [_to_dict(overlay) for overlay in valuation_overlays.values()],
+        "forensics_overlays": [_to_dict(overlay) for overlay in forensics_overlays.values()],
+        "policy_ai_analyses": [_to_dict(analysis) for analysis in policy_analyses],
+        "ai_news_credibility": [_to_dict(score) for score in ai_news_scores],
+        "theme_sentiments": [_to_dict(sentiment) for sentiment in theme_sentiments],
+        "economics_macro": _to_dict(macro_snapshot) if macro_snapshot is not None else {},
+        "economics_industries": [_to_dict(snapshot) for snapshot in industry_snapshots],
+        "economics_overlays": [_to_dict(overlay) for overlay in economics_overlays.values()],
+        "long_horizon_factors": _frame_to_records(long_horizon_factor_frame),
+        "long_horizon_alpha": _frame_to_records(long_horizon_alpha_frame),
+        "industry_chain_reasoner": {
+            theme: {
+                "chain_confidence": result.chain_confidence,
+                "used_llm": result.used_llm,
+                "rationale": result.rationale,
+                "nodes": [_to_dict(node) for node in result.nodes],
+                "edges": [_to_dict(edge) for edge in result.edges],
+            }
+            for theme, result in chain_reasoner_results.items()
+        },
         "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
         "factor_applicability": [_to_dict(item) for item in factor_applicability],
         "news_credibility": [_to_dict(item) for item in news_scores],
+        "retail_hft_risk": [_to_dict(report) for report in retail_hft_reports],
+        "long_short_allocation": _to_dict(long_short_allocation) if long_short_allocation is not None else {},
         "portfolio_plan": _to_dict(portfolio),
         "hedge_decision": _to_dict(hedge),
         "execution_constraints": [_to_dict(report) for report in execution_reports],
@@ -300,6 +508,28 @@ def _build_multi_theme_universe(
             )
         )
     return _dedupe_members(members)
+
+
+def _align_synthetic_company_theme_map(frame: pd.DataFrame, theme_profiles: list) -> pd.DataFrame:
+    """When the orchestrator falls back to token-derived theme names, the
+    synthetic ``company_theme_map`` (which is itself just a unit-test stub) must
+    track those names — otherwise the mock universe is empty. In production
+    ``map_company_exposures`` builds this frame dynamically and this step is a
+    no-op.
+    """
+
+    if frame is None or frame.empty or "theme" not in frame.columns:
+        return frame
+    available = [profile.theme_name for profile in theme_profiles if profile.theme_name]
+    if not available:
+        return frame
+    existing = list(dict.fromkeys(frame["theme"].astype(str)))
+    if any(theme in set(available) for theme in existing):
+        return frame
+    mapping = {old: available[index % len(available)] for index, old in enumerate(existing)}
+    data = frame.copy()
+    data["theme"] = data["theme"].astype(str).map(lambda value: mapping.get(value, value))
+    return data
 
 
 def _dedupe_members(members: list) -> list:
@@ -986,4 +1216,461 @@ def _to_dict(value: Any) -> Any:
         return [_to_dict(item) for item in value]
     if hasattr(value, "value"):
         return value.value
+    return value
+
+
+def _build_llm_client(cfg: dict[str, Any]) -> LLMSkillClient:
+    skills_cfg = cfg.get("llm_skills", {}) or {}
+    return LLMSkillClient(
+        LLMSkillConfig(
+            enabled=bool(skills_cfg.get("enabled", False)),
+            allow_network=bool(skills_cfg.get("allow_network", False)),
+            endpoint=str(skills_cfg.get("endpoint", "https://api.openai.com/v1/chat/completions")),
+            model=str(skills_cfg.get("model", "gpt-4.1-mini")),
+            api_key_env=str(skills_cfg.get("api_key_env", "OPENAI_API_KEY")),
+            timeout_seconds=float(skills_cfg.get("timeout_seconds", 30.0)),
+            max_input_chars=int(skills_cfg.get("max_input_chars", 16000)),
+            temperature=float(skills_cfg.get("temperature", 0.0)),
+        )
+    )
+
+
+def _build_orchestrator(cfg: dict[str, Any], client: LLMSkillClient) -> LLMOrchestrator:
+    skills_cfg = cfg.get("llm_skills", {}) or {}
+    toggles = SkillToggles(
+        policy_analyst=bool(skills_cfg.get("enabled_skills", {}).get("policy_analyst", True)),
+        industry_chain_reasoner=bool(skills_cfg.get("enabled_skills", {}).get("industry_chain_reasoner", True)),
+        news_credibility_agent=bool(skills_cfg.get("enabled_skills", {}).get("news_credibility_agent", True)),
+        sentiment_agent=bool(skills_cfg.get("enabled_skills", {}).get("sentiment_agent", False)),
+        valuation_agent=bool(skills_cfg.get("enabled_skills", {}).get("valuation_agent", False)),
+        financial_forensics_agent=bool(skills_cfg.get("enabled_skills", {}).get("financial_forensics_agent", False)),
+        economics_agent=bool(skills_cfg.get("enabled_skills", {}).get("economics_agent", False)),
+    )
+    return LLMOrchestrator(client, toggles)
+
+
+def _merge_news_credibility(base_scores: list, ai_scores: list[NewsCredibilityAIScore]) -> list:
+    if not ai_scores:
+        return base_scores
+    ai_by_id = {score.news_id: score for score in ai_scores if score.used_llm}
+    if not ai_by_id:
+        return base_scores
+    merged = []
+    for score in base_scores:
+        ai = ai_by_id.get(getattr(score, "news_id", ""))
+        if ai is None:
+            merged.append(score)
+            continue
+        merged.append(
+            score.__class__(
+                **{
+                    field: getattr(score, field)
+                    for field in score.__dataclass_fields__
+                    if field
+                    not in {
+                        "source_reliability",
+                        "is_primary_source",
+                        "is_official",
+                        "cross_validation_count",
+                        "sentiment_score",
+                        "fundamental_impact_score",
+                        "short_term_impact_score",
+                        "medium_term_impact_score",
+                        "confidence",
+                        "decay_half_life",
+                        "horizon_days",
+                        "rumor_risk",
+                        "rationale",
+                    }
+                },
+                source_reliability=ai.source_reliability,
+                is_primary_source=ai.is_primary_source,
+                is_official=ai.is_official,
+                cross_validation_count=ai.cross_validation_count,
+                sentiment_score=ai.sentiment_score,
+                fundamental_impact_score=ai.fundamental_impact,
+                short_term_impact_score=ai.short_term_impact,
+                medium_term_impact_score=ai.medium_term_impact,
+                confidence=ai.confidence,
+                decay_half_life=ai.decay_half_life,
+                horizon_days=ai.horizon_days,
+                rumor_risk=ai.rumor_risk,
+                rationale=f"ai_overlay:{ai.rationale}",
+            )
+        )
+    return merged
+
+
+def _run_forensics_overlays(orchestrator: LLMOrchestrator, financials: pd.DataFrame) -> dict[str, ForensicsOverlay]:
+    if financials is None or financials.empty or not orchestrator.toggles.financial_forensics_agent:
+        return {}
+    overlays: dict[str, ForensicsOverlay] = {}
+    latest = (
+        financials.assign(report_date=pd.to_datetime(financials.get("report_date"), errors="coerce"))
+        .sort_values(["symbol", "report_date"])
+        .groupby("symbol", sort=False)
+        .tail(1)
+    )
+    columns = [
+        "symbol",
+        "revenue",
+        "net_income",
+        "operating_cash_flow",
+        "receivables",
+        "inventory",
+        "cogs",
+        "total_assets",
+        "debt_to_asset",
+        "gross_margin",
+        "audit_opinion",
+        "recent_restatement",
+        "related_party_revenue_share",
+        "fraud_risk_score",
+    ]
+    for _, row in latest.iterrows():
+        symbol = str(row.get("symbol", ""))
+        if not symbol:
+            continue
+        blob = "\n".join(f"{column}: {row.get(column)}" for column in columns if column in row.index)
+        overlay = orchestrator.overlay_forensics(symbol, blob)
+        if overlay is not None:
+            overlays[symbol] = overlay
+    return overlays
+
+
+def _apply_forensics_overlays(fraud_scores: list, overlays: dict[str, ForensicsOverlay]) -> list:
+    if not overlays:
+        return fraud_scores
+    merged = []
+    for score in fraud_scores:
+        overlay = overlays.get(getattr(score, "symbol", ""))
+        if overlay is None:
+            merged.append(score)
+            continue
+        if not hasattr(score, "overall_fraud_risk_score"):
+            merged.append(score)
+            continue
+        weight = 0.55
+        blended = float(
+            (1.0 - weight) * float(getattr(score, "overall_fraud_risk_score", 50.0))
+            + weight * overlay.fraud_risk_score
+        )
+        try:
+            merged.append(
+                score.__class__(
+                    **{
+                        field: getattr(score, field)
+                        for field in score.__dataclass_fields__
+                        if field != "overall_fraud_risk_score"
+                    },
+                    overall_fraud_risk_score=blended,
+                )
+            )
+        except TypeError:
+            merged.append(score)
+    return merged
+
+
+def _run_valuation_overlays(orchestrator: LLMOrchestrator, financials: pd.DataFrame, market_state: pd.DataFrame) -> dict[str, ValuationOverlay]:
+    if financials is None or financials.empty or not orchestrator.toggles.valuation_agent:
+        return {}
+    overlays: dict[str, ValuationOverlay] = {}
+    market_lookup = {
+        str(row.get("symbol")): row.to_dict()
+        for _, row in (market_state if market_state is not None else pd.DataFrame()).iterrows()
+        if str(row.get("symbol"))
+    }
+    latest = (
+        financials.assign(report_date=pd.to_datetime(financials.get("report_date"), errors="coerce"))
+        .sort_values(["symbol", "report_date"])
+        .groupby("symbol", sort=False)
+        .tail(1)
+    )
+    columns = [
+        "symbol",
+        "industry",
+        "revenue",
+        "net_income",
+        "operating_cash_flow",
+        "capex",
+        "total_assets",
+        "debt_to_asset",
+        "gross_margin",
+        "revenue_growth",
+        "profit_growth",
+        "roe",
+        "pe_ttm",
+        "pb",
+        "ps_ttm",
+        "ev_ebitda",
+        "peg",
+        "eps",
+        "book_value_per_share",
+        "dividend_per_share",
+    ]
+    for _, row in latest.iterrows():
+        symbol = str(row.get("symbol", ""))
+        if not symbol:
+            continue
+        market = market_lookup.get(symbol, {})
+        market_blob = "\n".join(
+            f"{key}: {market[key]}"
+            for key in ("close", "market_cap", "free_float_market_cap", "liquidity_score")
+            if key in market
+        )
+        fin_blob = "\n".join(f"{column}: {row.get(column)}" for column in columns if column in row.index)
+        overlay = orchestrator.overlay_valuation(symbol, f"{fin_blob}\n{market_blob}".strip())
+        if overlay is not None:
+            overlays[symbol] = overlay
+    return overlays
+
+
+def _apply_valuation_overlays(reports: list, overlays: dict[str, ValuationOverlay]) -> list:
+    if not overlays:
+        return reports
+    merged = []
+    for report in reports:
+        overlay = overlays.get(getattr(report, "symbol", ""))
+        if overlay is None:
+            merged.append(report)
+            continue
+        try:
+            merged.append(
+                report.__class__(
+                    **{
+                        field: getattr(report, field)
+                        for field in report.__dataclass_fields__
+                        if field
+                        not in {
+                            "fair_value_per_share",
+                            "margin_of_safety_pct",
+                            "valuation_score",
+                            "bubble_risk_score",
+                            "rationale",
+                        }
+                    },
+                    fair_value_per_share=overlay.fair_value_per_share or report.fair_value_per_share,
+                    margin_of_safety_pct=float(
+                        0.50 * report.margin_of_safety_pct + 0.50 * overlay.margin_of_safety_pct
+                    ),
+                    valuation_score=float(0.50 * report.valuation_score + 0.50 * overlay.valuation_score),
+                    bubble_risk_score=max(report.bubble_risk_score, overlay.bubble_risk_score),
+                    rationale=f"{report.rationale}; ai={overlay.rationale}",
+                )
+            )
+        except TypeError:
+            merged.append(report)
+    return merged
+
+
+def _run_economics_overlays(
+    orchestrator: LLMOrchestrator,
+    snapshots: list,
+    macro,
+    theme_profiles: list,
+) -> dict[str, EconomicsOverlay]:
+    if not snapshots or not orchestrator.toggles.economics_agent:
+        return {}
+    macro_blob = (
+        f"as_of={getattr(macro, 'as_of_date', '')}; "
+        f"cycle={getattr(macro, 'business_cycle_stage', '')}; "
+        f"monetary={getattr(macro, 'monetary_stance', '')}; "
+        f"fiscal={getattr(macro, 'fiscal_stance', '')}; "
+        f"credit_impulse={getattr(macro, 'credit_impulse', 0.0)}; "
+        f"cny_strength={getattr(macro, 'cny_strength', 0.0)}; "
+        f"commodity_z={getattr(macro, 'commodity_index_zscore', 0.0)}"
+        if macro is not None
+        else ""
+    )
+    theme_blob = "; ".join(
+        f"{getattr(profile, 'theme_name', '')}:{getattr(profile, 'policy_strength', 0.0):.2f}"
+        for profile in theme_profiles
+    )
+    overlays: dict[str, EconomicsOverlay] = {}
+    for snapshot in snapshots:
+        industry = getattr(snapshot, "industry", "")
+        if not industry:
+            continue
+        blob = (
+            f"industry: {industry}\n"
+            f"current_stage: {getattr(snapshot, 'industry_cycle_stage', '')}\n"
+            f"supply_demand: {getattr(snapshot, 'supply_demand_balance', 0.0)}\n"
+            f"capacity_utilization: {getattr(snapshot, 'capacity_utilization', 0.0)}\n"
+            f"inventory_days_zscore: {getattr(snapshot, 'inventory_days_zscore', 0.0)}\n"
+            f"capex_intensity_trend: {getattr(snapshot, 'capex_intensity_trend', 0.0)}\n"
+            f"pricing_power: {getattr(snapshot, 'pricing_power', 0.0)}\n"
+            f"policy_support: {getattr(snapshot, 'policy_support_strength', 0.0)}\n"
+            f"expected_growth: {getattr(snapshot, 'expected_industry_revenue_growth_yoy', 0.0)}\n"
+            f"macro: {macro_blob}\n"
+            f"theme_policy: {theme_blob}"
+        )
+        overlay = orchestrator.overlay_economics(str(industry), blob)
+        if overlay is not None:
+            overlays[str(industry)] = overlay
+    return overlays
+
+
+def _apply_economics_overlays(snapshots: list, overlays: dict[str, EconomicsOverlay]) -> list:
+    if not overlays:
+        return snapshots
+    merged = []
+    for snapshot in snapshots:
+        overlay = overlays.get(getattr(snapshot, "industry", ""))
+        if overlay is None:
+            merged.append(snapshot)
+            continue
+        try:
+            merged.append(
+                snapshot.__class__(
+                    **{
+                        field: getattr(snapshot, field)
+                        for field in snapshot.__dataclass_fields__
+                        if field
+                        not in {
+                            "industry_cycle_stage",
+                            "supply_demand_balance",
+                            "pricing_power",
+                            "capacity_utilization",
+                            "capex_intensity_trend",
+                            "monetary_tailwind",
+                            "fx_pressure",
+                            "commodity_cost_pressure",
+                            "policy_support_strength",
+                            "expected_industry_revenue_growth_yoy",
+                            "expected_horizon_days",
+                            "economic_thesis",
+                            "rationale",
+                        }
+                    },
+                    industry_cycle_stage=overlay.industry_cycle_stage,
+                    supply_demand_balance=overlay.supply_demand_balance,
+                    pricing_power=overlay.pricing_power,
+                    capacity_utilization=overlay.capacity_utilization,
+                    capex_intensity_trend=overlay.capex_intensity_trend,
+                    monetary_tailwind=overlay.monetary_tailwind,
+                    fx_pressure=overlay.fx_pressure,
+                    commodity_cost_pressure=overlay.commodity_cost_pressure,
+                    policy_support_strength=overlay.policy_support_strength,
+                    expected_industry_revenue_growth_yoy=overlay.expected_industry_revenue_growth_yoy,
+                    expected_horizon_days=overlay.expected_horizon_days,
+                    economic_thesis=overlay.economic_thesis,
+                    rationale=f"{getattr(snapshot, 'rationale', '')}; ai={overlay.rationale}",
+                )
+            )
+        except TypeError:
+            merged.append(snapshot)
+    return merged
+
+
+def _run_theme_sentiments(
+    orchestrator: LLMOrchestrator,
+    theme_profiles: list,
+    evidence: list,
+) -> list[SentimentAIResult]:
+    if not theme_profiles or not orchestrator.toggles.sentiment_agent:
+        return []
+    by_theme: dict[str, list[str]] = {}
+    for record in evidence:
+        theme = getattr(record, "theme", None)
+        if not theme:
+            continue
+        rationale = getattr(record, "rationale", "")
+        if rationale:
+            by_theme.setdefault(theme, []).append(rationale)
+    results: list[SentimentAIResult] = []
+    for profile in theme_profiles:
+        rationales = by_theme.get(profile.theme_name, [])
+        blob = "\n".join(rationales[:60])
+        if not blob:
+            continue
+        results.append(orchestrator.assess_sentiment(profile.theme_name, blob))
+    return results
+
+
+def _maybe_frame(value: Any) -> pd.DataFrame:
+    if value is None:
+        return pd.DataFrame()
+    if hasattr(value, "frame"):
+        return getattr(value, "frame", pd.DataFrame())
+    if isinstance(value, pd.DataFrame):
+        return value
+    return pd.DataFrame()
+
+
+def _chain_features_frame(universe_members: list, chain_by_theme: dict[str, tuple[list, list]]) -> pd.DataFrame:
+    rows = []
+    nodes_by_id: dict[str, Any] = {}
+    for nodes, _ in chain_by_theme.values():
+        for node in nodes:
+            existing = nodes_by_id.get(node.node_id)
+            if existing is None or node.policy_support_score > existing.policy_support_score:
+                nodes_by_id[node.node_id] = node
+    for member in universe_members:
+        node = nodes_by_id.get(member.chain_node)
+        if node is None:
+            continue
+        rows.append(
+            {
+                "symbol": member.symbol,
+                "as_of_date": member.last_validated_at or member.entry_date,
+                "chain_centrality": float(node.dependency_strength),
+                "bottleneck_score": float(node.bottleneck_score),
+                "domestic_substitution_score": float(node.domestic_substitution_score),
+                "policy_support_decay": float(node.policy_support_score),
+                "demand_visibility": float(node.demand_visibility),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _merge_long_horizon_factors(
+    factor_frame: pd.DataFrame,
+    long_horizon_frame: pd.DataFrame,
+    economics_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    if factor_frame is None or factor_frame.empty:
+        return factor_frame
+    data = factor_frame.copy()
+    if long_horizon_frame is not None and not long_horizon_frame.empty:
+        merge_columns = [column for column in long_horizon_frame.columns if column not in data.columns or column == "symbol"]
+        data = data.merge(long_horizon_frame[merge_columns], on="symbol", how="left")
+    if economics_frame is not None and not economics_frame.empty:
+        economics_columns = [
+            "symbol",
+            "supply_demand_balance",
+            "pricing_power",
+            "capacity_utilization",
+            "credit_impulse_alignment",
+            "monetary_tailwind",
+            "fx_pressure",
+            "commodity_cost_pressure",
+            "policy_support_strength",
+            "expected_industry_revenue_growth_yoy",
+            "cobb_douglas_efficiency",
+            "company_pricing_power",
+            "company_capital_efficiency",
+            "company_demand_visibility",
+        ]
+        present = [column for column in economics_columns if column in economics_frame.columns]
+        if present:
+            data = data.merge(economics_frame[present], on="symbol", how="left")
+    return data
+
+
+def _frame_to_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    if frame is None or frame.empty:
+        return []
+    return [
+        {key: _coerce_jsonable(value) for key, value in row.items()}
+        for row in frame.to_dict("records")
+    ]
+
+
+def _coerce_jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+        return None
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
     return value

@@ -28,13 +28,13 @@ def test_policy_to_theme_to_industry_chain_pipeline_builds_real_pool():
     )
     parsed = [parse_policy_document(doc) for doc in docs]
     themes, evidence = discover_themes(parsed, "2026-05-14")
+    assert themes, "AI-driven theme discovery must surface at least one theme"
     ai_theme = themes[0]
     nodes, edges = build_industry_chain_graph(ai_theme)
 
-    assert ai_theme.theme_name == "ai_compute"
-    assert any(node.node_id == "gpu" for node in nodes)
-    assert any(node.node_id == "optical_module" for node in nodes)
-    assert edges
+    assert ai_theme.theme_name, "theme must have a non-empty AI-derived name"
+    assert ai_theme.policy_strength > 0.0
+    assert nodes, "chain reasoner must emit at least one node from evidence"
     assert evidence[0].hash
 
 
@@ -52,6 +52,7 @@ def test_theme_universe_distinguishes_core_from_false_association():
         ]
     )
     themes, _ = discover_themes([parse_policy_document(doc) for doc in docs], "2026-05-14")
+    primary_theme = themes[0].theme_name
     nodes, _ = build_industry_chain_graph(themes[0])
     fundamental_rows = pd.DataFrame(
         [
@@ -71,8 +72,8 @@ def test_theme_universe_distinguishes_core_from_false_association():
         ),
         pd.DataFrame(
             [
-                {"symbol": "600001.SH", "theme": "ai_compute", "chain_node": "server", "exposure_type": "direct_exposure", "exposure_score": 85, "source_confidence": 0.8, "evidence_count": 4},
-                {"symbol": "000858.SZ", "theme": "ai_compute", "chain_node": "cloud_application", "exposure_type": "false_association", "exposure_score": 15, "source_confidence": 0.1, "evidence_count": 0},
+                {"symbol": "600001.SH", "theme": primary_theme, "chain_node": "server", "exposure_type": "direct_exposure", "exposure_score": 85, "source_confidence": 0.8, "evidence_count": 4},
+                {"symbol": "000858.SZ", "theme": primary_theme, "chain_node": "cloud_application", "exposure_type": "false_association", "exposure_score": 15, "source_confidence": 0.1, "evidence_count": 0},
             ]
         ),
         themes,

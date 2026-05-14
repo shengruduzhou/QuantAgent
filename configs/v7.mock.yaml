@@ -25,6 +25,29 @@ policy_extraction:
   endpoint: https://api.openai.com/v1/chat/completions
   model: gpt-4.1-mini
   api_key_env: OPENAI_API_KEY
+llm_skills:
+  enabled: false
+  allow_network: false
+  endpoint: https://api.openai.com/v1/chat/completions
+  model: gpt-4.1-mini
+  api_key_env: OPENAI_API_KEY
+  timeout_seconds: 30.0
+  max_input_chars: 16000
+  temperature: 0.0
+  enabled_skills:
+    policy_analyst: true
+    industry_chain_reasoner: true
+    news_credibility_agent: true
+    sentiment_agent: true
+    valuation_agent: true
+    financial_forensics_agent: true
+    economics_agent: true
+industry_chain_reasoner:
+  use_dynamic_reasoner: true
+  use_llm_refinement: false
+  min_evidence_count_for_node: 1
+  min_evidence_count_for_strong_edge: 2
+  weak_association_max_evidence: 1
 evidence:
   min_source_reliability_for_trade_signal: 0.5
   min_cross_validation_count_for_core_pool: 2
