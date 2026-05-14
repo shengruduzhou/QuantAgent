@@ -154,6 +154,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     selected_themes = _select_theme_profiles(theme_profiles, cfg)
     reasoner_cfg = cfg.get("industry_chain_reasoner", {}) or {}
     use_dynamic_reasoner = bool(reasoner_cfg.get("use_dynamic_reasoner", True))
+    strict_no_template = bool(reasoner_cfg.get("strict_no_template_fallback", True))
     chain_reasoner_results: dict[str, Any] = {}
     if use_dynamic_reasoner:
         reasoner_config = IndustryChainReasonerConfig(
@@ -162,18 +163,20 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
             use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
             and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
+            strict_no_template_fallback=strict_no_template,
         )
         chain_reasoner_results = reason_industry_chain_for_themes(selected_themes, evidence, reasoner_config, llm_client)
         chain_by_theme = {
             theme: (list(result.nodes), list(result.edges)) for theme, result in chain_reasoner_results.items()
         }
-        for theme, (nodes, edges) in chain_by_theme.items():
-            if not nodes:
-                template_nodes, template_edges = build_industry_chain_graph(
-                    next(profile for profile in selected_themes if profile.theme_name == theme),
-                    evidence,
-                )
-                chain_by_theme[theme] = (template_nodes, template_edges)
+        if not strict_no_template:
+            for theme, (nodes, edges) in chain_by_theme.items():
+                if not nodes:
+                    template_nodes, template_edges = build_industry_chain_graph(
+                        next(profile for profile in selected_themes if profile.theme_name == theme),
+                        evidence,
+                    )
+                    chain_by_theme[theme] = (template_nodes, template_edges)
     else:
         chain_by_theme = {profile.theme_name: build_industry_chain_graph(profile, evidence) for profile in selected_themes}
     all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
@@ -292,7 +295,14 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
     factor_frame = _merge_long_horizon_factors(factor_frame, long_horizon_factor_frame, economics_company_frame)
     factor_columns = _factor_columns(factor_frame)
     factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
-    stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, factor_applicability, as_of_date)
+    factor_hard_gate = bool(cfg.get("factor_applicability", {}).get("hard_gate", True))
+    production_stages = tuple(cfg.get("factor_applicability", {}).get("production_stages", ("production", "validation")))
+    production_applicability = (
+        [item for item in factor_applicability if item.factor_lifecycle_stage in production_stages]
+        if factor_hard_gate
+        else list(factor_applicability)
+    )
+    stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, production_applicability, as_of_date)
 
     use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", True))
     deep_cfg = cfg.get("deep_alpha_model", {}) or {}
@@ -300,7 +310,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
         alphas = predict_v7_deep_alpha(
             factor_frame,
             universe_members,
-            factor_applicability,
+            production_applicability,
             V7DeepAlphaConfig(
                 hidden_size=int(deep_cfg.get("hidden_size", 16)),
                 seed=int(deep_cfg.get("seed", 1729)),
@@ -309,7 +319,7 @@ def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_
             ),
         )
     else:
-        alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, factor_applicability)
+        alphas = predict_v7_multi_horizon_alpha(factor_frame, universe_members, production_applicability)
     if not alphas and allow_synthetic:
         alphas = _build_synthetic_alphas(universe_members)
 

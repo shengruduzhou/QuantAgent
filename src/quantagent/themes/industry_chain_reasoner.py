@@ -75,6 +75,7 @@ class IndustryChainReasonerConfig:
     )
     use_llm_refinement: bool = False
     min_node_confidence_for_publication: float = 0.30
+    strict_no_template_fallback: bool = True
 
 
 @dataclass(frozen=True)

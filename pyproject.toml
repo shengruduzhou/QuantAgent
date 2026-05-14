@@ -30,7 +30,6 @@ optimization = [
 
 [project.scripts]
 quantagent = "quantagent.cli:app"
-quantagent-train-short-alpha = "quantagent.training.train_short_alpha:main"
 quantagent-build-factors = "quantagent.cli:build_factors_entry"
 quantagent-evaluate-factors = "quantagent.cli:evaluate_factors_entry"
 quantagent-build-flow-features = "quantagent.cli:build_flow_features_entry"

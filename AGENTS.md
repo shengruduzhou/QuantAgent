@@ -2,9 +2,21 @@
 
 ## 项目目的 / Project Purpose
 
-QuantAgent V7 的目标是把现有 V6 production scaffold 升级为面向 A 股散户现实约束的 AI Quant OS。系统覆盖 Point-in-Time feature store、Evidence OS、政策与主题发现、产业链图谱、动态主题股票池、基本面尽调、Financial Fraud Risk、News Credibility、多周期 Alpha、Factor Applicability、portfolio optimizer、A-share event-driven backtest、QMT execution-preparation、Risk Gate、Kill Switch 和 Audit Replay。
+QuantAgent V7 是面向 A 股散户现实约束的 PIT 量化研究系统。覆盖：
 
-本仓库不是玩具 LLM trading demo，也不提供 financial advice。所有研究输出必须经过测试、回测、风控和 dry-run 执行准备。
+- Point-in-Time financial provider (TuShare / AkShare) + local Parquet cache
+- Evidence OS（每条证据都带 source / published_at / available_at / hash）
+- 政策红头文件解析与主题发现
+- 证据驱动的动态产业链图谱（默认禁用静态模板回退）
+- 动态主题股票池（core / strong / satellite / watchlist / exclusion）
+- 基本面尽调、Financial Fraud Risk、News Credibility、Intrinsic Valuation
+- 多周期 Alpha (1 / 5 / 20 / 60 / 120 / 126 天)
+- Factor Applicability Hard Gate (walk-forward, 不通过的因子直接退出 Deep Alpha)
+- Walk-Forward Sleeve Allocator (long / medium / short / hedge / cash)
+- A-share event-driven backtest
+- QMT execution-preparation, Risk Gate, Kill Switch, Audit Replay
+
+仓库不是玩具 LLM trading demo，不提供 financial advice。研究输出必须经过测试、回测、风控和 dry-run 执行准备。
 
 ## A 股安全约束 / A-share Safety Constraints
 
@@ -14,15 +26,17 @@ QuantAgent V7 的目标是把现有 V6 production scaffold 升级为面向 A 股
 - Optimizer never emits orders：Optimizer / Portfolio Construction 只能输出 `target_weights`，不允许输出 broker orders。
 - OrderManager converts target weights into order intents：订单意图必须在 `OrderManager` 中生成。
 - RiskGate and KillSwitch before QMT submit：任何 QMT submit path 前必须通过 risk gate、kill switch、execution constraint simulation 和 reconciliation。
-- Optional dependencies degrade gracefully：`xtquant`、`cvxpy`、heavy NLP models 不存在时，imports 不应破坏研究流程。
+- Optional dependencies degrade gracefully：`xtquant`、`cvxpy`、heavy NLP models、tushare、akshare、torch 不存在时，imports 不应破坏研究流程。
+- PIT enforcement is not optional in strict mode：`enforce_pit_fundamentals=true` 时 `available_at > as_of_date` 的财报行必须被丢弃。
 
 ## Code Style / 代码规范
 
 - Python code、comments、docstrings、variable names、test names、config keys 必须使用 English。
-- 保持 V3/V4/V5/V6/SOTA behavior，除非 V7 明确替换。
-- 不删除已有 SOTA components；优先做 wrappers、adapters、integration seams。
+- 优先做 wrappers、adapters、integration seams，不删除仍被引用的 SOTA components。
 - 面向本地有限算力设计：small configs、CPU test mode、deterministic synthetic fixtures。
 - 新功能必须配套测试，优先使用 small synthetic panels。
+- 任何新增的财务字段必须同时定义 `report_period`、`ann_date`、`available_at`，否则无法进入 PIT 缓存。
+- Industry chain edges 必须有证据来源，禁止把共现直接当成产业链因果。
 
 ## Markdown Rule / Markdown 中英混写规则
 
@@ -45,23 +59,32 @@ git diff --check
 
 ## Execution Boundary / 执行边界
 
-默认 V7 offline synthetic / replay-safe flow：
+默认 V7 offline strict_local 或 mock smoke flow：
 
 ```text
-build PIT data panel
+build PIT data panel (strict required tables)
+-> apply PIT financial filter
 -> normalize EvidenceRecord
 -> discover policy themes and lifecycle
--> build industry chain graph
+-> reason industry chain from evidence (no template fallback)
 -> build dynamic thematic universe
 -> score fundamentals, valuation, fraud risk, news credibility
--> generate 1D/5D/20D/60D/120D/126D alpha
--> validate factor applicability
--> construct sleeve allocation and target_weights
+-> generate 1D / 5D / 20D / 60D / 120D / 126D alpha
+-> validate factor applicability and hard-gate non-production factors
+-> walk-forward sleeve allocation (when sleeve return history is available)
+-> construct portfolio + target_weights
 -> decide hedge / cash buffer
 -> pass Risk Gate and Kill Switch
 -> simulate A-share T+1, limit-up/down, suspension, liquidity and lot constraints
 -> OrderManager generates dry-run order intents only after approved target_weights
--> VirtualBroker / replay / audit
+-> VirtualBroker / audit
 ```
 
 任何 live order path 必须显式配置 `live_trading_enabled=true`、`dry_run=false`，并通过 kill switch、risk gate、broker reconciliation 和 audit replay。
+
+## Provider 责任 / Provider Responsibilities
+
+- Qlib 只负责：行情、技术因子、label 生成、训练数据切片、回测底座。
+- TuShare / AkShare 只负责：财务报表、财务指标、估值字段、公告披露日期。
+- TradingView public pages 只负责：sentiment / attention context，不作为基本面或行情真值。
+- 政策、公告、新闻原文必须保留 `source`、`published_at`、`available_at`、`hash`、`confidence`。

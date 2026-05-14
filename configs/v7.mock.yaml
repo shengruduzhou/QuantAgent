@@ -17,6 +17,10 @@ data:
   allow_synthetic_fallback: true
   allow_network: false
   v7_root: data/v7
+  fundamentals_root: data/v7/fundamentals
+  required_tables: [policies, base_universe, market_state]
+  enforce_pit_fundamentals: false
+  use_financial_cache: false
   tradingview_urls: []
   qlib_provider_uri:
   qlib_region: cn
@@ -48,6 +52,12 @@ industry_chain_reasoner:
   min_evidence_count_for_node: 1
   min_evidence_count_for_strong_edge: 2
   weak_association_max_evidence: 1
+  strict_no_template_fallback: false
+factor_applicability:
+  hard_gate: false
+  production_stages: [production, validation, insufficient_sample]
+walk_forward_sleeve_allocator:
+  enabled: false
 evidence:
   min_source_reliability_for_trade_signal: 0.5
   min_cross_validation_count_for_core_pool: 2

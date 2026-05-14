@@ -7,11 +7,18 @@ import pandas as pd
 
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.providers.disclosure_provider import DisclosureWebProvider
+from quantagent.data.providers.financial_cache import FinancialCacheConfig, FinancialStatementCache
 from quantagent.data.providers.news_provider import NewsWebProvider
 from quantagent.data.providers.policy_web_provider import PolicyWebProvider
 from quantagent.data.providers.qlib_provider import QlibProvider
 from quantagent.data.providers.tradingview_provider import TradingViewPublicProvider
 from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvider, V7ResearchDataBundle
+from quantagent.fundamental.financial_features import (
+    FinancialFeatureConfig,
+    apply_point_in_time_filter,
+    build_financial_features,
+    derive_v7_financial_columns,
+)
 
 
 V7ProviderMode = Literal["strict_local", "online", "mock"]
@@ -24,6 +31,7 @@ class V7DataQualityError(RuntimeError):
 @dataclass(frozen=True)
 class V7DataHubConfig:
     root: str = "data/v7"
+    fundamentals_root: str = "data/v7/fundamentals"
     provider_mode: V7ProviderMode = "strict_local"
     allow_synthetic_fallback: bool = False
     allow_network: bool = False
@@ -33,7 +41,15 @@ class V7DataHubConfig:
     tradingview_urls: tuple[str, ...] = ()
     qlib_provider_uri: str | None = None
     qlib_region: str = "cn"
-    required_tables: tuple[str, ...] = ("policies", "base_universe", "market_state")
+    required_tables: tuple[str, ...] = (
+        "policies",
+        "base_universe",
+        "market_state",
+        "market_panel",
+        "fundamentals",
+    )
+    enforce_pit_fundamentals: bool = True
+    use_financial_cache: bool = True
 
 
 @dataclass(frozen=True)
@@ -46,27 +62,37 @@ class V7DataHubResult:
 
 
 class V7DataHub:
-    """Unified PIT data entrypoint for V7 research."""
+    """Unified PIT data entrypoint for V7 research.
+
+    The hub is intentionally strict: when ``provider_mode='strict_local'``
+    every required table must be present and ``fundamentals`` must carry
+    an ``available_at`` column so the downstream PIT filter cannot leak
+    future data into a back-test.
+    """
 
     def __init__(self, config: V7DataHubConfig | dict[str, Any] | None = None) -> None:
         self.config = _coerce_config(config)
 
     def load(self, request: ProviderRequest, as_of_date: str) -> V7DataHubResult:
         bundle = LocalV7ResearchProvider(self.config.root).load_bundle(request, as_of_date)
+        bundle = self._enrich_fundamentals_from_cache(bundle, request, as_of_date)
         if self.config.provider_mode == "online":
             bundle = self._merge_online_sources(bundle, request, as_of_date)
-        warnings = _bundle_warnings(bundle)
+        warnings = list(_bundle_warnings(bundle))
         if self.config.provider_mode == "strict_local":
             self._validate_strict(bundle)
         if self.config.provider_mode == "online" and not self.config.allow_synthetic_fallback:
             self._validate_online(bundle)
+        if self.config.provider_mode != "mock" and self.config.enforce_pit_fundamentals:
+            self._validate_pit_fundamentals(bundle, as_of_date, warnings)
         return V7DataHubResult(
             bundle=bundle,
             provider_mode=self.config.provider_mode,
             allow_synthetic_fallback=self.config.allow_synthetic_fallback or self.config.provider_mode == "mock",
-            warnings=warnings,
+            warnings=tuple(warnings),
             metadata={
                 "root": self.config.root,
+                "fundamentals_root": self.config.fundamentals_root,
                 "provider_mode": self.config.provider_mode,
                 "allow_network": self.config.allow_network,
             },
@@ -87,6 +113,57 @@ class V7DataHub:
             raise V7DataQualityError(
                 "V7 online data is incomplete and synthetic fallback is disabled: " + ", ".join(sorted(set(missing)))
             )
+
+    def _validate_pit_fundamentals(
+        self,
+        bundle: V7ResearchDataBundle,
+        as_of_date: str,
+        warnings: list[str],
+    ) -> None:
+        frame = bundle.fundamentals.frame
+        if frame is None or frame.empty:
+            return
+        if "available_at" not in frame.columns:
+            raise V7DataQualityError(
+                "fundamentals frame is missing required 'available_at' column for PIT enforcement"
+            )
+        leaked = pd.to_datetime(frame["available_at"], errors="coerce") > pd.Timestamp(as_of_date)
+        if bool(leaked.any()):
+            warnings.append(f"pit_leak_dropped:{int(leaked.sum())}_fundamental_rows")
+            bundle.fundamentals.frame.drop(frame.index[leaked], inplace=True)  # type: ignore[arg-type]
+
+    def _enrich_fundamentals_from_cache(
+        self,
+        bundle: V7ResearchDataBundle,
+        request: ProviderRequest,
+        as_of_date: str,
+    ) -> V7ResearchDataBundle:
+        if not self.config.use_financial_cache:
+            return bundle
+        cache = FinancialStatementCache(FinancialCacheConfig(root=self.config.fundamentals_root))
+        statements = cache.load_all_pit(as_of_date, request.symbols or None)
+        if all(_empty_result(result) for result in statements.values()):
+            return bundle
+        features = build_financial_features(
+            income=statements["income"].frame,
+            balance_sheet=statements["balance_sheet"].frame,
+            cashflow=statements["cashflow"].frame,
+            financial_indicator=statements.get("financial_indicator", ProviderResult(pd.DataFrame(), source="")).frame,
+            config=FinancialFeatureConfig(),
+        )
+        if features.empty:
+            return bundle
+        latest = apply_point_in_time_filter(features, as_of_date)
+        projected = derive_v7_financial_columns(latest)
+        if projected.empty:
+            return bundle
+        existing = bundle.fundamentals.frame
+        if existing is not None and not existing.empty and "symbol" in existing.columns:
+            extra = projected[~projected["symbol"].isin(existing["symbol"])]
+            merged = pd.concat([existing, extra], ignore_index=True, sort=False)
+        else:
+            merged = projected
+        return _replace_fundamentals(bundle, merged, statements)
 
     def _merge_online_sources(
         self,
@@ -158,6 +235,38 @@ class V7DataHub:
         )
 
 
+def _replace_fundamentals(
+    bundle: V7ResearchDataBundle,
+    new_frame: pd.DataFrame,
+    statements: dict[str, ProviderResult],
+) -> V7ResearchDataBundle:
+    sources = [result.source for result in statements.values() if result.source]
+    warnings = tuple(warning for result in statements.values() for warning in result.warnings)
+    fundamentals = ProviderResult(
+        new_frame.reset_index(drop=True),
+        source="financial_cache_features|" + "|".join(sources) if sources else "financial_cache_features",
+        point_in_time=True,
+        quality_score=max(bundle.fundamentals.quality_score, 0.88) if not new_frame.empty else bundle.fundamentals.quality_score,
+        warnings=bundle.fundamentals.warnings + warnings,
+        metadata=bundle.fundamentals.metadata | {"financial_cache_used": True},
+    )
+    return V7ResearchDataBundle(
+        policies=bundle.policies,
+        theme_metrics=bundle.theme_metrics,
+        base_universe=bundle.base_universe,
+        company_profiles=bundle.company_profiles,
+        company_theme_map=bundle.company_theme_map,
+        fundamentals=fundamentals,
+        news=bundle.news,
+        market_state=bundle.market_state,
+        market_panel=bundle.market_panel,
+        factors=bundle.factors,
+        positions=bundle.positions,
+        announcements=bundle.announcements,
+        metadata=bundle.metadata,
+    )
+
+
 def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHubConfig:
     if config is None:
         return V7DataHubConfig()
@@ -168,8 +277,17 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
         mode = "mock"
     if mode not in {"strict_local", "online", "mock"}:
         raise ValueError("data.provider_mode must be strict_local, online, or mock")
+    required = config.get("required_tables")
+    if required is None:
+        if mode == "mock":
+            required_tuple: tuple[str, ...] = ("policies", "base_universe", "market_state")
+        else:
+            required_tuple = ("policies", "base_universe", "market_state", "market_panel", "fundamentals")
+    else:
+        required_tuple = tuple(str(item) for item in required)
     return V7DataHubConfig(
         root=str(config.get("v7_root", "data/v7")),
+        fundamentals_root=str(config.get("fundamentals_root", "data/v7/fundamentals")),
         provider_mode=mode,  # type: ignore[arg-type]
         allow_synthetic_fallback=bool(config.get("allow_synthetic_fallback", mode == "mock")),
         allow_network=bool(config.get("allow_network", False)),
@@ -179,7 +297,9 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
         tradingview_urls=tuple(str(item) for item in config.get("tradingview_urls", ())),
         qlib_provider_uri=str(config["qlib_provider_uri"]) if config.get("qlib_provider_uri") else None,
         qlib_region=str(config.get("qlib_region", "cn")),
-        required_tables=tuple(str(item) for item in config.get("required_tables", ("policies", "base_universe", "market_state"))),
+        required_tables=required_tuple,
+        enforce_pit_fundamentals=bool(config.get("enforce_pit_fundamentals", mode != "mock")),
+        use_financial_cache=bool(config.get("use_financial_cache", True)),
     )
 
 

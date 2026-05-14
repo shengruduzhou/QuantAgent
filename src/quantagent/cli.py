@@ -7,36 +7,9 @@ import pandas as pd
 import typer
 import yaml
 
-from quantagent.domain.schemas import ModelScores
 from quantagent.factors.evaluation import factor_summary_table, forward_return_labels
-from quantagent.strategy.decision_engine import decide_trade
 
-app = typer.Typer(help="QuantAgent research and decision CLI.")
-
-
-@app.command()
-def demo_decision(
-    ticker: str = "NVDA",
-    short_score: float = 82.0,
-    long_score: float = 86.0,
-    news_score: float = 70.0,
-    llm_score: float = 68.0,
-    risk_score: float = 32.0,
-    confidence: float = 0.72,
-) -> None:
-    """Run the deterministic decision layer with normalized scores."""
-    decision = decide_trade(
-        ModelScores(
-            ticker=ticker,
-            short_score=short_score,
-            long_score=long_score,
-            news_score=news_score,
-            llm_score=llm_score,
-            risk_score=risk_score,
-            confidence=confidence,
-        )
-    )
-    typer.echo(decision)
+app = typer.Typer(help="QuantAgent V7 research, fundamentals, and execution CLI.")
 
 
 @app.command("build-factors")
@@ -45,6 +18,7 @@ def build_factors(
     output_path: Path,
     library: str = "alpha101",
 ) -> None:
+    """Compute Alpha101 or CICC high-frequency factors from a price panel."""
     frame = pd.read_csv(input_path)
     if library == "alpha101":
         from quantagent.factors.alpha101 import compute_alpha101
@@ -107,262 +81,6 @@ def build_sector_rotation(
     typer.echo(f"wrote {output_path}")
 
 
-@app.command("build-features-v4")
-def build_features_v4(
-    output_path: Path = Path("data/processed/v4_features.csv"),
-) -> None:
-    from quantagent.services.build_features_service import build_features_v4 as build_service
-
-    result = build_service()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result.frame.to_csv(output_path, index=False)
-    typer.echo(f"wrote {len(result.frame)} v4 feature rows to {output_path}")
-
-
-@app.command("train-v4")
-def train_v4() -> None:
-    from quantagent.services.train_v4_service import train_v4_synthetic
-
-    metadata = train_v4_synthetic()
-    typer.echo(metadata)
-
-
-@app.command("infer-v4")
-def infer_v4(
-    feature_path: Path | None = None,
-    output_path: Path = Path("data/processed/v4_signals.csv"),
-) -> None:
-    from quantagent.services.build_features_service import build_features_v4 as build_service
-    from quantagent.services.daily_signal_service import infer_v4_alpha
-
-    features = pd.read_csv(feature_path) if feature_path else build_service().frame
-    signals = infer_v4_alpha(features)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    signals.to_csv(output_path, index=False)
-    typer.echo(f"wrote {len(signals)} v4 signals to {output_path}")
-
-
-@app.command("build-portfolio-v4")
-def build_portfolio_v4(
-    signal_path: Path | None = None,
-    output_path: Path = Path("data/processed/v4_target_weights.csv"),
-    mode: str = "long_only_enhancement",
-) -> None:
-    from quantagent.services.build_features_service import build_features_v4 as build_service
-    from quantagent.services.daily_signal_service import infer_v4_alpha
-    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
-
-    signals = pd.read_csv(signal_path) if signal_path else infer_v4_alpha(build_service().frame)
-    result = portfolio_service(signals, mode=mode)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result.target_weights.rename("target_weight").reset_index().rename(columns={"index": "symbol"}).to_csv(output_path, index=False)
-    typer.echo(f"wrote {len(result.target_weights)} target weights to {output_path}")
-
-
-@app.command("backtest-v4")
-def backtest_v4(
-    output_path: Path = Path("data/processed/v4_backtest_report.csv"),
-) -> None:
-    from quantagent.backtest.engine import EventDrivenBacktester
-    from quantagent.services.build_features_service import build_features_v4 as build_service
-    from quantagent.services.daily_signal_service import infer_v4_alpha
-    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
-
-    features = build_service().frame
-    signals = infer_v4_alpha(features)
-    portfolio = portfolio_service(signals)
-    dates = sorted(pd.to_datetime(features["trade_date"]).drop_duplicates())
-    weights = pd.DataFrame(0.0, index=dates, columns=portfolio.target_weights.index)
-    weights.iloc[-10:] = portfolio.target_weights
-    result = EventDrivenBacktester().run(weights, features[["trade_date", "symbol", "open", "high", "low", "close", "volume", "amount"]])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([result.report | result.diagnostics]).to_csv(output_path, index=False)
-    typer.echo(f"wrote v4 backtest report to {output_path}")
-
-
-@app.command("paper-trade-v4")
-def paper_trade_v4(
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.build_features_service import build_features_v4 as build_service
-    from quantagent.services.daily_signal_service import infer_v4_alpha
-    from quantagent.services.paper_trading_service import generate_dry_run_order_intents
-    from quantagent.services.portfolio_build_service import build_portfolio_v4 as portfolio_service
-
-    features = build_service().frame
-    signals = infer_v4_alpha(features)
-    portfolio = portfolio_service(signals)
-    latest = features.sort_values("trade_date").groupby("symbol").tail(1).set_index("symbol")
-    intents = generate_dry_run_order_intents(portfolio.target_weights, latest["close"]) if dry_run else []
-    typer.echo(f"generated {len(intents)} dry-run order intents")
-
-
-@app.command("build-features-v6")
-def build_features_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    start_date: str | None = None,
-    end_date: str | None = None,
-    universe: str | None = None,
-    output_dir: Path = Path("data/processed"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import build_features_v6
-
-    del dry_run
-    result = build_features_v6(config, start_date=start_date, end_date=end_date, universe=universe)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "v6_features.csv"
-    result.frame.to_csv(output_path, index=False)
-    typer.echo(f"status=ok rows={len(result.frame)} feature_version={result.feature_version} output={output_path}")
-
-
-@app.command("train-v6")
-def train_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    output_dir: Path = Path("artifacts/models/v6"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import build_features_v6, train_v6_multitower
-    import yaml as _yaml
-
-    cfg = _yaml.safe_load(config.read_text(encoding="utf-8")) or {}
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    features = build_features_v6(cfg)
-    result = train_v6_multitower(features.frame, cfg.get("model", {}), output_dir=output_dir, dry_run=dry_run)
-    typer.echo(_json(result))
-
-
-@app.command("validate-v6")
-def validate_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    output_dir: Path | None = None,
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import load_v6_config, validate_v6
-
-    cfg = load_v6_config(config)
-    if output_dir is not None:
-        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    typer.echo(_json(validate_v6(cfg)))
-
-
-@app.command("infer-v6")
-def infer_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    date: str | None = typer.Option(None, "--date"),
-    output_dir: Path = Path("data/processed"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import infer_v6, load_v6_config
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    result = infer_v6(cfg, trade_date=date)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "v6_inference.csv"
-    result.to_csv(output_path, index=False)
-    typer.echo(f"status=ok rows={len(result)} output={output_path}")
-
-
-@app.command("build-portfolio-v6")
-def build_portfolio_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    date: str | None = typer.Option(None, "--date"),
-    output_dir: Path = Path("data/processed"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import build_portfolio_v6, load_v6_config
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    result = build_portfolio_v6(cfg, trade_date=date)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "v6_target_weights.csv"
-    result["target_weights"].rename("target_weight").reset_index().rename(columns={"index": "symbol"}).to_csv(output_path, index=False)
-    typer.echo(f"status=ok weights={len(result['target_weights'])} output={output_path}")
-
-
-@app.command("backtest-v6")
-def backtest_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    start_date: str | None = None,
-    end_date: str | None = None,
-    output_dir: Path = Path("reports/v6"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import load_v6_config, run_backtest_v6
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    result = run_backtest_v6(cfg, start_date=start_date, end_date=end_date)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "v6_backtest_report.json"
-    output_path.write_text(_json(result), encoding="utf-8")
-    typer.echo(f"status=ok output={output_path}")
-
-
-@app.command("replay-v6")
-def replay_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    scenario: str = "mock_recent_replay",
-    output_dir: Path | None = None,
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import load_v6_config, run_historical_live_replay_v6
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    if output_dir is not None:
-        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
-    result = run_historical_live_replay_v6(cfg, scenario_name=scenario)
-    typer.echo(_json(result))
-
-
-@app.command("paper-trade-v6")
-def paper_trade_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    date: str | None = typer.Option(None, "--date"),
-    output_dir: Path | None = None,
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import load_v6_config, run_paper_trade_v6
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("execution", {})["dry_run"] = dry_run
-    if output_dir is not None:
-        cfg.setdefault("reporting", {})["output_dir"] = str(output_dir)
-    result = run_paper_trade_v6(cfg, trade_date=date)
-    typer.echo(f"status=ok orders={len(result['order_states'])} account_value={result['account_value']:.2f} audit={result['audit_path']}")
-
-
-@app.command("audit-replay-v6")
-def audit_replay_v6_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    audit_path: Path = Path("logs/v6/virtual_broker_audit.jsonl"),
-    output_dir: Path | None = None,
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import audit_replay_v6
-
-    del config, output_dir, dry_run
-    typer.echo(_json(audit_replay_v6(audit_path)))
-
-
-@app.command("generate-v6-report")
-def generate_v6_report_cli(
-    config: Path = Path("configs/v6.default.yaml"),
-    output_dir: Path = Path("reports/v6"),
-    dry_run: bool = True,
-) -> None:
-    from quantagent.services.v6_pipeline_service import generate_v6_report, load_v6_config
-
-    cfg = load_v6_config(config)
-    cfg.setdefault("safety", {})["dry_run"] = dry_run
-    result = generate_v6_report(cfg, output_dir=output_dir)
-    typer.echo(_json(result))
-
-
 @app.command("validate-v7")
 def validate_v7_cli(
     config: Path = Path("configs/v7.default.yaml"),
@@ -375,7 +93,7 @@ def validate_v7_cli(
 @app.command("run-daily-v7")
 def run_daily_v7_cli(
     config: Path = Path("configs/v7.default.yaml"),
-    date: str = typer.Option("2026-05-14", "--date"),
+    date: str = typer.Option("2026-05-15", "--date"),
     output_dir: Path = Path("reports/v7"),
 ) -> None:
     from quantagent.services.v7_pipeline_service import run_daily_v7_research
@@ -385,6 +103,80 @@ def run_daily_v7_cli(
     output_path = output_dir / "v7_daily_research_report.json"
     output_path.write_text(_json(result), encoding="utf-8")
     typer.echo(f"status=ok themes={len(result['theme_ranking'])} targets={len(result['portfolio_plan']['target_weights'])} output={output_path}")
+
+
+@app.command("build-fundamentals-v7")
+def build_fundamentals_v7_cli(
+    symbols: str = typer.Option(..., "--symbols", help="Comma-separated A-share symbols (e.g. 600519.SH,000858.SZ)"),
+    start_date: str = typer.Option(..., "--start-date"),
+    end_date: str = typer.Option(..., "--end-date"),
+    provider: str = typer.Option("tushare", "--provider", help="tushare or akshare"),
+    fundamentals_root: Path = Path("data/v7/fundamentals"),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+    token_env: str = typer.Option("TUSHARE_TOKEN", "--token-env"),
+) -> None:
+    """Pull PIT-aware financial statements from TuShare/AkShare and write them to the V7 cache."""
+    from quantagent.data.providers.akshare_financial_provider import AkShareFinancialProvider
+    from quantagent.data.providers.base import ProviderRequest
+    from quantagent.data.providers.financial_cache import FinancialCacheConfig, FinancialStatementCache
+    from quantagent.data.providers.tushare_financial_provider import TuShareFinancialProvider
+
+    request = ProviderRequest(
+        start_date=start_date,
+        end_date=end_date,
+        symbols=tuple(item.strip() for item in symbols.split(",") if item.strip()),
+    )
+    if provider == "tushare":
+        adapter = TuShareFinancialProvider(allow_network=allow_network, token_env=token_env)
+    elif provider == "akshare":
+        adapter = AkShareFinancialProvider(allow_network=allow_network)
+    else:
+        raise typer.BadParameter("provider must be tushare or akshare")
+    statements = adapter.all_statements(request)
+    cache = FinancialStatementCache(FinancialCacheConfig(root=str(fundamentals_root)))
+    summary: dict[str, dict[str, object]] = {}
+    for name, result in statements.items():
+        path = cache.upsert(name, result.frame)
+        summary[name] = {
+            "rows": int(0 if result.frame is None else len(result.frame)),
+            "source": result.source,
+            "path": str(path),
+            "warnings": list(result.warnings),
+        }
+    typer.echo(_json({"provider": provider, "statements": summary}))
+
+
+@app.command("walk-forward-v7")
+def walk_forward_v7_cli(
+    sleeve_returns_path: Path = typer.Option(..., "--sleeve-returns"),
+    output_path: Path = Path("reports/v7/walk_forward_sleeve_allocation.json"),
+    grid_step: float = typer.Option(0.05, "--grid-step"),
+    embargo_days: int = typer.Option(5, "--embargo-days"),
+    walk_forward_splits: int = typer.Option(4, "--splits"),
+    drawdown_penalty: float = typer.Option(0.50, "--drawdown-penalty"),
+) -> None:
+    """Run the walk-forward sleeve allocator on a daily sleeve-returns panel."""
+    from quantagent.portfolio.walk_forward_sleeve_allocator import (
+        WalkForwardSleeveConfig,
+        allocate_sleeves_walk_forward,
+    )
+
+    frame = pd.read_csv(sleeve_returns_path)
+    if "trade_date" not in frame.columns:
+        raise typer.BadParameter("sleeve-returns CSV must contain a trade_date column")
+    panel = frame.set_index("trade_date")
+    result = allocate_sleeves_walk_forward(
+        panel,
+        config=WalkForwardSleeveConfig(
+            walk_forward_splits=walk_forward_splits,
+            embargo_days=embargo_days,
+            grid_step=grid_step,
+            drawdown_penalty=drawdown_penalty,
+        ),
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(_json(result), encoding="utf-8")
+    typer.echo(f"status=ok windows={result.diagnostics.get('walk_forward_windows', 0)} cash_weight={result.cash_weight:.3f} output={output_path}")
 
 
 @app.command("generate-factor-report")

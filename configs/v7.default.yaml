@@ -17,13 +17,23 @@ data:
   allow_synthetic_fallback: false
   allow_network: false
   v7_root: data/v7
-  required_tables: [policies, base_universe, market_state]
+  fundamentals_root: data/v7/fundamentals
+  required_tables: [policies, base_universe, market_state, market_panel, fundamentals]
+  enforce_pit_fundamentals: true
+  use_financial_cache: true
   policy_urls: []
   news_urls: []
   disclosure_urls: []
   tradingview_urls: []
   qlib_provider_uri:
   qlib_region: cn
+fundamentals_pipeline:
+  primary_provider: tushare
+  fallback_provider: akshare
+  available_lag_days: 1
+  cache_format: parquet
+  growth_lookback_periods: 1
+  cap_extreme_quantile: 0.99
 policy_extraction:
   enabled: true
   endpoint: https://api.openai.com/v1/chat/completions
@@ -52,6 +62,18 @@ industry_chain_reasoner:
   min_evidence_count_for_node: 1
   min_evidence_count_for_strong_edge: 2
   weak_association_max_evidence: 1
+  strict_no_template_fallback: true
+factor_applicability:
+  hard_gate: true
+  production_stages: [production, validation]
+walk_forward_sleeve_allocator:
+  enabled: true
+  walk_forward_splits: 4
+  embargo_days: 5
+  min_window_days: 40
+  grid_step: 0.05
+  drawdown_penalty: 0.50
+  cash_floor: 0.10
 long_horizon_factors:
   enabled: true
   fraud_haircut_threshold: 60.0
