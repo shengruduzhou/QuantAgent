@@ -1,4 +1,5 @@
 import pandas as pd
+import yaml
 
 from quantagent.fundamental.confidence_adjuster import adjust_confidence
 from quantagent.fundamental.financial_statement_agent import score_financial_statements
@@ -105,6 +106,30 @@ def test_v7_daily_service_returns_closed_loop_without_orders():
     assert len(result["industry_chain"]["by_theme"]) >= 2
     assert "OrderIntent" not in str(result)
     assert "OrderManager" in result["order_boundary"]
+
+
+def test_v7_daily_service_stops_when_stock_pool_gate_is_empty():
+    config = yaml.safe_load(open("configs/v7.mock.yaml", encoding="utf-8")) or {}
+    config["stock_pool_gate"] = {
+        "enabled": True,
+        "allow_satellite_if_confidence_above": 0.99,
+        "require_factor_coverage": True,
+        "block_false_association": True,
+    }
+    config["factor_applicability"] = {
+        "hard_gate": True,
+        "production_stages": ["disabled_stage_for_gate_regression"],
+    }
+
+    result = run_daily_v7_research(config, as_of_date="2026-05-14")
+
+    assert result["stock_pool_gate"]["gate_failed"] is True
+    assert result["stock_pool_gate"]["audit_reason"] == "empty_after_stock_pool_hard_gate"
+    assert result["multi_horizon_alpha"] == {}
+    assert result["portfolio_plan"]["target_weights"] == {}
+    assert result["risk_report"]["risk_passed"] is False
+    assert "stock_pool_gate_failed" in result["risk_report"]["risk_warnings"]
+    assert result["audit_log"]["final_decision_reason"] == "empty_after_stock_pool_hard_gate"
 
 
 def test_v7_default_daily_refuses_synthetic_fallback_when_data_missing():

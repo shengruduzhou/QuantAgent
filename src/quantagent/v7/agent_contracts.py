@@ -1,6 +1,42 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any
+
+
+ORDER_FORBIDDEN_KEYS: tuple[str, ...] = (
+    "order",
+    "orders",
+    "order_intent",
+    "order_intents",
+    "broker_order",
+    "broker_orders",
+    "submit_order",
+)
+
+EVIDENCE_REQUIRED_FIELDS: tuple[str, ...] = (
+    "source",
+    "available_at",
+    "raw_hash",
+    "confidence",
+)
+
+DOWNSTREAM_DECISION_AGENTS: tuple[str, ...] = (
+    "portfolio_construction_agent",
+    "hedge_decision_agent",
+    "ashare_execution_agent",
+    "risk_gate_agent",
+    "backtest_attribution_agent",
+)
+
+AUDIT_TRAIL_KEYS: tuple[str, ...] = (
+    "audit_trail",
+    "audit_log",
+    "audit",
+    "decision_id",
+    "final_decision_reason",
+    "rationale",
+)
 
 
 @dataclass(frozen=True)
@@ -13,6 +49,17 @@ class AgentSpec:
     new_modules: tuple[str, ...] = ()
     can_emit_orders: bool = False
     point_in_time_required: bool = True
+
+
+@dataclass(frozen=True)
+class AgentValidationResult:
+    agent_name: str
+    passed: bool
+    errors: tuple[str, ...]
+
+
+class AgentContractViolation(ValueError):
+    """Raised when a runtime agent output violates the V7 safety contract."""
 
 
 V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
@@ -191,3 +238,89 @@ def get_agent_spec(name: str) -> AgentSpec:
         if spec.name == name:
             return spec
     raise KeyError(name)
+
+
+def validate_agent_specs(specs: tuple[AgentSpec, ...] = V7_AGENT_SPECS) -> AgentValidationResult:
+    errors: list[str] = []
+    for spec in specs:
+        if spec.can_emit_orders:
+            errors.append(f"{spec.name}:can_emit_orders_true")
+        for output in spec.outputs:
+            if "OrderIntent" in output or output.lower() in ORDER_FORBIDDEN_KEYS:
+                errors.append(f"{spec.name}:forbidden_output:{output}")
+    return AgentValidationResult("V7_AGENT_SPECS", not errors, tuple(errors))
+
+
+def validate_agent_output(agent_name: str, payload: Any) -> AgentValidationResult:
+    spec = get_agent_spec(agent_name)
+    errors: list[str] = []
+    if spec.can_emit_orders:
+        errors.append(f"{agent_name}:can_emit_orders_true")
+    materialized = _materialize(payload)
+    _scan_for_order_payload(materialized, agent_name, errors)
+    _scan_for_evidence_payload(materialized, agent_name, errors)
+    if agent_name in DOWNSTREAM_DECISION_AGENTS and not _has_audit_trail(materialized):
+        errors.append(f"{agent_name}:missing_audit_trail")
+    return AgentValidationResult(agent_name, not errors, tuple(errors))
+
+
+def assert_agent_output_valid(agent_name: str, payload: Any) -> None:
+    result = validate_agent_output(agent_name, payload)
+    if not result.passed:
+        raise AgentContractViolation(";".join(result.errors))
+
+
+def _materialize(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {key: _materialize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_materialize(item) for item in value]
+    return value
+
+
+def _scan_for_order_payload(value: Any, agent_name: str, errors: list[str], path: str = "$") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text in ORDER_FORBIDDEN_KEYS or "orderintent" in key_text:
+                errors.append(f"{agent_name}:forbidden_order_field:{path}.{key}")
+            _scan_for_order_payload(item, agent_name, errors, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _scan_for_order_payload(item, agent_name, errors, f"{path}[{index}]")
+
+
+def _scan_for_evidence_payload(value: Any, agent_name: str, errors: list[str], path: str = "$") -> None:
+    if isinstance(value, dict):
+        if _looks_like_evidence(value):
+            missing = [
+                field
+                for field in EVIDENCE_REQUIRED_FIELDS
+                if field not in value or value.get(field) in (None, "")
+            ]
+            if missing:
+                errors.append(f"{agent_name}:evidence_missing:{path}:{','.join(missing)}")
+        for key, item in value.items():
+            _scan_for_evidence_payload(item, agent_name, errors, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _scan_for_evidence_payload(item, agent_name, errors, f"{path}[{index}]")
+
+
+def _looks_like_evidence(value: dict[str, Any]) -> bool:
+    keys = set(value)
+    if "evidence_id" in keys:
+        return True
+    return {"source", "confidence"} <= keys and ("raw_hash" in keys or "hash" in keys or "published_at" in keys)
+
+
+def _has_audit_trail(value: Any) -> bool:
+    if isinstance(value, dict):
+        if any(key in value and value.get(key) not in (None, "", (), []) for key in AUDIT_TRAIL_KEYS):
+            return True
+        return any(_has_audit_trail(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_audit_trail(item) for item in value)
+    return False

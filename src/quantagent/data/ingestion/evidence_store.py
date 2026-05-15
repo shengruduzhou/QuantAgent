@@ -75,6 +75,10 @@ class EvidenceStore:
             return pd.DataFrame(columns=list(EVIDENCE_COLUMNS))
         return pd.concat(frames, ignore_index=True, sort=False)
 
+    def quality_report(self, as_of_date: str | None = None) -> dict[str, object]:
+        frame = self.read_visible(as_of_date) if as_of_date else self._read_all()
+        return build_evidence_quality_report(frame, as_of_date=as_of_date, required_columns=EVIDENCE_COLUMNS)
+
     def _merge_with_existing(self, path: Path, partition_frame: pd.DataFrame) -> pd.DataFrame:
         if not path.exists():
             return partition_frame.drop_duplicates(subset=["raw_hash"])
@@ -106,3 +110,41 @@ class EvidenceStore:
 
     def _extension(self) -> str:
         return "parquet" if self.config.file_format == "parquet" else "csv"
+
+    def _read_all(self) -> pd.DataFrame:
+        root = Path(self.config.root)
+        if not root.exists():
+            return pd.DataFrame(columns=list(EVIDENCE_COLUMNS))
+        frames: list[pd.DataFrame] = []
+        for path in sorted(root.glob(f"{self.config.partition_column}=*/evidence.{self._extension()}")):
+            frames.append(self._read_frame(path))
+        if not frames:
+            return pd.DataFrame(columns=list(EVIDENCE_COLUMNS))
+        return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def build_evidence_quality_report(
+    frame: pd.DataFrame,
+    *,
+    as_of_date: str | None = None,
+    required_columns: tuple[str, ...] = EVIDENCE_COLUMNS,
+) -> dict[str, object]:
+    if frame is None:
+        frame = pd.DataFrame()
+    missing = [column for column in required_columns if column not in frame.columns]
+    duplicate_rate = 0.0
+    if not frame.empty and "raw_hash" in frame.columns:
+        duplicate_rate = float(frame["raw_hash"].duplicated().mean())
+    pit_violation_count = 0
+    if as_of_date and "available_at" in frame.columns:
+        pit_violation_count = int((pd.to_datetime(frame["available_at"], errors="coerce") > pd.Timestamp(as_of_date)).sum())
+    reliability = 0.0
+    if "source_reliability" in frame.columns and not frame.empty:
+        reliability = float(pd.to_numeric(frame["source_reliability"], errors="coerce").fillna(0.0).mean())
+    return {
+        "row_count": int(len(frame)),
+        "missing_columns": missing,
+        "source_reliability_mean": reliability,
+        "duplicate_rate": duplicate_rate,
+        "pit_violation_count": pit_violation_count,
+    }

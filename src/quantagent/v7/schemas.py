@@ -115,6 +115,7 @@ class EvidenceRecord:
     source_authority_level: float
     timestamp: str
     published_at: str
+    available_at: str | None = None
     effective_start_date: str | None = None
     effective_end_date: str | None = None
     symbol: str | None = None
@@ -134,6 +135,7 @@ class EvidenceRecord:
     horizon_days: int = 5
     rationale: str = ""
     raw_reference: dict[str, Any] = field(default_factory=dict)
+    raw_hash: str = ""
     hash: str = ""
     point_in_time_valid: bool = True
     risk_flags: tuple[str, ...] = ()

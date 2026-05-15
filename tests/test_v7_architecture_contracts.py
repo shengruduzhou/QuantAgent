@@ -1,4 +1,13 @@
-from quantagent.v7.agent_contracts import V7_AGENT_SPECS, get_agent_spec
+import pytest
+
+from quantagent.v7.agent_contracts import (
+    AgentContractViolation,
+    V7_AGENT_SPECS,
+    assert_agent_output_valid,
+    get_agent_spec,
+    validate_agent_output,
+    validate_agent_specs,
+)
 from quantagent.v7.dag import V7_DAILY_DAG, validate_dag
 from quantagent.v7.schemas import EvidenceRecord, EventType, SourceType, ThemeLifecycleStage, UniverseBucket
 from quantagent.v7.scoring import (
@@ -42,6 +51,59 @@ def test_v7_agent_specs_preserve_order_boundary():
     assert get_agent_spec("portfolio_construction_agent").outputs == ("PortfolioPlan", "Constraint")
     assert all(spec.can_emit_orders is False for spec in V7_AGENT_SPECS)
     assert all("OrderIntent" not in output for spec in V7_AGENT_SPECS for output in spec.outputs)
+    assert validate_agent_specs().passed is True
+
+
+def test_runtime_agent_contract_rejects_order_payloads():
+    result = validate_agent_output(
+        "theme_discovery_agent",
+        {
+            "evidence": {
+                "evidence_id": "e1",
+                "source": "gov.cn",
+                "available_at": "2026-05-14",
+                "raw_hash": "h1",
+                "confidence": 0.9,
+            },
+            "order_intents": [{"symbol": "600001.SH", "side": "buy"}],
+        },
+    )
+
+    assert result.passed is False
+    assert any("forbidden_order_field" in error for error in result.errors)
+
+
+def test_runtime_agent_contract_requires_evidence_traceability():
+    result = validate_agent_output(
+        "policy_agent",
+        {"evidence": {"evidence_id": "e1", "source": "gov.cn", "confidence": 0.9}},
+    )
+
+    assert result.passed is False
+    assert any("available_at" in error and "raw_hash" in error for error in result.errors)
+
+
+def test_runtime_agent_contract_requires_downstream_audit_trail():
+    invalid = validate_agent_output(
+        "portfolio_construction_agent",
+        {"portfolio_plan": {"target_weights": {"600001.SH": 0.05}}},
+    )
+    valid = validate_agent_output(
+        "portfolio_construction_agent",
+        {
+            "portfolio_plan": {"target_weights": {"600001.SH": 0.05}},
+            "audit_trail": {"decision_id": "p1", "reason": "approved_target_weights_only"},
+        },
+    )
+
+    assert invalid.passed is False
+    assert "portfolio_construction_agent:missing_audit_trail" in invalid.errors
+    assert valid.passed is True
+    with pytest.raises(AgentContractViolation):
+        assert_agent_output_valid(
+            "portfolio_construction_agent",
+            {"portfolio_plan": {"target_weights": {"600001.SH": 0.05}}},
+        )
 
 
 def test_v7_daily_dag_dependencies_are_ordered():

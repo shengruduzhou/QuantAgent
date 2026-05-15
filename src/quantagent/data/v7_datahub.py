@@ -95,6 +95,7 @@ class V7DataHub:
                 "fundamentals_root": self.config.fundamentals_root,
                 "provider_mode": self.config.provider_mode,
                 "allow_network": self.config.allow_network,
+                "data_quality_report": _bundle_quality_report(bundle, as_of_date),
             },
         )
 
@@ -367,3 +368,53 @@ def _bundle_warnings(bundle: V7ResearchDataBundle) -> tuple[str, ...]:
     ):
         warnings.extend(result.warnings)
     return tuple(warnings)
+
+
+_QUALITY_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "policies": ("source", "published_at", "available_at"),
+    "news": ("source", "published_at", "available_at", "raw_hash"),
+    "announcements": ("source", "published_at", "available_at"),
+    "market_panel": ("symbol", "trade_date", "open", "high", "low", "close", "volume", "amount", "available_at"),
+    "market_state": ("symbol", "available_at"),
+    "fundamentals": ("symbol", "report_period", "ann_date", "available_at"),
+    "base_universe": ("symbol", "available_at"),
+    "company_theme_map": ("symbol", "theme", "available_at"),
+}
+
+
+def _bundle_quality_report(bundle: V7ResearchDataBundle, as_of_date: str) -> dict[str, dict[str, object]]:
+    report: dict[str, dict[str, object]] = {}
+    for name in (
+        "policies",
+        "news",
+        "announcements",
+        "market_panel",
+        "market_state",
+        "fundamentals",
+        "base_universe",
+        "company_theme_map",
+    ):
+        result = getattr(bundle, name)
+        frame = result.frame if result.frame is not None else pd.DataFrame()
+        required = _QUALITY_REQUIRED_COLUMNS.get(name, ())
+        missing = [column for column in required if column not in frame.columns]
+        pit_violations = 0
+        if "available_at" in frame.columns:
+            pit_violations = int((pd.to_datetime(frame["available_at"], errors="coerce") > pd.Timestamp(as_of_date)).sum())
+        duplicate_rate = 0.0
+        hash_column = "raw_hash" if "raw_hash" in frame.columns else "hash" if "hash" in frame.columns else ""
+        if hash_column and not frame.empty:
+            duplicate_rate = float(frame[hash_column].duplicated().mean())
+        reliability = 0.0
+        if "source_reliability" in frame.columns and not frame.empty:
+            reliability = float(pd.to_numeric(frame["source_reliability"], errors="coerce").fillna(0.0).mean())
+        report[name] = {
+            "row_count": int(len(frame)),
+            "missing_columns": missing,
+            "source": result.source,
+            "source_reliability_mean": reliability,
+            "duplicate_rate": duplicate_rate,
+            "pit_violation_count": pit_violations,
+            "warnings": list(result.warnings),
+        }
+    return report

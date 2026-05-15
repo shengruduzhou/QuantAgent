@@ -92,6 +92,7 @@ def news_scores_to_evidence(scores: list[NewsCredibilityScore], as_of_date: str)
                     source_authority_level=score.source_reliability,
                     timestamp=as_of_date,
                     published_at=as_of_date,
+                    available_at=as_of_date,
                     symbol=symbol,
                     theme=score.affected_theme,
                     event_type=score.event_type,
@@ -105,6 +106,7 @@ def news_scores_to_evidence(scores: list[NewsCredibilityScore], as_of_date: str)
                     horizon_days=score.horizon_days,
                     rationale=score.rationale,
                     raw_reference={"news_id": score.news_id, "rumor_risk": score.rumor_risk},
+                    raw_hash=score.news_id,
                     point_in_time_valid=True,
                     risk_flags=score.contradiction_flags + (("rumor_risk",) if score.rumor_risk >= 0.6 else ()),
                 ).with_hash()

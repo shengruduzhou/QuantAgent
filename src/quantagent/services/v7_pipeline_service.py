@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import dataclass, asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -98,7 +98,9 @@ from quantagent.v7.schemas import (
     MarketRegime,
     MarketRegimeSnapshot,
     MultiHorizonAlpha,
+    PortfolioPlan,
     RiskGateReport,
+    SleeveType,
     TechnicalTimingPlan,
     ThemeLifecycleStage,
 )
@@ -138,387 +140,629 @@ def validate_v7(config: str | Path | dict[str, Any] | None = None) -> dict[str, 
     }
 
 
-def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_of_date: str = "2026-05-14") -> dict[str, Any]:
-    cfg = load_v7_config(config)
-    hub_result = _load_datahub_result(cfg, as_of_date)
-    bundle = hub_result.bundle
-    allow_synthetic = hub_result.allow_synthetic_fallback
-    policy_rows = _frame_or_records(
-        bundle.policies.frame,
-        cfg.get("synthetic_policy_documents", _synthetic_policy_records(as_of_date)),
-        allow_synthetic,
-    )
-    documents = local_policy_documents(policy_rows)
-    llm_client = _build_llm_client(cfg)
-    orchestrator = _build_orchestrator(cfg, llm_client)
-    policy_analyses = orchestrator.analyze_policies(documents)
-    parsed = [
-        parse_policy_document(document, analysis=analysis)
-        for document, analysis in zip(documents, policy_analyses)
-    ]
-    schema_evidence, schema_warnings = extract_policy_schema_evidence(
-        documents,
-        as_of_date,
-        cfg.get("policy_extraction", {}) | {"allow_network": bool(cfg.get("data", {}).get("allow_network", False))},
-    )
-    ai_news_scores = orchestrator.score_news_batch(bundle.news.frame)
-    news_scores = _merge_news_credibility(score_news_credibility(bundle.news.frame), ai_news_scores)
-    cross_validation_summaries = cross_validate(bundle.news.frame) if not bundle.news.frame.empty else []
-    if cross_validation_summaries:
-        news_scores = attach_cross_validation_fields(news_scores, cross_validation_summaries)
-    announcement_evidence = order_contract_evidence(bundle.announcements.frame, as_of_date)
-    news_evidence = news_scores_to_evidence(news_scores, as_of_date)
-    theme_profiles, evidence = discover_themes(
-        parsed,
-        as_of_date,
-        _frame_or(bundle.theme_metrics.frame, _synthetic_market_theme_metrics(), allow_synthetic),
-        extra_evidence=schema_evidence + announcement_evidence + news_evidence,
-    )
-    selected_themes = _select_theme_profiles(theme_profiles, cfg)
-    reasoner_cfg = cfg.get("industry_chain_reasoner", {}) or {}
-    reasoner_config = IndustryChainReasonerConfig(
-        min_evidence_count_for_node=int(reasoner_cfg.get("min_evidence_count_for_node", 1)),
-        min_evidence_count_for_strong_edge=int(reasoner_cfg.get("min_evidence_count_for_strong_edge", 2)),
-        weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
-        use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
-        and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
-        strict_no_template_fallback=bool(reasoner_cfg.get("strict_no_template_fallback", True)),
-    )
-    chain_reasoner_results = reason_industry_chain_for_themes(selected_themes, evidence, reasoner_config, llm_client)
-    chain_by_theme = {
-        theme: (list(result.nodes), list(result.edges)) for theme, result in chain_reasoner_results.items()
-    }
-    all_chain_nodes = [node for nodes, _ in chain_by_theme.values() for node in nodes]
-    all_chain_edges = [edge for _, edges in chain_by_theme.values() for edge in edges]
+@dataclass
+class V7PipelineContext:
+    cfg: dict[str, Any]
+    as_of_date: str
+    gate_failed: bool = False
+    gate_failure_reason: str = ""
+    report: dict[str, Any] | None = None
 
-    financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials(), allow_synthetic)
-    financials = _fundamental_input_frame(financials_raw, market_state=bundle.market_state.frame, market_panel=bundle.market_panel.frame)
-    forensics_overlays: dict[str, ForensicsOverlay] = {}
-    if financials.empty:
-        fraud_scores = []
-        fundamental_scores = []
-    else:
-        fraud_scores = score_fraud_risk(financials)
-        forensics_overlays = _run_forensics_overlays(orchestrator, financials)
-        fraud_scores = _apply_forensics_overlays(fraud_scores, forensics_overlays)
-        fraud_by_symbol = {score.symbol: score for score in fraud_scores}
-        financials["fraud_risk_score"] = financials["symbol"].map(
-            lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score if str(symbol) in fraud_by_symbol else 50.0
+
+class V7DataStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        ctx.hub_result = _load_datahub_result(ctx.cfg, ctx.as_of_date)
+        ctx.bundle = ctx.hub_result.bundle
+        ctx.allow_synthetic = ctx.hub_result.allow_synthetic_fallback
+        ctx.llm_client = _build_llm_client(ctx.cfg)
+        ctx.orchestrator = _build_orchestrator(ctx.cfg, ctx.llm_client)
+        return ctx
+
+
+class V7EvidenceStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        cfg = ctx.cfg
+        bundle = ctx.bundle
+        ctx.policy_rows = _frame_or_records(
+            bundle.policies.frame,
+            cfg.get("synthetic_policy_documents", _synthetic_policy_records(ctx.as_of_date)),
+            ctx.allow_synthetic,
         )
-        fundamental_scores = score_financial_statements(financials)
-    fundamental_due_diligence = build_fundamental_due_diligence(
-        financials,
-        fundamental_scores,
-        fraud_scores,
-        as_of_date,
-    )
-    fundamentals = {score.symbol: score for score in fundamental_scores}
-
-    base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe(), allow_synthetic)
-    company_theme_map = bundle.company_theme_map.frame
-    if company_theme_map.empty:
-        profiles = _frame_or(bundle.company_profiles.frame, pd.DataFrame(), False)
-        mapped_frames = []
-        if not profiles.empty:
-            for profile in selected_themes:
-                chain_nodes, _ = chain_by_theme[profile.theme_name]
-                mapped = map_company_exposures(profiles, profile.theme_name, chain_nodes, evidence, as_of_date=as_of_date)
-                if not mapped.empty:
-                    mapped_frames.append(mapped)
-        company_theme_map = pd.concat(mapped_frames, ignore_index=True) if mapped_frames else company_theme_map
-    company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(as_of_date), allow_synthetic)
-    if allow_synthetic:
-        company_theme_map = _align_synthetic_company_theme_map(company_theme_map, selected_themes)
-    market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state(), allow_synthetic)
-    universe_members = _build_multi_theme_universe(
-        base_universe=base_universe,
-        company_theme_map=company_theme_map,
-        theme_profiles=selected_themes,
-        chain_by_theme=chain_by_theme,
-        fundamentals=fundamentals,
-        market_state=market_state,
-        as_of_date=as_of_date,
-    )
-    market = _market_regime_from_data(bundle.market_panel.frame, market_state, universe_members, selected_themes, allow_synthetic)
-
-    macro_indicators = _maybe_frame(getattr(bundle, "macro_indicators", None))
-    economic_cfg = cfg.get("economic_analyzer", {}) or {}
-    macro_snapshot = analyze_macro(macro_indicators, as_of_date, EconomicAnalyzerConfig(
-        capacity_utilization_target=float(economic_cfg.get("capacity_utilization_target", 0.80)),
-        inventory_days_warning=float(economic_cfg.get("inventory_days_warning", 90.0)),
-    )) if bool(economic_cfg.get("enabled", True)) else None
-    industry_snapshots = (
-        analyze_industries(financials, selected_themes, macro_snapshot)
-        if macro_snapshot is not None and not financials.empty
-        else []
-    )
-    economics_overlays = _run_economics_overlays(orchestrator, industry_snapshots, macro_snapshot, selected_themes)
-    industry_snapshots = _apply_economics_overlays(industry_snapshots, economics_overlays)
-    economics_company_frame = (
-        industry_snapshots_to_company_frame(financials, industry_snapshots, as_of_date)
-        if industry_snapshots
-        else pd.DataFrame()
-    )
-
-    valuation_cfg = cfg.get("intrinsic_valuation", {}) or {}
-    valuation_reports = (
-        value_universe(
-            financials,
-            market_state,
-            as_of_date,
-            IntrinsicValuationConfig(
-                default_terminal_growth=float(valuation_cfg.get("default_terminal_growth", 0.025)),
-                default_forecast_years=int(valuation_cfg.get("default_forecast_years", 5)),
-                fraud_confidence_haircut_threshold=float(valuation_cfg.get("fraud_confidence_haircut_threshold", 60.0)),
-                fraud_confidence_haircut_strength=float(valuation_cfg.get("fraud_confidence_haircut_strength", 0.60)),
-            ),
+        ctx.documents = local_policy_documents(ctx.policy_rows)
+        ctx.policy_analyses = ctx.orchestrator.analyze_policies(ctx.documents)
+        ctx.parsed = [
+            parse_policy_document(document, analysis=analysis)
+            for document, analysis in zip(ctx.documents, ctx.policy_analyses)
+        ]
+        ctx.schema_evidence, ctx.schema_warnings = extract_policy_schema_evidence(
+            ctx.documents,
+            ctx.as_of_date,
+            cfg.get("policy_extraction", {}) | {"allow_network": bool(cfg.get("data", {}).get("allow_network", False))},
         )
-        if bool(valuation_cfg.get("enabled", True)) and not financials.empty
-        else []
-    )
-    valuation_overlays = _run_valuation_overlays(orchestrator, financials, market_state)
-    valuation_reports = _apply_valuation_overlays(valuation_reports, valuation_overlays)
-    theme_sentiments = _run_theme_sentiments(orchestrator, selected_themes, evidence)
+        ctx.ai_news_scores = ctx.orchestrator.score_news_batch(bundle.news.frame)
+        ctx.news_scores = _merge_news_credibility(score_news_credibility(bundle.news.frame), ctx.ai_news_scores)
+        ctx.cross_validation_summaries = cross_validate(bundle.news.frame) if not bundle.news.frame.empty else []
+        if ctx.cross_validation_summaries:
+            ctx.news_scores = attach_cross_validation_fields(ctx.news_scores, ctx.cross_validation_summaries)
+        ctx.announcement_evidence = order_contract_evidence(bundle.announcements.frame, ctx.as_of_date)
+        ctx.news_evidence = news_scores_to_evidence(ctx.news_scores, ctx.as_of_date)
+        return ctx
 
-    chain_features_frame = _chain_features_frame(universe_members, chain_by_theme)
-    long_horizon_cfg = cfg.get("long_horizon_factors", {}) or {}
-    long_horizon_factor_frame = (
-        compute_long_horizon_factors(
-            fundamentals=financials,
-            market_state=market_state,
-            price_panel=bundle.market_panel.frame,
-            chain_features=chain_features_frame,
-            economics_features=economics_company_frame,
-            config=LongHorizonFactorConfig(
-                fraud_haircut_threshold=float(long_horizon_cfg.get("fraud_haircut_threshold", 60.0)),
-                fraud_haircut_strength=float(long_horizon_cfg.get("fraud_haircut_strength", 0.50)),
-                policy_decay_half_life_days=float(long_horizon_cfg.get("policy_decay_half_life_days", 90.0)),
-            ),
+
+class V7ThemeStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        cfg = ctx.cfg
+        ctx.theme_profiles, ctx.evidence = discover_themes(
+            ctx.parsed,
+            ctx.as_of_date,
+            _frame_or(ctx.bundle.theme_metrics.frame, _synthetic_market_theme_metrics(), ctx.allow_synthetic),
+            extra_evidence=ctx.schema_evidence + ctx.announcement_evidence + ctx.news_evidence,
         )
-        if bool(long_horizon_cfg.get("enabled", True))
-        else pd.DataFrame()
-    )
-    long_horizon_alpha_frame = long_horizon_alpha_score(long_horizon_factor_frame) if not long_horizon_factor_frame.empty else pd.DataFrame()
-
-    factor_frame = _feature_frame_for_v7(bundle, universe_members, theme_profiles, financials, market_state, as_of_date, allow_synthetic)
-    factor_frame = _merge_long_horizon_factors(factor_frame, long_horizon_factor_frame, economics_company_frame)
-    factor_columns = _factor_columns(factor_frame)
-    factor_applicability = validate_factor_applicability(factor_frame, factor_columns, universe_members, market.market_regime) if factor_columns else []
-    factor_hard_gate = bool(cfg.get("factor_applicability", {}).get("hard_gate", True))
-    production_stages = tuple(cfg.get("factor_applicability", {}).get("production_stages", ("production", "validation")))
-    production_applicability = (
-        [item for item in factor_applicability if item.factor_lifecycle_stage in production_stages]
-        if factor_hard_gate
-        else list(factor_applicability)
-    )
-    stock_pool_selection = build_stock_pool_selection(universe_members, selected_themes, production_applicability, as_of_date)
-
-    gate_cfg = cfg.get("stock_pool_gate", {}) or {}
-    if bool(gate_cfg.get("enabled", True)):
-        gated_members, gate_drop_log = apply_stock_pool_gate(
-            universe_members,
-            stock_pool_selection,
-            StockPoolGateConfig(
-                allow_satellite_if_confidence_above=float(
-                    gate_cfg.get("allow_satellite_if_confidence_above", 0.75)
-                ),
-                require_factor_coverage=bool(gate_cfg.get("require_factor_coverage", True)),
-                block_false_association=bool(gate_cfg.get("block_false_association", True)),
-            ),
+        ctx.selected_themes = _select_theme_profiles(ctx.theme_profiles, cfg)
+        reasoner_cfg = cfg.get("industry_chain_reasoner", {}) or {}
+        reasoner_config = IndustryChainReasonerConfig(
+            min_evidence_count_for_node=int(reasoner_cfg.get("min_evidence_count_for_node", 1)),
+            min_evidence_count_for_strong_edge=int(reasoner_cfg.get("min_evidence_count_for_strong_edge", 2)),
+            weak_association_max_evidence=int(reasoner_cfg.get("weak_association_max_evidence", 1)),
+            use_llm_refinement=bool(reasoner_cfg.get("use_llm_refinement", False))
+            and bool(cfg.get("llm_skills", {}).get("enabled_skills", {}).get("industry_chain_reasoner", True)),
+            strict_no_template_fallback=bool(reasoner_cfg.get("strict_no_template_fallback", True)),
         )
-        if gated_members:
-            alpha_members = gated_members
+        ctx.chain_reasoner_results = reason_industry_chain_for_themes(
+            ctx.selected_themes,
+            ctx.evidence,
+            reasoner_config,
+            ctx.llm_client,
+        )
+        ctx.chain_by_theme = {
+            theme: (list(result.nodes), list(result.edges))
+            for theme, result in ctx.chain_reasoner_results.items()
+        }
+        ctx.all_chain_nodes = [node for nodes, _ in ctx.chain_by_theme.values() for node in nodes]
+        ctx.all_chain_edges = [edge for _, edges in ctx.chain_by_theme.values() for edge in edges]
+        return ctx
+
+
+class V7FundamentalStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        bundle = ctx.bundle
+        cfg = ctx.cfg
+        ctx.financials_raw = _frame_or(bundle.fundamentals.frame, _synthetic_financials(), ctx.allow_synthetic)
+        ctx.financials = _fundamental_input_frame(
+            ctx.financials_raw,
+            market_state=bundle.market_state.frame,
+            market_panel=bundle.market_panel.frame,
+        )
+        ctx.forensics_overlays = {}
+        if ctx.financials.empty:
+            ctx.fraud_scores = []
+            ctx.fundamental_scores = []
         else:
-            alpha_members = universe_members
-            gate_drop_log["__gate_disabled__"] = "empty_after_gate_falling_back_to_full_universe"
-    else:
-        alpha_members = universe_members
-        gate_drop_log = {}
-
-    alpha_cfg = cfg.get("alpha_model", {}) or {}
-    use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", False))
-    use_classical_alpha = bool(alpha_cfg.get("enabled", True))
-    deep_cfg = cfg.get("deep_alpha_model", {}) or {}
-    if use_classical_alpha:
-        alphas = predict_v7_classical_alpha(
-            factor_frame,
-            alpha_members,
-            production_applicability,
-            ClassicalAlphaConfig(
-                model=str(alpha_cfg.get("model", "ridge")),
-                alpha=float(alpha_cfg.get("alpha", 1.0)),
-                l1_ratio=float(alpha_cfg.get("l1_ratio", 0.5)),
-                min_train_rows=int(alpha_cfg.get("min_train_rows", 30)),
-                fraud_penalty_weight=float(alpha_cfg.get("fraud_penalty_weight", 0.30)),
-            ),
+            ctx.fraud_scores = score_fraud_risk(ctx.financials)
+            ctx.forensics_overlays = _run_forensics_overlays(ctx.orchestrator, ctx.financials)
+            ctx.fraud_scores = _apply_forensics_overlays(ctx.fraud_scores, ctx.forensics_overlays)
+            fraud_by_symbol = {score.symbol: score for score in ctx.fraud_scores}
+            ctx.financials["fraud_risk_score"] = ctx.financials["symbol"].map(
+                lambda symbol: fraud_by_symbol[str(symbol)].overall_fraud_risk_score if str(symbol) in fraud_by_symbol else 50.0
+            )
+            ctx.fundamental_scores = score_financial_statements(ctx.financials)
+        ctx.fundamental_due_diligence = build_fundamental_due_diligence(
+            ctx.financials,
+            ctx.fundamental_scores,
+            ctx.fraud_scores,
+            ctx.as_of_date,
         )
-    elif use_deep_alpha:
-        alphas = predict_v7_deep_alpha(
-            factor_frame,
-            alpha_members,
-            production_applicability,
-            V7DeepAlphaConfig(
-                hidden_size=int(deep_cfg.get("hidden_size", 16)),
-                seed=int(deep_cfg.get("seed", 1729)),
-                use_torch_if_available=bool(deep_cfg.get("use_torch_if_available", True)),
-                fraud_penalty_weight=float(deep_cfg.get("fraud_penalty_weight", 0.30)),
-            ),
-        )
-    else:
-        alphas = predict_v7_multi_horizon_alpha(factor_frame, alpha_members, production_applicability)
-    if not alphas and allow_synthetic:
-        alphas = _build_synthetic_alphas(alpha_members)
+        ctx.fundamentals = {score.symbol: score for score in ctx.fundamental_scores}
+        ctx.market_state = _frame_or(bundle.market_state.frame, _synthetic_market_state(), ctx.allow_synthetic)
 
-    retail_cfg = cfg.get("retail_hft_risk", {}) or {}
-    if bool(retail_cfg.get("enabled", True)):
-        retail_hft_reports = score_retail_hft_risk(
+        macro_indicators = _maybe_frame(getattr(bundle, "macro_indicators", None))
+        economic_cfg = cfg.get("economic_analyzer", {}) or {}
+        ctx.macro_snapshot = analyze_macro(
+            macro_indicators,
+            ctx.as_of_date,
+            EconomicAnalyzerConfig(
+                capacity_utilization_target=float(economic_cfg.get("capacity_utilization_target", 0.80)),
+                inventory_days_warning=float(economic_cfg.get("inventory_days_warning", 90.0)),
+            ),
+        ) if bool(economic_cfg.get("enabled", True)) else None
+        ctx.industry_snapshots = (
+            analyze_industries(ctx.financials, ctx.selected_themes, ctx.macro_snapshot)
+            if ctx.macro_snapshot is not None and not ctx.financials.empty
+            else []
+        )
+        ctx.economics_overlays = _run_economics_overlays(
+            ctx.orchestrator,
+            ctx.industry_snapshots,
+            ctx.macro_snapshot,
+            ctx.selected_themes,
+        )
+        ctx.industry_snapshots = _apply_economics_overlays(ctx.industry_snapshots, ctx.economics_overlays)
+        ctx.economics_company_frame = (
+            industry_snapshots_to_company_frame(ctx.financials, ctx.industry_snapshots, ctx.as_of_date)
+            if ctx.industry_snapshots
+            else pd.DataFrame()
+        )
+
+        valuation_cfg = cfg.get("intrinsic_valuation", {}) or {}
+        ctx.valuation_reports = (
+            value_universe(
+                ctx.financials,
+                ctx.market_state,
+                ctx.as_of_date,
+                IntrinsicValuationConfig(
+                    default_terminal_growth=float(valuation_cfg.get("default_terminal_growth", 0.025)),
+                    default_forecast_years=int(valuation_cfg.get("default_forecast_years", 5)),
+                    fraud_confidence_haircut_threshold=float(valuation_cfg.get("fraud_confidence_haircut_threshold", 60.0)),
+                    fraud_confidence_haircut_strength=float(valuation_cfg.get("fraud_confidence_haircut_strength", 0.60)),
+                ),
+            )
+            if bool(valuation_cfg.get("enabled", True)) and not ctx.financials.empty
+            else []
+        )
+        ctx.valuation_overlays = _run_valuation_overlays(ctx.orchestrator, ctx.financials, ctx.market_state)
+        ctx.valuation_reports = _apply_valuation_overlays(ctx.valuation_reports, ctx.valuation_overlays)
+        ctx.theme_sentiments = _run_theme_sentiments(ctx.orchestrator, ctx.selected_themes, ctx.evidence)
+        return ctx
+
+
+class V7AlphaStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        self._build_universe_and_market(ctx)
+        self._build_factor_frames(ctx)
+        self._apply_stock_pool_gate(ctx)
+        if ctx.gate_failed:
+            ctx.alphas = {}
+            ctx.retail_hft_reports = []
+            return ctx
+        self._predict_alpha(ctx)
+        return ctx
+
+    def _build_universe_and_market(self, ctx: V7PipelineContext) -> None:
+        bundle = ctx.bundle
+        ctx.base_universe = _frame_or(bundle.base_universe.frame, _synthetic_base_universe(), ctx.allow_synthetic)
+        company_theme_map = bundle.company_theme_map.frame
+        if company_theme_map.empty:
+            profiles = _frame_or(bundle.company_profiles.frame, pd.DataFrame(), False)
+            mapped_frames = []
+            if not profiles.empty:
+                for profile in ctx.selected_themes:
+                    chain_nodes, _ = ctx.chain_by_theme[profile.theme_name]
+                    mapped = map_company_exposures(
+                        profiles,
+                        profile.theme_name,
+                        chain_nodes,
+                        ctx.evidence,
+                        as_of_date=ctx.as_of_date,
+                    )
+                    if not mapped.empty:
+                        mapped_frames.append(mapped)
+            company_theme_map = pd.concat(mapped_frames, ignore_index=True) if mapped_frames else company_theme_map
+        ctx.company_theme_map = _frame_or(company_theme_map, _synthetic_company_theme_map(ctx.as_of_date), ctx.allow_synthetic)
+        if ctx.allow_synthetic:
+            ctx.company_theme_map = _align_synthetic_company_theme_map(ctx.company_theme_map, ctx.selected_themes)
+        ctx.universe_members = _build_multi_theme_universe(
+            base_universe=ctx.base_universe,
+            company_theme_map=ctx.company_theme_map,
+            theme_profiles=ctx.selected_themes,
+            chain_by_theme=ctx.chain_by_theme,
+            fundamentals=ctx.fundamentals,
+            market_state=ctx.market_state,
+            as_of_date=ctx.as_of_date,
+        )
+        ctx.market = _market_regime_from_data(
             bundle.market_panel.frame,
-            market_state,
-            RetailHFTRiskConfig(
-                base_penalty=float(retail_cfg.get("base_penalty", 0.20)),
-                max_penalty=float(retail_cfg.get("max_penalty", 0.85)),
-                institutional_volume_zscore_warning=float(retail_cfg.get("institutional_volume_zscore_warning", 2.0)),
-            ),
+            ctx.market_state,
+            ctx.universe_members,
+            ctx.selected_themes,
+            ctx.allow_synthetic,
         )
-        alphas = apply_retail_hft_penalty(alphas, retail_hft_reports)
-    else:
-        retail_hft_reports = []
-    timing = _build_timing(alpha_members)
+
+    def _build_factor_frames(self, ctx: V7PipelineContext) -> None:
+        cfg = ctx.cfg
+        bundle = ctx.bundle
+        ctx.chain_features_frame = _chain_features_frame(ctx.universe_members, ctx.chain_by_theme)
+        long_horizon_cfg = cfg.get("long_horizon_factors", {}) or {}
+        ctx.long_horizon_factor_frame = (
+            compute_long_horizon_factors(
+                fundamentals=ctx.financials,
+                market_state=ctx.market_state,
+                price_panel=bundle.market_panel.frame,
+                chain_features=ctx.chain_features_frame,
+                economics_features=ctx.economics_company_frame,
+                config=LongHorizonFactorConfig(
+                    fraud_haircut_threshold=float(long_horizon_cfg.get("fraud_haircut_threshold", 60.0)),
+                    fraud_haircut_strength=float(long_horizon_cfg.get("fraud_haircut_strength", 0.50)),
+                    policy_decay_half_life_days=float(long_horizon_cfg.get("policy_decay_half_life_days", 90.0)),
+                ),
+            )
+            if bool(long_horizon_cfg.get("enabled", True))
+            else pd.DataFrame()
+        )
+        ctx.long_horizon_alpha_frame = (
+            long_horizon_alpha_score(ctx.long_horizon_factor_frame)
+            if not ctx.long_horizon_factor_frame.empty
+            else pd.DataFrame()
+        )
+        ctx.factor_frame = _feature_frame_for_v7(
+            bundle,
+            ctx.universe_members,
+            ctx.theme_profiles,
+            ctx.financials,
+            ctx.market_state,
+            ctx.as_of_date,
+            ctx.allow_synthetic,
+        )
+        ctx.factor_frame = _merge_long_horizon_factors(
+            ctx.factor_frame,
+            ctx.long_horizon_factor_frame,
+            ctx.economics_company_frame,
+        )
+        ctx.factor_columns = _factor_columns(ctx.factor_frame)
+        ctx.factor_applicability = (
+            validate_factor_applicability(ctx.factor_frame, ctx.factor_columns, ctx.universe_members, ctx.market.market_regime)
+            if ctx.factor_columns
+            else []
+        )
+        factor_hard_gate = bool(cfg.get("factor_applicability", {}).get("hard_gate", True))
+        production_stages = tuple(cfg.get("factor_applicability", {}).get("production_stages", ("production", "validation")))
+        ctx.production_applicability = (
+            [item for item in ctx.factor_applicability if item.factor_lifecycle_stage in production_stages]
+            if factor_hard_gate
+            else list(ctx.factor_applicability)
+        )
+        ctx.stock_pool_selection = build_stock_pool_selection(
+            ctx.universe_members,
+            ctx.selected_themes,
+            ctx.production_applicability,
+            ctx.as_of_date,
+        )
+
+    def _apply_stock_pool_gate(self, ctx: V7PipelineContext) -> None:
+        gate_cfg = ctx.cfg.get("stock_pool_gate", {}) or {}
+        if bool(gate_cfg.get("enabled", True)):
+            gated_members, ctx.gate_drop_log = apply_stock_pool_gate(
+                ctx.universe_members,
+                ctx.stock_pool_selection,
+                StockPoolGateConfig(
+                    allow_satellite_if_confidence_above=float(gate_cfg.get("allow_satellite_if_confidence_above", 0.75)),
+                    require_factor_coverage=bool(gate_cfg.get("require_factor_coverage", True)),
+                    block_false_association=bool(gate_cfg.get("block_false_association", True)),
+                ),
+            )
+            if gated_members:
+                ctx.alpha_members = gated_members
+                return
+            ctx.alpha_members = []
+            ctx.gate_failed = True
+            ctx.gate_failure_reason = "empty_after_stock_pool_hard_gate"
+            ctx.gate_drop_log["__stock_pool_gate_failed__"] = ctx.gate_failure_reason
+            return
+        ctx.alpha_members = ctx.universe_members
+        ctx.gate_drop_log = {}
+
+    def _predict_alpha(self, ctx: V7PipelineContext) -> None:
+        cfg = ctx.cfg
+        alpha_cfg = cfg.get("alpha_model", {}) or {}
+        use_deep_alpha = bool(cfg.get("deep_alpha_model", {}).get("enabled", False))
+        use_classical_alpha = bool(alpha_cfg.get("enabled", True))
+        deep_cfg = cfg.get("deep_alpha_model", {}) or {}
+        if use_classical_alpha:
+            ctx.alphas = predict_v7_classical_alpha(
+                ctx.factor_frame,
+                ctx.alpha_members,
+                ctx.production_applicability,
+                ClassicalAlphaConfig(
+                    model=str(alpha_cfg.get("model", "ridge")),
+                    alpha=float(alpha_cfg.get("alpha", 1.0)),
+                    l1_ratio=float(alpha_cfg.get("l1_ratio", 0.5)),
+                    min_train_rows=int(alpha_cfg.get("min_train_rows", 30)),
+                    fraud_penalty_weight=float(alpha_cfg.get("fraud_penalty_weight", 0.30)),
+                ),
+            )
+        elif use_deep_alpha:
+            ctx.alphas = predict_v7_deep_alpha(
+                ctx.factor_frame,
+                ctx.alpha_members,
+                ctx.production_applicability,
+                V7DeepAlphaConfig(
+                    hidden_size=int(deep_cfg.get("hidden_size", 16)),
+                    seed=int(deep_cfg.get("seed", 1729)),
+                    use_torch_if_available=bool(deep_cfg.get("use_torch_if_available", True)),
+                    fraud_penalty_weight=float(deep_cfg.get("fraud_penalty_weight", 0.30)),
+                ),
+            )
+        else:
+            ctx.alphas = predict_v7_multi_horizon_alpha(
+                ctx.factor_frame,
+                ctx.alpha_members,
+                ctx.production_applicability,
+            )
+        if not ctx.alphas and ctx.allow_synthetic and ctx.alpha_members:
+            ctx.alphas = _build_synthetic_alphas(ctx.alpha_members)
+
+        retail_cfg = cfg.get("retail_hft_risk", {}) or {}
+        if bool(retail_cfg.get("enabled", True)):
+            ctx.retail_hft_reports = score_retail_hft_risk(
+                ctx.bundle.market_panel.frame,
+                ctx.market_state,
+                RetailHFTRiskConfig(
+                    base_penalty=float(retail_cfg.get("base_penalty", 0.20)),
+                    max_penalty=float(retail_cfg.get("max_penalty", 0.85)),
+                    institutional_volume_zscore_warning=float(retail_cfg.get("institutional_volume_zscore_warning", 2.0)),
+                ),
+            )
+            ctx.alphas = apply_retail_hft_penalty(ctx.alphas, ctx.retail_hft_reports)
+        else:
+            ctx.retail_hft_reports = []
+
+
+class V7PortfolioStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        if ctx.gate_failed:
+            ctx.timing = {}
+            ctx.long_short_allocation = None
+            ctx.portfolio = _empty_portfolio_from_config(ctx.market, ctx.cfg, ("stock_pool_gate_failed", ctx.gate_failure_reason))
+            ctx.lifecycle_notes = [ctx.gate_failure_reason]
+        else:
+            ctx.timing = _build_timing(ctx.alpha_members)
+            portfolio_cfg = ctx.cfg.get("portfolio", {})
+            allocator_cfg = ctx.cfg.get("long_short_allocator", {}) or {}
+            ctx.long_short_allocation = (
+                allocate_long_short(
+                    ctx.alphas,
+                    ctx.alpha_members,
+                    ctx.market,
+                    None,
+                    LongShortAllocatorConfig(
+                        long_horizon_confidence_threshold=float(allocator_cfg.get("long_horizon_confidence_threshold", 0.45)),
+                        short_horizon_confidence_threshold=float(allocator_cfg.get("short_horizon_confidence_threshold", 0.55)),
+                        hedge_scale=float(allocator_cfg.get("hedge_scale", 0.30)),
+                    ),
+                )
+                if bool(allocator_cfg.get("enabled", True))
+                else None
+            )
+            sleeve_weights_override = _sleeve_weights_from_long_short(ctx.long_short_allocation, allocator_cfg)
+            ctx.portfolio = construct_v7_portfolio(
+                ctx.alpha_members,
+                ctx.alphas,
+                ctx.market,
+                ctx.timing,
+                current_weights=_current_weights(ctx.bundle.positions.frame),
+                max_single_name_weight=float(portfolio_cfg.get("max_single_name_weight", 0.06)),
+                max_sector_weight=float(portfolio_cfg.get("max_sector_weight", 0.30)),
+                max_theme_weight=float(portfolio_cfg.get("max_theme_weight", 0.35)),
+                turnover_limit=float(portfolio_cfg.get("max_turnover", portfolio_cfg.get("turnover_limit", 0.35))),
+                sleeve_weights_override=sleeve_weights_override,
+            )
+            ctx.portfolio, ctx.lifecycle_notes = _apply_lifecycle_caps(ctx.portfolio, ctx.alpha_members)
+        theme_crowding = _average_theme_crowding(ctx.selected_themes)
+        ctx.hedge = decide_v7_hedge(ctx.market, ctx.portfolio, theme_crowding_score=theme_crowding)
+        ctx.hedge_recommendation = _select_tool_hedge(
+            ctx.portfolio,
+            ctx.hedge,
+            ctx.market,
+            ctx.bundle.market_panel.frame,
+            ctx.cfg,
+        )
+        ctx.retail_hedge_result = _apply_retail_hedge_feasibility(ctx.hedge_recommendation, ctx.cfg)
+        if ctx.retail_hedge_result is not None:
+            ctx.hedge_recommendation = ctx.retail_hedge_result.recommendation
+        return ctx
+
+
+class V7RiskStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        ctx.execution_reports = _execution_reports(
+            ctx.portfolio,
+            ctx.market_state,
+            ctx.bundle.positions.frame,
+            ctx.cfg.get("execution", {}),
+        )
+        if ctx.gate_failed:
+            ctx.risk_report = _stock_pool_gate_failed_risk_report(ctx.portfolio, ctx.hedge, ctx.gate_failure_reason)
+            ctx.backtest = _empty_backtest("stock_pool_gate_failed")
+        else:
+            ctx.risk_report = _risk_gate_report(ctx.alpha_members, ctx.portfolio, ctx.execution_reports, ctx.hedge)
+            ctx.backtest = _run_theme_backtest(ctx.portfolio, ctx.bundle.market_panel.frame, ctx.alpha_members, ctx.allow_synthetic)
+        ctx.audit = AuditLogRecord(
+            decision_id=f"v7-{ctx.as_of_date}",
+            timestamp=ctx.as_of_date,
+            input_data_versions={
+                "policy": ctx.bundle.policies.source,
+                "market": ctx.bundle.market_panel.source,
+                "financials": ctx.bundle.fundamentals.source,
+                "company_theme_map": ctx.bundle.company_theme_map.source,
+            },
+            model_version="v7.mock.multi_horizon" if ctx.allow_synthetic else "v7.strict.multi_horizon",
+            feature_version="v7.mock.features" if ctx.allow_synthetic else "v7.pit.features",
+            evidence_hashes=tuple(record.hash for record in ctx.evidence if record.hash),
+            risk_gate_result="passed" if ctx.risk_report.risk_passed else "failed",
+            final_decision_reason=ctx.gate_failure_reason or "V7 research run emitted target_weights only; no live orders emitted.",
+        )
+        return ctx
+
+
+class V7ReportStage:
+    def run(self, ctx: V7PipelineContext) -> V7PipelineContext:
+        ctx.report = {
+            "data_mode": {
+                "provider_mode": ctx.hub_result.provider_mode,
+                "allow_synthetic_fallback": ctx.allow_synthetic,
+                "warnings": list(ctx.hub_result.warnings + ctx.schema_warnings),
+                "quality_report": ctx.hub_result.metadata.get("data_quality_report", {}),
+            },
+            "market_summary": {
+                "market_regime": ctx.market.market_regime.value,
+                "risk_off_score": ctx.market.risk_off_score,
+                "recommended_gross_exposure": ctx.market.recommended_gross_exposure,
+                "recommended_cash_weight": ctx.market.recommended_cash_weight,
+                "hedge_need_score": ctx.hedge.hedge_need_score,
+            },
+            "selected_themes": [profile.theme_name for profile in ctx.selected_themes],
+            "theme_ranking": [_to_dict(profile) for profile in sorted(ctx.theme_profiles, key=lambda item: item.theme_strength, reverse=True)],
+            "industry_chain": {
+                "nodes": [_to_dict(node) for node in ctx.all_chain_nodes],
+                "edges": [_to_dict(edge) for edge in ctx.all_chain_edges],
+                "by_theme": {
+                    theme: {
+                        "nodes": [_to_dict(node) for node in nodes],
+                        "edges": [_to_dict(edge) for edge in edges],
+                    }
+                    for theme, (nodes, edges) in ctx.chain_by_theme.items()
+                },
+            },
+            "stock_pool_selection": [_to_dict(report) for report in ctx.stock_pool_selection],
+            "stock_pool_gate": {
+                "gate_failed": ctx.gate_failed,
+                "audit_reason": ctx.gate_failure_reason,
+                "kept_symbols": [member.symbol for member in ctx.alpha_members],
+                "dropped_symbols": ctx.gate_drop_log,
+                "drop_summary": gate_summary(ctx.gate_drop_log),
+            },
+            "thematic_universe": [_to_dict(member) for member in ctx.universe_members],
+            "fundamental_due_diligence": [_to_dict(report) for report in ctx.fundamental_due_diligence],
+            "intrinsic_valuation": [_to_dict(report) for report in ctx.valuation_reports],
+            "valuation_overlays": [_to_dict(overlay) for overlay in ctx.valuation_overlays.values()],
+            "forensics_overlays": [_to_dict(overlay) for overlay in ctx.forensics_overlays.values()],
+            "policy_ai_analyses": [_to_dict(analysis) for analysis in ctx.policy_analyses],
+            "ai_news_credibility": [_to_dict(score) for score in ctx.ai_news_scores],
+            "theme_sentiments": [_to_dict(sentiment) for sentiment in ctx.theme_sentiments],
+            "economics_macro": _to_dict(ctx.macro_snapshot) if ctx.macro_snapshot is not None else {},
+            "economics_industries": [_to_dict(snapshot) for snapshot in ctx.industry_snapshots],
+            "economics_overlays": [_to_dict(overlay) for overlay in ctx.economics_overlays.values()],
+            "long_horizon_factors": _frame_to_records(ctx.long_horizon_factor_frame),
+            "long_horizon_alpha": _frame_to_records(ctx.long_horizon_alpha_frame),
+            "industry_chain_reasoner": {
+                theme: {
+                    "chain_confidence": result.chain_confidence,
+                    "used_llm": result.used_llm,
+                    "rationale": result.rationale,
+                    "nodes": [_to_dict(node) for node in result.nodes],
+                    "edges": [_to_dict(edge) for edge in result.edges],
+                }
+                for theme, result in ctx.chain_reasoner_results.items()
+            },
+            "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in ctx.alphas.items()},
+            "factor_applicability": [_to_dict(item) for item in ctx.factor_applicability],
+            "news_credibility": [_to_dict(item) for item in ctx.news_scores],
+            "news_cross_validation": [_to_dict(summary) for summary in ctx.cross_validation_summaries],
+            "retail_hft_risk": [_to_dict(report) for report in ctx.retail_hft_reports],
+            "long_short_allocation": _to_dict(ctx.long_short_allocation) if ctx.long_short_allocation is not None else {},
+            "portfolio_plan": _to_dict(ctx.portfolio),
+            "lifecycle_caps_applied": ctx.lifecycle_notes,
+            "hedge_decision": _to_dict(ctx.hedge),
+            "tool_hedge": _to_dict(ctx.hedge_recommendation) if ctx.hedge_recommendation is not None else {},
+            "retail_hedge_feasibility": (
+                {
+                    "feasibility_score": ctx.retail_hedge_result.feasibility_score,
+                    "blocked_actions": list(ctx.retail_hedge_result.blocked_actions),
+                    "audit_notes": list(ctx.retail_hedge_result.audit_notes),
+                }
+                if ctx.retail_hedge_result is not None
+                else {}
+            ),
+            "execution_constraints": [_to_dict(report) for report in ctx.execution_reports],
+            "risk_report": _to_dict(ctx.risk_report),
+            "backtest_attribution": _to_dict(ctx.backtest),
+            "audit_log": _to_dict(ctx.audit),
+            "order_boundary": "agents_and_optimizer_emit_no_orders; OrderManager is the only order-intent owner",
+        }
+        return ctx
+
+
+def run_daily_v7_research(config: str | Path | dict[str, Any] | None = None, as_of_date: str = "2026-05-14") -> dict[str, Any]:
+    ctx = V7PipelineContext(cfg=load_v7_config(config), as_of_date=as_of_date)
+    for stage in (
+        V7DataStage(),
+        V7EvidenceStage(),
+        V7ThemeStage(),
+        V7FundamentalStage(),
+        V7AlphaStage(),
+        V7PortfolioStage(),
+        V7RiskStage(),
+        V7ReportStage(),
+    ):
+        ctx = stage.run(ctx)
+    return ctx.report or {}
+
+
+def _empty_portfolio_from_config(
+    market: MarketRegimeSnapshot,
+    cfg: dict[str, Any],
+    notes: tuple[str, ...],
+) -> PortfolioPlan:
     portfolio_cfg = cfg.get("portfolio", {})
-    allocator_cfg = cfg.get("long_short_allocator", {}) or {}
-    long_short_allocation = (
-        allocate_long_short(
-            alphas,
-            alpha_members,
-            market,
-            None,
-            LongShortAllocatorConfig(
-                long_horizon_confidence_threshold=float(allocator_cfg.get("long_horizon_confidence_threshold", 0.45)),
-                short_horizon_confidence_threshold=float(allocator_cfg.get("short_horizon_confidence_threshold", 0.55)),
-                hedge_scale=float(allocator_cfg.get("hedge_scale", 0.30)),
-            ),
-        )
-        if bool(allocator_cfg.get("enabled", True))
-        else None
-    )
-    sleeve_weights_override = _sleeve_weights_from_long_short(long_short_allocation, allocator_cfg)
-    portfolio = construct_v7_portfolio(
-        alpha_members,
-        alphas,
-        market,
-        timing,
-        current_weights=_current_weights(bundle.positions.frame),
+    cash_weight = max(0.05, float(getattr(market, "recommended_cash_weight", 0.20)))
+    sleeve_weights = {
+        SleeveType.LONG_FUNDAMENTAL: 0.0,
+        SleeveType.MEDIUM_THEME: 0.0,
+        SleeveType.SHORT_EVENT: 0.0,
+        SleeveType.SECTOR_ROTATION: 0.0,
+        SleeveType.HEDGE: 0.0,
+        SleeveType.CASH_BUFFER: cash_weight,
+    }
+    return PortfolioPlan(
+        sleeve_weights=sleeve_weights,
+        target_weights={},
         max_single_name_weight=float(portfolio_cfg.get("max_single_name_weight", 0.06)),
         max_sector_weight=float(portfolio_cfg.get("max_sector_weight", 0.30)),
         max_theme_weight=float(portfolio_cfg.get("max_theme_weight", 0.35)),
+        cash_weight=cash_weight,
+        hedge_weight=0.0,
         turnover_limit=float(portfolio_cfg.get("max_turnover", portfolio_cfg.get("turnover_limit", 0.35))),
-        sleeve_weights_override=sleeve_weights_override,
+        position_reason={},
+        sector_weights={},
+        theme_weights={},
+        sleeve_target_weights={},
+        constraint_notes=notes,
     )
-    portfolio, lifecycle_notes = _apply_lifecycle_caps(portfolio, alpha_members)
-    theme_crowding = _average_theme_crowding(selected_themes)
-    hedge = decide_v7_hedge(market, portfolio, theme_crowding_score=theme_crowding)
-    hedge_recommendation = _select_tool_hedge(portfolio, hedge, market, bundle.market_panel.frame, cfg)
-    retail_hedge_result = _apply_retail_hedge_feasibility(hedge_recommendation, cfg)
-    if retail_hedge_result is not None:
-        hedge_recommendation = retail_hedge_result.recommendation
-    execution_reports = _execution_reports(portfolio, market_state, bundle.positions.frame, cfg.get("execution", {}))
-    risk_report = _risk_gate_report(alpha_members, portfolio, execution_reports, hedge)
-    backtest = _run_theme_backtest(portfolio, bundle.market_panel.frame, alpha_members, allow_synthetic)
-    audit = AuditLogRecord(
-        decision_id=f"v7-{as_of_date}",
-        timestamp=as_of_date,
-        input_data_versions={
-            "policy": bundle.policies.source,
-            "market": bundle.market_panel.source,
-            "financials": bundle.fundamentals.source,
-            "company_theme_map": bundle.company_theme_map.source,
-        },
-        model_version="v7.mock.multi_horizon" if allow_synthetic else "v7.strict.multi_horizon",
-        feature_version="v7.mock.features" if allow_synthetic else "v7.pit.features",
-        evidence_hashes=tuple(record.hash for record in evidence if record.hash),
-        risk_gate_result="passed" if risk_report.risk_passed else "failed",
-        final_decision_reason="V7 research run emitted target_weights only; no live orders emitted.",
+
+
+def _stock_pool_gate_failed_risk_report(
+    portfolio: PortfolioPlan,
+    hedge,
+    reason: str,
+) -> RiskGateReport:
+    return RiskGateReport(
+        risk_passed=False,
+        rejected_symbols={},
+        reduced_symbols={},
+        blocked_symbols={},
+        risk_warnings=("stock_pool_gate_failed", reason),
+        max_allowed_position={},
+        required_cash_buffer=max(portfolio.cash_weight, hedge.cash_buffer_target),
+        kill_switch_triggered=True,
+        rationale=f"stock_pool_gate_failed:{reason}; alpha_generation_skipped; target_weights_empty",
     )
-    return {
-        "data_mode": {
-            "provider_mode": hub_result.provider_mode,
-            "allow_synthetic_fallback": allow_synthetic,
-            "warnings": list(hub_result.warnings + schema_warnings),
-        },
-        "market_summary": {
-            "market_regime": market.market_regime.value,
-            "risk_off_score": market.risk_off_score,
-            "recommended_gross_exposure": market.recommended_gross_exposure,
-            "recommended_cash_weight": market.recommended_cash_weight,
-            "hedge_need_score": hedge.hedge_need_score,
-        },
-        "selected_themes": [profile.theme_name for profile in selected_themes],
-        "theme_ranking": [_to_dict(profile) for profile in sorted(theme_profiles, key=lambda item: item.theme_strength, reverse=True)],
-        "industry_chain": {
-            "nodes": [_to_dict(node) for node in all_chain_nodes],
-            "edges": [_to_dict(edge) for edge in all_chain_edges],
-            "by_theme": {
-                theme: {
-                    "nodes": [_to_dict(node) for node in nodes],
-                    "edges": [_to_dict(edge) for edge in edges],
-                }
-                for theme, (nodes, edges) in chain_by_theme.items()
-            },
-        },
-        "stock_pool_selection": [_to_dict(report) for report in stock_pool_selection],
-        "stock_pool_gate": {
-            "kept_symbols": [member.symbol for member in alpha_members],
-            "dropped_symbols": gate_drop_log,
-            "drop_summary": gate_summary(gate_drop_log),
-        },
-        "thematic_universe": [_to_dict(member) for member in universe_members],
-        "fundamental_due_diligence": [_to_dict(report) for report in fundamental_due_diligence],
-        "intrinsic_valuation": [_to_dict(report) for report in valuation_reports],
-        "valuation_overlays": [_to_dict(overlay) for overlay in valuation_overlays.values()],
-        "forensics_overlays": [_to_dict(overlay) for overlay in forensics_overlays.values()],
-        "policy_ai_analyses": [_to_dict(analysis) for analysis in policy_analyses],
-        "ai_news_credibility": [_to_dict(score) for score in ai_news_scores],
-        "theme_sentiments": [_to_dict(sentiment) for sentiment in theme_sentiments],
-        "economics_macro": _to_dict(macro_snapshot) if macro_snapshot is not None else {},
-        "economics_industries": [_to_dict(snapshot) for snapshot in industry_snapshots],
-        "economics_overlays": [_to_dict(overlay) for overlay in economics_overlays.values()],
-        "long_horizon_factors": _frame_to_records(long_horizon_factor_frame),
-        "long_horizon_alpha": _frame_to_records(long_horizon_alpha_frame),
-        "industry_chain_reasoner": {
-            theme: {
-                "chain_confidence": result.chain_confidence,
-                "used_llm": result.used_llm,
-                "rationale": result.rationale,
-                "nodes": [_to_dict(node) for node in result.nodes],
-                "edges": [_to_dict(edge) for edge in result.edges],
-            }
-            for theme, result in chain_reasoner_results.items()
-        },
-        "multi_horizon_alpha": {symbol: _to_dict(alpha) for symbol, alpha in alphas.items()},
-        "factor_applicability": [_to_dict(item) for item in factor_applicability],
-        "news_credibility": [_to_dict(item) for item in news_scores],
-        "news_cross_validation": [_to_dict(summary) for summary in cross_validation_summaries],
-        "retail_hft_risk": [_to_dict(report) for report in retail_hft_reports],
-        "long_short_allocation": _to_dict(long_short_allocation) if long_short_allocation is not None else {},
-        "portfolio_plan": _to_dict(portfolio),
-        "lifecycle_caps_applied": lifecycle_notes,
-        "hedge_decision": _to_dict(hedge),
-        "tool_hedge": _to_dict(hedge_recommendation) if hedge_recommendation is not None else {},
-        "retail_hedge_feasibility": (
-            {
-                "feasibility_score": retail_hedge_result.feasibility_score,
-                "blocked_actions": list(retail_hedge_result.blocked_actions),
-                "audit_notes": list(retail_hedge_result.audit_notes),
-            }
-            if retail_hedge_result is not None
-            else {}
-        ),
-        "execution_constraints": [_to_dict(report) for report in execution_reports],
-        "risk_report": _to_dict(risk_report),
-        "backtest_attribution": _to_dict(backtest),
-        "audit_log": _to_dict(audit),
-        "order_boundary": "agents_and_optimizer_emit_no_orders; OrderManager is the only order-intent owner",
-    }
+
+
+def _empty_backtest(reason: str) -> BacktestAttributionReport:
+    return BacktestAttributionReport(
+        annual_return=0.0,
+        cumulative_return=0.0,
+        sharpe=0.0,
+        sortino=0.0,
+        max_drawdown=0.0,
+        calmar=0.0,
+        volatility=0.0,
+        hit_rate=0.0,
+        win_loss_ratio=0.0,
+        turnover=0.0,
+        transaction_cost=0.0,
+        alpha=0.0,
+        beta=0.0,
+        information_ratio=0.0,
+        rank_ic=0.0,
+        rank_icir=0.0,
+        factor_decay={},
+        capacity=0.0,
+        tail_risk=0.0,
+        drawdown_recovery_days=0,
+        theme_contribution={},
+        factor_contribution={},
+        agent_contribution={reason: 1.0},
+    )
 
 
 def _sleeve_weights_from_long_short(allocation, allocator_cfg: dict[str, Any]) -> dict[str, float] | None:

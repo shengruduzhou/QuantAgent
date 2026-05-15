@@ -7,6 +7,7 @@ from quantagent.data.ingestion import (
     EvidenceStore,
     EvidenceStoreConfig,
 )
+from quantagent.data.ingestion.evidence_store import build_evidence_quality_report
 from quantagent.themes import (
     StockPoolGateConfig,
     apply_stock_pool_gate,
@@ -192,6 +193,9 @@ def test_evidence_store_round_trip(tmp_path):
     visible = store.read_visible("2026-05-14")
     assert len(visible) == 1
     assert visible.iloc[0]["evidence_id"] == "e1"
+    quality = store.quality_report("2026-05-14")
+    assert quality["row_count"] == 1
+    assert quality["pit_violation_count"] == 0
 
 
 def test_build_pit_evidence_slice_drops_future_rows():
@@ -203,3 +207,23 @@ def test_build_pit_evidence_slice_drops_future_rows():
     )
     sliced = build_pit_evidence_slice(frame, "2026-05-14")
     assert list(sliced["evidence_id"]) == ["a"]
+
+
+def test_evidence_quality_report_counts_duplicates_missing_columns_and_pit():
+    frame = pd.DataFrame(
+        [
+            {"source_reliability": 0.9, "available_at": "2026-05-10", "raw_hash": "h1"},
+            {"source_reliability": 0.3, "available_at": "2026-05-20", "raw_hash": "h1"},
+        ]
+    )
+    report = build_evidence_quality_report(
+        frame,
+        as_of_date="2026-05-14",
+        required_columns=("available_at", "raw_hash", "source_reliability", "source"),
+    )
+
+    assert report["row_count"] == 2
+    assert report["duplicate_rate"] == 0.5
+    assert report["pit_violation_count"] == 1
+    assert report["source_reliability_mean"] == 0.6
+    assert report["missing_columns"] == ["source"]

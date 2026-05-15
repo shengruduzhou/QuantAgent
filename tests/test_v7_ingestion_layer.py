@@ -153,3 +153,22 @@ def test_news_ingestor_flags_rumours(tmp_path):
     assert bool(frame.iloc[0]["rumor_risk_flag"]) is True
     # Confidence must be penalised after rumour flag
     assert float(frame.iloc[0]["confidence"]) < 0.55
+
+
+def test_news_ingestor_caps_single_low_reliability_core_signal(tmp_path):
+    cache_dir = tmp_path / "news"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "n.csv").write_text(
+        "source_name,url,title,body,published_at\n"
+        "xueqiu.com,https://xueqiu.com/n1,CATL 300750.SZ gets huge order,EV battery and energy storage demand rises,2026-05-13\n",
+        encoding="utf-8",
+    )
+    ingestor = NewsIngestor(local_cache_root=str(cache_dir))
+    config = DailyEvidenceJobConfig(as_of_date="2026-05-14", cache_root=str(tmp_path / "evidence"))
+    frame = ingestor.fetch(config, SourceCredibilityRegistry())
+
+    assert "300750.SZ" in frame.iloc[0]["affected_symbols"]
+    assert "ev_supply_chain" in frame.iloc[0]["theme_candidates"]
+    assert bool(frame.iloc[0]["core_pool_signal_allowed"]) is False
+    assert float(frame.iloc[0]["confidence"]) <= 0.34
+    assert "single_low_reliability_source" in frame.iloc[0]["risk_flags"]

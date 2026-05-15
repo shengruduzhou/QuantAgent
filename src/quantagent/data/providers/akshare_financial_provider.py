@@ -52,6 +52,22 @@ _CASHFLOW_RENAME = {
     "购建固定资产、无形资产和其他长期资产支付的现金": "capex",
 }
 
+AKSHARE_FINANCIAL_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "report_period",
+    "ann_date",
+    "available_at",
+)
+
+AKSHARE_FINANCIAL_CANONICAL_COLUMNS: tuple[str, ...] = tuple(
+    sorted(
+        set(_INCOME_RENAME.values())
+        | set(_BALANCE_RENAME.values())
+        | set(_CASHFLOW_RENAME.values())
+        | {"symbol", "available_at", "source", "source_reliability", "point_in_time_valid"}
+    )
+)
+
 
 @dataclass
 class AkShareFinancialProvider:
@@ -75,6 +91,26 @@ class AkShareFinancialProvider:
             "income": self.income(request),
             "balance_sheet": self.balance_sheet(request),
             "cashflow": self.cashflow(request),
+        }
+
+    def health_check(self, request: ProviderRequest | None = None) -> dict[str, object]:
+        if not self.allow_network:
+            return {"status": "disabled", "reason": "allow_network_false"}
+        try:
+            import akshare as ak  # type: ignore  # noqa: F401
+        except Exception as exc:  # pragma: no cover - optional dependency
+            return {"status": "unavailable", "reason": f"akshare_unavailable:{type(exc).__name__}"}
+        if request is None:
+            return {"status": "passed", "source": self.source}
+        try:
+            result = self.income(request)
+        except ProviderUnavailable as exc:
+            return {"status": "unavailable", "reason": str(exc)}
+        return {
+            "status": "passed" if result.quality_score > 0 else "failed",
+            "source": result.source,
+            "warnings": list(result.warnings),
+            "schema_report": result.metadata.get("schema_report", {}),
         }
 
     def _fetch_statement(
@@ -107,13 +143,16 @@ class AkShareFinancialProvider:
                 continue
             frames.append(self._normalize(raw, rename, symbol))
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        schema_report = akshare_financial_schema_report(frame)
+        warnings = [] if not frame.empty else [f"akshare_empty_{symbol_argument}"]
+        warnings.extend(f"akshare_schema_missing:{column}" for column in schema_report["missing_columns"])
         return ProviderResult(
             frame,
             source=f"{self.source}:{api}:{symbol_argument}",
             point_in_time=True,
-            quality_score=0.72 if not frame.empty else 0.0,
-            warnings=() if not frame.empty else (f"akshare_empty_{symbol_argument}",),
-            metadata={"api": api, "category": symbol_argument},
+            quality_score=0.72 if not frame.empty and schema_report["status"] == "passed" else 0.0,
+            warnings=tuple(warnings),
+            metadata={"api": api, "category": symbol_argument, "schema_report": schema_report},
         )
 
     def _normalize(self, frame: pd.DataFrame, rename: dict[str, str], symbol: str) -> pd.DataFrame:
@@ -135,3 +174,19 @@ class AkShareFinancialProvider:
 
 def _plain_code(symbol: str) -> str:
     return str(symbol).split(".")[0]
+
+
+def akshare_financial_schema_report(frame: pd.DataFrame) -> dict[str, object]:
+    missing = [column for column in AKSHARE_FINANCIAL_REQUIRED_COLUMNS if column not in frame.columns]
+    pit_violations = 0
+    if "available_at" in frame.columns:
+        parsed = pd.to_datetime(frame["available_at"], errors="coerce")
+        pit_violations = int(parsed.isna().sum())
+    return {
+        "status": "passed" if not missing and pit_violations == 0 else "failed",
+        "row_count": int(0 if frame is None else len(frame)),
+        "required_columns": list(AKSHARE_FINANCIAL_REQUIRED_COLUMNS),
+        "canonical_columns": list(AKSHARE_FINANCIAL_CANONICAL_COLUMNS),
+        "missing_columns": missing,
+        "pit_violation_count": pit_violations,
+    }

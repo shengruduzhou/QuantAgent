@@ -1,7 +1,14 @@
+import os
+
 import pandas as pd
 import pytest
 
-from quantagent.data.providers.akshare_financial_provider import AkShareFinancialProvider
+from quantagent.data.providers.akshare_financial_provider import (
+    AKSHARE_FINANCIAL_REQUIRED_COLUMNS,
+    AkShareFinancialProvider,
+    akshare_financial_schema_report,
+)
+from quantagent.data.providers.akshare_live_provider import akshare_market_schema_report
 from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
 from quantagent.data.providers.financial_cache import (
     FinancialCacheConfig,
@@ -12,6 +19,7 @@ from quantagent.data.providers.tushare_financial_provider import (
     TuShareFinancialProvider,
     merge_statements,
 )
+from quantagent.data.providers.qlib_provider import QlibProvider, validate_qlib_market_schema
 from quantagent.fundamental.financial_features import (
     FinancialFeatureConfig,
     apply_point_in_time_filter as features_pit_filter,
@@ -57,6 +65,70 @@ def test_akshare_provider_requires_network():
     provider = AkShareFinancialProvider(allow_network=False)
     with pytest.raises(ProviderUnavailable):
         provider.income(ProviderRequest("2024-01-01", "2026-05-15", symbols=("600519.SH",)))
+
+
+def test_akshare_schema_normalization_and_snapshot_columns():
+    provider = AkShareFinancialProvider(allow_network=False)
+    raw = pd.DataFrame(
+        [
+            {
+                "Report Date": "2025-12-31",
+                "Ann Date": "2026-03-31",
+                "Revenue": 100.0,
+            }
+        ]
+    )
+    normalized = provider._normalize(
+        raw,
+        {"Report Date": "report_period", "Ann Date": "ann_date", "Revenue": "revenue"},
+        "600519.SH",
+    )
+    report = akshare_financial_schema_report(normalized)
+
+    assert AKSHARE_FINANCIAL_REQUIRED_COLUMNS == ("symbol", "report_period", "ann_date", "available_at")
+    assert report["status"] == "passed"
+    assert {"symbol", "report_period", "ann_date", "available_at", "revenue"}.issubset(normalized.columns)
+
+
+def test_market_provider_schema_reports_missing_columns_and_pit_violations():
+    qlib_frame = pd.DataFrame(
+        [
+            {
+                "symbol": "600519.SH",
+                "trade_date": "2026-05-14",
+                "open": 1.0,
+                "high": 1.1,
+                "low": 0.9,
+                "close": 1.0,
+                "volume": 100,
+                "amount": 1000,
+                "available_at": "2026-05-16",
+            }
+        ]
+    )
+    qlib_report = validate_qlib_market_schema(qlib_frame, as_of_date="2026-05-15")
+    akshare_report = akshare_market_schema_report(qlib_frame.drop(columns=["amount"]))
+
+    assert qlib_report["pit_violation_count"] == 1
+    assert qlib_report["status"] == "failed"
+    assert "amount" in akshare_report["missing_columns"]
+
+
+def test_qlib_provider_integration_skips_without_local_provider_uri():
+    pytest.importorskip("qlib")
+    provider_uri = os.getenv("QUANTAGENT_TEST_QLIB_PROVIDER_URI")
+    if not provider_uri:
+        pytest.skip("QUANTAGENT_TEST_QLIB_PROVIDER_URI is not configured")
+    provider = QlibProvider(provider_uri=provider_uri, region="cn")
+    result = provider.daily_ohlcv(
+        ProviderRequest(
+            start_date="2026-05-01",
+            end_date="2026-05-15",
+            symbols=("600519.SH",),
+        )
+    )
+    report = validate_qlib_market_schema(result.frame, as_of_date="2026-05-15")
+    assert report["status"] == "passed"
 
 
 def test_merge_statements_carries_strictest_available_at():

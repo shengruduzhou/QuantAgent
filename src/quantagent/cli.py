@@ -146,6 +146,32 @@ def build_fundamentals_v7_cli(
     typer.echo(_json({"provider": provider, "statements": summary}))
 
 
+@app.command("check-qlib-v7")
+def check_qlib_v7_cli(
+    provider_uri: str = typer.Option(..., "--provider-uri"),
+    start_date: str = typer.Option("2026-05-01", "--start-date"),
+    end_date: str = typer.Option("2026-05-15", "--end-date"),
+    symbols: str = typer.Option("", "--symbols", help="Optional comma-separated symbols for a schema probe."),
+    universe: str = typer.Option("", "--universe", help="Optional qlib universe name."),
+    region: str = typer.Option("cn", "--region"),
+) -> None:
+    """Check local Qlib CN provider readiness and PIT market schema."""
+    from quantagent.data.providers.base import ProviderRequest
+    from quantagent.data.providers.qlib_provider import QlibProvider
+
+    request = None
+    symbol_tuple = tuple(item.strip() for item in symbols.split(",") if item.strip())
+    if symbol_tuple or universe:
+        request = ProviderRequest(
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_tuple,
+            universe=universe or None,
+        )
+    result = QlibProvider(provider_uri=provider_uri, region=region).health_check(request)
+    typer.echo(_json(result))
+
+
 @app.command("walk-forward-v7")
 def walk_forward_v7_cli(
     sleeve_returns_path: Path = typer.Option(..., "--sleeve-returns"),
