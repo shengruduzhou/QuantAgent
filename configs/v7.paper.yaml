@@ -1,0 +1,29 @@
+version: v7
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  virtual_broker_only: true
+  agents_can_emit_orders: false
+  optimizer_output: target_weights
+  order_intent_owner: OrderManager
+paper_trading:
+  broker: VirtualBroker
+  initial_cash: 1000000.0
+  audit_log_dir: logs/v7_paper
+execution:
+  market: ashare
+  lot_size: 100
+  t_plus_one: true
+  block_buy_limit_up: true
+  block_sell_limit_down: true
+  block_suspended: true
+  block_st: true
+  volume_participation_cap: 0.10
+  slippage_bps: 8.0
+  transaction_cost_bps: 12.0
+live_readiness:
+  require_risk_gate: true
+  require_kill_switch: true
+  require_execution_constraint_simulation: true
+  require_reconciliation: true
+  require_audit_replay: true

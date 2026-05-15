@@ -7,6 +7,7 @@ from quantagent.data.providers.akshare_financial_provider import (
     AKSHARE_FINANCIAL_REQUIRED_COLUMNS,
     AkShareFinancialProvider,
     akshare_financial_schema_report,
+    to_akshare_symbol,
 )
 from quantagent.data.providers.akshare_live_provider import akshare_market_schema_report
 from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
@@ -87,7 +88,23 @@ def test_akshare_schema_normalization_and_snapshot_columns():
 
     assert AKSHARE_FINANCIAL_REQUIRED_COLUMNS == ("symbol", "report_period", "ann_date", "available_at")
     assert report["status"] == "passed"
-    assert {"symbol", "report_period", "ann_date", "available_at", "revenue"}.issubset(normalized.columns)
+    assert {"symbol", "report_period", "ann_date", "available_at", "revenue", "raw_hash"}.issubset(normalized.columns)
+
+
+def test_akshare_symbol_conversion_and_update_date_fallback():
+    assert to_akshare_symbol("600000.SH") == "sh600000"
+    assert to_akshare_symbol("000001.SZ") == "sz000001"
+    assert to_akshare_symbol("300750.SZ") == "sz300750"
+    assert to_akshare_symbol("688981.SH") == "sh688981"
+
+    provider = AkShareFinancialProvider(allow_network=False)
+    normalized = provider._normalize(
+        pd.DataFrame([{"报告日期": "2025-12-31", "更新日期": "2026-03-31", "营业收入": 100.0}]),
+        {"报告日期": "report_period", "更新日期": "update_date", "营业收入": "revenue"},
+        "600000.SH",
+    )
+    assert normalized.iloc[0]["ann_date"] == "2026-03-31"
+    assert normalized.iloc[0]["available_at"] == "2026-04-01"
 
 
 def test_market_provider_schema_reports_missing_columns_and_pit_violations():

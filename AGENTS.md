@@ -2,57 +2,74 @@
 
 ## 项目目的 / Project Purpose
 
-QuantAgent V7 是面向 A 股散户现实约束的 PIT 量化研究系统。覆盖：
+QuantAgent V7 是面向 A 股散户现实约束的 PIT quant research system。仓库不是 toy LLM trading demo，不提供 financial advice，不承诺收益。研究输出必须经过测试、回测、风控、paper trading 和 live-readiness reporting，才允许讨论任何 live execution path。
 
-- Point-in-Time financial provider (TuShare / AkShare) + local Parquet cache
-- Daily Evidence Ingestion Layer (`data/ingestion/*` + `EvidenceStore`)
-  每条证据都带 `source / source_authority / source_reliability / published_at / available_at / horizon_days / decay_half_life / raw_hash`
-- 政策红头文件解析与主题发现（active discovery，可通过 `SourceProfile` 的 sitemap / RSS / discovery URL 主动抓取）
-- 证据驱动的动态产业链图谱（默认禁用静态模板回退）
-- 动态主题股票池 + 硬门槛（`stock_pool_gate` 在 alpha 模型前过滤掉 watchlist / exclusion / false-association / 无因子覆盖 的标的）
-- 基本面尽调、Financial Fraud Risk、News Credibility、Intrinsic Valuation
-- 多周期 Alpha (1 / 5 / 20 / 60 / 120 / 126 天)
-  默认 Ridge 经典基线 (`v7_classical_alpha`)；可选 ElasticNet 或 V7 Deep Alpha
-- Factor Applicability Hard Gate (walk-forward，`member.sector` 真行业 slice，不再把 chain_node 错当 sector)
-- Walk-Forward Sleeve Allocator (long / medium / short / hedge / cash)
-- A-share event-driven backtest + Full-pipeline PIT backtester
-- Hedge Decision Engine + RetailHedgeFeasibilityChecker (剥掉不可执行的 hedge action)
-- QMT execution-preparation, Risk Gate, Kill Switch, Audit Replay
+V7 覆盖：
 
-仓库不是玩具 LLM trading demo，不提供 financial advice。研究输出必须经过测试、回测、风控和 dry-run 执行准备。
+- Point-in-Time financial provider (TuShare / AkShare) + local Parquet/CSV cache。
+- Daily Evidence Ingestion Layer (`data/ingestion/*` + `EvidenceStore`)；每条 `EvidenceRecord` 必须带 source、published_at、available_at、raw_hash 和 confidence。
+- Qlib CN market panel、technical features、label generation、training slices、backtest base。
+- Dynamic theme discovery、industry chain graph、stock pool hard gate。
+- Fundamental due diligence、Financial Fraud Risk、News Credibility、Intrinsic Valuation。
+- Multi-horizon Alpha: 1 / 5 / 20 / 60 / 120 / 126 days，默认 Ridge，ElasticNet optional，Deep Alpha disabled unless real training code is wired。
+- Purged walk-forward CV、model artifacts、metrics、acceptance gates。
+- A-share execution simulation：T+1、limit-up/down、suspension、ST、lot size、volume cap、slippage、cost、partial fills、failed order audit。
+- QMT execution-preparation、Risk Gate、Kill Switch、Reconciliation、Audit Replay。
 
 ## A 股安全约束 / A-share Safety Constraints
 
 - No live trading by default：默认禁止实盘交易。
-- QMT dry-run default：`QMTGateway` 必须默认 `dry_run=True`。
-- Agents never emit orders：LLM / Agent 只能输出 structured evidence、views、constraints、confidence、risk flags、audit logs。
-- Optimizer never emits orders：Optimizer / Portfolio Construction 只能输出 `target_weights`，不允许输出 broker orders。
-- OrderManager converts target weights into order intents：订单意图必须在 `OrderManager` 中生成。
-- RiskGate and KillSwitch before QMT submit：任何 QMT submit path 前必须通过 risk gate、kill switch、execution constraint simulation 和 reconciliation。
-- Optional dependencies degrade gracefully：`xtquant`、`cvxpy`、heavy NLP models、tushare、akshare、torch、scikit-learn 不存在时，imports 不应破坏研究流程。
-- PIT enforcement is not optional in strict mode：`enforce_pit_fundamentals=true` 时 `available_at > as_of_date` 的财报行必须被丢弃；`build_pit_evidence_slice` 同样对 evidence 严格过滤。
+- `QMTGateway` 必须默认 `dry_run=True`，`live_trading_enabled=False`。
+- Agents never emit orders：LLM / Agent 只能输出 evidence、views、constraints、confidence、risk flags、audit logs。
+- Optimizer never emits orders：Portfolio Construction 只能输出 `target_weights`。
+- Only `OrderManager` converts target weights into order intents。
+- QMT submit 前必须通过 risk gate、kill switch、execution constraint simulation、reconciliation、audit replay。
+- Production mode must not use synthetic fallback；mock data 只允许在 tests 和 smoke examples。
+- 不允许新增任何 guaranteed profitability 或收益保证表述。
 
 ## Code Style / 代码规范
 
-- Python code、comments、docstrings、variable names、test names、config keys 必须使用 English。
+- Python code、comments、docstrings、function names、class names、variable names、test names、config keys 使用 English。
+- Markdown 必须 Chinese-English mixed，以中文说明为主，保留关键 English terms。
+- 新增财务字段必须同时定义 `report_period`、`ann_date`、`available_at`，否则不能进入 PIT cache。
+- Optional dependencies must degrade gracefully；real-data commands must report actionable install/setup errors。
 - 优先做 wrappers、adapters、integration seams，不删除仍被引用的 SOTA components。
-- 面向本地有限算力设计：small configs、CPU test mode、deterministic synthetic fixtures。
-- 新功能必须配套测试，优先使用 small synthetic panels。
-- 任何新增的财务字段必须同时定义 `report_period`、`ann_date`、`available_at`，否则无法进入 PIT 缓存。
-- Industry chain edges 必须有证据来源，禁止把共现直接当成产业链因果；company-theme 映射用 `ChainNode` 的 `bottleneck_score / domestic_substitution_score / dependency_strength / demand_visibility`，禁止再硬编码 node-id 白名单。
+- 删除 unused code 或 obsolete `.md` 前，必须证明未被 imports、CLI、tests、README、AGENTS 或 docs 引用。
 
-## Markdown Rule / Markdown 中英混写规则
+## Real-Data Commands / 真实数据命令
 
-所有 `.md` 文件必须 Chinese-English mixed：
+```powershell
+quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
+quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
+quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
+quantagent build-labels-v7 --market-panel data/v7/market_panel.parquet --output data/v7/labels.parquet
+quantagent train-alpha-v7 --dataset data/v7/training_dataset.parquet --output-dir artifacts/v7_alpha
+quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
+quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
+quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
+```
 
-- 每个 section 以中文说明为主，保留关键 English terms。
-- Headings should be bilingual where useful，例如 `## 数据层 / Data Layer`。
-- 不允许新增纯英文或纯中文 Markdown 文档。
-- Code blocks 可以 English-only，因为它们是代码或配置示例。
+Qlib CN official command:
+
+```powershell
+python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
+```
+
+## Acceptance Gates / 验收门槛
+
+Model 不能标记 production-ready，除非：
+
+- zero PIT violations。
+- 每个 horizon 有足够 training rows、symbol coverage、date coverage。
+- out-of-sample RankIC stability 为正。
+- turnover-adjusted net return after cost 通过阈值。
+- max drawdown 低于配置阈值。
+- no single factor dominates unrealistically。
+- 至少一个 adverse market regime 验证通过。
+- paper trading report exists before live readiness can pass。
+- 结果不是只在 mock data 上成立。
 
 ## Testing Commands / 测试命令
-
-首选命令：
 
 ```powershell
 C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m pytest tests/
@@ -60,36 +77,9 @@ C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall src
 git diff --check
 ```
 
-## Execution Boundary / 执行边界
-
-默认 V7 offline strict_local 或 mock smoke flow：
-
-```text
-build PIT data panel (strict required tables)
--> apply PIT financial filter
--> normalize EvidenceRecord and persist to EvidenceStore
--> discover policy themes and lifecycle
--> reason industry chain from evidence (no template fallback)
--> map company exposure via ChainNode role/scores (no hard-coded node id)
--> build dynamic thematic universe
--> apply stock_pool_gate (core+strong allowed; satellite only if confidence>=0.75)
--> score fundamentals, valuation, fraud risk, news credibility
--> generate 1D / 5D / 20D / 60D / 120D / 126D alpha (Ridge default; ElasticNet / Deep optional)
--> validate factor applicability and hard-gate non-production factors
--> walk-forward sleeve allocation (when sleeve return history is available)
--> construct portfolio + target_weights
--> decide hedge + retail-feasibility filter (cash + inverse ETF; reduce gross)
--> pass Risk Gate and Kill Switch
--> simulate A-share T+1, limit-up/down, suspension, liquidity and lot constraints
--> OrderManager generates dry-run order intents only after approved target_weights
--> VirtualBroker / audit
-```
-
-任何 live order path 必须显式配置 `live_trading_enabled=true`、`dry_run=false`，并通过 kill switch、risk gate、broker reconciliation 和 audit replay。
-
 ## Provider 责任 / Provider Responsibilities
 
-- Qlib 只负责：行情、技术因子、label 生成、训练数据切片、回测底座。
-- TuShare / AkShare 只负责：财务报表、财务指标、估值字段、公告披露日期。
-- TradingView public pages 只负责：sentiment / attention context，不作为基本面或行情真值。
-- 政策、公告、新闻原文必须保留 `source`、`published_at`、`available_at`、`hash`、`confidence`，并落到 `EvidenceStore` 的 `available_at` 分区。
+- Qlib：行情、technical factors、label generation、training slices、backtest base。
+- TuShare / AkShare：财务报表、财务指标、估值字段、公告披露日期。
+- TradingView public pages：sentiment / attention context，不作为基本面或行情真值。
+- Policy、announcement、news 原文必须保留 `source / published_at / available_at / raw_hash / confidence` 并进入 `EvidenceStore`。

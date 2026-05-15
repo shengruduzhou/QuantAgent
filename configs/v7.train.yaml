@@ -1,0 +1,26 @@
+version: v7
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  virtual_broker_only: true
+  agents_can_emit_orders: false
+  optimizer_output: target_weights
+  order_intent_owner: OrderManager
+training:
+  model: ridge
+  optional_deep_alpha_enabled: false
+  horizons: [1, 5, 20, 60, 120, 126]
+  min_train_rows: 1000
+  n_splits: 4
+  embargo_pct: 0.02
+  cost_bps: 12.0
+  output_dir: artifacts/v7_alpha
+acceptance_gates:
+  zero_pit_violations: true
+  min_rank_ic_mean: 0.0
+  min_rank_ic_stability: 0.0
+  min_turnover_adjusted_net_return: 0.0
+  max_drawdown: 0.25
+  max_single_factor_dominance: 0.60
+  require_adverse_regime: true
+  require_paper_report_before_live_readiness: true

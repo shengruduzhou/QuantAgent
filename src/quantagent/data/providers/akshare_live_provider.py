@@ -52,7 +52,7 @@ class AkShareLiveProvider:
         try:
             import akshare as ak  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
-            raise ProviderUnavailable("akshare is not available") from exc
+            raise ProviderUnavailable("akshare is not available; install quantagent[data]") from exc
         if not request.symbols:
             raise ProviderUnavailable("AkShare live daily_ohlcv requires explicit symbols")
         frames = []

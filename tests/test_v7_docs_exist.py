@@ -7,6 +7,7 @@ def test_v7_docs_and_config_exist_and_cover_required_boundaries():
         Path("AGENTS.md"),
         Path("docs/V7_系统架构与Agent接口.md"),
         Path("docs/V7_算法风控回测与验收.md"),
+        Path("docs/V7_PIT数据与财务特征.md"),
         Path("configs/v7.default.yaml"),
     ]
     for path in docs:

@@ -2,95 +2,71 @@
 
 ## 目标 / Goal
 
-财务数据必须严格 Point-in-Time。任何新增财务字段都必须同时带：
+V7 的真实数据层必须 Point-in-Time safe。任何 financial statement row 必须带 `symbol / report_period / ann_date / available_at / source / source_reliability / raw_hash / point_in_time_valid`。缺少 `available_at` 的财务事实不能进入 strict PIT cache。
 
-- `report_period`
-- `ann_date`
-- `available_at`
+## Qlib Market Data / Qlib 行情层
 
-缺少 `available_at` 的财务事实不能进入 strict PIT cache。
+Qlib 只负责 market data、technical features、labels、training slices 和 backtest base。官方 CN download command：
 
-## Provider 分工 / Provider Split
+```powershell
+python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
+```
 
-- Qlib：market OHLCV、technical factors、labels、training slices、backtest base。
-- TuShare / AkShare：financial statements、financial indicators、valuation fields、disclosure dates。
-- Local cache：`FinancialStatementCache` 负责落盘与 PIT read。
+本仓库提供 wrapper：
 
-Qlib 不负责财务事实，避免把 feature namespace 当成基本面真值。
+```powershell
+quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
+quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
+```
 
-## Qlib / 本地行情 Provider
-
-`QlibProvider` 提供：
-
-- `daily_ohlcv(request)`
-- `health_check(request=None)`
-- `validate_qlib_market_schema(frame, as_of_date=None)`
-
-必需字段：
+Market schema hard requirements：
 
 ```text
 symbol, trade_date, open, high, low, close, volume, amount, available_at
 ```
 
-CLI check：
+Optional tradability columns are reported when present：`is_suspended / is_st / is_limit_up / is_limit_down`。Close-derived features 在 `v7_dataset_builder.build_market_features` 中按 next trading row 设置 `available_at`，避免 same-day close lookahead。
+
+## AkShare Financials / AkShare 财务层
+
+AkShare financial adapter 现在使用 A-share symbol conversion：
+
+```text
+600000.SH -> sh600000
+000001.SZ -> sz000001
+300750.SZ -> sz300750
+688981.SH -> sh688981
+```
+
+`stock_financial_report_sina` 支持 `公告日期`，当缺失时使用 `更新日期` 作为 announcement/update date，并按 `available_lag_days` 生成 `available_at`。
 
 ```powershell
-quantagent check-qlib-v7 --provider-uri D:\qlib_data\cn_data --symbols 600519.SH --start-date 2026-05-01 --end-date 2026-05-15
+quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
 ```
 
-本地 CN 数据通常需要先按 Qlib 官方流程下载或构建 provider_uri，然后在 `configs/v7.default.yaml` 中设置：
+Provider 会 batch symbols、retry、rate limit，并为 normalized rows 写入 `raw_hash`。Raw source snapshots 后续可以接入专用 snapshot store；当前 PIT cache 保留 normalized source identity 和 row hash。
 
-```yaml
-data:
-  qlib_provider_uri: D:\qlib_data\cn_data
-  qlib_region: cn
-```
+## Dataset and Labels / 训练数据与标签
 
-测试中 `tests/test_v7_pit_financial.py` 的 Qlib integration 会在缺少 `qlib` 包或 `QUANTAGENT_TEST_QLIB_PROVIDER_URI` 时 skip。
+`src/quantagent/data/v7_dataset_builder.py` 负责把 market features、PIT fundamentals、evidence scores、theme exposure、risk features 合成 trainable dataset。
 
-## AkShare / 免费兜底 Provider
-
-AkShare 是 free-first fallback。它现在提供：
-
-- `AkShareFinancialProvider.health_check()`
-- `akshare_financial_schema_report(frame)`
-- `AkShareLiveProvider.health_check()`
-- `akshare_market_schema_report(frame)`
-
-Provider 会对 empty response、missing required columns、schema drift 发出 warning。测试覆盖 normalized schema 和 canonical column snapshot。
-
-## Financial Cache / 财务缓存
-
-`FinancialStatementCache` 默认根目录：
+`src/quantagent/data/v7_label_builder.py` 生成 horizons：
 
 ```text
-data/v7/fundamentals
+1, 5, 20, 60, 120, 126
 ```
 
-它按 statement name 存储 income、balance_sheet、cashflow、financial_indicator、disclosure_dates。读取时使用：
+Labels 是 future outcomes，只能用于 training / validation，不能 join 到 inference frame。
 
-```python
-cache.load_pit_frame("income", as_of_date="2026-05-15", symbols=("600519.SH",))
-```
+## Quality Gates / 质量硬门槛
 
-PIT 过滤规则是 `available_at <= as_of_date`。`available_at > as_of_date` 必须丢弃。
+`src/quantagent/data/v7_quality_gates.py` 提供 hard gates：
 
-## Data Quality / 数据质量报告
+- zero PIT violations。
+- minimum rows per horizon。
+- minimum symbol coverage。
+- minimum date coverage。
+- reject mock / synthetic data for production readiness。
+- no unrealistic single-factor dominance。
 
-`V7DataHub` 在返回值中加入：
-
-```text
-data_mode.quality_report
-```
-
-每张表报告：
-
-- row count；
-- missing columns；
-- source；
-- source reliability mean；
-- duplicate rate；
-- PIT violation count；
-- provider warnings。
-
-`EvidenceStore.quality_report(as_of_date)` 对 evidence partitions 也提供同样检查。
+这些 gates 是 blocking checks，不只是 report。

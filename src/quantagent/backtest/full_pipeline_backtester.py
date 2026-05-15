@@ -1,27 +1,10 @@
-"""Full-pipeline PIT backtester.
+"""Lightweight full-pipeline PIT backtest scaffold.
 
-Most existing backtesters only test the alpha → portfolio leg of the
-pipeline. The V7 evidence layer demands a full walk-through: at each
-``as_of_date`` we want to know that the evidence ingestion, theme
-discovery, industry chain, stock-pool gate, alpha, portfolio,
-execution and risk-gate decisions were all built using data that
-would have been visible at that date.
-
-This backtester is intentionally lightweight — it iterates over a list
-of dates, calls a user-provided ``daily_step`` callable (typically a
-wrapper around :func:`run_daily_v7_research`), and replays the prices
-day by day, applying:
-
-* PIT enforcement on every input frame via ``available_at <= as_of``.
-* T+1 execution from the next trading bar.
-* A per-day audit log of which symbols were filtered by the stock-pool
-  gate and how much portfolio weight survived.
-
-This is a research scaffold rather than a production backtester — it
-relies on the user passing already-PIT-aware data frames. The
-:func:`build_pit_evidence_slice` helper is provided to keep tests
-honest: it returns only rows whose ``available_at`` field is on or
-before ``as_of_date``.
+This module replays a V7 research callback by ``as_of_date`` and keeps
+PIT audit checks honest. It is not the production-grade A-share execution
+simulator; use ``ashare_execution_simulator.py`` when target weights must
+flow through ``OrderManager`` and ``VirtualBroker`` with retail execution
+constraints.
 """
 
 from __future__ import annotations
@@ -36,7 +19,7 @@ import pandas as pd
 @dataclass(frozen=True)
 class FullPipelineBacktestConfig:
     initial_capital: float = 1_000_000.0
-    execution_lag_days: int = 1  # T+1 fill
+    execution_lag_days: int = 1
     cost_bps: float = 8.0
     max_single_name_weight: float = 0.06
     revalidate_universe_every_n_days: int = 5
@@ -104,19 +87,7 @@ def run_full_pipeline_backtest(
     daily_step: Callable[[str], dict[str, Any]],
     config: FullPipelineBacktestConfig | None = None,
 ) -> FullPipelineBacktestResult:
-    """Iterate over ``dates`` and replay the full V7 pipeline day by day.
-
-    Parameters
-    ----------
-    dates : iterable of str
-        Trading days to evaluate (sorted ascending).
-    price_panel : DataFrame
-        Wide-format daily prices with ``trade_date``, ``symbol``, ``close``.
-    daily_step : callable
-        Callback that takes ``as_of_date`` and returns a dict with at least
-        ``target_weights`` (``dict[symbol, weight]``) and optionally
-        ``universe_size`` and ``audit`` (already-PIT-filtered metadata).
-    """
+    """Iterate over dates and replay the V7 research callback day by day."""
 
     config = config or FullPipelineBacktestConfig()
     dates = list(dates)
@@ -147,7 +118,6 @@ def run_full_pipeline_backtest(
     for index, current_date in enumerate(sorted_dates):
         step = daily_step(current_date.strftime("%Y-%m-%d"))
         target = dict(step.get("target_weights", {}))
-        # Enforce per-name cap before execution
         for symbol, weight in list(target.items()):
             if weight > config.max_single_name_weight:
                 target[symbol] = config.max_single_name_weight
@@ -162,17 +132,12 @@ def run_full_pipeline_backtest(
             }
         )
 
-        # T+N fill: a target placed today executes ``execution_lag_days``
-        # ticks later. We bring ``pending_target`` into ``current_weights``
-        # before mark-to-market on the current bar, then queue today's
-        # target for a future tick.
         if config.execution_lag_days <= 0:
             current_weights = dict(target)
         else:
             current_weights = dict(pending_target) if index >= config.execution_lag_days else current_weights
             pending_target = dict(target)
 
-        # Mark-to-market for the *current* date using realised weights
         realized_weights_rows.append(pd.Series(current_weights, name=current_date))
         if current_date in close_wide.index and index > 0:
             prev_date = sorted_dates[index - 1]

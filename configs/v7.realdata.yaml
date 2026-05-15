@@ -1,0 +1,37 @@
+version: v7
+safety:
+  live_trading_enabled: false
+  dry_run: true
+  virtual_broker_only: true
+  agents_can_emit_orders: false
+  optimizer_output: target_weights
+  order_intent_owner: OrderManager
+data:
+  provider_mode: strict_local
+  allow_synthetic_fallback: false
+  allow_network: false
+  point_in_time_required: true
+  v7_root: data/v7
+  fundamentals_root: data/v7/fundamentals
+  qlib_provider_uri: ~/.qlib/qlib_data/cn_data
+  qlib_region: cn
+  required_tables: [policies, base_universe, market_state, market_panel, fundamentals]
+  enforce_pit_fundamentals: true
+  supported_horizons_days: [1, 5, 20, 60, 120, 126]
+quality_gates:
+  min_training_rows_per_horizon: 1000
+  min_symbol_coverage: 50
+  min_date_coverage: 120
+  require_zero_pit_violations: true
+  reject_mock_or_synthetic: true
+execution:
+  market: ashare
+  lot_size: 100
+  t_plus_one: true
+  block_buy_limit_up: true
+  block_sell_limit_down: true
+  block_suspended: true
+  block_st: true
+  volume_participation_cap: 0.10
+  slippage_bps: 8.0
+  transaction_cost_bps: 12.0

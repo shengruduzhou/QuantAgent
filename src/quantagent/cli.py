@@ -172,6 +172,159 @@ def check_qlib_v7_cli(
     typer.echo(_json(result))
 
 
+@app.command("download-qlib-v7")
+def download_qlib_v7_cli(
+    target_dir: str = typer.Option("~/.qlib/qlib_data/cn_data", "--target-dir"),
+    region: str = typer.Option("cn", "--region"),
+) -> None:
+    """Print the official Qlib CN data command; run it in a Qlib checkout."""
+    command = f"python scripts/get_data.py qlib_data --target_dir {target_dir} --region {region}"
+    typer.echo(_json({"status": "manual_step_required", "command": command, "note": "run this inside the official Qlib scripts directory"}))
+
+
+@app.command("build-market-panel-v7")
+def build_market_panel_v7_cli(
+    provider_uri: str = typer.Option(..., "--provider-uri"),
+    start_date: str = typer.Option(..., "--start-date"),
+    end_date: str = typer.Option(..., "--end-date"),
+    output_root: Path = typer.Option(Path("data/v7"), "--output-root"),
+    symbols: str = typer.Option("", "--symbols"),
+    universe: str = typer.Option("", "--universe"),
+    region: str = typer.Option("cn", "--region"),
+) -> None:
+    """Export a PIT market panel and close-available-next-day features from local Qlib CN data."""
+    from quantagent.data.bootstrap.qlib_bootstrap import QlibBootstrapConfig, build_qlib_market_panel
+
+    result = build_qlib_market_panel(
+        QlibBootstrapConfig(
+            provider_uri=provider_uri,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=tuple(item.strip() for item in symbols.split(",") if item.strip()),
+            universe=universe or None,
+            region=region,
+            output_root=str(output_root),
+        )
+    )
+    typer.echo(_json(result))
+
+
+@app.command("build-akshare-v7")
+def build_akshare_v7_cli(
+    symbols: str = typer.Option(..., "--symbols"),
+    start_date: str = typer.Option(..., "--start-date"),
+    end_date: str = typer.Option(..., "--end-date"),
+    fundamentals_root: Path = typer.Option(Path("data/v7/fundamentals"), "--fundamentals-root"),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Download AkShare statements into the PIT financial cache."""
+    from quantagent.data.bootstrap.akshare_bootstrap import AkShareBootstrapConfig, build_akshare_financial_cache
+
+    result = build_akshare_financial_cache(
+        AkShareBootstrapConfig(
+            start_date=start_date,
+            end_date=end_date,
+            symbols=tuple(item.strip() for item in symbols.split(",") if item.strip()),
+            fundamentals_root=str(fundamentals_root),
+            allow_network=allow_network,
+        )
+    )
+    typer.echo(_json(result))
+
+
+@app.command("build-labels-v7")
+def build_labels_v7_cli(
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    output_path: Path = typer.Option(Path("data/v7/labels.parquet"), "--output"),
+    horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
+) -> None:
+    """Build future-return labels for training; labels must never be used for inference."""
+    from quantagent.data.v7_label_builder import build_forward_return_labels
+
+    frame = _read_frame(market_panel_path)
+    result = build_forward_return_labels(frame, tuple(int(item.strip()) for item in horizons.split(",") if item.strip()))
+    actual = _write_frame(result.frame, output_path)
+    typer.echo(_json({"status": "passed", "output": str(actual), "rows": len(result.frame), "label_schema": result.label_schema}))
+
+
+@app.command("train-alpha-v7")
+def train_alpha_v7_cli(
+    dataset_path: Path = typer.Option(..., "--dataset"),
+    output_dir: Path = typer.Option(Path("artifacts/v7_alpha"), "--output-dir"),
+    model: str = typer.Option("ridge", "--model"),
+    min_train_rows: int = typer.Option(100, "--min-train-rows"),
+    mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
+    paper_report: Path | None = typer.Option(None, "--paper-report"),
+) -> None:
+    """Train Ridge/ElasticNet alpha with purged walk-forward CV and acceptance gates."""
+    from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
+
+    result = run_v7_training_experiment(
+        _read_frame(dataset_path),
+        V7TrainingConfig(
+            model=model,
+            min_train_rows=min_train_rows,
+            output_dir=str(output_dir),
+            mark_production_ready=mark_production_ready,
+            paper_report_path=str(paper_report) if paper_report else None,
+        ),
+    )
+    typer.echo(_json(result))
+
+
+@app.command("walk-forward-backtest-v7")
+def walk_forward_backtest_v7_cli(
+    target_weights_path: Path = typer.Option(..., "--target-weights"),
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    output_path: Path = typer.Option(Path("reports/v7/walk_forward_backtest.json"), "--output"),
+) -> None:
+    """Replay target_weights through the A-share OrderManager execution simulator."""
+    from quantagent.backtest.ashare_execution_simulator import simulate_ashare_target_weights
+
+    weights = _read_frame(target_weights_path)
+    if "trade_date" in weights.columns:
+        weights = weights.set_index("trade_date")
+    result = simulate_ashare_target_weights(weights, _read_frame(market_panel_path))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "nav": result.nav.to_dict(),
+        "orders": result.order_audit.to_dict("records"),
+        "failed_orders": result.failed_order_audit.to_dict("records"),
+        "config": result.config,
+    }
+    output_path.write_text(_json(payload), encoding="utf-8")
+    typer.echo(f"status=ok output={output_path} failed_orders={len(result.failed_order_audit)}")
+
+
+@app.command("paper-trade-v7")
+def paper_trade_v7_cli(
+    target_weights_path: Path = typer.Option(..., "--target-weights"),
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    output_path: Path = typer.Option(Path("reports/v7/paper_trade_report.json"), "--output"),
+) -> None:
+    """Run the same dry-run VirtualBroker path used by backtests; no live submit is possible here."""
+    walk_forward_backtest_v7_cli(target_weights_path, market_panel_path, output_path)
+
+
+@app.command("v7-live-readiness-report")
+def v7_live_readiness_report_cli(
+    metrics_path: Path = typer.Option(..., "--metrics"),
+    paper_report: Path = typer.Option(..., "--paper-report"),
+    output_path: Path = typer.Option(Path("reports/v7/live_readiness_report.json"), "--output"),
+) -> None:
+    """Evaluate live-readiness gates without enabling live trading."""
+    from quantagent.data.v7_quality_gates import evaluate_model_acceptance_gates
+
+    import json
+
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    report = evaluate_model_acceptance_gates(metrics, paper_report_path=paper_report).to_dict()
+    report["safety_defaults"] = {"live_trading_enabled": False, "dry_run": True, "virtual_broker_only": True}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(_json(report), encoding="utf-8")
+    typer.echo(_json(report))
+
+
 @app.command("walk-forward-v7")
 def walk_forward_v7_cli(
     sleeve_returns_path: Path = typer.Option(..., "--sleeve-returns"),
@@ -281,6 +434,24 @@ def _json(value: object) -> str:
         return str(obj)
 
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=default)
+
+
+def _read_frame(path: Path) -> pd.DataFrame:
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def _write_frame(frame: pd.DataFrame, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".parquet":
+        try:
+            frame.to_parquet(path, index=False)
+            return path
+        except Exception:
+            path = path.with_suffix(".csv")
+    frame.to_csv(path, index=False)
+    return path
 
 
 if __name__ == "__main__":

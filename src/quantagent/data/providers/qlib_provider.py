@@ -20,6 +20,13 @@ QLIB_MARKET_COLUMNS: tuple[str, ...] = (
     "available_at",
 )
 
+QLIB_MARKET_OPTIONAL_COLUMNS: tuple[str, ...] = (
+    "is_suspended",
+    "is_st",
+    "is_limit_up",
+    "is_limit_down",
+)
+
 
 @dataclass
 class QlibProvider:
@@ -101,6 +108,8 @@ class QlibProvider:
 
 def validate_qlib_market_schema(frame: pd.DataFrame, as_of_date: str | None = None) -> dict[str, object]:
     missing = [column for column in QLIB_MARKET_COLUMNS if column not in frame.columns]
+    optional_present = [column for column in QLIB_MARKET_OPTIONAL_COLUMNS if column in frame.columns]
+    optional_missing = [column for column in QLIB_MARKET_OPTIONAL_COLUMNS if column not in frame.columns]
     pit_violations = 0
     if as_of_date and "available_at" in frame.columns:
         pit_violations = int((pd.to_datetime(frame["available_at"], errors="coerce") > pd.Timestamp(as_of_date)).sum())
@@ -108,6 +117,9 @@ def validate_qlib_market_schema(frame: pd.DataFrame, as_of_date: str | None = No
         "status": "passed" if not missing and pit_violations == 0 else "failed",
         "row_count": int(0 if frame is None else len(frame)),
         "required_columns": list(QLIB_MARKET_COLUMNS),
+        "optional_columns": list(QLIB_MARKET_OPTIONAL_COLUMNS),
+        "optional_columns_present": optional_present,
+        "optional_columns_missing": optional_missing,
         "missing_columns": missing,
         "pit_violation_count": pit_violations,
     }
