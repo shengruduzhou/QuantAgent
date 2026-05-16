@@ -45,3 +45,20 @@ quantagent build-training-dataset-v7 \
 - `enforce_quality_gates=true`（默认）让 gate failure 直接 raise。
 - `source_name` 默认 `realdata`；用于 mock-data 验证时显式传 `mock` 来跳过 production gate。
 - `allow_synthetic_fallback=false` 永远；显式传 true 会被 builder 拒绝。
+
+## Strict Mode 检查 / Strict Mode Checks
+
+`V7TrainingDatasetConfig.strict_mode=True`（默认）会在写盘前 raise，覆盖以下条件：
+
+- 训练集为空；
+- 缺少 entity/PIT 列（`symbol / trade_date / available_at`）；
+- 特征集为空；
+- 缺少任一 `forward_return_{h}d` 标签；
+- 标签列泄漏到特征列；
+- `(trade_date, symbol)` 重复行；
+- `source / source_name / data_source` 中包含 `mock / synthetic / demo`；
+- 同时传 `train_end_date` 与 `validation_end_date` 时，其中任一窗口为空，或 `validation_end_date <= train_end_date`。
+
+## Feature Groups
+
+可选 `--feature-groups short_term,fundamental` 仅选用某些 V7 feature group（来自 `quantagent.data.v7_feature_groups`）。Feature group 列在帧中缺失时会自动跳过，避免 schema drift 直接打断训练。

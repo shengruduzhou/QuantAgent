@@ -11,6 +11,7 @@ import pandas as pd
 
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.providers.tushare_financial_provider import _available_at
+from quantagent.data.trading_calendar import TradingCalendar
 
 
 _COMMON_RENAME = {
@@ -89,6 +90,7 @@ class AkShareFinancialProvider:
     retry_count: int = 2
     retry_sleep_seconds: float = 0.5
     rate_limit_seconds: float = 0.2
+    trading_calendar: TradingCalendar | None = None
 
     def income(self, request: ProviderRequest) -> ProviderResult:
         return self._fetch_statement("stock_financial_report_sina", "利润表", _INCOME_RENAME, request)
@@ -180,7 +182,12 @@ class AkShareFinancialProvider:
         if "ann_date" not in data.columns and "report_period" in data.columns:
             data["ann_date"] = data["report_period"]
         if "ann_date" in data.columns:
-            data["available_at"] = _available_at(data["ann_date"], self.available_lag_days)
+            if self.trading_calendar is not None and not self.trading_calendar.empty:
+                data["available_at"] = self.trading_calendar.resolve_available_at(
+                    data["ann_date"], lag_days=self.available_lag_days
+                ).dt.strftime("%Y-%m-%d")
+            else:
+                data["available_at"] = _available_at(data["ann_date"], self.available_lag_days)
         data["source"] = self.source
         data["source_reliability"] = 0.72
         data["raw_hash"] = [_row_hash(row) for row in data.to_dict("records")]

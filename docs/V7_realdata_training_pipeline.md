@@ -80,13 +80,15 @@ quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-r
 
 - Baseline：Ridge（默认）、ElasticNet。
 - 可选 tree 模型：`--model lightgbm` / `--model xgboost`。未安装 extras 时优雅降级回 Ridge，并保留 manifest 中真实使用的模型记录。
-- 可选 PyTorch 模型仅在 `quantagent[training]` extra 安装后启用。
+- 深度模型：`quantagent train-deep-alpha-v7` —— 支持 fit / predict / save / load / 检查点 / early stopping / CPU+单卡。Huber 损失 + cross-sectional rank loss + 可选 long-short utility loss。无 PyTorch 时回退 numpy ridge head。
 - 全部模型走 purged walk-forward CV（`quantagent.quant_math.purged_cv`）+ embargo + multi-horizon training。
 - 训练 artifact 写入 `artifacts/v7_alpha/`：
   - `model_coefficients.json`、`metrics.json`、`feature_schema.json`、`label_schema.json`、`training_config.json`
   - `data_quality_report.json`、`acceptance_report.json`、`walk_forward_predictions.csv`
   - `experiment_manifest.json`（experiment name、horizons、git commit、fold count、production_ready）
+  - `deep/deep_alpha_state.json` + `deep/deep_alpha_config.json`（深度模型 round-trip 状态）
 - `artifacts/v7_alpha/registry/<experiment>.json` + `latest.json`（`ModelRegistry`）。
+- 评估指标在 `quantagent.training.metrics` 中统一：IC、rank IC、ICIR、top-minus-bottom spread、Sharpe、Sortino、max drawdown、hit rate、capacity proxy。`compose_alpha_metrics` 给出一组完整结果，可直接写入 `metrics.json`。
 
 ## 安全 / Safety
 

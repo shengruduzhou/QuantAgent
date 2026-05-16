@@ -59,9 +59,11 @@ quantagent check-qlib-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 6005
 quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
 quantagent build-fundamentals-v7 --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15 --provider tushare --allow-network
+quantagent build-valuation-v7 --as-of-dates 2026-05-15 --symbols 600519.SH --allow-network
 quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
-quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --output data/v7/gold/training_dataset/training_dataset.parquet
+quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --valuation data/v7/silver/valuation/valuation.parquet --output data/v7/gold/training_dataset/training_dataset.parquet
 quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha --model ridge
+quantagent train-deep-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha/deep --horizons 1,5,20,60,120,126
 quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
 quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
@@ -110,3 +112,6 @@ git diff --check
 - 默认禁止实盘交易；任何 production toggle 必须经独立人工 sign-off。
 - Qlib CN 数据需要用户自行准备 provider_uri；TuShare 需要 token；AkShare 网络抓取需要 `--allow-network`。
 - LightGBM / XGBoost / PyTorch 等深度依赖为可选 extras，未安装时 ridge / 线性 baseline 仍能正常训练。
+- `train-deep-alpha-v7` 在 PyTorch 缺失时回退到 numpy ridge head，仍写出可 round-trip 的 state；预测能力会下降。
+- `build-valuation-v7` 默认拉取 AkShare 当日 snapshot；离线环境需用 `--csv-snapshot` 提供历史快照。
+- 业务日历 `TradingCalendar` 从 silver market panel 派生；若未生成 panel，PIT 解析会退回 calendar-day fallback 并写 warning。

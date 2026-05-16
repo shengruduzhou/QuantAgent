@@ -6,6 +6,7 @@ V7 的任何 production / realdata 数据必须满足 Point-in-Time safety：
 - 行情 close / volume / amount 及 close-derived 技术特征不能以 `trade_date` 为可见日期。`build_market_features` 把 `available_at` 设置为 **下一交易日**，避免 same-day close lookahead。
 - 财务 / 公告 / 估值类行必须带 `report_period`、`ann_date`、`available_at`。如果 `ann_date` 缺失，按 vendor 文档 + `available_lag_days` 估计并打 `point_in_time_valid=false`，不能进入 strict PIT cache。
 - `available_at` 永远是“信息可见日”，不能等于 `report_period`。
+- AkShare 财务 provider 接受可选 `trading_calendar=TradingCalendar`，把 `ann_date` 按交易日历对齐到下一个交易日。`src/quantagent/data/trading_calendar.py:TradingCalendar.from_market_panel` 从 silver market panel 派生日历，保证与实际 trade_date 一致。
 
 ## Schema
 
@@ -37,6 +38,17 @@ V7 的任何 production / realdata 数据必须满足 Point-in-Time safety：
 
 ### Disclosures (silver/disclosures)
 保留公告原文、announcement category、ann_date、available_at、raw_hash。
+
+### Valuation (silver/valuation)
+| column | type | notes |
+| ------ | ---- | ----- |
+| symbol | str |  |
+| trade_date | date | 估值快照日 |
+| available_at | date | 与 trade_date 相同（snapshot 当日可见） |
+| pe_ttm / pb / ps_ttm | float |  |
+| market_cap / free_float_market_cap | float | CNY |
+| dividend_yield / turnover_rate | float | 可选 |
+| source / source_reliability / raw_hash | meta |  |
 
 ### Training Dataset (gold/training_dataset)
 - 通过 `build-training-dataset-v7` 由 silver 输入 + multi-horizon 标签 as-of join 产出。

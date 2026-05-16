@@ -99,6 +99,31 @@ def build_akshare_v7(
     typer.echo(json_dump(result))
 
 
+@app.command("build-valuation-v7")
+def build_valuation_v7(
+    as_of_dates: str = typer.Option("", "--as-of-dates", help="Comma-separated valuation snapshot dates (YYYY-MM-DD)."),
+    symbols: str = typer.Option("", "--symbols"),
+    lake_root: Path = typer.Option(Path("data/v7"), "--lake-root"),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+    csv_snapshot: Path | None = typer.Option(None, "--csv-snapshot", help="Optional pre-collected valuation snapshot."),
+    output_name: str = typer.Option("valuation.parquet", "--output-name"),
+) -> None:
+    """Build the silver valuation cache from AkShare snapshots or a local CSV."""
+    from quantagent.data.bootstrap.valuation_bootstrap import ValuationBootstrapConfig, build_valuation_cache
+
+    result = build_valuation_cache(
+        ValuationBootstrapConfig(
+            as_of_dates=parse_csv_tuple(as_of_dates),
+            symbols=parse_csv_tuple(symbols),
+            lake_root=str(lake_root),
+            allow_network=allow_network,
+            csv_snapshot=str(csv_snapshot) if csv_snapshot else None,
+            output_name=output_name,
+        )
+    )
+    typer.echo(json_dump(result))
+
+
 @app.command("build-fundamentals-v7")
 def build_fundamentals_v7(
     symbols: str = typer.Option(..., "--symbols", help="Comma-separated A-share symbols (e.g. 600519.SH,000858.SZ)"),

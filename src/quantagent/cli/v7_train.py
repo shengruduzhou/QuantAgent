@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 from pathlib import Path
 
 import typer
 
-from quantagent.cli._utils import app, json_dump, read_frame
+from quantagent.cli._utils import app, json_dump, parse_csv_tuple, read_frame
 
 
 @app.command("train-alpha-v7")
@@ -63,6 +64,63 @@ def evaluate_alpha_v7(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json_dump(payload), encoding="utf-8")
     typer.echo(json_dump(payload))
+
+
+@app.command("train-deep-alpha-v7")
+def train_deep_alpha_v7(
+    dataset_path: Path = typer.Option(..., "--dataset"),
+    output_dir: Path = typer.Option(Path("artifacts/v7_alpha/deep"), "--output-dir"),
+    horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
+    hidden_sizes: str = typer.Option("64,32", "--hidden-sizes"),
+    learning_rate: float = typer.Option(1e-3, "--learning-rate"),
+    weight_decay: float = typer.Option(1e-4, "--weight-decay"),
+    batch_size: int = typer.Option(1024, "--batch-size"),
+    max_epochs: int = typer.Option(30, "--max-epochs"),
+    early_stopping_patience: int = typer.Option(5, "--early-stopping-patience"),
+    rank_loss_weight: float = typer.Option(0.5, "--rank-loss-weight"),
+    utility_loss_weight: float = typer.Option(0.0, "--utility-loss-weight"),
+    device: str = typer.Option("auto", "--device"),
+    feature_columns: str = typer.Option("", "--feature-columns"),
+    use_torch: bool = typer.Option(True, "--use-torch/--no-use-torch"),
+    seed: int = typer.Option(1729, "--seed"),
+    validation_dataset: Path | None = typer.Option(None, "--validation-dataset"),
+) -> None:
+    """Train the V7 deep alpha model (PyTorch if installed, numpy ridge head otherwise)."""
+    from quantagent.training.v7_deep_trainer import V7DeepAlphaTrainer, V7DeepAlphaTrainerConfig
+
+    config = V7DeepAlphaTrainerConfig(
+        horizons=tuple(int(h) for h in parse_csv_tuple(horizons)),
+        hidden_sizes=tuple(int(h) for h in parse_csv_tuple(hidden_sizes)),
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        batch_size=batch_size,
+        max_epochs=max_epochs,
+        early_stopping_patience=early_stopping_patience,
+        rank_loss_weight=rank_loss_weight,
+        utility_loss_weight=utility_loss_weight,
+        device=device,
+        feature_columns=parse_csv_tuple(feature_columns),
+        seed=seed,
+        output_dir=str(output_dir),
+        use_torch=use_torch,
+    )
+    trainer = V7DeepAlphaTrainer(config)
+    train_frame = read_frame(dataset_path)
+    val_frame = read_frame(validation_dataset) if validation_dataset else None
+    state = trainer.fit(train_frame, validation_dataset=val_frame)
+    saved = trainer.save(output_dir)
+    typer.echo(
+        json_dump(
+            {
+                "backend": state.backend,
+                "horizons": state.horizons,
+                "feature_count": len(state.feature_columns),
+                "training_history": state.training_history,
+                "state_path": str(saved),
+                "config": asdict(config),
+            }
+        )
+    )
 
 
 @app.command("run-real-training-v7")

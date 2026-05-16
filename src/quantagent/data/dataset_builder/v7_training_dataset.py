@@ -56,6 +56,10 @@ class V7TrainingDatasetConfig:
     enforce_quality_gates: bool = True
     add_missingness_flags: bool = True
     allow_synthetic_fallback: bool = False
+    strict_mode: bool = True
+    feature_groups: tuple[str, ...] = ()
+    train_end_date: str | None = None
+    validation_end_date: str | None = None
     source_name: str = "realdata"
     extra: dict[str, object] = field(default_factory=dict)
 
@@ -115,9 +119,19 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     dataset = features.merge(labels_subset, on=["symbol", "trade_date"], how="inner")
     dataset = dataset.dropna(subset=["available_at"]).reset_index(drop=True)
 
-    feature_columns = _feature_columns(dataset, desired_horizons)
+    if config.feature_groups:
+        from quantagent.data.v7_feature_groups import select_v7_feature_columns
+
+        feature_columns = list(select_v7_feature_columns(dataset, groups=config.feature_groups).selected)
+        if not feature_columns:
+            feature_columns = _feature_columns(dataset, desired_horizons)
+    else:
+        feature_columns = _feature_columns(dataset, desired_horizons)
     if not feature_columns:
         raise ValueError("training dataset has no usable feature columns after as-of joins")
+
+    if config.strict_mode:
+        _strict_mode_assert(dataset, feature_columns, desired_horizons, config)
 
     label_column_names = [f"forward_return_{h}d" for h in desired_horizons]
     feature_schema = {
@@ -361,6 +375,59 @@ def _default_manifest_path(output_path: Path) -> Path:
         return lake.manifests / "training_dataset.json"
     except (ValueError, FileNotFoundError, OSError):
         return output_path.with_suffix(".manifest.json")
+
+
+def _strict_mode_assert(
+    dataset: pd.DataFrame,
+    feature_columns: list[str],
+    horizons: tuple[int, ...],
+    config: V7TrainingDatasetConfig,
+) -> None:
+    """Enforce strict-mode invariants on the gold training dataset.
+
+    Strict mode is the default. It raises ``ValueError`` if any of the
+    following holds: labels missing, features empty, PIT columns
+    missing, duplicate ``(trade_date, symbol)`` rows, synthetic source
+    rows, label columns leaked into the feature set, or train/validation
+    date ranges overlap when explicit splits were supplied.
+    """
+    if dataset is None or dataset.empty:
+        raise ValueError("strict mode: training dataset is empty")
+    missing_entity = [c for c in REQUIRED_ENTITY_COLUMNS if c not in dataset.columns]
+    if missing_entity:
+        raise ValueError(f"strict mode: missing PIT/entity columns {missing_entity}")
+    if not feature_columns:
+        raise ValueError("strict mode: feature set is empty")
+    label_cols = [f"forward_return_{h}d" for h in horizons]
+    missing_labels = [c for c in label_cols if c not in dataset.columns]
+    if missing_labels:
+        raise ValueError(f"strict mode: missing forward-return labels {missing_labels}")
+    leaked = sorted(set(feature_columns).intersection(set(label_cols)))
+    if leaked:
+        raise ValueError(f"strict mode: label columns leaked into features {leaked}")
+    duplicate_count = int(dataset.duplicated(subset=["trade_date", "symbol"]).sum())
+    if duplicate_count:
+        raise ValueError(
+            f"strict mode: {duplicate_count} duplicate (trade_date, symbol) rows in training dataset"
+        )
+    for column in ("source", "source_name", "data_source"):
+        if column in dataset.columns:
+            values = dataset[column].astype(str).str.lower()
+            if values.str.contains("mock|synthetic|demo").any():
+                raise ValueError("strict mode: synthetic / mock rows present in training dataset")
+    if config.train_end_date and config.validation_end_date:
+        train_end = pd.Timestamp(config.train_end_date)
+        val_end = pd.Timestamp(config.validation_end_date)
+        if val_end <= train_end:
+            raise ValueError(
+                "strict mode: validation_end_date must be strictly after train_end_date"
+            )
+        in_train = dataset[dataset["trade_date"] <= train_end]
+        in_val = dataset[(dataset["trade_date"] > train_end) & (dataset["trade_date"] <= val_end)]
+        in_test = dataset[dataset["trade_date"] > val_end]
+        for window_name, frame in (("train", in_train), ("validation", in_val), ("test", in_test)):
+            if frame.empty:
+                raise ValueError(f"strict mode: {window_name} window is empty")
 
 
 __all__ = [
