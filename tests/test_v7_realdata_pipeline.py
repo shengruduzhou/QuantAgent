@@ -166,6 +166,20 @@ def test_materialize_factors_writes_manifest(tmp_path):
     assert manifest["factors"][0]["no_lookahead_check"] is True
 
 
+def test_training_dataset_loader_fails_loud_on_unreadable_parquet(tmp_path):
+    from quantagent.data.dataset_builder.v7_training_dataset import load_table
+
+    bad_path = tmp_path / "broken.parquet"
+    bad_path.write_text("not parquet", encoding="utf-8")
+
+    try:
+        load_table(bad_path)
+    except RuntimeError as exc:
+        assert "install pyarrow/fastparquet" in str(exc)
+    else:
+        raise AssertionError("unreadable parquet without CSV fallback must fail loudly")
+
+
 def test_run_paper_backtest_writes_user_facing_outputs(tmp_path):
     market = _market_panel(days=5, symbols=("600001.SH", "000001.SZ"))
     market_path = tmp_path / "market.csv"
@@ -203,6 +217,9 @@ def test_run_paper_backtest_writes_user_facing_outputs(tmp_path):
         assert (output_dir / name).exists()
     report = json.loads((output_dir / "paper_report.json").read_text(encoding="utf-8"))
     assert "realized_money_earned_lost" in report["summary"]
+    selected = pd.read_csv(output_dir / "selected_stocks.csv")
+    assert {"first_buy_date", "estimated_symbol_pnl"}.issubset(selected.columns)
+    assert "target_weights" in report["files"]
 
     regen_dir = tmp_path / "paper_regenerated"
     regen = runner.invoke(

@@ -12,9 +12,9 @@ class SchemaExtractionConfig:
     provider: str = "disabled"
     enabled: bool = False
     allow_network: bool = False
-    endpoint: str = "https://api.openai.com/v1/responses"
-    model: str = "gpt-4.1-mini"
-    api_key_env: str = "OPENAI_API_KEY"
+    endpoint: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
     timeout_seconds: float = 30.0
     max_input_chars: int = 16000
 
@@ -31,9 +31,9 @@ class OpenAICompatibleSchemaExtractor:
                 provider=self.config.provider,
                 enabled=self.config.enabled,
                 allow_network=self.config.allow_network,
-                endpoint=self.config.endpoint,
-                model=self.config.model,
-                api_key_env=self.config.api_key_env,
+                endpoint=self.config.endpoint or _default_endpoint(self.config.provider),
+                model=self.config.model or _default_model(self.config.provider),
+                api_key_env=self.config.api_key_env or _default_api_key_env(self.config.provider),
                 timeout_seconds=self.config.timeout_seconds,
                 max_input_chars=self.config.max_input_chars,
             )
@@ -57,9 +57,29 @@ def _coerce_config(config: SchemaExtractionConfig | dict[str, Any] | None) -> Sc
         provider=str(config.get("provider", "disabled")),
         enabled=bool(config.get("enabled", False)),
         allow_network=bool(config.get("allow_network", False)),
-        endpoint=str(config.get("endpoint", "https://api.openai.com/v1/responses")),
-        model=str(config.get("model", "gpt-4.1-mini")),
-        api_key_env=str(config.get("api_key_env", "OPENAI_API_KEY")),
+        endpoint=str(config["endpoint"]) if config.get("endpoint") else None,
+        model=str(config["model"]) if config.get("model") else None,
+        api_key_env=str(config["api_key_env"]) if config.get("api_key_env") else None,
         timeout_seconds=float(config.get("timeout_seconds", 30.0)),
         max_input_chars=int(config.get("max_input_chars", 16000)),
     )
+
+
+def _default_endpoint(provider: str) -> str:
+    if provider == "gemini":
+        return "https://generativelanguage.googleapis.com/v1beta"
+    if provider == "openai-compatible":
+        return "https://api.openai.com/v1/chat/completions"
+    return "https://api.openai.com/v1/responses"
+
+
+def _default_model(provider: str) -> str:
+    if provider == "gemini":
+        return "gemini-1.5-flash"
+    return "gpt-4.1-mini"
+
+
+def _default_api_key_env(provider: str) -> str:
+    if provider == "gemini":
+        return "GOOGLE_API_KEY"
+    return "OPENAI_API_KEY"

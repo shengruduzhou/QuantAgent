@@ -76,8 +76,8 @@ def setup_qlib_v7(
             "py -3.12 -m venv .venv",
             ".\\.venv\\Scripts\\Activate.ps1",
             "pip install -U pip",
-            'pip install -e ".[training,research]"',
-            "pip install pyqlib akshare polars lightgbm xgboost torch",
+            'pip install -e ".[data,training,research,optimization]"',
+            "pip install pyqlib akshare polars lightgbm xgboost torch cvxpy",
             '$env:QUANTAGENT_HOME = "E:\\Project\\QuantAgent\\runtime"',
             "quantagent storage-info-v7 --ensure",
             (
@@ -87,6 +87,10 @@ def setup_qlib_v7(
             (
                 f"quantagent check-qlib-v7 --provider-uri {resolved} --region {region} "
                 "--symbols SH600519,SZ000001 --start-date 2018-01-01 --end-date 2020-09-25"
+            ),
+            (
+                "quantagent build-akshare-market-panel-v7 --symbols 600519.SH,600036.SH,000001.SZ "
+                "--start-date 2021-01-01 --end-date 2026-05-15 --allow-network"
             ),
         ],
         "note": (

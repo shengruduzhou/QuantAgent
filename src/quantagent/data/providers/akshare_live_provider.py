@@ -115,8 +115,9 @@ def _normalize_akshare_daily(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
     keep = [column for column in columns.values() if column in data.columns]
     data = data[keep].copy()
     data["symbol"] = symbol
-    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    data["available_at"] = data["trade_date"]
+    trade_dates = pd.to_datetime(data["trade_date"], errors="coerce")
+    data["trade_date"] = trade_dates.dt.strftime("%Y-%m-%d")
+    data["available_at"] = (trade_dates + pd.offsets.BDay(1)).dt.strftime("%Y-%m-%d")
     for column in ("open", "high", "low", "close", "volume", "amount"):
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")

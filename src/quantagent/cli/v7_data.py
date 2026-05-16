@@ -123,13 +123,81 @@ def build_akshare_v7(
             start_date=start_date,
             end_date=end_date,
             symbols=parse_csv_tuple(symbols),
-            fundamentals_root=str(fundamentals_root),
+            fundamentals_root=str(fundamentals_root) if fundamentals_root else None,
             allow_network=allow_network,
             lake_root=str(resolved_lake),
         )
     )
     typer.echo(json_dump(result))
     if result.get("status") == "empty":
+        raise typer.Exit(code=1)
+
+
+@app.command("build-akshare-market-panel-v7")
+def build_akshare_market_panel_v7(
+    symbols: str = typer.Option(..., "--symbols", help="Comma-separated A-share symbols, e.g. 600519.SH,000001.SZ."),
+    start_date: str = typer.Option(..., "--start-date"),
+    end_date: str = typer.Option(..., "--end-date"),
+    output_root: Path = typer.Option(None, "--output-root"),
+    output_path: Path = typer.Option(None, "--output"),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+    adjust: str = typer.Option("qfq", "--adjust"),
+) -> None:
+    """Build a recent PIT market panel from AkShare daily OHLCV.
+
+    This is the real-data path for dates beyond the official free Qlib CN
+    dump. Daily bars are marked available on the next business day so labels
+    and training can enforce PIT semantics downstream.
+    """
+    from quantagent.data.lake import v7_lake_paths
+    from quantagent.data.manifest import build_manifest_for_frame
+    from quantagent.data.providers.akshare_live_provider import (
+        AKSHARE_MARKET_REQUIRED_COLUMNS,
+        AkShareLiveProvider,
+        akshare_market_schema_report,
+    )
+    from quantagent.data.providers.base import ProviderRequest
+
+    resolved_root = Path(output_root) if output_root is not None else default_v7_lake_root()
+    lake = v7_lake_paths(resolved_root).ensure()
+    resolved_output = Path(output_path) if output_path is not None else lake.silver_market_panel / "market_panel.parquet"
+    request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=parse_csv_tuple(symbols))
+    result = AkShareLiveProvider(allow_network=allow_network, adjust=adjust).daily_ohlcv(request)
+    written = write_frame(result.frame, resolved_output)
+    schema_report = akshare_market_schema_report(result.frame)
+    manifest = build_manifest_for_frame(
+        dataset_name="market_panel",
+        vendor="akshare",
+        frame=result.frame,
+        output_paths=[written],
+        start_date=start_date,
+        end_date=end_date,
+        symbols=request.symbols,
+        required_columns=AKSHARE_MARKET_REQUIRED_COLUMNS,
+        pit_violation_count=int(schema_report.get("pit_violation_count", 0)),
+        warnings=result.warnings,
+        extra={
+            "source": result.source,
+            "adjust": adjust,
+            "function_name": result.metadata.get("function_name"),
+            "failed_symbols": result.metadata.get("failed_symbols", []),
+            "schema_report": schema_report,
+            "availability_rule": "daily_ohlcv_available_next_business_day",
+        },
+    )
+    manifest_path = lake.manifests / "market_panel.json"
+    manifest.write(manifest_path)
+    payload = {
+        "status": "passed" if not result.frame.empty and schema_report["status"] == "passed" else "empty",
+        "output": str(written),
+        "manifest": str(manifest_path),
+        "rows": int(len(result.frame)),
+        "symbols": list(request.symbols),
+        "warnings": list(result.warnings),
+        "schema_report": schema_report,
+    }
+    typer.echo(json_dump(payload))
+    if payload["status"] != "passed":
         raise typer.Exit(code=1)
 
 

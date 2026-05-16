@@ -20,6 +20,7 @@ class PaperReportConfig:
     slippage_bps: float = 8.0
     output_dir: str | Path = "paper_report"
     title: str = "QuantAgent V7 Paper Trading Report"
+    target_weights_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ def write_paper_report(
         "holdings": str(_write_csv(holdings, output_dir / "holdings.csv")),
         "pnl": str(_write_csv(pnl, output_dir / "pnl.csv")),
     }
+    if config.target_weights_path:
+        files["target_weights"] = str(config.target_weights_path)
     payload = {
         "status": "passed",
         "summary": summary,
@@ -83,6 +86,7 @@ def _trade_frame(orders: pd.DataFrame, config: PaperReportConfig) -> pd.DataFram
                 "symbol",
                 "side",
                 "quantity",
+                "filled_quantity",
                 "reference_price",
                 "avg_price",
                 "gross_amount",
@@ -96,6 +100,8 @@ def _trade_frame(orders: pd.DataFrame, config: PaperReportConfig) -> pd.DataFram
     for column in ("filled_quantity", "avg_price", "reference_price"):
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    if "quantity" not in frame.columns and "filled_quantity" in frame.columns:
+        frame["quantity"] = frame["filled_quantity"]
     cost_model = AShareCostModel()
     fees: list[float] = []
     slippage: list[float] = []
@@ -146,7 +152,60 @@ def _selected_stocks(trades: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFra
         set(trades.get("symbol", pd.Series(dtype=str)).dropna().astype(str))
         | set(holdings.get("symbol", pd.Series(dtype=str)).dropna().astype(str))
     )
-    return pd.DataFrame({"symbol": symbols})
+    columns = [
+        "symbol",
+        "first_buy_date",
+        "last_trade_date",
+        "buy_count",
+        "sell_count",
+        "gross_buy_amount",
+        "gross_sell_amount",
+        "ending_market_value",
+        "estimated_symbol_pnl",
+    ]
+    if not symbols:
+        return pd.DataFrame(columns=columns)
+    completed = trades.copy() if trades is not None else pd.DataFrame()
+    if not completed.empty and "status" in completed.columns:
+        completed = completed[completed["status"].astype(str).isin(["filled", "partial"])]
+    latest_holdings = pd.DataFrame()
+    if holdings is not None and not holdings.empty and {"trade_date", "symbol", "market_value"}.issubset(holdings.columns):
+        latest_holdings = (
+            holdings.sort_values("trade_date")
+            .groupby("symbol", as_index=False)
+            .tail(1)[["symbol", "market_value"]]
+            .rename(columns={"market_value": "ending_market_value"})
+        )
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        symbol_trades = completed[completed.get("symbol", pd.Series(dtype=str)).astype(str) == symbol] if not completed.empty else completed
+        buys = symbol_trades[symbol_trades.get("side", pd.Series(dtype=str)).astype(str).str.lower() == "buy"] if not symbol_trades.empty else symbol_trades
+        sells = symbol_trades[symbol_trades.get("side", pd.Series(dtype=str)).astype(str).str.lower() == "sell"] if not symbol_trades.empty else symbol_trades
+        gross_buy = float(buys.get("gross_amount", pd.Series(dtype=float)).sum()) if not buys.empty else 0.0
+        gross_sell = float(sells.get("gross_amount", pd.Series(dtype=float)).sum()) if not sells.empty else 0.0
+        fees = float(symbol_trades.get("estimated_fee", pd.Series(dtype=float)).sum()) if not symbol_trades.empty else 0.0
+        slippage = float(symbol_trades.get("estimated_slippage", pd.Series(dtype=float)).sum()) if not symbol_trades.empty else 0.0
+        ending_value = 0.0
+        if not latest_holdings.empty:
+            matched = latest_holdings[latest_holdings["symbol"].astype(str) == symbol]
+            if not matched.empty:
+                ending_value = float(matched["ending_market_value"].iloc[-1])
+        first_buy_date = None if buys.empty or "trade_date" not in buys.columns else str(pd.to_datetime(buys["trade_date"]).min().date())
+        last_trade_date = None if symbol_trades.empty or "trade_date" not in symbol_trades.columns else str(pd.to_datetime(symbol_trades["trade_date"]).max().date())
+        rows.append(
+            {
+                "symbol": symbol,
+                "first_buy_date": first_buy_date,
+                "last_trade_date": last_trade_date,
+                "buy_count": int(len(buys)),
+                "sell_count": int(len(sells)),
+                "gross_buy_amount": gross_buy,
+                "gross_sell_amount": gross_sell,
+                "ending_market_value": ending_value,
+                "estimated_symbol_pnl": gross_sell - gross_buy + ending_value - fees - slippage,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _summary(pnl: pd.DataFrame, trades: pd.DataFrame, failed: pd.DataFrame, initial_cash: float) -> dict[str, object]:
@@ -183,7 +242,12 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> Path:
 
 def _markdown_report(payload: dict[str, object]) -> str:
     summary = payload["summary"]
-    lines = ["# QuantAgent V7 Paper Trading Report", "", "本报告只描述 paper/backtest 结果，不构成 financial advice。", ""]
+    lines = [
+        "# QuantAgent V7 Paper Trading Report",
+        "",
+        "本报告只描述 paper/backtest 结果，不构成 financial advice；LLM/Agent 不生成订单。",
+        "",
+    ]
     lines.append("## Summary")
     for key, value in summary.items():  # type: ignore[union-attr]
         lines.append(f"- `{key}`: {value}")

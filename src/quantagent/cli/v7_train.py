@@ -1,4 +1,4 @@
-"""V7 training CLI: alpha training, evaluation, and real-data orchestration."""
+﻿"""V7 training CLI: alpha training, evaluation, and real-data orchestration."""
 
 from __future__ import annotations
 
@@ -384,16 +384,23 @@ def run_full_real_training_v7(
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
     max_turnover: float = typer.Option(0.50, "--max-turnover"),
+    optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
+    objective: str = typer.Option("max_expected_alpha", "--objective"),
+    cash_floor: float = typer.Option(0.0, "--cash-floor"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
+    benchmark_symbol: str | None = typer.Option(None, "--benchmark-symbol"),
+    paper_report_output_dir: Path | None = typer.Option(None, "--paper-report-output-dir"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
     allow_model_downgrade: bool = typer.Option(False, "--allow-model-downgrade"),
 ) -> None:
-    """End-to-end real-data pipeline: dataset → train → predict → target weights → backtest.
+    """End-to-end real-data pipeline: dataset -> train -> predict -> target weights -> paper report.
 
     Live trading remains disabled. Backtest runs through the existing
-    OrderManager → VirtualBroker dry-run path.
+    OrderManager -> VirtualBroker dry-run path.
     """
-    from quantagent.backtest.ashare_execution_simulator import simulate_ashare_target_weights
+    from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig, simulate_ashare_target_weights
+    from quantagent.backtest.paper_report import PaperReportConfig, write_paper_report
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
     from quantagent.portfolio.v7_target_weights import (
         V7TargetWeightsConfig,
@@ -467,6 +474,10 @@ def run_full_real_training_v7(
             max_weight_per_name=max_weight_per_name,
             max_sector_weight=max_sector_weight,
             max_turnover=max_turnover,
+            optimizer_backend=optimizer_backend,
+            objective=objective,
+            cash_floor=cash_floor,
+            capital_yuan=initial_cash,
         ),
     )
     weights_path = default_target_weights_root() / "target_weights.parquet"
@@ -476,26 +487,54 @@ def run_full_real_training_v7(
     reports_root.mkdir(parents=True, exist_ok=True)
     backtest_path = reports_root / "walk_forward_backtest.json"
     backtest_status: dict[str, object] = {"status": "skipped", "reason": "no_target_weights"}
+    paper_report_status: dict[str, object] = {"status": "skipped", "reason": "no_target_weights"}
     if not weights_result.target_weights.empty:
         weights_frame = weights_result.target_weights.copy()
         if "trade_date" in weights_frame.columns:
             weights_frame = weights_frame.set_index("trade_date")
-        sim = simulate_ashare_target_weights(weights_frame, read_frame(market_panel_path))
+        market_frame = read_frame(market_panel_path)
+        paper_dir = Path(paper_report_output_dir) if paper_report_output_dir is not None else reports_root / "paper_report"
+        report_weights_path = write_frame(weights_result.target_weights, paper_dir / "target_weights.parquet")
+        sim = simulate_ashare_target_weights(
+            weights_frame,
+            market_frame,
+            AShareExecutionSimulationConfig(
+                initial_cash=initial_cash,
+                audit_log_dir=str(paper_dir / "audit"),
+            ),
+        )
         backtest_path.write_text(
             json_dump(
                 {
                     "nav": sim.nav.to_dict(),
                     "orders": sim.order_audit.to_dict("records"),
                     "failed_orders": sim.failed_order_audit.to_dict("records"),
+                    "holdings": sim.position_history.to_dict("records"),
                     "config": sim.config,
                 }
             ),
             encoding="utf-8",
         )
+        paper_result = write_paper_report(
+            sim,
+            market_panel=market_frame,
+            config=PaperReportConfig(
+                initial_cash=initial_cash,
+                benchmark_symbol=benchmark_symbol,
+                output_dir=paper_dir,
+                target_weights_path=str(report_weights_path),
+            ),
+        )
         backtest_status = {
             "status": "ok",
             "output": str(backtest_path),
             "failed_orders": int(len(sim.failed_order_audit)),
+        }
+        paper_report_status = {
+            "status": paper_result.status,
+            "output_dir": paper_result.output_dir,
+            "summary": paper_result.summary,
+            "files": paper_result.files,
         }
 
     pipeline_report = {
@@ -512,6 +551,7 @@ def run_full_real_training_v7(
             "diagnostics": weights_result.diagnostics,
         },
         "backtest": backtest_status,
+        "paper_report": paper_report_status,
     }
     pipeline_report_path = reports_root / "full_pipeline_report.json"
     pipeline_report_path.write_text(json_dump(pipeline_report), encoding="utf-8")

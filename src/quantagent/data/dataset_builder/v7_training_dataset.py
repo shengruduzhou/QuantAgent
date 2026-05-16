@@ -227,11 +227,14 @@ def load_table(path: str | Path | None) -> pd.DataFrame:
     if file_path.suffix == ".parquet":
         try:
             return pd.read_parquet(file_path)
-        except Exception:
+        except Exception as exc:
             csv = file_path.with_suffix(".csv")
             if csv.exists():
                 return pd.read_csv(csv)
-            return pd.DataFrame()
+            raise RuntimeError(
+                f"failed to read parquet table {file_path}; install pyarrow/fastparquet "
+                "or provide a sibling CSV fallback"
+            ) from exc
     return pd.read_csv(file_path)
 
 

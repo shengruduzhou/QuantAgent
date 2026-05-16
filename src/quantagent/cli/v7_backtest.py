@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import typer
 
-from quantagent.cli._utils import app, default_reports_root, json_dump, read_frame
+from quantagent.cli._utils import app, default_reports_root, json_dump, read_frame, write_frame
 
 
 @app.command("walk-forward-backtest-v7")
@@ -115,6 +115,8 @@ def run_paper_backtest_v7(
         weights = weights.set_index("trade_date")
     market = read_frame(market_panel_path)
     resolved_dir = Path(output_dir) if output_dir is not None else default_reports_root() / "paper_report"
+    report_weights = weights.reset_index().rename(columns={"index": "trade_date"})
+    written_weights = write_frame(report_weights, resolved_dir / "target_weights.parquet")
     sim = simulate_ashare_target_weights(
         weights,
         market,
@@ -134,6 +136,7 @@ def run_paper_backtest_v7(
             benchmark_symbol=benchmark_symbol,
             slippage_bps=slippage_bps,
             output_dir=resolved_dir,
+            target_weights_path=str(written_weights),
         ),
     )
     typer.echo(json_dump(report))

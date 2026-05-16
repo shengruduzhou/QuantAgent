@@ -96,3 +96,68 @@ def test_llm_skill_config_from_env_keeps_key_indirect(monkeypatch):
     result = LLMSkillClient(config).invoke("risk_explain", system_prompt="", user_text="", fallback={"ok": True})
     assert result.used_fallback is True
     assert result.fallback_reason == "network_blocked"
+
+
+def test_llm_skill_client_builds_gemini_payload_without_printing_key(monkeypatch):
+    from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
+
+    monkeypatch.setenv("QUANTAGENT_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("QUANTAGENT_LLM_ENABLED", "true")
+    monkeypatch.setenv("QUANTAGENT_LLM_ALLOW_NETWORK", "false")
+    monkeypatch.setenv("QUANTAGENT_LLM_MODEL", "gemma-test-model")
+    config = LLMSkillConfig.from_env()
+    client = LLMSkillClient(config)
+
+    assert config.api_key_env == "GOOGLE_API_KEY"
+    assert client._resolved_endpoint().endswith("/models/gemma-test-model:generateContent")
+    payload = client._request_payload("system", "user")
+    assert payload["generationConfig"]["responseMimeType"] == "application/json"
+    result = client.invoke("schema", system_prompt="system", user_text="user", fallback={"ok": True})
+    assert result.fallback_reason == "network_blocked"
+
+
+def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
+    from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
+    from quantagent.data.providers.base import ProviderResult
+
+    def fake_daily(self, request):
+        frame = pd.DataFrame(
+            [
+                {
+                    "symbol": "600519.SH",
+                    "trade_date": "2024-01-02",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000,
+                    "amount": 10500.0,
+                    "available_at": "2024-01-03",
+                }
+            ]
+        )
+        return ProviderResult(frame, source="akshare_live_provider:stock_zh_a_hist", point_in_time=True)
+
+    monkeypatch.setattr(AkShareLiveProvider, "daily_ohlcv", fake_daily)
+    output_root = tmp_path / "lake"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "build-akshare-market-panel-v7",
+            "--symbols",
+            "600519.SH",
+            "--start-date",
+            "2024-01-01",
+            "--end-date",
+            "2024-01-31",
+            "--output-root",
+            str(output_root),
+            "--allow-network",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "passed"
+    assert (output_root / "manifests" / "market_panel.json").exists()

@@ -1666,20 +1666,44 @@ def _to_dict(value: Any) -> Any:
 
 
 def _build_llm_client(cfg: dict[str, Any]) -> LLMSkillClient:
+    import os
+
     skills_cfg = cfg.get("llm_skills", {}) or {}
+    env_cfg = LLMSkillConfig.from_env()
+    provider = os.getenv("QUANTAGENT_LLM_PROVIDER") or str(skills_cfg.get("provider", "disabled"))
     return LLMSkillClient(
         LLMSkillConfig(
-            enabled=bool(skills_cfg.get("enabled", False)),
-            allow_network=bool(skills_cfg.get("allow_network", False)),
-            provider=str(skills_cfg.get("provider", "disabled")),
-            endpoint=str(skills_cfg.get("endpoint", "https://api.openai.com/v1/responses")),
-            model=str(skills_cfg.get("model", "gpt-4.1-mini")),
-            api_key_env=str(skills_cfg.get("api_key_env", "OPENAI_API_KEY")),
-            timeout_seconds=float(skills_cfg.get("timeout_seconds", 30.0)),
-            max_input_chars=int(skills_cfg.get("max_input_chars", 16000)),
-            temperature=float(skills_cfg.get("temperature", 0.0)),
+            enabled=env_cfg.enabled if os.getenv("QUANTAGENT_LLM_ENABLED") is not None else bool(skills_cfg.get("enabled", False)),
+            allow_network=env_cfg.allow_network if os.getenv("QUANTAGENT_LLM_ALLOW_NETWORK") is not None else bool(skills_cfg.get("allow_network", False)),
+            provider=provider,
+            endpoint=os.getenv("QUANTAGENT_LLM_ENDPOINT") or str(skills_cfg.get("endpoint") or _default_llm_endpoint(provider)),
+            model=os.getenv("QUANTAGENT_LLM_MODEL") or str(skills_cfg.get("model") or _default_llm_model(provider)),
+            api_key_env=os.getenv("QUANTAGENT_LLM_API_KEY_ENV") or str(skills_cfg.get("api_key_env") or _default_llm_key_env(provider)),
+            timeout_seconds=float(os.getenv("QUANTAGENT_LLM_TIMEOUT_SECONDS") or skills_cfg.get("timeout_seconds", 30.0)),
+            max_input_chars=int(os.getenv("QUANTAGENT_LLM_MAX_INPUT_CHARS") or skills_cfg.get("max_input_chars", 16000)),
+            temperature=float(os.getenv("QUANTAGENT_LLM_TEMPERATURE") or skills_cfg.get("temperature", 0.0)),
         )
     )
+
+
+def _default_llm_endpoint(provider: str) -> str:
+    if provider == "gemini":
+        return "https://generativelanguage.googleapis.com/v1beta"
+    if provider == "openai-compatible":
+        return "https://api.openai.com/v1/chat/completions"
+    return "https://api.openai.com/v1/responses"
+
+
+def _default_llm_model(provider: str) -> str:
+    if provider == "gemini":
+        return "gemini-1.5-flash"
+    return "gpt-4.1-mini"
+
+
+def _default_llm_key_env(provider: str) -> str:
+    if provider == "gemini":
+        return "GOOGLE_API_KEY"
+    return "OPENAI_API_KEY"
 
 
 def _build_orchestrator(cfg: dict[str, Any], client: LLMSkillClient) -> LLMOrchestrator:
