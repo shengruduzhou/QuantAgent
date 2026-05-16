@@ -16,8 +16,8 @@ data:
   provider_mode: strict_local
   allow_synthetic_fallback: false
   allow_network: false
-  v7_root: data/v7
-  fundamentals_root: data/v7/fundamentals
+  v7_root:
+  fundamentals_root:
   required_tables: [policies, base_universe, market_state, market_panel, fundamentals]
   enforce_pit_fundamentals: true
   use_financial_cache: true
@@ -36,18 +36,21 @@ fundamentals_pipeline:
   cap_extreme_quantile: 0.99
 policy_extraction:
   enabled: true
-  endpoint: https://api.openai.com/v1/chat/completions
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
   model: gpt-4.1-mini
   api_key_env: OPENAI_API_KEY
 llm_skills:
   enabled: true
   allow_network: false  # set to true at runtime to call the API; defaults to dry-run
-  endpoint: https://api.openai.com/v1/chat/completions
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
   model: gpt-4.1-mini
   api_key_env: OPENAI_API_KEY
   timeout_seconds: 30.0
   max_input_chars: 16000
   temperature: 0.0
+  response_format: json_object
   enabled_skills:
     policy_analyst: true
     industry_chain_reasoner: true
@@ -140,8 +143,8 @@ lifecycle_trading_rules:
   enabled: true
 ingestion:
   enabled: true
-  cache_root: data/v7/evidence
-  store_root: data/v7/evidence/store
+  cache_root:
+  store_root:
   write_to_store: true
   available_lag_days: 1
   enabled_sources: [policy, disclosure, news, financial, order_contract, regulatory_penalty]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
@@ -287,9 +288,15 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
             required_tuple = ("policies", "base_universe", "market_state", "market_panel", "fundamentals")
     else:
         required_tuple = tuple(str(item) for item in required)
+    layout = quant_paths()
     return V7DataHubConfig(
-        root=str(config.get("v7_root", quant_paths().data_root / "v7")),
-        fundamentals_root=str(config.get("fundamentals_root", quant_paths().data_root / "v7" / "raw" / "akshare" / "fundamentals")),
+        root=str(_resolve_config_path(config.get("v7_root"), layout.data_root / "v7")),
+        fundamentals_root=str(
+            _resolve_config_path(
+                config.get("fundamentals_root"),
+                layout.data_root / "v7" / "raw" / "akshare" / "fundamentals",
+            )
+        ),
         provider_mode=mode,  # type: ignore[arg-type]
         allow_synthetic_fallback=bool(config.get("allow_synthetic_fallback", mode == "mock")),
         allow_network=bool(config.get("allow_network", False)),
@@ -303,6 +310,26 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
         enforce_pit_fundamentals=bool(config.get("enforce_pit_fundamentals", mode != "mock")),
         use_financial_cache=bool(config.get("use_financial_cache", True)),
     )
+
+
+def _resolve_config_path(value: object, default: Path) -> Path:
+    """Resolve YAML path settings without splitting from ``quant_paths`` defaults."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text or text in {"quant_paths", "quant_paths.default", "null", "~"}:
+        return default
+    layout = quant_paths()
+    replacements = {
+        "{QUANTAGENT_HOME}": str(layout.home),
+        "${QUANTAGENT_HOME}": str(layout.home),
+        "{QUANTAGENT_DATA_ROOT}": str(layout.data_root),
+        "${QUANTAGENT_DATA_ROOT}": str(layout.data_root),
+    }
+    for marker, replacement in replacements.items():
+        text = text.replace(marker, replacement)
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else layout.home / path
 
 
 def _empty_result(result: ProviderResult) -> bool:

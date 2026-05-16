@@ -11,9 +11,9 @@ data:
   allow_synthetic_fallback: false
   allow_network: false
   point_in_time_required: true
-  v7_root: data/v7
-  fundamentals_root: data/v7/fundamentals
-  qlib_provider_uri: ~/.qlib/qlib_data/cn_data
+  v7_root:
+  fundamentals_root:
+  qlib_provider_uri: E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data
   qlib_region: cn
   required_tables: [policies, base_universe, market_state, market_panel, fundamentals]
   enforce_pit_fundamentals: true

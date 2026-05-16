@@ -4,7 +4,7 @@ Every large artifact produced by the V7 pipeline — Qlib silver/raw dumps,
 AkShare/TuShare PIT caches, trained model checkpoints, predictions,
 target weights, walk-forward backtest reports and audit logs — is written
 outside the repository under a single configurable root. The default
-root on Windows is ``E:\\AI量化\\`` (the Chinese name reads as
+root on Windows is ``E:\\Project\\QuantAgent\\runtime\\`` (the Chinese name reads as
 "AI Quant"); on other platforms it falls back to ``~/AI_quant``.
 
 Callers should resolve the layout through :func:`quant_paths` and not
@@ -24,7 +24,7 @@ import platform
 DEFAULT_QUANT_HOME_ENV = "QUANTAGENT_HOME"
 DEFAULT_DATA_ROOT_ENV = "QUANTAGENT_DATA_ROOT"
 
-_WINDOWS_DEFAULT_HOME = Path("E:/AI\u91cf\u5316")
+_REPO_RUNTIME_HOME = Path(__file__).resolve().parents[3] / "runtime"
 _POSIX_DEFAULT_HOME = Path.home() / "AI_quant"
 
 
@@ -90,7 +90,7 @@ def resolve_quant_home(override: str | os.PathLike[str] | None = None) -> Path:
 
     1. Explicit ``override`` argument.
     2. ``QUANTAGENT_HOME`` environment variable.
-    3. ``E:\\AI量化`` on Windows.
+    3. ``E:\\Project\\QuantAgent\\runtime`` on Windows.
     4. ``~/AI_quant`` on POSIX systems.
     """
     if override is not None:
@@ -99,7 +99,7 @@ def resolve_quant_home(override: str | os.PathLike[str] | None = None) -> Path:
     if env_home:
         return Path(env_home).expanduser()
     if platform.system() == "Windows":
-        return _WINDOWS_DEFAULT_HOME
+        return _REPO_RUNTIME_HOME
     return _POSIX_DEFAULT_HOME
 
 

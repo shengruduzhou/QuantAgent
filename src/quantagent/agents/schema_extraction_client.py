@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import os
 from typing import Any
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
+from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
 from quantagent.data.providers.base import ProviderUnavailable
 
 
 @dataclass(frozen=True)
 class SchemaExtractionConfig:
+    provider: str = "disabled"
     enabled: bool = False
     allow_network: bool = False
-    endpoint: str = "https://api.openai.com/v1/chat/completions"
+    endpoint: str = "https://api.openai.com/v1/responses"
     model: str = "gpt-4.1-mini"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 30.0
@@ -28,40 +26,26 @@ class OpenAICompatibleSchemaExtractor:
         self.config = _coerce_config(config)
 
     def extract_json(self, *, system_prompt: str, user_text: str) -> dict[str, Any]:
-        if not self.config.enabled:
-            raise ProviderUnavailable("remote schema extraction is disabled")
-        if not self.config.allow_network:
-            raise ProviderUnavailable("remote schema extraction requires allow_network=true")
-        api_key = os.getenv(self.config.api_key_env)
-        if not api_key:
-            raise ProviderUnavailable(f"{self.config.api_key_env} is required for remote schema extraction")
-        payload = {
-            "model": self.config.model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text[: self.config.max_input_chars]},
-            ],
-        }
-        request = Request(
-            self.config.endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        result = LLMSkillClient(
+            LLMSkillConfig(
+                provider=self.config.provider,
+                enabled=self.config.enabled,
+                allow_network=self.config.allow_network,
+                endpoint=self.config.endpoint,
+                model=self.config.model,
+                api_key_env=self.config.api_key_env,
+                timeout_seconds=self.config.timeout_seconds,
+                max_input_chars=self.config.max_input_chars,
+            )
+        ).invoke(
+            "schema_extraction",
+            system_prompt=system_prompt,
+            user_text=user_text,
+            fallback={},
         )
-        try:
-            with urlopen(request, timeout=self.config.timeout_seconds) as response:  # noqa: S310
-                raw = response.read().decode("utf-8", errors="replace")
-        except URLError as exc:  # pragma: no cover - network disabled in unit tests
-            raise ProviderUnavailable("remote schema extraction request failed") from exc
-        data = json.loads(raw)
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
+        if result.used_fallback:
+            raise ProviderUnavailable(f"remote schema extraction unavailable: {result.fallback_reason}")
+        return result.output
 
 
 def _coerce_config(config: SchemaExtractionConfig | dict[str, Any] | None) -> SchemaExtractionConfig:
@@ -70,9 +54,10 @@ def _coerce_config(config: SchemaExtractionConfig | dict[str, Any] | None) -> Sc
     if isinstance(config, SchemaExtractionConfig):
         return config
     return SchemaExtractionConfig(
+        provider=str(config.get("provider", "disabled")),
         enabled=bool(config.get("enabled", False)),
         allow_network=bool(config.get("allow_network", False)),
-        endpoint=str(config.get("endpoint", "https://api.openai.com/v1/chat/completions")),
+        endpoint=str(config.get("endpoint", "https://api.openai.com/v1/responses")),
         model=str(config.get("model", "gpt-4.1-mini")),
         api_key_env=str(config.get("api_key_env", "OPENAI_API_KEY")),
         timeout_seconds=float(config.get("timeout_seconds", 30.0)),

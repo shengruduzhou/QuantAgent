@@ -136,3 +136,86 @@ def test_new_v7_cli_commands_smoke(tmp_path):
     assert labels_path.exists()
     assert readiness.exit_code == 0, readiness.output
     assert '"passed": true' in readiness.output
+
+
+def test_materialize_factors_writes_manifest(tmp_path):
+    market = _market_panel(days=25)
+    market_path = tmp_path / "market.csv"
+    output_path = tmp_path / "factors.csv"
+    market.to_csv(market_path, index=False)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "materialize-factors-v7",
+            "--market-panel",
+            str(market_path),
+            "--output",
+            str(output_path),
+            "--backend",
+            "pandas",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest_path = output_path.with_suffix(".manifest.json")
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["dataset_name"] == "factors"
+    assert manifest["factors"][0]["no_lookahead_check"] is True
+
+
+def test_run_paper_backtest_writes_user_facing_outputs(tmp_path):
+    market = _market_panel(days=5, symbols=("600001.SH", "000001.SZ"))
+    market_path = tmp_path / "market.csv"
+    market.to_csv(market_path, index=False)
+    dates = sorted(market["trade_date"].unique())
+    weights = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "600001.SH": [0.40, 0.40, 0.20, 0.0, 0.0],
+            "000001.SZ": [0.0, 0.20, 0.30, 0.30, 0.0],
+        }
+    )
+    weights_path = tmp_path / "weights.csv"
+    weights.to_csv(weights_path, index=False)
+    output_dir = tmp_path / "paper"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "run-paper-backtest-v7",
+            "--target-weights",
+            str(weights_path),
+            "--market-panel",
+            str(market_path),
+            "--output-dir",
+            str(output_dir),
+            "--initial-cash",
+            "1000000",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    for name in ["selected_stocks.csv", "trades.csv", "pnl.csv", "holdings.csv", "paper_report.json", "paper_report.html", "paper_report.md"]:
+        assert (output_dir / name).exists()
+    report = json.loads((output_dir / "paper_report.json").read_text(encoding="utf-8"))
+    assert "realized_money_earned_lost" in report["summary"]
+
+    regen_dir = tmp_path / "paper_regenerated"
+    regen = runner.invoke(
+        app,
+        [
+            "generate-paper-report-v7",
+            "--target-weights",
+            str(weights_path),
+            "--market-panel",
+            str(market_path),
+            "--output-dir",
+            str(regen_dir),
+        ],
+    )
+    assert regen.exit_code == 0, regen.output
+    assert (regen_dir / "paper_report.html").exists()

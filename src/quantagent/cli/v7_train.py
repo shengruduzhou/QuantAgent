@@ -299,6 +299,9 @@ def build_target_weights_v7(
     long_short: bool = typer.Option(False, "--long-short/--long-only"),
     horizon_column: str | None = typer.Option(None, "--horizon-column"),
     min_amount_yuan: float = typer.Option(0.0, "--min-amount-yuan"),
+    optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
+    objective: str = typer.Option("max_expected_alpha", "--objective"),
+    cash_floor: float = typer.Option(0.0, "--cash-floor"),
 ) -> None:
     """Convert per-symbol predictions into a constrained target-weights panel.
 
@@ -322,6 +325,9 @@ def build_target_weights_v7(
         cost_bps=cost_bps,
         horizon_column=horizon_column,
         min_amount_yuan=min_amount_yuan,
+        optimizer_backend=optimizer_backend,
+        objective=objective,
+        cash_floor=cash_floor,
     )
     result = build_v7_target_weights(
         read_frame(predictions_path),

@@ -12,7 +12,7 @@ all those paths in one place so the CLI, bootstrap and dataset builders
 agree on where to read and write.
 
 The default root is resolved through :func:`quantagent.config.paths.quant_paths`
-so large datasets are written outside the repository (``E:\\AI量化\\data`` on
+so large datasets are written outside the repository (``E:\\Project\\QuantAgent\\runtime\\data`` on
 Windows by default; overridable through ``QUANTAGENT_HOME`` /
 ``QUANTAGENT_DATA_ROOT``). Callers passing a relative path still work — the
 relative path is honoured verbatim, which keeps tiny test fixtures working

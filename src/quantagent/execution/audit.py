@@ -7,11 +7,14 @@ from typing import Any
 
 import json
 
+from quantagent.config.paths import quant_paths
+
 
 class AuditLogger:
     """Append-only deterministic JSONL audit logger."""
 
-    def __init__(self, log_dir: str | Path = "logs/execution", file_name: str = "audit.jsonl") -> None:
+    def __init__(self, log_dir: str | Path | None = None, file_name: str = "audit.jsonl") -> None:
+        log_dir = log_dir or quant_paths().logs / "execution"
         self.path = Path(log_dir) / file_name
 
     def write(self, event_type: str, payload: Any) -> Path:

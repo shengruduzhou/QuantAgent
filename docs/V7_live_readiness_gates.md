@@ -31,11 +31,11 @@ CLI：
 
 ```powershell
 quantagent v7-live-readiness-report \
-  --metrics E:\AI量化\models\v7_alpha\metrics.json \
-  --paper-report E:\AI量化\reports\v7\paper_trade_report.json
+  --metrics E:\Project\QuantAgent\runtime\models\v7_alpha\metrics.json \
+  --paper-report E:\Project\QuantAgent\runtime\reports\v7\paper_trade_report.json
 quantagent evaluate-alpha-v7 \
-  --metrics E:\AI量化\models\v7_alpha\metrics.json \
-  --paper-report E:\AI量化\reports\v7\paper_trade_report.json
+  --metrics E:\Project\QuantAgent\runtime\models\v7_alpha\metrics.json \
+  --paper-report E:\Project\QuantAgent\runtime\reports\v7\paper_trade_report.json
 ```
 
 输出 JSON 包含 `passed`、`failures`、`metrics`、`safety_defaults`。`passed=true` **不会** 自动开启实盘——仍然需要单独的 production toggle 与人工 sign-off。

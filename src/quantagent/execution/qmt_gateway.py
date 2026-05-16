@@ -13,6 +13,7 @@ from quantagent.execution.broker_base import (
     Position,
 )
 from quantagent.execution.audit import AuditLogger
+from quantagent.config.paths import quant_paths
 
 
 @dataclass
@@ -24,7 +25,7 @@ class QMTConfig:
     dry_run: bool = True
     live_trading_enabled: bool = False
     timeout_seconds: float = 5.0
-    audit_log_dir: str = "logs/execution"
+    audit_log_dir: str = field(default_factory=lambda: str(quant_paths().logs / "execution"))
 
 
 @dataclass

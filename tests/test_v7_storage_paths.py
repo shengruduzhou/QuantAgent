@@ -1,8 +1,9 @@
-"""Tests for the unified ``E:\\AI量化`` storage layout."""
+"""Tests for the unified ``E:\\Project\\QuantAgent\\runtime`` storage layout."""
 
 from __future__ import annotations
 
 import os
+import platform
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,13 @@ def test_resolve_quant_home_reads_env(tmp_path, monkeypatch):
     monkeypatch.setenv(DEFAULT_QUANT_HOME_ENV, str(tmp_path))
     home = resolve_quant_home()
     assert home == tmp_path
+
+
+def test_windows_default_quant_home_is_repo_runtime(monkeypatch):
+    monkeypatch.delenv(DEFAULT_QUANT_HOME_ENV, raising=False)
+    if platform.system() == "Windows":
+        assert resolve_quant_home().name == "runtime"
+        assert resolve_quant_home().parent.name == "QuantAgent"
 
 
 def test_quant_paths_layout_contains_required_directories(tmp_path, monkeypatch):

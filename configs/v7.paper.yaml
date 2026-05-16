@@ -9,7 +9,7 @@ safety:
 paper_trading:
   broker: VirtualBroker
   initial_cash: 1000000.0
-  audit_log_dir: logs/v7_paper
+  audit_log_dir:
 execution:
   market: ashare
   lot_size: 100

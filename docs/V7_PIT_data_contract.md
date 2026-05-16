@@ -48,7 +48,7 @@ Statement merge must use `pit_wide_merge_statements`:
 Every silver/gold artifact must have a manifest under:
 
 ```text
-E:\AI量化\data\v7\manifests\<dataset>.json
+E:\Project\QuantAgent\runtime\data\v7\manifests\<dataset>.json
 ```
 
 Manifest fields include provider/vendor, source paths, generated_at, row_count, date_range, symbols, schema report, PIT violations, duplicate rate, warnings and content hash.

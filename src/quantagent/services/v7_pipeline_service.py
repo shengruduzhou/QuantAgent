@@ -1671,7 +1671,8 @@ def _build_llm_client(cfg: dict[str, Any]) -> LLMSkillClient:
         LLMSkillConfig(
             enabled=bool(skills_cfg.get("enabled", False)),
             allow_network=bool(skills_cfg.get("allow_network", False)),
-            endpoint=str(skills_cfg.get("endpoint", "https://api.openai.com/v1/chat/completions")),
+            provider=str(skills_cfg.get("provider", "disabled")),
+            endpoint=str(skills_cfg.get("endpoint", "https://api.openai.com/v1/responses")),
             model=str(skills_cfg.get("model", "gpt-4.1-mini")),
             api_key_env=str(skills_cfg.get("api_key_env", "OPENAI_API_KEY")),
             timeout_seconds=float(skills_cfg.get("timeout_seconds", 30.0)),

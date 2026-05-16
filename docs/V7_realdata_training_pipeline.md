@@ -4,18 +4,18 @@ V7 的 real-data path 从 Qlib CN market data、AkShare/TuShare PIT financial da
 
 ## Storage
 
-默认 Windows root 是 `E:\AI量化\`：
+默认 Windows root 是 `E:\Project\QuantAgent\runtime\`：
 
 ```text
-E:\AI量化\data\v7\raw\
-E:\AI量化\data\v7\silver\
-E:\AI量化\data\v7\gold\training_dataset\
-E:\AI量化\data\v7\manifests\
-E:\AI量化\models\v7_alpha\
-E:\AI量化\predictions\
-E:\AI量化\target_weights\
-E:\AI量化\reports\v7\
-E:\AI量化\logs\
+E:\Project\QuantAgent\runtime\data\v7\raw\
+E:\Project\QuantAgent\runtime\data\v7\silver\
+E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\
+E:\Project\QuantAgent\runtime\data\v7\manifests\
+E:\Project\QuantAgent\runtime\models\v7_alpha\
+E:\Project\QuantAgent\runtime\predictions\
+E:\Project\QuantAgent\runtime\target_weights\
+E:\Project\QuantAgent\runtime\reports\v7\
+E:\Project\QuantAgent\runtime\logs\
 ```
 
 `QUANTAGENT_HOME` 覆盖全局 root，`QUANTAGENT_DATA_ROOT` 只覆盖 data tier。
@@ -23,11 +23,20 @@ E:\AI量化\logs\
 ## Qlib Setup
 
 ```powershell
+cd E:\Project\QuantAgent
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -e ".[data,training,research,optimization]"
+pip install pyqlib akshare polars lightgbm xgboost torch
+$env:QUANTAGENT_HOME = "E:\Project\QuantAgent\runtime"
+
 quantagent storage-info-v7 --ensure
 
 quantagent setup-qlib-v7 `
   --region cn `
   --interval 1d `
+  --target-dir E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --run `
   --allow-community-fallback
 ```
@@ -53,7 +62,7 @@ quantagent setup-qlib-v7 `
 
 ```powershell
 quantagent build-market-panel-v7 `
-  --provider-uri E:\AI量化\data\raw\qlib\cn_data `
+  --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --symbols 600519.SH,000858.SZ `
   --start-date 2020-01-01 `
   --end-date 2026-05-15
@@ -67,32 +76,44 @@ quantagent build-akshare-v7 `
 quantagent build-valuation-v7 --as-of-dates 2026-05-15 --allow-network
 
 quantagent build-labels-v7 `
-  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet
 
 quantagent materialize-factors-v7 `
-  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet `
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
   --backend polars
 
 quantagent build-training-dataset-v7 `
-  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet `
-  --labels E:\AI量化\data\v7\labels.parquet `
-  --fundamentals-root E:\AI量化\data\v7\raw\akshare\fundamentals
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
+  --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
+  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\raw\akshare\fundamentals
 
 quantagent train-alpha-v7 `
-  --dataset E:\AI量化\data\v7\gold\training_dataset\training_dataset.parquet `
+  --dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet `
   --model ft_transformer `
   --split-mode rolling `
   --purge-days 126 `
   --embargo-days 5
 
 quantagent run-full-real-training-v7 `
-  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet `
-  --labels E:\AI量化\data\v7\labels.parquet `
-  --sector-map E:\AI量化\data\v7\silver\sector\sector_map.csv `
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
+  --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
+  --sector-map E:\Project\QuantAgent\runtime\data\v7\silver\sector\sector_map.csv `
   --model ridge `
   --split-mode rolling `
   --purge-days 126 `
   --embargo-days 5
+
+quantagent run-paper-backtest-v7 `
+  --target-weights E:\Project\QuantAgent\runtime\target_weights\target_weights.parquet `
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
+  --initial-cash 1000000 `
+  --output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
+
+quantagent generate-paper-report-v7 `
+  --target-weights E:\Project\QuantAgent\runtime\target_weights\target_weights.parquet `
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
+  --initial-cash 1000000 `
+  --output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
 ```
 
 ## Optimization
@@ -107,4 +128,20 @@ quantagent run-full-real-training-v7 `
 - `information_ratio_like`
 - `hit_rate`
 
-The report is written to `E:\AI量化\reports\v7\optimization\optimization_report.json` by default.
+The report is written to `E:\Project\QuantAgent\runtime\reports\v7\optimization\optimization_report.json` by default.
+
+## Paper Report Outputs
+
+`run-paper-backtest-v7` / `generate-paper-report-v7` writes:
+
+- `selected_stocks.csv`
+- `target_weights.parquet` from the upstream optimizer
+- `trades.csv`
+- `failed_orders.csv`
+- `holdings.csv`
+- `pnl.csv`
+- `paper_report.json`
+- `paper_report.md`
+- `paper_report.html`
+
+Summary fields include `initial_cash`, `final_nav`, `realized_money_earned_lost`, `gross_return`, `net_return_after_estimated_costs`, `total_estimated_fees`, `total_estimated_slippage`, `max_drawdown`, `trade_count`, and `failed_order_count`.

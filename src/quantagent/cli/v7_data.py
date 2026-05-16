@@ -122,6 +122,75 @@ def build_akshare_v7(
     typer.echo(json_dump(result))
 
 
+@app.command("smoke-akshare-v7")
+def smoke_akshare_v7(
+    symbols: str = typer.Option(..., "--symbols"),
+    start_date: str = typer.Option("2025-01-01", "--start-date"),
+    end_date: str = typer.Option("2026-05-15", "--end-date"),
+    as_of_date: str = typer.Option("2026-05-15", "--as-of-date"),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Probe AkShare market, valuation and PIT financial availability.
+
+    The command never fabricates rows. Network access must be explicitly
+    enabled; failures are returned as per-source warnings with a non-zero
+    status when every probe fails.
+    """
+    from quantagent.data.providers.akshare_financial_provider import AkShareFinancialProvider
+    from quantagent.data.providers.akshare_valuation_provider import AkShareValuationProvider
+    from quantagent.data.providers.base import ProviderRequest
+
+    request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=parse_csv_tuple(symbols))
+    probes: dict[str, object] = {}
+    warnings: list[str] = []
+
+    provider = AkShareFinancialProvider(allow_network=allow_network)
+    for name, fetch in {
+        "income": provider.income,
+        "balance_sheet": provider.balance_sheet,
+        "cashflow": provider.cashflow,
+    }.items():
+        try:
+            result = fetch(request)
+            probes[name] = {
+                "status": "passed" if not result.frame.empty else "empty",
+                "rows": int(len(result.frame)),
+                "warnings": list(result.warnings),
+                "schema_report": result.metadata.get("schema_report", {}),
+            }
+            warnings.extend(result.warnings)
+        except Exception as exc:
+            warning = f"{name}_failed:{type(exc).__name__}:{exc}"
+            probes[name] = {"status": "failed", "warning": warning}
+            warnings.append(warning)
+
+    try:
+        valuation = AkShareValuationProvider(allow_network=allow_network).snapshot(as_of_date, request)
+        probes["valuation"] = {
+            "status": "passed" if not valuation.frame.empty else "empty",
+            "rows": int(len(valuation.frame)),
+            "warnings": list(valuation.warnings),
+            "schema_report": valuation.metadata.get("schema_report", {}),
+        }
+        warnings.extend(valuation.warnings)
+    except Exception as exc:
+        warning = f"valuation_failed:{type(exc).__name__}:{exc}"
+        probes["valuation"] = {"status": "failed", "warning": warning}
+        warnings.append(warning)
+
+    passed = any(isinstance(item, dict) and item.get("status") == "passed" for item in probes.values())
+    payload = {
+        "status": "passed" if passed else "failed",
+        "allow_network": allow_network,
+        "symbols": list(request.symbols),
+        "probes": probes,
+        "warnings": warnings,
+    }
+    typer.echo(json_dump(payload))
+    if not passed:
+        raise typer.Exit(code=1)
+
+
 @app.command("build-valuation-v7")
 def build_valuation_v7(
     as_of_dates: str = typer.Option("", "--as-of-dates", help="Comma-separated valuation snapshot dates (YYYY-MM-DD)."),
@@ -266,7 +335,8 @@ def materialize_factors_v7(
     long_format: bool = typer.Option(False, "--long-format"),
 ) -> None:
     """Materialize default Alpha101-style factors into the V7 lake."""
-    from quantagent.factors.expr import build_factor_frame
+    from quantagent.data.manifest import utc_now_iso
+    from quantagent.factors.expr import build_factor_frame, build_factor_manifest
 
     resolved_output = (
         Path(output_path)
@@ -275,6 +345,22 @@ def materialize_factors_v7(
     )
     factors = build_factor_frame(read_frame(market_panel_path), backend=backend, long_format=long_format)
     written = write_frame(factors, resolved_output)
+    manifest = {
+        "dataset_name": "factors",
+        "created_at": utc_now_iso(),
+        "backend": backend,
+        "row_count": int(len(factors)),
+        "column_count": int(len(factors.columns)),
+        "output_path": str(written),
+        "factors": build_factor_manifest(backend=backend),
+        "warnings": [
+            entry["fallback"]
+            for entry in build_factor_manifest(backend=backend)
+            if entry.get("fallback")
+        ],
+    }
+    manifest_path = Path(written).with_suffix(".manifest.json")
+    manifest_path.write_text(json_dump(manifest), encoding="utf-8")
     typer.echo(
         json_dump(
             {
@@ -283,6 +369,7 @@ def materialize_factors_v7(
                 "rows": int(len(factors)),
                 "columns": list(factors.columns),
                 "output": str(written),
+                "manifest": str(manifest_path),
             }
         )
     )

@@ -35,6 +35,8 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class V7TargetWeightsConfig:
+    optimizer_backend: str = "auto"
+    objective: str = "max_expected_alpha"
     long_short: bool = False
     top_k: int = 30
     max_weight_per_name: float = 0.10
@@ -44,6 +46,7 @@ class V7TargetWeightsConfig:
     liquidity_participation: float = 0.05
     min_amount_yuan: float = 0.0
     min_universe: int = 1
+    cash_floor: float = 0.0
     alpha_temperature: float = 1.0
     capital_yuan: float = 1_000_000.0
     horizon_column: str | None = None
@@ -158,8 +161,14 @@ def build_v7_target_weights(
         else:
             top_k = min(config.top_k, len(eligible))
             longs = eligible.nlargest(top_k, "prediction")
-            scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
-            weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
+            cvx_weights, cvx_note = _try_cvxpy_long_only(longs, previous_weights, sector_lookup, config)
+            if cvx_weights is not None:
+                weights = cvx_weights
+                diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "cvxpy", "note": cvx_note})
+            else:
+                scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
+                diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "deterministic", "note": cvx_note})
         # Apply per-name cap.
         caps = longs.set_index("symbol")["liquidity_cap"] if not config.long_short else pd.concat(
             [longs.set_index("symbol")["liquidity_cap"], shorts.set_index("symbol")["liquidity_cap"]]
@@ -272,6 +281,58 @@ def _apply_turnover_cap(target: pd.Series, previous: pd.Series, cap: float) -> p
         return target
     scale = cap / max(turnover, 1e-9)
     return aligned_prev + delta * scale
+
+
+def _try_cvxpy_long_only(
+    longs: pd.DataFrame,
+    previous_weights: pd.Series | None,
+    sector_lookup: dict[str, str],
+    config: V7TargetWeightsConfig,
+) -> tuple[pd.Series | None, str]:
+    if config.optimizer_backend == "deterministic" or config.long_short:
+        return None, "deterministic_requested"
+    try:
+        import cvxpy as cp  # type: ignore
+    except Exception:
+        if config.optimizer_backend == "cvxpy":
+            raise RuntimeError("optimizer_backend='cvxpy' requires cvxpy; install quantagent[optimization]")
+        return None, "cvxpy_unavailable_deterministic_fallback"
+    symbols = longs["symbol"].astype(str).tolist()
+    if not symbols:
+        return None, "empty_universe"
+    alpha = longs["prediction"].astype(float).to_numpy()
+    caps = longs.set_index("symbol")["liquidity_cap"].reindex(symbols).fillna(config.max_weight_per_name).to_numpy(dtype=float)
+    w = cp.Variable(len(symbols))
+    prev = (
+        previous_weights.reindex(symbols).fillna(0.0).to_numpy(dtype=float)
+        if previous_weights is not None
+        else np.zeros(len(symbols), dtype=float)
+    )
+    objective = cp.Maximize(alpha @ w - float(config.cost_bps) / 10_000.0 * cp.norm1(w - prev))
+    constraints = [w >= 0, w <= caps, cp.sum(w) <= 1.0]
+    if config.cash_floor > 0:
+        constraints.append(cp.sum(w) <= 1.0 - float(config.cash_floor))
+    if sector_lookup:
+        sector_series = pd.Series(symbols, index=symbols).map(sector_lookup).fillna("__unknown__")
+        for sector in sorted(set(sector_series)):
+            idx = [i for i, symbol in enumerate(symbols) if sector_series.loc[symbol] == sector]
+            constraints.append(cp.sum(w[idx]) <= config.max_sector_weight)
+    if previous_weights is not None and config.max_turnover > 0:
+        constraints.append(cp.norm1(w - prev) <= config.max_turnover)
+    problem = cp.Problem(objective, constraints)
+    try:
+        problem.solve(solver=cp.CLARABEL, verbose=False)
+    except Exception:
+        problem.solve(verbose=False)
+    if w.value is None:
+        if config.optimizer_backend == "cvxpy":
+            raise RuntimeError(f"cvxpy optimizer failed: {problem.status}")
+        return None, f"cvxpy_failed:{problem.status}"
+    weights = pd.Series(np.asarray(w.value, dtype=float), index=pd.Index(symbols, name="symbol")).clip(lower=0.0)
+    gross = float(weights.sum())
+    if gross <= 0:
+        return None, "cvxpy_zero_solution"
+    return weights / gross, f"objective={config.objective};status={problem.status}"
 
 
 def write_v7_target_weights(result: V7TargetWeightsResult, output_path: Path) -> Path:

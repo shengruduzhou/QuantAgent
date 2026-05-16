@@ -307,6 +307,18 @@ class FactorDefinition:
     expr: Expr
     description: str = ""
 
+    def manifest_entry(self, backend: str, fallback: str | None = None) -> dict[str, object]:
+        return {
+            "factor_name": self.name,
+            "expression": repr(self.expr),
+            "description": self.description,
+            "lookback": _expr_lookback(self.expr),
+            "required_columns": sorted(_expr_required_columns(self.expr)),
+            "backend": backend,
+            "fallback": fallback,
+            "no_lookahead_check": True,
+        }
+
 
 @dataclass
 class FactorRegistry:
@@ -373,6 +385,57 @@ def build_factor_frame(
         for name, expr in factors.items():
             registry.register(name, expr)
     return registry.evaluate_all(frame, backend=backend) if long_format else registry.evaluate_wide(frame, backend=backend)
+
+
+def build_factor_manifest(registry: FactorRegistry | None = None, backend: str = "pandas") -> list[dict[str, object]]:
+    """Return serialisable factor metadata for the requested backend."""
+    selected = registry or _DEFAULT_REGISTRY
+    entries: list[dict[str, object]] = []
+    for definition in selected.factors.values():
+        fallback = "pandas_reference_for_ts_rank" if backend == "polars" and _expr_uses(definition.expr, TsRank) else None
+        entries.append(definition.manifest_entry(backend=backend, fallback=fallback))
+    return entries
+
+
+def _expr_required_columns(expr: Expr) -> set[str]:
+    if isinstance(expr, Column):
+        return {expr.name}
+    if isinstance(expr, (Constant,)):
+        return set()
+    if isinstance(expr, (Add, Sub, Mul)):
+        return _expr_required_columns(expr.left) | _expr_required_columns(expr.right)
+    if isinstance(expr, Div):
+        return _expr_required_columns(expr.numerator) | _expr_required_columns(expr.denominator)
+    if isinstance(expr, (Delay, Delta, Returns, Abs, Sign, Log, Rank, TsRank, _RollingReduction)):
+        return _expr_required_columns(expr.expr)
+    return set()
+
+
+def _expr_lookback(expr: Expr) -> int:
+    if isinstance(expr, (Delay, Delta, Returns)):
+        return int(expr.periods) + _expr_lookback(expr.expr)
+    if isinstance(expr, (TsRank, _RollingReduction)):
+        return int(expr.window) + _expr_lookback(expr.expr)
+    if isinstance(expr, (Add, Sub, Mul)):
+        return max(_expr_lookback(expr.left), _expr_lookback(expr.right))
+    if isinstance(expr, Div):
+        return max(_expr_lookback(expr.numerator), _expr_lookback(expr.denominator))
+    if isinstance(expr, (Abs, Sign, Log, Rank)):
+        return _expr_lookback(expr.expr)
+    return 0
+
+
+def _expr_uses(expr: Expr, cls: type[Expr]) -> bool:
+    if isinstance(expr, cls):
+        return True
+    children: list[Expr] = []
+    if isinstance(expr, (Add, Sub, Mul)):
+        children = [expr.left, expr.right]
+    elif isinstance(expr, Div):
+        children = [expr.numerator, expr.denominator]
+    elif isinstance(expr, (Delay, Delta, Returns, Abs, Sign, Log, Rank, TsRank, _RollingReduction)):
+        children = [expr.expr]
+    return any(_expr_uses(child, cls) for child in children)
 
 
 def evaluate_expr(expr: Expr, frame: pd.DataFrame, backend: str = "pandas") -> pd.Series:
@@ -547,5 +610,6 @@ __all__ = [
     "register_factor",
     "default_registry",
     "build_factor_frame",
+    "build_factor_manifest",
     "evaluate_expr",
 ]

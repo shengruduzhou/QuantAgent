@@ -16,8 +16,8 @@ data:
   provider_mode: mock
   allow_synthetic_fallback: true
   allow_network: false
-  v7_root: data/v7
-  fundamentals_root: data/v7/fundamentals
+  v7_root:
+  fundamentals_root:
   required_tables: [policies, base_universe, market_state]
   enforce_pit_fundamentals: false
   use_financial_cache: false
@@ -26,13 +26,15 @@ data:
   qlib_region: cn
 policy_extraction:
   enabled: false
-  endpoint: https://api.openai.com/v1/chat/completions
+  provider: disabled
+  endpoint: https://api.openai.com/v1/responses
   model: gpt-4.1-mini
   api_key_env: OPENAI_API_KEY
 llm_skills:
   enabled: false
   allow_network: false
-  endpoint: https://api.openai.com/v1/chat/completions
+  provider: disabled
+  endpoint: https://api.openai.com/v1/responses
   model: gpt-4.1-mini
   api_key_env: OPENAI_API_KEY
   timeout_seconds: 30.0

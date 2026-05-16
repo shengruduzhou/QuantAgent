@@ -4,19 +4,19 @@
 
 ```powershell
 quantagent build-training-dataset-v7 `
-  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet `
-  --labels E:\AI量化\data\v7\labels.parquet `
-  --fundamentals-root E:\AI量化\data\v7\raw\akshare\fundamentals `
-  --valuation E:\AI量化\data\v7\silver\valuation\valuation.parquet `
-  --disclosures E:\AI量化\data\v7\silver\disclosures\disclosures.parquet `
+  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
+  --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
+  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\raw\akshare\fundamentals `
+  --valuation E:\Project\QuantAgent\runtime\data\v7\silver\valuation\valuation.parquet `
+  --disclosures E:\Project\QuantAgent\runtime\data\v7\silver\disclosures\disclosures.parquet `
   --horizons 1,5,20,60,120,126
 ```
 
 默认输出：
 
-- `E:\AI量化\data\v7\gold\training_dataset\training_dataset.parquet`
+- `E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet`
 - `training_dataset.feature_schema.json`
-- `E:\AI量化\data\v7\manifests\training_dataset.json`
+- `E:\Project\QuantAgent\runtime\data\v7\manifests\training_dataset.json`
 
 ## Join Semantics
 

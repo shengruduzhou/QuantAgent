@@ -10,6 +10,7 @@ from quantagent.execution.broker_base import BrokerBase, Order, OrderSide, Order
 from quantagent.execution.cost_model import AShareCostModel
 from quantagent.execution.fill_simulator import FillSimulator
 from quantagent.execution.position_ledger import PositionLedger
+from quantagent.config.paths import quant_paths
 
 
 @dataclass
@@ -17,7 +18,7 @@ class VirtualBroker(BrokerBase):
     user_id: str = "simulated_user_001"
     initial_cash: float = 1_000_000.0
     dry_run: bool = True
-    audit_log_dir: str | Path = "logs/v6"
+    audit_log_dir: str | Path = field(default_factory=lambda: quant_paths().logs / "v6")
     fill_simulator: FillSimulator = field(default_factory=FillSimulator)
     cost_model: AShareCostModel = field(default_factory=AShareCostModel)
     market_state: dict[str, dict[str, object]] = field(default_factory=dict)

@@ -14,7 +14,7 @@ training:
   n_splits: 4
   embargo_pct: 0.02
   cost_bps: 12.0
-  output_dir: artifacts/v7_alpha
+  output_dir:
 acceptance_gates:
   zero_pit_violations: true
   min_rank_ic_mean: 0.0

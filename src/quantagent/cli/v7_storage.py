@@ -1,4 +1,4 @@
-"""V7 storage CLI: inspect and initialise the unified ``E:\\AI量化\\`` layout."""
+"""V7 storage CLI: inspect and initialise the unified runtime layout."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ def storage_info_v7(
 ) -> None:
     """Report the resolved storage layout used for all V7 large artefacts.
 
-    The default home is ``E:\\AI量化`` on Windows and ``~/AI_quant`` on
-    other platforms; both can be overridden by the ``QUANTAGENT_HOME``
-    environment variable. Use ``--ensure`` to create the directory tree.
+    The default home is ``<repo>/runtime`` on Windows and ``~/AI_quant`` on
+    other platforms. ``QUANTAGENT_HOME`` overrides it. Use ``--ensure`` to
+    create the directory tree.
     """
     layout = quant_paths(home=home)
     if ensure:
@@ -47,7 +47,7 @@ def setup_qlib_v7(
     """Prepare Qlib CN data with an auditable setup path.
 
     Without ``--run`` this command only resolves the destination and
-    prints the official Qlib download command — runnable verbatim inside
+    prints the official Qlib download command 鈥?runnable verbatim inside
     a Qlib checkout. With ``--run`` it attempts to invoke pyqlib's
     ``GetData`` API directly so the dataset lands at the resolved path.
 
@@ -101,7 +101,7 @@ def _community_fallback_notes(target_dir: Path, region: str, interval: str) -> d
 
     These point at well-known mirrors (qlib official release tarball,
     community ``qlib-server`` packages) without endorsing any specific
-    third party — the operator decides which fallback is acceptable.
+    third party 鈥?the operator decides which fallback is acceptable.
     """
     return {
         "notes": [

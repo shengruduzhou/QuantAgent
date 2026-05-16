@@ -158,6 +158,7 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         coefficients,
         feature_importance=_feature_importance(boosters, feature_columns) if boosters else None,
     )
+    metrics |= _training_manifest_metrics(prediction_frame, feature_columns, config.model)
     adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{config.horizons[0]}d"
     adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
     metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
@@ -314,6 +315,7 @@ def _run_ft_transformer_experiment(
 
     prediction_frame = pd.concat(all_predictions, ignore_index=True)
     metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients={})
+    metrics |= _training_manifest_metrics(prediction_frame, feature_columns, config.model)
     adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{used_horizons[0]}d"
     adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
     metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
@@ -530,13 +532,44 @@ def _aggregate_metrics(
     return {
         "rank_ic_mean": float(np.mean(rank_ics)) if rank_ics else 0.0,
         "rank_ic_stability": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-12)) if rank_ics else 0.0,
+        "ICIR": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-12)) if rank_ics else 0.0,
         "turnover_adjusted_net_return": float(np.sum(net_returns)) if net_returns else 0.0,
         "max_drawdown": float(min(drawdowns)) if drawdowns else 0.0,
         "single_factor_dominance": dominance,
         "uses_mock_or_synthetic": False,
         "prediction_rows": int(len(predictions)),
         "fold_count": int(len(fold_metrics)),
+        "hit_rate": _prediction_hit_rate(predictions),
     }
+
+
+def _training_manifest_metrics(
+    predictions: pd.DataFrame,
+    feature_columns: list[str],
+    model_kind: str,
+) -> dict[str, object]:
+    dates = pd.to_datetime(predictions["trade_date"], errors="coerce").dropna()
+    return {
+        "feature_count": int(len(feature_columns)),
+        "model_kind": model_kind,
+        "data_range": {
+            "start": dates.min().strftime("%Y-%m-%d") if not dates.empty else None,
+            "end": dates.max().strftime("%Y-%m-%d") if not dates.empty else None,
+        },
+    }
+
+
+def _prediction_hit_rate(predictions: pd.DataFrame) -> float:
+    hits: list[pd.Series] = []
+    for column in [c for c in predictions.columns if c.startswith("forward_return_")]:
+        realized = pd.to_numeric(predictions[column], errors="coerce")
+        predicted = pd.to_numeric(predictions["prediction"], errors="coerce")
+        valid = realized.notna() & predicted.notna()
+        if valid.any():
+            hits.append((realized[valid] * predicted[valid]) > 0)
+    if not hits:
+        return 0.0
+    return float(pd.concat(hits, ignore_index=True).mean())
 
 
 def _single_factor_dominance(coefficients: dict[str, dict[str, float]]) -> float:
