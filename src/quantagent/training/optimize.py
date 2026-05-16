@@ -8,7 +8,7 @@ candidate hyperparameter combination the executor:
 2. Evaluates walk-forward metrics: rank IC mean, rank IC stability,
    turnover-adjusted return after cost, max drawdown, hit rate.
 3. Records the candidate, metrics and any constraint-violation count
-   into a report written under ``reports/v7/optimization/``.
+   into a report written under the unified reports root.
 
 The optimiser does **not** touch live trading and obeys the same
 acceptance gates as the standalone trainer.
@@ -21,10 +21,13 @@ from itertools import product
 import json
 from pathlib import Path
 import random
+import subprocess
 from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+
+from quantagent.config.paths import quant_paths
 
 
 SearchSpace = dict[str, Sequence[object]]
@@ -38,8 +41,10 @@ class OptimizationConfig:
     n_trials: int | None = None
     seed: int = 1729
     sampler: str = "grid"  # "grid" or "random"
-    output_dir: str = "reports/v7/optimization"
+    output_dir: str = field(default_factory=lambda: str(quant_paths().reports / "v7" / "optimization"))
     train_kwargs: dict[str, object] = field(default_factory=dict)
+    min_folds: int = 1
+    stability_threshold: float = float("-inf")
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,8 @@ def run_alpha_param_search(
     """
     if dataset is None or dataset.empty:
         raise ValueError("optimization requires a non-empty dataset")
+    if config.objective not in _SUPPORTED_OBJECTIVES:
+        raise ValueError(f"unsupported objective {config.objective}; supported: {sorted(_SUPPORTED_OBJECTIVES)}")
     from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
 
     output_dir = Path(config.output_dir)
@@ -105,6 +112,10 @@ def run_alpha_param_search(
         kwargs.setdefault("output_dir", str(output_dir / f"trial_{trial_id:03d}"))
         result = run_v7_training_experiment(dataset, V7TrainingConfig(**kwargs))
         metrics = _extract_metrics(result)
+        if metrics.get("fold_count", 0.0) < config.min_folds:
+            metrics["anti_overfit_rejected"] = 1.0
+        if metrics.get("rank_ic_stability", 0.0) < config.stability_threshold:
+            metrics["anti_overfit_rejected"] = 1.0
         score = float(metrics.get(config.objective, float("nan")))
         trial = {
             "trial_id": trial_id,
@@ -128,6 +139,9 @@ def run_alpha_param_search(
         json.dumps(
             {
                 "config": asdict(config),
+                "git_commit": _git_commit(),
+                "dataset_rows": int(len(dataset)),
+                "date_range": _date_range(dataset),
                 "best_candidate": best_candidate,
                 "best_metrics": best_metrics,
                 "trials": trials,
@@ -145,6 +159,17 @@ def run_alpha_param_search(
         trials=trials,
         report_path=report_path,
     )
+
+
+_SUPPORTED_OBJECTIVES = {
+    "rank_ic_mean",
+    "rank_ic_stability",
+    "turnover_adjusted_net_return",
+    "max_drawdown",
+    "sharpe_like",
+    "information_ratio_like",
+    "hit_rate",
+}
 
 
 def _extract_metrics(training_result: object) -> dict[str, float]:
@@ -166,7 +191,30 @@ def _extract_metrics(training_result: object) -> dict[str, float]:
                     flat[f"{key}.{sub_key}"] = 1.0 if sub_value else 0.0
                 elif isinstance(sub_value, (int, float)):
                     flat[f"{key}.{sub_key}"] = float(sub_value)
+    if "sharpe_like" not in flat:
+        returns = float(flat.get("turnover_adjusted_net_return", 0.0))
+        drawdown = abs(float(flat.get("max_drawdown", 0.0))) + 1e-12
+        flat["sharpe_like"] = returns / drawdown
+    flat.setdefault("information_ratio_like", flat.get("rank_ic_stability", 0.0))
+    flat.setdefault("hit_rate", 1.0 if flat.get("rank_ic_mean", 0.0) > 0 else 0.0)
     return flat
+
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], check=False, capture_output=True, text=True)
+    except Exception:
+        return None
+    return result.stdout.strip() or None
+
+
+def _date_range(dataset: pd.DataFrame) -> dict[str, str | None]:
+    if "trade_date" not in dataset.columns or dataset.empty:
+        return {"start": None, "end": None}
+    dates = pd.to_datetime(dataset["trade_date"], errors="coerce").dropna()
+    if dates.empty:
+        return {"start": None, "end": None}
+    return {"start": str(dates.min().date()), "end": str(dates.max().date())}
 
 
 __all__ = [

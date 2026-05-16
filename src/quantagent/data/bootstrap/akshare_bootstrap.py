@@ -1,9 +1,8 @@
 """AkShare financial bootstrap for the V7 PIT cache.
 
 Pulls income / balance / cashflow statements through ``AkShareFinancialProvider``,
-upserts them into the canonical PIT cache under ``data/v7/silver/fundamentals/``
-(mirrored at the legacy ``data/v7/fundamentals/`` path for backwards
-compatibility), and emits a ``DataManifest`` recording vendor, rows, schema
+upserts them into the canonical PIT cache under the unified V7 lake, and emits a
+``DataManifest`` recording vendor, rows, schema
 violations, warnings and content hashes. Network is opt-in via
 ``allow_network=True``; otherwise the provider raises ``ProviderUnavailable``
 with an actionable hint.
@@ -16,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.lake import v7_lake_paths
 from quantagent.data.manifest import build_manifest_for_frame
 from quantagent.data.providers.akshare_financial_provider import (
@@ -31,14 +31,14 @@ class AkShareBootstrapConfig:
     start_date: str
     end_date: str
     symbols: tuple[str, ...]
-    fundamentals_root: str = "data/v7/fundamentals"
+    fundamentals_root: str | None = None
     allow_network: bool = False
     available_lag_days: int = 1
     retry_count: int = 2
     retry_sleep_seconds: float = 0.5
     rate_limit_seconds: float = 0.2
     use_lake_layout: bool = True
-    lake_root: str = "data/v7"
+    lake_root: str | None = None
 
 
 def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, object]:
@@ -54,11 +54,15 @@ def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, o
     )
     statements = provider.all_statements(request)
 
-    lake = v7_lake_paths(config.lake_root).ensure() if config.use_lake_layout else None
-    silver_root = lake.silver_fundamentals if lake else Path(config.fundamentals_root)
+    resolved_lake_root = config.lake_root or str(quant_paths().data_root / "v7")
+    resolved_fundamentals_root = config.fundamentals_root or str(
+        quant_paths().data_root / "v7" / "raw" / "akshare" / "fundamentals"
+    )
+    lake = v7_lake_paths(resolved_lake_root).ensure() if config.use_lake_layout else None
+    silver_root = lake.silver_fundamentals if lake else Path(resolved_fundamentals_root)
     silver_root.mkdir(parents=True, exist_ok=True)
     silver_cache = FinancialStatementCache(FinancialCacheConfig(root=str(silver_root)))
-    legacy_cache = FinancialStatementCache(FinancialCacheConfig(root=config.fundamentals_root))
+    raw_cache = FinancialStatementCache(FinancialCacheConfig(root=resolved_fundamentals_root))
 
     summary: dict[str, dict[str, object]] = {}
     manifest_paths: list[Path] = []
@@ -67,7 +71,7 @@ def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, o
     for statement, result in statements.items():
         silver_path = silver_cache.upsert(statement, result.frame)
         if lake is not None:
-            legacy_cache.upsert(statement, result.frame)
+            raw_cache.upsert(statement, result.frame)
         rows = int(0 if result.frame is None else len(result.frame))
         aggregate_rows += rows
         combined_warnings.extend(result.warnings)
@@ -99,7 +103,7 @@ def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, o
         "status": "passed" if aggregate_rows > 0 else "empty",
         "config": asdict(config),
         "fundamentals_root": str(silver_root),
-        "legacy_fundamentals_root": str(Path(config.fundamentals_root)),
+        "raw_fundamentals_root": str(Path(resolved_fundamentals_root)),
         "statements": summary,
         "manifest_paths": [str(p) for p in manifest_paths],
         "total_rows": aggregate_rows,

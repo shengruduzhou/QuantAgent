@@ -18,12 +18,26 @@ from quantagent.cli._utils import (
 
 @app.command("download-qlib-v7")
 def download_qlib_v7(
-    target_dir: str = typer.Option("~/.qlib/qlib_data/cn_data", "--target-dir"),
+    target_dir: str = typer.Option(None, "--target-dir"),
     region: str = typer.Option("cn", "--region"),
+    interval: str = typer.Option("1d", "--interval"),
 ) -> None:
-    """Print the official Qlib CN data command; run it inside a Qlib checkout."""
-    command = f"python scripts/get_data.py qlib_data --target_dir {target_dir} --region {region}"
-    typer.echo(json_dump({"status": "manual_step_required", "command": command, "note": "run this inside the official Qlib scripts directory"}))
+    """Deprecated alias for setup-qlib-v7 dry-run output."""
+    from quantagent.config.paths import quant_paths
+
+    resolved = Path(target_dir).expanduser() if target_dir else quant_paths().raw / "qlib" / f"{region}_data"
+    command = f"python scripts/get_data.py qlib_data --target_dir {resolved} --region {region} --interval {interval}"
+    typer.echo(
+        json_dump(
+            {
+                "status": "deprecated_alias",
+                "replacement": "setup-qlib-v7",
+                "target_dir": str(resolved),
+                "official_command": command,
+                "note": "download-qlib-v7 is retained only as a backwards-compatible alias.",
+            }
+        )
+    )
 
 
 @app.command("check-qlib-v7")
@@ -87,7 +101,7 @@ def build_akshare_v7(
     symbols: str = typer.Option(..., "--symbols"),
     start_date: str = typer.Option(..., "--start-date"),
     end_date: str = typer.Option(..., "--end-date"),
-    fundamentals_root: Path = typer.Option(Path("data/v7/fundamentals"), "--fundamentals-root"),
+    fundamentals_root: Path = typer.Option(None, "--fundamentals-root"),
     allow_network: bool = typer.Option(False, "--allow-network"),
     lake_root: Path = typer.Option(None, "--lake-root"),
 ) -> None:
@@ -140,7 +154,7 @@ def build_fundamentals_v7(
     start_date: str = typer.Option(..., "--start-date"),
     end_date: str = typer.Option(..., "--end-date"),
     provider: str = typer.Option("tushare", "--provider", help="tushare or akshare"),
-    fundamentals_root: Path = typer.Option(Path("data/v7/fundamentals"), "--fundamentals-root"),
+    fundamentals_root: Path = typer.Option(None, "--fundamentals-root"),
     allow_network: bool = typer.Option(False, "--allow-network"),
     token_env: str = typer.Option("TUSHARE_TOKEN", "--token-env"),
 ) -> None:
@@ -162,6 +176,10 @@ def build_fundamentals_v7(
     else:
         raise typer.BadParameter("provider must be tushare or akshare")
     statements = adapter.all_statements(request)
+    if fundamentals_root is None:
+        from quantagent.config.paths import quant_paths
+
+        fundamentals_root = quant_paths().data_root / "v7" / "raw" / provider / "fundamentals"
     cache = FinancialStatementCache(FinancialCacheConfig(root=str(fundamentals_root)))
     summary: dict[str, dict[str, object]] = {}
     for name, result in statements.items():
@@ -238,3 +256,33 @@ def build_training_dataset_v7(
     )
     result = build_v7_training_dataset_artifact(config)
     typer.echo(json_dump(result.summary))
+
+
+@app.command("materialize-factors-v7")
+def materialize_factors_v7(
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    output_path: Path = typer.Option(None, "--output"),
+    backend: str = typer.Option("pandas", "--backend", help="pandas or polars"),
+    long_format: bool = typer.Option(False, "--long-format"),
+) -> None:
+    """Materialize default Alpha101-style factors into the V7 lake."""
+    from quantagent.factors.expr import build_factor_frame
+
+    resolved_output = (
+        Path(output_path)
+        if output_path is not None
+        else default_v7_lake_root() / "silver" / "factors" / "factors.parquet"
+    )
+    factors = build_factor_frame(read_frame(market_panel_path), backend=backend, long_format=long_format)
+    written = write_frame(factors, resolved_output)
+    typer.echo(
+        json_dump(
+            {
+                "status": "passed",
+                "backend": backend,
+                "rows": int(len(factors)),
+                "columns": list(factors.columns),
+                "output": str(written),
+            }
+        )
+    )

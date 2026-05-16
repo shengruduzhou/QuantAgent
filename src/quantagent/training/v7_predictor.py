@@ -8,6 +8,7 @@ Loads a previously trained V7 alpha artifact directory and emits a
   and the optional native booster files under ``boosters/``).
 * Deep alpha models persisted by :class:`V7DeepAlphaTrainer`
   (``deep_alpha_state.json`` + ``deep_alpha_config.json``).
+* FT-Transformer artifacts persisted as ``ft_transformer.pt``.
 
 The predictor never re-fits anything; it is a deterministic forward
 pass meant for ``predict-alpha-v7`` and the prediction-to-target-weights
@@ -59,14 +60,17 @@ def predict_v7_alpha(
         raise FileNotFoundError(f"V7 model artifact directory not found: {artifact}")
 
     deep_state = artifact / "deep_alpha_state.json"
+    ft_state = artifact / "ft_transformer.pt"
     classic_state = artifact / "model_coefficients.json"
     if deep_state.exists():
         return _predict_deep(artifact, deep_state, feature_frame, primary_horizon)
+    if ft_state.exists():
+        return _predict_ft_transformer(artifact, feature_frame, primary_horizon)
     if classic_state.exists():
         return _predict_classic(artifact, classic_state, feature_frame, primary_horizon)
     raise FileNotFoundError(
         f"V7 model artifact directory {artifact} contains neither "
-        f"deep_alpha_state.json nor model_coefficients.json"
+        f"deep_alpha_state.json, ft_transformer.pt nor model_coefficients.json"
     )
 
 
@@ -142,6 +146,27 @@ def _predict_classic(
         feature_columns=feature_columns,
         horizons=tuple(horizons),
         artifact_dir=str(artifact_dir),
+    )
+
+
+def _predict_ft_transformer(
+    artifact_dir: Path,
+    feature_frame: pd.DataFrame,
+    primary_horizon: int | None,
+) -> V7PredictionResult:
+    from quantagent.training.ft_transformer_trainer import predict_ft_transformer_artifact
+
+    result = predict_ft_transformer_artifact(
+        artifact_dir,
+        feature_frame,
+        primary_horizon=primary_horizon,
+    )
+    return V7PredictionResult(
+        predictions=result.predictions,
+        model_kind="ft_transformer",
+        feature_columns=result.feature_columns,
+        horizons=result.horizons,
+        artifact_dir=result.artifact_dir,
     )
 
 

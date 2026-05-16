@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.execution.fill_simulator import FillSimulator
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.execution.virtual_broker import VirtualBroker
@@ -19,7 +20,7 @@ class AShareExecutionSimulationConfig:
     slippage_bps: float = 8.0
     block_st_buy: bool = True
     max_st_weight: float = 0.0
-    audit_log_dir: str = "logs/v7_backtest"
+    audit_log_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ def simulate_ashare_target_weights(
     config: AShareExecutionSimulationConfig | None = None,
 ) -> AShareExecutionSimulationResult:
     config = config or AShareExecutionSimulationConfig()
+    audit_log_dir = config.audit_log_dir or str(quant_paths().logs / "v7_backtest")
     if target_weight_history is None or target_weight_history.empty:
         return AShareExecutionSimulationResult(pd.Series(dtype=float), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), asdict(config))
     market = market_panel.copy()
@@ -49,7 +51,7 @@ def simulate_ashare_target_weights(
     broker = VirtualBroker(
         initial_cash=config.initial_cash,
         dry_run=True,
-        audit_log_dir=config.audit_log_dir,
+        audit_log_dir=audit_log_dir,
         fill_simulator=FillSimulator(
             participation_rate=config.volume_participation_cap,
             slippage_bps=config.slippage_bps,

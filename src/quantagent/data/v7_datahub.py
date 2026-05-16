@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.providers.disclosure_provider import DisclosureWebProvider
 from quantagent.data.providers.financial_cache import FinancialCacheConfig, FinancialStatementCache
@@ -30,8 +31,8 @@ class V7DataQualityError(RuntimeError):
 
 @dataclass(frozen=True)
 class V7DataHubConfig:
-    root: str = "data/v7"
-    fundamentals_root: str = "data/v7/fundamentals"
+    root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7"))
+    fundamentals_root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "raw" / "akshare" / "fundamentals"))
     provider_mode: V7ProviderMode = "strict_local"
     allow_synthetic_fallback: bool = False
     allow_network: bool = False
@@ -287,8 +288,8 @@ def _coerce_config(config: V7DataHubConfig | dict[str, Any] | None) -> V7DataHub
     else:
         required_tuple = tuple(str(item) for item in required)
     return V7DataHubConfig(
-        root=str(config.get("v7_root", "data/v7")),
-        fundamentals_root=str(config.get("fundamentals_root", "data/v7/fundamentals")),
+        root=str(config.get("v7_root", quant_paths().data_root / "v7")),
+        fundamentals_root=str(config.get("fundamentals_root", quant_paths().data_root / "v7" / "raw" / "akshare" / "fundamentals")),
         provider_mode=mode,  # type: ignore[arg-type]
         allow_synthetic_fallback=bool(config.get("allow_synthetic_fallback", mode == "mock")),
         allow_network=bool(config.get("allow_network", False)),

@@ -11,6 +11,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.v7_label_builder import V7_LABEL_HORIZONS
 from quantagent.data.v7_quality_gates import (
     V7DataQualityGateConfig,
@@ -19,11 +20,19 @@ from quantagent.data.v7_quality_gates import (
     evaluate_data_quality_gates,
     evaluate_model_acceptance_gates,
 )
-from quantagent.quant_math.purged_cv import PurgedKFoldConfig, purged_kfold_split
 from quantagent.training.model_registry import ModelRegistry
+from quantagent.training.splitters import WalkForwardSplitConfig, split_walk_forward
 
 
-SUPPORTED_MODELS: tuple[str, ...] = ("ridge", "elastic_net", "lightgbm", "xgboost")
+SUPPORTED_MODELS: tuple[str, ...] = ("ridge", "elastic_net", "lightgbm", "xgboost", "ft_transformer")
+
+
+def _default_output_dir() -> str:
+    return str(quant_paths().models / "v7_alpha")
+
+
+def _default_registry_root() -> str:
+    return str(quant_paths().models / "v7_alpha" / "registry")
 
 
 @dataclass(frozen=True)
@@ -34,19 +43,31 @@ class V7TrainingConfig:
     l1_ratio: float = 0.5
     min_train_rows: int = 100
     n_splits: int = 4
+    split_mode: str = "expanding"
+    valid_size_days: int = 5
+    min_train_days: int = 20
+    rolling_train_days: int = 252
+    embargo_days: int = 5
+    purge_days: int | None = None
     embargo_pct: float = 0.02
     cost_bps: float = 12.0
-    output_dir: str = "artifacts/v7_alpha"
+    output_dir: str = field(default_factory=_default_output_dir)
     paper_report_path: str | None = None
     mark_production_ready: bool = False
     feature_columns: tuple[str, ...] = ()
-    registry_root: str = "artifacts/v7_alpha/registry"
+    registry_root: str = field(default_factory=_default_registry_root)
     experiment_name: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     allow_model_downgrade: bool = False
     n_estimators: int = 200
     max_depth: int = 6
     learning_rate: float = 0.05
+    ft_max_epochs: int = 30
+    ft_batch_size: int = 1024
+    ft_d_token: int = 64
+    ft_n_blocks: int = 3
+    ft_n_heads: int = 4
+    ft_use_amp: bool = True
 
 
 @dataclass(frozen=True)
@@ -79,6 +100,8 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     feature_columns = list(config.feature_columns or _auto_feature_columns(data))
     if not feature_columns:
         raise ValueError("V7 training found no numeric feature columns")
+    if config.model == "ft_transformer":
+        return _run_ft_transformer_experiment(data, feature_columns, quality.to_dict(), config)
     coefficients: dict[str, dict[str, float]] = {}
     boosters: dict[str, object] = {}
     all_predictions: list[pd.DataFrame] = []
@@ -90,15 +113,12 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         horizon_data = data.dropna(subset=[label_column, *feature_columns]).reset_index(drop=True)
         if len(horizon_data) < config.min_train_rows:
             continue
-        label_end = _label_end_times(horizon_data, horizon)
-        splits = purged_kfold_split(
-            horizon_data["trade_date"],
-            label_end,
-            PurgedKFoldConfig(n_splits=min(config.n_splits, max(2, len(horizon_data) // 2)), embargo_pct=config.embargo_pct),
-        )
+        folds = _make_walk_forward_folds(horizon_data, config)
         last_artifact = None
-        for fold, (train_idx, test_idx) in enumerate(splits):
-            if len(train_idx) < max(10, len(feature_columns)):
+        for fold in folds:
+            train_idx = fold.train_idx
+            test_idx = fold.valid_idx
+            if len(train_idx) < max(config.min_train_rows, 10, len(feature_columns)):
                 continue
             train = horizon_data.iloc[train_idx]
             test = horizon_data.iloc[test_idx]
@@ -118,8 +138,14 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
             fold_frame = test[["trade_date", "symbol", label_column]].copy()
             fold_frame["horizon"] = horizon
             fold_frame["prediction"] = prediction
+            fold_frame["sample_role"] = "validation"
+            fold_frame["fold_id"] = fold.fold_id
+            fold_frame["train_start"] = fold.train_dates[0]
+            fold_frame["train_end"] = fold.train_dates[1]
+            fold_frame["valid_start"] = fold.valid_dates[0]
+            fold_frame["valid_end"] = fold.valid_dates[1]
             all_predictions.append(fold_frame)
-            fold_metrics.append(_fold_metrics(fold_frame, label_column, fold, horizon, config.cost_bps))
+            fold_metrics.append(_fold_metrics(fold_frame, label_column, fold.fold_id, horizon, config.cost_bps))
         if last_artifact is not None:
             boosters[str(horizon)] = last_artifact
 
@@ -132,7 +158,8 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         coefficients,
         feature_importance=_feature_importance(boosters, feature_columns) if boosters else None,
     )
-    adverse_report = evaluate_adverse_regime(prediction_frame, label_column="forward_return_1d")
+    adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{config.horizons[0]}d"
+    adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
     metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
     metrics["adverse_regime_report"] = adverse_report
     metrics["backend"] = backend
@@ -163,6 +190,160 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         output_dir=str(output_dir),
         metrics=metrics,
         data_quality_report=quality.to_dict(),
+        acceptance_report=acceptance.to_dict(),
+        artifact_paths=artifact_paths,
+    )
+
+
+def _make_walk_forward_folds(frame: pd.DataFrame, config: V7TrainingConfig):
+    available_horizons = tuple(h for h in config.horizons if f"forward_return_{h}d" in frame.columns)
+    purge_days = max(available_horizons or config.horizons) if config.purge_days is None else int(config.purge_days)
+    symbol_count = max(1, int(frame["symbol"].nunique()) if "symbol" in frame.columns else 1)
+    row_based_min_train_days = int(np.ceil(config.min_train_rows / symbol_count)) + config.embargo_days + max(0, purge_days)
+    cfg = WalkForwardSplitConfig(
+        n_splits=config.n_splits,
+        valid_size_days=config.valid_size_days,
+        min_train_days=max(config.min_train_days, row_based_min_train_days),
+        rolling_train_days=config.rolling_train_days,
+        embargo_days=config.embargo_days,
+        purge_days=max(0, purge_days),
+        mode=config.split_mode,
+    )
+    folds = split_walk_forward(frame, config=cfg)
+    if not folds:
+        unique_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna().nunique()
+        relaxed_valid_size = max(1, min(config.valid_size_days, unique_dates - cfg.min_train_days))
+        if relaxed_valid_size < config.valid_size_days:
+            folds = split_walk_forward(
+                frame,
+                config=WalkForwardSplitConfig(
+                    n_splits=max(1, min(config.n_splits, 2)),
+                    valid_size_days=relaxed_valid_size,
+                    min_train_days=cfg.min_train_days,
+                    rolling_train_days=config.rolling_train_days,
+                    embargo_days=config.embargo_days,
+                    purge_days=max(0, purge_days),
+                    mode=config.split_mode,
+                ),
+            )
+    if not folds:
+        raise ValueError(
+            "V7 training produced no walk-forward folds; increase date coverage or lower "
+            "min_train_days/valid_size_days/purge_days."
+        )
+    return folds
+
+
+def _run_ft_transformer_experiment(
+    data: pd.DataFrame,
+    feature_columns: list[str],
+    quality: dict[str, object],
+    config: V7TrainingConfig,
+) -> V7TrainingResult:
+    from quantagent.training.ft_transformer_trainer import (
+        FTTransformerTrainer,
+        FTTransformerTrainerConfig,
+        predict_ft_transformer_artifact,
+    )
+
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    all_predictions: list[pd.DataFrame] = []
+    fold_metrics: list[dict[str, object]] = []
+    used_horizons = tuple(h for h in config.horizons if f"forward_return_{h}d" in data.columns)
+    if not used_horizons:
+        raise ValueError("FT-Transformer training found no configured forward_return_*d labels")
+    required_labels = [f"forward_return_{h}d" for h in used_horizons]
+    fit_frame = data.dropna(subset=[*required_labels, *feature_columns]).reset_index(drop=True)
+    if len(fit_frame) < config.min_train_rows:
+        raise ValueError("FT-Transformer training has fewer rows than min_train_rows")
+    for fold in _make_walk_forward_folds(fit_frame, config):
+        train = fit_frame.iloc[fold.train_idx].copy()
+        valid = fit_frame.iloc[fold.valid_idx].copy()
+        if len(train) < max(config.min_train_rows, len(feature_columns)):
+            continue
+        fold_dir = output_dir / "walk_forward" / f"fold_{fold.fold_id:03d}"
+        trainer = FTTransformerTrainer(
+            FTTransformerTrainerConfig(
+                horizons=used_horizons,
+                d_token=config.ft_d_token,
+                n_blocks=config.ft_n_blocks,
+                n_heads=config.ft_n_heads,
+                learning_rate=config.learning_rate,
+                batch_size=config.ft_batch_size,
+                max_epochs=config.ft_max_epochs,
+                use_amp=config.ft_use_amp,
+                feature_columns=tuple(feature_columns),
+                output_dir=str(fold_dir),
+            )
+        )
+        trainer.fit_and_save(train, validation_dataset=valid)
+        pred = predict_ft_transformer_artifact(fold_dir, valid)
+        for horizon in used_horizons:
+            label_column = f"forward_return_{horizon}d"
+            alpha_column = f"alpha_{horizon}d"
+            fold_frame = valid[["trade_date", "symbol", label_column]].copy()
+            fold_frame["horizon"] = horizon
+            fold_frame["prediction"] = pred.predictions[alpha_column].to_numpy(dtype=float)
+            fold_frame["sample_role"] = "validation"
+            fold_frame["fold_id"] = fold.fold_id
+            fold_frame["train_start"] = fold.train_dates[0]
+            fold_frame["train_end"] = fold.train_dates[1]
+            fold_frame["valid_start"] = fold.valid_dates[0]
+            fold_frame["valid_end"] = fold.valid_dates[1]
+            all_predictions.append(fold_frame)
+            fold_metrics.append(_fold_metrics(fold_frame, label_column, fold.fold_id, horizon, config.cost_bps))
+    if not all_predictions:
+        raise ValueError("FT-Transformer training produced no out-of-sample predictions")
+
+    final_trainer = FTTransformerTrainer(
+        FTTransformerTrainerConfig(
+            horizons=used_horizons,
+            d_token=config.ft_d_token,
+            n_blocks=config.ft_n_blocks,
+            n_heads=config.ft_n_heads,
+            learning_rate=config.learning_rate,
+            batch_size=config.ft_batch_size,
+            max_epochs=config.ft_max_epochs,
+            use_amp=config.ft_use_amp,
+            feature_columns=tuple(feature_columns),
+            output_dir=str(output_dir),
+        )
+    )
+    final_trainer.fit_and_save(fit_frame)
+
+    prediction_frame = pd.concat(all_predictions, ignore_index=True)
+    metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients={})
+    adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{used_horizons[0]}d"
+    adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
+    metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
+    metrics["adverse_regime_report"] = adverse_report
+    metrics["backend"] = "ft_transformer"
+    metrics["model_requested"] = config.model
+    metrics["model_downgraded"] = False
+    acceptance = evaluate_model_acceptance_gates(
+        metrics,
+        V7ModelAcceptanceGateConfig(require_paper_report=config.mark_production_ready),
+        paper_report_path=config.paper_report_path,
+    )
+    status = "production_ready" if config.mark_production_ready and acceptance.passed else "validation_only"
+    artifact_paths = _write_artifacts(
+        output_dir,
+        config,
+        feature_columns,
+        {},
+        metrics,
+        quality,
+        acceptance.to_dict(),
+        prediction_frame,
+        backend="ft_transformer",
+    )
+    artifact_paths["ft_checkpoint"] = str(output_dir / "ft_transformer.pt")
+    return V7TrainingResult(
+        status=status,
+        output_dir=str(output_dir),
+        metrics=metrics,
+        data_quality_report=quality,
         acceptance_report=acceptance.to_dict(),
         artifact_paths=artifact_paths,
     )

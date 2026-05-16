@@ -14,17 +14,18 @@ calling external APIs; once a frame is normalised through
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.daily_evidence_job import EVIDENCE_COLUMNS
 
 
 @dataclass(frozen=True)
 class EvidenceStoreConfig:
-    root: str = "data/v7/evidence/store"
+    root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "evidence" / "store"))
     partition_column: str = "available_at"
     file_format: str = "parquet"
 

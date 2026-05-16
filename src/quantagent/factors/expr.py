@@ -317,25 +317,25 @@ class FactorRegistry:
         self.factors[name] = definition
         return definition
 
-    def evaluate_all(self, frame: pd.DataFrame) -> pd.DataFrame:
+    def evaluate_all(self, frame: pd.DataFrame, backend: str = "pandas") -> pd.DataFrame:
         """Evaluate every registered factor and return a tidy long-format frame."""
         if not self.factors:
             return pd.DataFrame(columns=["symbol", "trade_date", "factor_name", "factor_value"])
         rows: list[pd.DataFrame] = []
         base = frame[["symbol", "trade_date"]].copy()
         for name, definition in self.factors.items():
-            values = definition.expr.evaluate(frame)
+            values = evaluate_expr(definition.expr, frame, backend=backend)
             piece = base.copy()
             piece["factor_name"] = name
             piece["factor_value"] = values.values
             rows.append(piece)
         return pd.concat(rows, ignore_index=True, sort=False)
 
-    def evaluate_wide(self, frame: pd.DataFrame) -> pd.DataFrame:
+    def evaluate_wide(self, frame: pd.DataFrame, backend: str = "pandas") -> pd.DataFrame:
         """Evaluate every registered factor as a wide ``factor_*`` frame."""
         wide = frame[["symbol", "trade_date"]].copy()
         for name, definition in self.factors.items():
-            wide[f"factor_{name}"] = definition.expr.evaluate(frame).values
+            wide[f"factor_{name}"] = evaluate_expr(definition.expr, frame, backend=backend).values
         return wide
 
 
@@ -355,6 +355,7 @@ def build_factor_frame(
     frame: pd.DataFrame,
     factors: dict[str, Expr] | FactorRegistry | None = None,
     long_format: bool = False,
+    backend: str = "pandas",
 ) -> pd.DataFrame:
     """Evaluate a collection of expressions over ``frame``.
 
@@ -371,7 +372,117 @@ def build_factor_frame(
         registry = FactorRegistry()
         for name, expr in factors.items():
             registry.register(name, expr)
-    return registry.evaluate_all(frame) if long_format else registry.evaluate_wide(frame)
+    return registry.evaluate_all(frame, backend=backend) if long_format else registry.evaluate_wide(frame, backend=backend)
+
+
+def evaluate_expr(expr: Expr, frame: pd.DataFrame, backend: str = "pandas") -> pd.Series:
+    """Evaluate one expression using the requested backend."""
+    if backend == "pandas":
+        return expr.evaluate(frame)
+    if backend == "polars":
+        return _evaluate_polars(expr, frame)
+    raise ValueError("factor backend must be pandas or polars")
+
+
+def _evaluate_polars(expr: Expr, frame: pd.DataFrame) -> pd.Series:
+    try:
+        import polars as pl
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("backend='polars' requires polars; install quantagent[research]") from exc
+    _ensure_sorted(frame)
+    base = frame.reset_index(drop=True).copy()
+    base["__row_id"] = np.arange(len(base))
+    pl_frame = pl.from_pandas(base)
+    result = _polars_value_frame(expr, pl_frame, pl)
+    aligned = result.sort("__row_id").to_pandas()["factor_value"]
+    return pd.Series(aligned.to_numpy(dtype=float), index=frame.index, dtype=float)
+
+
+def _polars_value_frame(expr: Expr, pl_frame, pl):
+    if isinstance(expr, Column):
+        if expr.name not in pl_frame.columns:
+            raise KeyError(f"factor expression references missing column '{expr.name}'")
+        return pl_frame.select("__row_id", pl.col(expr.name).cast(pl.Float64, strict=False).alias("factor_value"))
+    if isinstance(expr, Constant):
+        return pl_frame.select("__row_id", pl.lit(float(expr.value)).alias("factor_value"))
+    if isinstance(expr, Add):
+        return _polars_binary(expr.left, expr.right, pl_frame, pl, "add")
+    if isinstance(expr, Sub):
+        return _polars_binary(expr.left, expr.right, pl_frame, pl, "sub")
+    if isinstance(expr, Mul):
+        return _polars_binary(expr.left, expr.right, pl_frame, pl, "mul")
+    if isinstance(expr, Div):
+        return _polars_binary(expr.numerator, expr.denominator, pl_frame, pl, "div")
+    if isinstance(expr, Delay):
+        return _polars_grouped(expr.expr, pl_frame, pl, pl.col("factor_value").shift(expr.periods))
+    if isinstance(expr, Delta):
+        current = _polars_value_frame(expr.expr, pl_frame, pl).rename({"factor_value": "left"})
+        shifted = _polars_grouped(expr.expr, pl_frame, pl, pl.col("factor_value").shift(expr.periods)).rename({"factor_value": "right"})
+        return current.join(shifted, on="__row_id").select("__row_id", (pl.col("left") - pl.col("right")).alias("factor_value"))
+    if isinstance(expr, Returns):
+        current = _polars_value_frame(expr.expr, pl_frame, pl).rename({"factor_value": "left"})
+        shifted = _polars_grouped(expr.expr, pl_frame, pl, pl.col("factor_value").shift(expr.periods)).rename({"factor_value": "right"})
+        return current.join(shifted, on="__row_id").select(
+            "__row_id",
+            ((pl.col("left") / pl.when(pl.col("right") == 0.0).then(None).otherwise(pl.col("right"))) - 1.0).alias("factor_value"),
+        )
+    if isinstance(expr, _RollingReduction):
+        rolling_expr = {
+            "mean": pl.col("factor_value").rolling_mean(window_size=expr.window, min_periods=expr.window),
+            "std": pl.col("factor_value").rolling_std(window_size=expr.window, min_periods=expr.window),
+            "sum": pl.col("factor_value").rolling_sum(window_size=expr.window, min_periods=expr.window),
+            "max": pl.col("factor_value").rolling_max(window_size=expr.window, min_periods=expr.window),
+            "min": pl.col("factor_value").rolling_min(window_size=expr.window, min_periods=expr.window),
+        }[expr.op]
+        return _polars_grouped(expr.expr, pl_frame, pl, rolling_expr)
+    if isinstance(expr, TsRank):
+        # Keep the backend surface deterministic across Polars versions;
+        # TsRank is evaluated with the pandas reference while other core
+        # rolling reductions use native Polars expressions.
+        values = expr.evaluate(pl_frame.to_pandas())
+        return pl.DataFrame({"__row_id": pl_frame["__row_id"], "factor_value": values.to_numpy(dtype=float)})
+    if isinstance(expr, Rank):
+        values = _polars_value_frame(expr.expr, pl_frame, pl)
+        keyed = pl_frame.select("__row_id", "trade_date").join(values, on="__row_id")
+        return keyed.with_columns(
+            pl.col("factor_value").rank(method=expr.method).over("trade_date").alias("__rank"),
+            pl.len().over("trade_date").alias("__count"),
+        ).select("__row_id", (pl.col("__rank") / pl.col("__count")).alias("factor_value"))
+    if isinstance(expr, Abs):
+        values = _polars_value_frame(expr.expr, pl_frame, pl)
+        return values.select("__row_id", pl.col("factor_value").abs().alias("factor_value"))
+    if isinstance(expr, Sign):
+        values = _polars_value_frame(expr.expr, pl_frame, pl)
+        return values.select("__row_id", pl.col("factor_value").sign().alias("factor_value"))
+    if isinstance(expr, Log):
+        values = _polars_value_frame(expr.expr, pl_frame, pl)
+        return values.select("__row_id", pl.col("factor_value").clip(1e-12, None).log().alias("factor_value"))
+    raise TypeError(f"unsupported polars factor expression: {type(expr).__name__}")
+
+
+def _polars_binary(left: Expr, right: Expr, pl_frame, pl, op: str):
+    ldf = _polars_value_frame(left, pl_frame, pl).rename({"factor_value": "left"})
+    rdf = _polars_value_frame(right, pl_frame, pl).rename({"factor_value": "right"})
+    joined = ldf.join(rdf, on="__row_id")
+    if op == "add":
+        expr = pl.col("left") + pl.col("right")
+    elif op == "sub":
+        expr = pl.col("left") - pl.col("right")
+    elif op == "mul":
+        expr = pl.col("left") * pl.col("right")
+    elif op == "div":
+        expr = pl.col("left") / pl.when(pl.col("right") == 0.0).then(None).otherwise(pl.col("right"))
+    else:  # pragma: no cover
+        raise ValueError(op)
+    return joined.select("__row_id", expr.alias("factor_value"))
+
+
+def _polars_grouped(inner: Expr, pl_frame, pl, value_expr):
+    values = _polars_value_frame(inner, pl_frame, pl)
+    keyed = pl_frame.select("__row_id", "symbol", "trade_date").join(values, on="__row_id")
+    return keyed.sort(["symbol", "trade_date", "__row_id"]).with_columns(
+        value_expr.over("symbol").alias("factor_value")
+    ).select("__row_id", "factor_value")
 
 
 # A small handful of canonical Alpha101-style examples for tests and docs.
@@ -436,4 +547,5 @@ __all__ = [
     "register_factor",
     "default_registry",
     "build_factor_frame",
+    "evaluate_expr",
 ]

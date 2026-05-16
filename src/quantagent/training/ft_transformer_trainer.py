@@ -23,6 +23,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
+
+
+def _default_ft_output_dir() -> str:
+    return str(quant_paths().models / "v7_alpha" / "ft_transformer")
+
 
 @dataclass(frozen=True)
 class FTTransformerTrainerConfig:
@@ -44,7 +50,7 @@ class FTTransformerTrainerConfig:
     feature_columns: tuple[str, ...] = ()
     use_missing_mask: bool = True
     use_amp: bool = True
-    output_dir: str = "models/v7_alpha/ft_transformer"
+    output_dir: str = field(default_factory=_default_ft_output_dir)
     resume_checkpoint: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
 
@@ -59,6 +65,14 @@ class FTTransformerArtifacts:
     horizons: list[int]
     feature_columns: list[str]
     training_history: list[dict[str, float]]
+
+
+@dataclass(frozen=True)
+class FTTransformerPredictionResult:
+    predictions: pd.DataFrame
+    horizons: tuple[int, ...]
+    feature_columns: tuple[str, ...]
+    artifact_dir: str
 
 
 class FTTransformerTrainer:
@@ -313,8 +327,63 @@ def _resolve_device(device: str) -> str:  # pragma: no cover - torch path
     return device
 
 
+def predict_ft_transformer_artifact(
+    artifact_dir: str | Path,
+    feature_frame: pd.DataFrame,
+    *,
+    primary_horizon: int | None = None,
+    device: str = "cpu",
+) -> FTTransformerPredictionResult:
+    """Load ``ft_transformer.pt`` and run a deterministic forward pass."""
+    if feature_frame is None or feature_frame.empty:
+        raise ValueError("FT-Transformer prediction requires a non-empty feature frame")
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("FT-Transformer prediction requires PyTorch; install quantagent[training]") from exc
+    from quantagent.models.ft_transformer import FTTransformer, FTTransformerConfig
+
+    artifact = Path(artifact_dir)
+    if artifact.is_file():
+        artifact = artifact.parent
+    checkpoint_path = artifact / "ft_transformer.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"FT-Transformer checkpoint not found: {checkpoint_path}")
+    resolved_device = _resolve_device(device)
+    checkpoint = torch.load(checkpoint_path, map_location=resolved_device)
+    feature_columns = tuple(str(c) for c in checkpoint["feature_columns"])
+    horizons = tuple(int(h) for h in checkpoint["horizons"])
+    missing = [column for column in feature_columns if column not in feature_frame.columns]
+    if missing:
+        raise ValueError(f"FT-Transformer feature frame missing columns {missing}")
+    model_config = FTTransformerConfig(**checkpoint["config"])
+    model = FTTransformer(model_config).to(resolved_device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    means = np.asarray(checkpoint["feature_means"], dtype=float)
+    scales = np.asarray(checkpoint["feature_scales"], dtype=float)
+    values = feature_frame[list(feature_columns)].to_numpy(dtype=float)
+    tensor = torch.tensor((values - means) / scales, dtype=torch.float32, device=resolved_device)
+    with torch.no_grad():
+        outputs = model(tensor).detach().cpu().numpy()
+    base_columns = [c for c in ("symbol", "trade_date") if c in feature_frame.columns]
+    output = feature_frame[base_columns].copy()
+    for index, horizon in enumerate(horizons):
+        output[f"alpha_{horizon}d"] = outputs[:, index]
+    primary = primary_horizon if primary_horizon in horizons else horizons[0]
+    output["prediction"] = output[f"alpha_{primary}d"]
+    return FTTransformerPredictionResult(
+        predictions=output.reset_index(drop=True),
+        horizons=horizons,
+        feature_columns=feature_columns,
+        artifact_dir=str(artifact),
+    )
+
+
 __all__ = [
     "FTTransformerTrainer",
     "FTTransformerTrainerConfig",
     "FTTransformerArtifacts",
+    "FTTransformerPredictionResult",
+    "predict_ft_transformer_artifact",
 ]

@@ -1,64 +1,65 @@
-# V7 Training Dataset Schema / V7 训练数据集 Schema
+# V7 Training Dataset Schema / 训练集 Schema
 
-## 入口 / Entry
+## Entry
 
 ```powershell
-quantagent build-training-dataset-v7 \
-  --market-panel data/v7/silver/market_panel/market_panel.parquet \
-  --labels data/v7/labels.parquet \
-  --fundamentals-root data/v7/silver/fundamentals \
-  --valuation data/v7/silver/valuation/valuation.parquet \
-  --disclosures data/v7/silver/disclosures/disclosures.parquet \
-  --horizons 1,5,20,60,120,126 \
-  --output data/v7/gold/training_dataset/training_dataset.parquet
+quantagent build-training-dataset-v7 `
+  --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet `
+  --labels E:\AI量化\data\v7\labels.parquet `
+  --fundamentals-root E:\AI量化\data\v7\raw\akshare\fundamentals `
+  --valuation E:\AI量化\data\v7\silver\valuation\valuation.parquet `
+  --disclosures E:\AI量化\data\v7\silver\disclosures\disclosures.parquet `
+  --horizons 1,5,20,60,120,126
 ```
 
-实现：`src/quantagent/data/dataset_builder/v7_training_dataset.py`。
+默认输出：
 
-## Join 语义 / Join Semantics
+- `E:\AI量化\data\v7\gold\training_dataset\training_dataset.parquet`
+- `training_dataset.feature_schema.json`
+- `E:\AI量化\data\v7\manifests\training_dataset.json`
 
-- 市场面板先经过 `build_market_features`，得到带有 `available_at = next trading row` 的 PIT 特征。
-- 财务 / 估值 / 披露 frame 必须含 `symbol + available_at`，as-of join 时使用 `direction="backward"`，保证 `feature_available_at <= trade_date`。
-- 没有匹配到的源会写入 missingness flag：`missing_fundamentals` / `missing_valuation` / `missing_disclosures`。
-- 标签来自 `build-labels-v7` 输出（`forward_return_{h}d` + `label_end_{h}d`）。
-- inner-join market features × labels 后丢掉 `available_at` 缺失的行。
+## Join Semantics
 
-## 输出 / Outputs
+- Market panel 先经过 `build_market_features`，close-derived features 使用 next trading row `available_at`。
+- Financial / valuation / disclosure frames 必须带 `symbol + available_at`，as-of join 使用 backward direction。
+- `feature_available_at <= trade_date` 是硬约束。
+- Labels 来自 `build-labels-v7`：`forward_return_{h}d` 和 `label_end_{h}d`。
+- Missing source 会写 missingness flag，例如 `missing_fundamentals`。
 
-- `training_dataset.parquet` —— 训练用 DataFrame。
-- `training_dataset.feature_schema.json` —— feature/label/entity/timestamp/forbidden 列定义、horizons、source name、available_at policy。
-- `data/v7/manifests/training_dataset.json` —— 行数、列数、PIT 违反计数、duplicate rate、文件 sha256、warnings、quality status。
+## Forbidden Inference Columns
 
-如果 `--output` 指向 lake 外的路径，manifest 会写到 `<output>.manifest.json`。
+Feature schema 明确列出：
 
-## 列定义 / Columns
+- entity: `symbol`
+- timestamp: `trade_date`, `available_at`
+- labels: `forward_return_*`, `label_end_*`
+- forbidden raw market columns: `open`, `high`, `low`, `close`, `volume`, `amount`
 
-- Entity：`symbol`
-- Timestamp：`trade_date`、`available_at`
-- Labels：`forward_return_{h}d`、`label_end_{h}d`
-- Forbidden（不可用于 inference）：`open / high / low / close / volume / amount` + 所有 `forward_return_*` / `label_end_*`
-- Features：所有数值型 / bool 列减去 forbidden / label / entity / timestamp
+Inference feature columns不得包含 labels、label_end、raw forward labels 或 same-day close-derived leakage。
 
-## 数据质量 / Quality
+## Strict Checks
 
-- min_rows / min_symbols / min_dates 默认 100 / 2 / 5，可由 CLI 调整。
-- `enforce_quality_gates=true`（默认）让 gate failure 直接 raise。
-- `source_name` 默认 `realdata`；用于 mock-data 验证时显式传 `mock` 来跳过 production gate。
-- `allow_synthetic_fallback=false` 永远；显式传 true 会被 builder 拒绝。
+`V7TrainingDatasetConfig.strict_mode=True` 默认开启，以下情况会 raise：
 
-## Strict Mode 检查 / Strict Mode Checks
-
-`V7TrainingDatasetConfig.strict_mode=True`（默认）会在写盘前 raise，覆盖以下条件：
-
-- 训练集为空；
-- 缺少 entity/PIT 列（`symbol / trade_date / available_at`）；
-- 特征集为空；
-- 缺少任一 `forward_return_{h}d` 标签；
-- 标签列泄漏到特征列；
-- `(trade_date, symbol)` 重复行；
-- `source / source_name / data_source` 中包含 `mock / synthetic / demo`；
-- 同时传 `train_end_date` 与 `validation_end_date` 时，其中任一窗口为空，或 `validation_end_date <= train_end_date`。
+- training dataset 为空。
+- 缺少 `symbol / trade_date / available_at`。
+- 没有可训练 features。
+- 缺少任一 configured horizon label。
+- label columns 泄漏到 feature columns。
+- `(trade_date, symbol)` 重复。
+- `available_at > trade_date`。
+- source metadata 包含 `mock / synthetic / demo` 且用于 real-data path。
 
 ## Feature Groups
 
-可选 `--feature-groups short_term,fundamental` 仅选用某些 V7 feature group（来自 `quantagent.data.v7_feature_groups`）。Feature group 列在帧中缺失时会自动跳过，避免 schema drift 直接打断训练。
+当前 feature groups 覆盖：
+
+- market technical features
+- Alpha101-style factor columns
+- valuation factors
+- financial statement ratios
+- growth / profitability / leverage / liquidity ratios
+- sector / industry neutralized features
+- calendar / regime features
+
+缺列时会通过 schema report 和 missingness summary 暴露，real-data path 不会静默造数。

@@ -7,6 +7,8 @@ from typing import Any
 
 import json
 
+from quantagent.config.paths import quant_paths
+
 
 @dataclass(frozen=True)
 class ModelRegistryEntry:
@@ -19,8 +21,8 @@ class ModelRegistryEntry:
 
 
 class ModelRegistry:
-    def __init__(self, root: str | Path = "artifacts/models/v6") -> None:
-        self.root = Path(root)
+    def __init__(self, root: str | Path | None = None) -> None:
+        self.root = Path(root) if root is not None else quant_paths().models / "registry"
 
     def register(self, model_version: str, feature_version: str, metrics: dict[str, float], metadata: dict[str, Any] | None = None) -> ModelRegistryEntry:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -42,4 +44,3 @@ class ModelRegistry:
         if not path.exists():
             return None
         return ModelRegistryEntry(**json.loads(path.read_text(encoding="utf-8")))
-

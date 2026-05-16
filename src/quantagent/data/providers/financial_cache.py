@@ -1,6 +1,6 @@
 """Local Parquet/CSV cache for PIT-aware financial statements.
 
-The cache lives under ``data/v7/fundamentals/`` and is structured so that
+The cache lives under the unified V7 data root by default and is structured so that
 each statement type is its own file with the columns:
 
     symbol | report_period | ann_date | available_at | <statement fields...> | source | source_reliability
@@ -13,12 +13,13 @@ the same Parquet can be replayed at any historical date without leakage.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.providers.base import ProviderResult
 
 
@@ -33,7 +34,7 @@ _STATEMENT_FILES = {
 
 @dataclass(frozen=True)
 class FinancialCacheConfig:
-    root: str = "data/v7/fundamentals"
+    root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "raw" / "akshare" / "fundamentals"))
     format: str = "parquet"
 
 

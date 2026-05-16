@@ -16,32 +16,28 @@ app = typer.Typer(help="QuantAgent V7 research, fundamentals, and execution CLI.
 
 
 def default_v7_lake_root() -> Path:
-    """Default ``data/v7`` lake root for the CLI.
-
-    Prefers the unified layout (``$QUANTAGENT_HOME/data/v7``) and falls
-    back to the legacy in-repo ``data/v7`` directory only when it
-    already exists, so an existing checkout doesn't silently relocate.
-    """
-    legacy = Path("data") / "v7"
-    if legacy.exists():
-        return legacy
+    """Default V7 lake root for the CLI (unified layout)."""
     return quant_paths().data_root / "v7"
 
 
 def default_artifact_root() -> Path:
     """Default models / artifact root for the CLI (unified layout)."""
-    legacy = Path("artifacts") / "v7_alpha"
-    if legacy.exists():
-        return legacy
     return quant_paths().models / "v7_alpha"
 
 
 def default_reports_root() -> Path:
     """Default report output root for the CLI (unified layout)."""
-    legacy = Path("reports") / "v7"
-    if legacy.exists():
-        return legacy
     return quant_paths().reports / "v7"
+
+
+def default_predictions_root() -> Path:
+    """Default predictions root for the CLI (unified layout)."""
+    return quant_paths().predictions
+
+
+def default_target_weights_root() -> Path:
+    """Default target-weights root for the CLI (unified layout)."""
+    return quant_paths().target_weights
 
 
 def json_dump(value: object) -> str:

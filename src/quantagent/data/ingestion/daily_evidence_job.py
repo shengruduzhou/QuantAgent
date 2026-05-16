@@ -30,6 +30,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.source_registry import SourceCredibilityRegistry, SourceProfile
 
 
@@ -101,7 +102,7 @@ class DailyEvidenceJobConfig:
 
     as_of_date: str
     dry_run: bool = True
-    cache_root: str = "data/v7/evidence"
+    cache_root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "evidence"))
     enabled_sources: tuple[str, ...] = (
         "policy",
         "disclosure",
@@ -112,7 +113,7 @@ class DailyEvidenceJobConfig:
     )
     available_lag_days: int = 1
     write_to_store: bool = True
-    store_root: str = "data/v7/evidence/store"
+    store_root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "evidence" / "store"))
 
 
 @dataclass(frozen=True)

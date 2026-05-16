@@ -12,9 +12,9 @@ The objective combines:
 * Cross-sectional rank loss per ``trade_date`` (rank-IC friendly).
 * Optional long-short portfolio utility (``--lambda-utility``).
 
-Checkpoints, configs and feature schemas are written under
-``artifacts/v7_alpha/<experiment>/`` so ``ModelRegistry`` can pick them
-up. ``save`` / ``load`` round-trip the full model state.
+Checkpoints, configs and feature schemas are written under the unified
+``quant_paths().models / "v7_alpha"`` tree by default. ``save`` /
+``load`` round-trip the full model state.
 
 Live trading is never enabled by this module; it only emits
 predictions and ``target_weights_proxy`` columns for the downstream
@@ -30,6 +30,12 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+
+from quantagent.config.paths import quant_paths
+
+
+def _default_deep_output_dir() -> str:
+    return str(quant_paths().models / "v7_alpha" / "deep")
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,7 @@ class V7DeepAlphaTrainerConfig:
     device: str = "auto"
     seed: int = 1729
     feature_columns: tuple[str, ...] = ()
-    output_dir: str = "artifacts/v7_alpha/deep"
+    output_dir: str = field(default_factory=_default_deep_output_dir)
     use_torch: bool = True
     extra: dict[str, object] = field(default_factory=dict)
 

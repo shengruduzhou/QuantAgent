@@ -22,25 +22,13 @@ inside ``tmp_path``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
-from quantagent.config.paths import DEFAULT_DATA_ROOT_ENV, quant_paths
+from quantagent.config.paths import quant_paths
 
 
 def _default_v7_root() -> Path:
-    """Return the default V7 lake root.
-
-    Prefers the unified storage layout under ``QUANTAGENT_HOME`` but
-    keeps the legacy ``data/v7`` directory when it already exists so a
-    running checkout doesn't silently move its artefacts.
-    """
-    env = os.environ.get(DEFAULT_DATA_ROOT_ENV)
-    if env:
-        return Path(env).expanduser() / "v7"
-    legacy = Path("data") / "v7"
-    if legacy.exists():
-        return legacy
+    """Return the default V7 lake root under the unified storage layout."""
     return quant_paths().data_root / "v7"
 
 

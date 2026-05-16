@@ -415,6 +415,85 @@ def test_predict_v7_alpha_round_trip_classical(tmp_path):
     assert len(result.predictions) == len(dataset)
 
 
+def test_train_alpha_outputs_validation_only_predictions(tmp_path):
+    from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
+
+    dataset = _toy_training_frame(rows=300)
+    result = run_v7_training_experiment(
+        dataset,
+        V7TrainingConfig(
+            model="ridge",
+            horizons=(1,),
+            output_dir=str(tmp_path / "alpha"),
+            min_train_rows=20,
+            n_splits=2,
+            split_mode="rolling",
+            valid_size_days=5,
+            min_train_days=20,
+            purge_days=1,
+            embargo_days=1,
+        ),
+    )
+    predictions = pd.read_csv(result.artifact_paths["predictions"])
+    assert set(predictions["sample_role"]) == {"validation"}
+    assert (pd.to_datetime(predictions["train_end"]) < pd.to_datetime(predictions["valid_start"])).all()
+
+
+def test_run_full_pipeline_uses_oos_predictions_loader(tmp_path):
+    from quantagent.cli.v7_train import _load_oos_predictions
+
+    predictions = pd.DataFrame(
+        [
+            {"symbol": "A", "trade_date": "2025-01-02", "horizon": 5, "prediction": 0.1, "sample_role": "validation", "fold_id": 0},
+            {"symbol": "B", "trade_date": "2025-01-02", "horizon": 5, "prediction": 0.0, "sample_role": "validation", "fold_id": 0},
+        ]
+    )
+    path = tmp_path / "walk_forward_predictions.csv"
+    predictions.to_csv(path, index=False)
+    loaded = _load_oos_predictions(path, primary_horizon=5)
+    assert list(loaded.columns) == ["symbol", "trade_date", "prediction", "sample_role", "fold_id"]
+    bad = predictions.copy()
+    bad["sample_role"] = "in_sample"
+    bad_path = tmp_path / "bad.csv"
+    bad.to_csv(bad_path, index=False)
+    with pytest.raises(ValueError, match="out-of-sample"):
+        _load_oos_predictions(bad_path, primary_horizon=5)
+
+
+def test_predict_v7_alpha_round_trip_ft_transformer(tmp_path):
+    torch = pytest.importorskip("torch")
+    from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
+    from quantagent.training.v7_predictor import predict_v7_alpha
+
+    _ = torch
+    dataset = _toy_training_frame(rows=150)
+    output_dir = tmp_path / "ft"
+    result = run_v7_training_experiment(
+        dataset,
+        V7TrainingConfig(
+            model="ft_transformer",
+            horizons=(1,),
+            output_dir=str(output_dir),
+            min_train_rows=20,
+            n_splits=1,
+            split_mode="chronological",
+            valid_size_days=5,
+            min_train_days=20,
+            purge_days=1,
+            embargo_days=1,
+            ft_max_epochs=1,
+            ft_batch_size=16,
+            ft_d_token=8,
+            ft_n_blocks=1,
+            ft_n_heads=2,
+        ),
+    )
+    assert Path(result.artifact_paths["ft_checkpoint"]).exists()
+    pred = predict_v7_alpha(output_dir, dataset, primary_horizon=1)
+    assert pred.model_kind == "ft_transformer"
+    assert {"alpha_1d", "prediction"}.issubset(pred.predictions.columns)
+
+
 # ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------
@@ -429,7 +508,7 @@ def test_new_cli_commands_are_registered():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     output = result.stdout
-    for command in ("predict-alpha-v7", "build-target-weights-v7", "run-full-real-training-v7"):
+    for command in ("predict-alpha-v7", "build-target-weights-v7", "run-full-real-training-v7", "materialize-factors-v7"):
         assert command in output, f"CLI is missing {command} in --help output"
 
 

@@ -97,7 +97,7 @@ Model 不能标记 production-ready，除非：
 
 - `quantagent.config.paths` — 统一 `E:\AI量化\` 存储布局，环境变量 `QUANTAGENT_HOME` / `QUANTAGENT_DATA_ROOT` 覆盖。
 - `quantagent.training.splitters` — expanding / rolling / purged / chronological 走式 walk-forward 切分。
-- `quantagent.training.optimize` — alpha 超参 grid / random search，写 `reports/v7/optimization/`。
+- `quantagent.training.optimize` — alpha 超参 grid / random search，默认写 `E:\AI量化\reports\v7\optimization\`。
 - `quantagent.factors.expr` — Alpha101-style 符号化因子 DSL，`Rank(TsMean(Returns(Close, 1), 5))`，零 lookahead 测试覆盖。
 - `quantagent.models.ft_transformer` — FT-Transformer 表格架构（PyTorch 可选）。
 - `quantagent.training.ft_transformer_trainer` — FT-Transformer trainer（AMP / checkpoint resume / 时序 validation 切分）。

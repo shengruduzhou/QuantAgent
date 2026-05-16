@@ -4,8 +4,7 @@ This bootstrap wraps the optional pyqlib provider so V7 can:
 
 * verify the local provider_uri before attempting any read,
 * document the official CN download command in a single place,
-* materialise a canonical PIT-tagged market panel into the silver tier
-  (``data/v7/silver/market_panel/``),
+* materialise a canonical PIT-tagged market panel into the unified silver tier,
 * derive close-available-next-day technical features, and
 * emit a ``DataManifest`` that records vendor, range, schema, PIT
   violations and content hashes for downstream consumers.
@@ -21,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.lake import v7_lake_paths
 from quantagent.data.manifest import build_manifest_for_frame
 from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
@@ -46,7 +46,7 @@ class QlibBootstrapConfig:
     symbols: tuple[str, ...] = ()
     universe: str | None = None
     region: str = "cn"
-    output_root: str = "data/v7"
+    output_root: str | None = None
     build_features: bool = True
     require_optional_flags: bool = False
     use_lake_layout: bool = True
@@ -75,8 +75,9 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
             f"Qlib market panel missing tradability flags: {report['optional_columns_missing']}"
         )
 
-    lake = v7_lake_paths(config.output_root).ensure() if config.use_lake_layout else None
-    legacy_root = Path(config.output_root)
+    output_root = config.output_root or str(quant_paths().data_root / "v7")
+    lake = v7_lake_paths(output_root).ensure() if config.use_lake_layout else None
+    legacy_root = Path(output_root)
     legacy_root.mkdir(parents=True, exist_ok=True)
     market_path = (lake.silver_market_panel / "market_panel.parquet") if lake else (legacy_root / "market_panel.parquet")
     _write_frame(result.frame, market_path)
@@ -88,12 +89,6 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
         feature_path = (lake.silver_market_panel / "market_features.parquet") if lake else (legacy_root / "market_features.parquet")
         _write_frame(features, feature_path)
         feature_rows = len(features)
-
-    # legacy mirror so existing CLI/tests pointing at ``data/v7/market_panel.parquet`` keep working
-    if lake is not None:
-        mirror = legacy_root / "market_panel.parquet"
-        if mirror.resolve() != market_path.resolve():
-            _write_frame(result.frame, mirror)
 
     manifest = build_manifest_for_frame(
         dataset_name="market_panel",

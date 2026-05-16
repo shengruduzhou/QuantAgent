@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -60,3 +61,38 @@ def test_quant_paths_ensure_creates_all_directories(tmp_path, monkeypatch):
     layout = quant_paths().ensure()
     for value in layout.as_dict().values():
         assert os.path.isdir(value)
+
+
+def test_v7_cli_defaults_do_not_use_repo_local_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv(DEFAULT_QUANT_HOME_ENV, str(tmp_path))
+    monkeypatch.delenv("QUANTAGENT_DATA_ROOT", raising=False)
+
+    from quantagent.cli._utils import (
+        default_artifact_root,
+        default_predictions_root,
+        default_reports_root,
+        default_target_weights_root,
+        default_v7_lake_root,
+    )
+    from quantagent.training.ft_transformer_trainer import FTTransformerTrainerConfig
+    from quantagent.training.model_registry import ModelRegistry
+    from quantagent.training.v7_deep_trainer import V7DeepAlphaTrainerConfig
+    from quantagent.training.v7_experiment import V7TrainingConfig
+
+    defaults = [
+        default_v7_lake_root(),
+        default_artifact_root(),
+        default_predictions_root(),
+        default_target_weights_root(),
+        default_reports_root(),
+        Path(V7TrainingConfig().output_dir),
+        Path(V7DeepAlphaTrainerConfig().output_dir),
+        Path(FTTransformerTrainerConfig().output_dir),
+        ModelRegistry().root,
+    ]
+    for path in defaults:
+        assert path.is_absolute()
+        assert str(path).startswith(str(tmp_path))
+        assert not str(path).startswith("data")
+        assert not str(path).startswith("artifacts")
+        assert not str(path).startswith("reports")

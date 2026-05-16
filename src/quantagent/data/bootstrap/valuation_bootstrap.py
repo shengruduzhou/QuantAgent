@@ -9,11 +9,12 @@ bootstrap copies it into the lake while still emitting a manifest.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.lake import v7_lake_paths
 from quantagent.data.manifest import build_manifest_for_frame
 from quantagent.data.providers.akshare_valuation_provider import (
@@ -27,7 +28,7 @@ from quantagent.data.providers.base import ProviderRequest
 class ValuationBootstrapConfig:
     as_of_dates: tuple[str, ...]
     symbols: tuple[str, ...] = ()
-    lake_root: str = "data/v7"
+    lake_root: str = field(default_factory=lambda: str(quant_paths().data_root / "v7"))
     allow_network: bool = False
     csv_snapshot: str | None = None
     output_name: str = "valuation.parquet"

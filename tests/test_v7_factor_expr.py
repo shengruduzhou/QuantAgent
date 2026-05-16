@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quantagent.factors.expr import (
     Close,
@@ -13,8 +14,11 @@ from quantagent.factors.expr import (
     Rank,
     Returns,
     TsMean,
+    TsMax,
+    TsMin,
     TsRank,
     TsStd,
+    TsSum,
     Volume,
     build_factor_frame,
     register_factor,
@@ -115,3 +119,29 @@ def test_register_factor_writes_into_default_registry():
     long_frame = build_factor_frame(df, default_registry(), long_format=True)
     assert new_factor.name == "debug_close"
     assert "debug_close" in set(long_frame["factor_name"].unique())
+
+
+def test_polars_backend_matches_pandas_for_core_operators():
+    pytest.importorskip("polars")
+    df = _toy_panel(num_days=12, symbols=("A", "B", "C"))
+    factors = {
+        "rank": Rank(Close),
+        "delay": Delay(Close, 1),
+        "delta": Delta(Close, 1),
+        "returns": Returns(Close, 1),
+        "mean": TsMean(Close, 3),
+        "std": TsStd(Close, 3),
+        "sum": TsSum(Close, 3),
+        "tsrank": TsRank(Close, 3),
+        "min": TsMin(Close, 3),
+        "max": TsMax(Close, 3),
+    }
+    pandas_result = build_factor_frame(df, factors, backend="pandas")
+    polars_result = build_factor_frame(df, factors, backend="polars")
+    pd.testing.assert_frame_equal(
+        pandas_result.drop(columns=["trade_date"]),
+        polars_result.drop(columns=["trade_date"]),
+        check_dtype=False,
+        atol=1e-10,
+        rtol=1e-10,
+    )

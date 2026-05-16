@@ -11,24 +11,36 @@ import typer
 from quantagent.cli._utils import (
     app,
     default_artifact_root,
+    default_predictions_root,
+    default_reports_root,
+    default_target_weights_root,
     default_v7_lake_root,
     json_dump,
     parse_csv_tuple,
     read_frame,
     write_frame,
 )
+from quantagent.config.paths import quant_paths
 
 
 @app.command("train-alpha-v7")
 def train_alpha_v7(
     dataset_path: Path = typer.Option(..., "--dataset"),
     output_dir: Path = typer.Option(None, "--output-dir"),
-    model: str = typer.Option("ridge", "--model", help="ridge | elastic_net | lightgbm | xgboost"),
+    model: str = typer.Option("ridge", "--model", help="ridge | elastic_net | lightgbm | xgboost | ft_transformer"),
     min_train_rows: int = typer.Option(100, "--min-train-rows"),
+    split_mode: str = typer.Option("expanding", "--split-mode", help="expanding | rolling | purged | chronological"),
+    valid_size_days: int = typer.Option(5, "--valid-size-days"),
+    min_train_days: int = typer.Option(20, "--min-train-days"),
+    rolling_train_days: int = typer.Option(252, "--rolling-train-days"),
+    embargo_days: int = typer.Option(5, "--embargo-days"),
+    purge_days: int | None = typer.Option(None, "--purge-days", help="Defaults to max configured label horizon."),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
     experiment_name: str | None = typer.Option(None, "--experiment-name"),
-    registry_root: Path = typer.Option(Path("artifacts/v7_alpha/registry"), "--registry-root"),
+    registry_root: Path | None = typer.Option(None, "--registry-root"),
+    ft_max_epochs: int = typer.Option(30, "--ft-max-epochs"),
+    ft_batch_size: int = typer.Option(1024, "--ft-batch-size"),
     allow_model_downgrade: bool = typer.Option(
         False,
         "--allow-model-downgrade",
@@ -44,20 +56,26 @@ def train_alpha_v7(
     from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
 
     resolved_output = Path(output_dir) if output_dir is not None else default_artifact_root()
-    resolved_registry = (
-        Path(registry_root) if registry_root != Path("artifacts/v7_alpha/registry") else resolved_output / "registry"
-    )
+    resolved_registry = Path(registry_root) if registry_root is not None else resolved_output / "registry"
     result = run_v7_training_experiment(
         read_frame(dataset_path),
         V7TrainingConfig(
             model=model,
             min_train_rows=min_train_rows,
+            split_mode=split_mode,
+            valid_size_days=valid_size_days,
+            min_train_days=min_train_days,
+            rolling_train_days=rolling_train_days,
+            embargo_days=embargo_days,
+            purge_days=purge_days,
             output_dir=str(resolved_output),
             mark_production_ready=mark_production_ready,
             paper_report_path=str(paper_report) if paper_report else None,
             experiment_name=experiment_name,
             registry_root=str(resolved_registry),
             allow_model_downgrade=allow_model_downgrade,
+            ft_max_epochs=ft_max_epochs,
+            ft_batch_size=ft_batch_size,
         ),
     )
     typer.echo(json_dump(result))
@@ -96,7 +114,7 @@ def evaluate_alpha_v7(
 @app.command("train-deep-alpha-v7")
 def train_deep_alpha_v7(
     dataset_path: Path = typer.Option(..., "--dataset"),
-    output_dir: Path = typer.Option(Path("artifacts/v7_alpha/deep"), "--output-dir"),
+    output_dir: Path = typer.Option(None, "--output-dir"),
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     hidden_sizes: str = typer.Option("64,32", "--hidden-sizes"),
     learning_rate: float = typer.Option(1e-3, "--learning-rate"),
@@ -164,6 +182,12 @@ def run_real_training_v7(
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     min_rows: int = typer.Option(100, "--min-rows"),
     min_train_rows: int = typer.Option(100, "--min-train-rows"),
+    split_mode: str = typer.Option("expanding", "--split-mode"),
+    valid_size_days: int = typer.Option(5, "--valid-size-days"),
+    min_train_days: int = typer.Option(20, "--min-train-days"),
+    rolling_train_days: int = typer.Option(252, "--rolling-train-days"),
+    embargo_days: int = typer.Option(5, "--embargo-days"),
+    purge_days: int | None = typer.Option(None, "--purge-days"),
     min_symbols: int = typer.Option(2, "--min-symbols"),
     min_dates: int = typer.Option(5, "--min-dates"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
@@ -201,6 +225,12 @@ def run_real_training_v7(
             model=model,
             horizons=horizons_tuple,
             min_train_rows=min_train_rows,
+            split_mode=split_mode,
+            valid_size_days=valid_size_days,
+            min_train_days=min_train_days,
+            rolling_train_days=rolling_train_days,
+            embargo_days=embargo_days,
+            purge_days=purge_days,
             output_dir=str(resolved_output),
             mark_production_ready=mark_production_ready,
             paper_report_path=str(paper_report) if paper_report else None,
@@ -234,7 +264,7 @@ def predict_alpha_v7(
     resolved_output = (
         Path(output_path)
         if output_path is not None
-        else default_artifact_root() / "predictions" / "predictions.parquet"
+        else default_predictions_root() / "predictions.parquet"
     )
     result = predict_v7_alpha(
         model_dir,
@@ -302,7 +332,7 @@ def build_target_weights_v7(
     resolved_output = (
         Path(output_path)
         if output_path is not None
-        else default_artifact_root() / "target_weights" / "target_weights.parquet"
+        else default_target_weights_root() / "target_weights.parquet"
     )
     written = write_v7_target_weights(result, resolved_output)
     diagnostics_path = Path(written).with_suffix(".diagnostics.json")
@@ -334,6 +364,14 @@ def run_full_real_training_v7(
     primary_horizon: int = typer.Option(5, "--primary-horizon"),
     min_rows: int = typer.Option(100, "--min-rows"),
     min_train_rows: int = typer.Option(100, "--min-train-rows"),
+    split_mode: str = typer.Option("rolling", "--split-mode"),
+    valid_size_days: int = typer.Option(20, "--valid-size-days"),
+    min_train_days: int = typer.Option(120, "--min-train-days"),
+    rolling_train_days: int = typer.Option(756, "--rolling-train-days"),
+    embargo_days: int = typer.Option(5, "--embargo-days"),
+    purge_days: int | None = typer.Option(None, "--purge-days"),
+    ft_max_epochs: int = typer.Option(30, "--ft-max-epochs"),
+    ft_batch_size: int = typer.Option(1024, "--ft-batch-size"),
     min_symbols: int = typer.Option(2, "--min-symbols"),
     min_dates: int = typer.Option(5, "--min-dates"),
     top_k: int = typer.Option(30, "--top-k"),
@@ -390,21 +428,32 @@ def run_full_real_training_v7(
             model=model,
             horizons=horizons_tuple,
             min_train_rows=min_train_rows,
+            split_mode=split_mode,
+            valid_size_days=valid_size_days,
+            min_train_days=min_train_days,
+            rolling_train_days=rolling_train_days,
+            embargo_days=embargo_days,
+            purge_days=purge_days,
             output_dir=str(output_dir),
             mark_production_ready=mark_production_ready,
             paper_report_path=str(paper_report) if paper_report else None,
             allow_model_downgrade=allow_model_downgrade,
+            ft_max_epochs=ft_max_epochs,
+            ft_batch_size=ft_batch_size,
         ),
     )
 
-    predictions = predict_v7_alpha(output_dir, training_dataset, primary_horizon=primary_horizon)
-    predictions_path = output_dir / "predictions" / "predictions.parquet"
+    predictions_frame = _load_oos_predictions(
+        Path(training_result.artifact_paths["predictions"]),
+        primary_horizon=primary_horizon,
+    )
+    predictions_path = default_predictions_root() / "predictions.parquet"
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
-    written_predictions = write_frame(predictions.predictions, predictions_path)
+    written_predictions = write_frame(predictions_frame, predictions_path)
 
     sector_frame = read_frame(sector_map_path) if sector_map_path else None
     weights_result = build_v7_target_weights(
-        predictions.predictions,
+        predictions_frame,
         read_frame(market_panel_path),
         sector_map=sector_frame,
         config=V7TargetWeightsConfig(
@@ -414,10 +463,12 @@ def run_full_real_training_v7(
             max_turnover=max_turnover,
         ),
     )
-    weights_path = output_dir / "target_weights" / "target_weights.parquet"
+    weights_path = default_target_weights_root() / "target_weights.parquet"
     written_weights = write_v7_target_weights(weights_result, weights_path)
 
-    backtest_path = output_dir / "walk_forward_backtest.json"
+    reports_root = default_reports_root()
+    reports_root.mkdir(parents=True, exist_ok=True)
+    backtest_path = reports_root / "walk_forward_backtest.json"
     backtest_status: dict[str, object] = {"status": "skipped", "reason": "no_target_weights"}
     if not weights_result.target_weights.empty:
         weights_frame = weights_result.target_weights.copy()
@@ -446,8 +497,9 @@ def run_full_real_training_v7(
         "training": training_result,
         "predictions": {
             "output": str(written_predictions),
-            "horizons": list(predictions.horizons),
-            "model_kind": predictions.model_kind,
+            "horizons": [primary_horizon],
+            "model_kind": model,
+            "sample_role": "validation",
         },
         "target_weights": {
             "output": str(written_weights),
@@ -455,6 +507,27 @@ def run_full_real_training_v7(
         },
         "backtest": backtest_status,
     }
-    pipeline_report_path = output_dir / "full_pipeline_report.json"
+    pipeline_report_path = reports_root / "full_pipeline_report.json"
     pipeline_report_path.write_text(json_dump(pipeline_report), encoding="utf-8")
     typer.echo(json_dump(pipeline_report))
+
+
+def _load_oos_predictions(path: Path, primary_horizon: int) -> "pd.DataFrame":
+    import pandas as pd
+
+    frame = read_frame(path)
+    if "sample_role" not in frame.columns or set(frame["sample_role"].astype(str)) != {"validation"}:
+        raise ValueError("run-full-real-training-v7 requires validation-only out-of-sample predictions")
+    if "horizon" not in frame.columns:
+        raise ValueError("walk-forward predictions are missing horizon")
+    selected = frame[frame["horizon"].astype(int) == int(primary_horizon)].copy()
+    if selected.empty:
+        raise ValueError(f"no out-of-sample predictions found for horizon {primary_horizon}")
+    required = {"symbol", "trade_date", "prediction"}
+    missing = required - set(selected.columns)
+    if missing:
+        raise ValueError(f"out-of-sample predictions missing columns {sorted(missing)}")
+    selected["trade_date"] = pd.to_datetime(selected["trade_date"], errors="coerce")
+    if selected["trade_date"].isna().any():
+        raise ValueError("out-of-sample predictions contain invalid trade_date values")
+    return selected[["symbol", "trade_date", "prediction", "sample_role", "fold_id"]].reset_index(drop=True)

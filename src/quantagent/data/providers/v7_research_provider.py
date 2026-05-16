@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from quantagent.config.paths import quant_paths
 from quantagent.data.providers.base import ProviderRequest, ProviderResult
 
 
@@ -44,8 +45,8 @@ class LocalV7ResearchProvider:
         "announcements": "announcements.csv",
     }
 
-    def __init__(self, root: str | Path = "data/v7") -> None:
-        self.root = Path(root)
+    def __init__(self, root: str | Path | None = None) -> None:
+        self.root = Path(root) if root is not None else quant_paths().data_root / "v7"
 
     def load_bundle(self, request: ProviderRequest, as_of_date: str) -> V7ResearchDataBundle:
         results = {name: self._read(name, request, as_of_date) for name in self.FILES}
