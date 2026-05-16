@@ -8,13 +8,21 @@ from pathlib import Path
 
 import typer
 
-from quantagent.cli._utils import app, json_dump, parse_csv_tuple, read_frame, write_frame
+from quantagent.cli._utils import (
+    app,
+    default_artifact_root,
+    default_v7_lake_root,
+    json_dump,
+    parse_csv_tuple,
+    read_frame,
+    write_frame,
+)
 
 
 @app.command("train-alpha-v7")
 def train_alpha_v7(
     dataset_path: Path = typer.Option(..., "--dataset"),
-    output_dir: Path = typer.Option(Path("artifacts/v7_alpha"), "--output-dir"),
+    output_dir: Path = typer.Option(None, "--output-dir"),
     model: str = typer.Option("ridge", "--model", help="ridge | elastic_net | lightgbm | xgboost"),
     min_train_rows: int = typer.Option(100, "--min-train-rows"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
@@ -35,16 +43,20 @@ def train_alpha_v7(
     """
     from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
 
+    resolved_output = Path(output_dir) if output_dir is not None else default_artifact_root()
+    resolved_registry = (
+        Path(registry_root) if registry_root != Path("artifacts/v7_alpha/registry") else resolved_output / "registry"
+    )
     result = run_v7_training_experiment(
         read_frame(dataset_path),
         V7TrainingConfig(
             model=model,
             min_train_rows=min_train_rows,
-            output_dir=str(output_dir),
+            output_dir=str(resolved_output),
             mark_production_ready=mark_production_ready,
             paper_report_path=str(paper_report) if paper_report else None,
             experiment_name=experiment_name,
-            registry_root=str(registry_root),
+            registry_root=str(resolved_registry),
             allow_model_downgrade=allow_model_downgrade,
         ),
     )
@@ -56,7 +68,7 @@ def evaluate_alpha_v7(
     metrics_path: Path = typer.Option(..., "--metrics"),
     acceptance_path: Path | None = typer.Option(None, "--acceptance-report"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
-    output_path: Path = typer.Option(Path("artifacts/v7_alpha/evaluation_report.json"), "--output"),
+    output_path: Path = typer.Option(None, "--output"),
 ) -> None:
     """Re-evaluate an existing metrics.json against the acceptance gates without retraining."""
     from quantagent.data.v7_quality_gates import (
@@ -72,8 +84,12 @@ def evaluate_alpha_v7(
     report = evaluate_model_acceptance_gates(metrics, config, paper_report_path=paper_report)
     payload = report.to_dict()
     payload["metrics_path"] = str(metrics_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json_dump(payload), encoding="utf-8")
+    resolved_output = (
+        Path(output_path) if output_path is not None else default_artifact_root() / "evaluation_report.json"
+    )
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output.write_text(json_dump(payload), encoding="utf-8")
+    payload["output_path"] = str(resolved_output)
     typer.echo(json_dump(payload))
 
 
@@ -99,6 +115,7 @@ def train_deep_alpha_v7(
     """Train the V7 deep alpha model (PyTorch if installed, numpy ridge head otherwise)."""
     from quantagent.training.v7_deep_trainer import V7DeepAlphaTrainer, V7DeepAlphaTrainerConfig
 
+    resolved_output = Path(output_dir) if output_dir is not None else default_artifact_root() / "deep"
     config = V7DeepAlphaTrainerConfig(
         horizons=tuple(int(h) for h in parse_csv_tuple(horizons)),
         hidden_sizes=tuple(int(h) for h in parse_csv_tuple(hidden_sizes)),
@@ -112,14 +129,14 @@ def train_deep_alpha_v7(
         device=device,
         feature_columns=parse_csv_tuple(feature_columns),
         seed=seed,
-        output_dir=str(output_dir),
+        output_dir=str(resolved_output),
         use_torch=use_torch,
     )
     trainer = V7DeepAlphaTrainer(config)
     train_frame = read_frame(dataset_path)
     val_frame = read_frame(validation_dataset) if validation_dataset else None
     state = trainer.fit(train_frame, validation_dataset=val_frame)
-    saved = trainer.save(output_dir)
+    saved = trainer.save(resolved_output)
     typer.echo(
         json_dump(
             {
@@ -138,13 +155,11 @@ def train_deep_alpha_v7(
 def run_real_training_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     labels_path: Path = typer.Option(..., "--labels"),
-    output_dir: Path = typer.Option(Path("artifacts/v7_alpha"), "--output-dir"),
+    output_dir: Path = typer.Option(None, "--output-dir"),
     fundamentals_root: Path | None = typer.Option(None, "--fundamentals-root"),
     valuation_path: Path | None = typer.Option(None, "--valuation"),
     disclosures_path: Path | None = typer.Option(None, "--disclosures"),
-    training_dataset_path: Path = typer.Option(
-        Path("data/v7/gold/training_dataset/training_dataset.parquet"), "--training-dataset"
-    ),
+    training_dataset_path: Path = typer.Option(None, "--training-dataset"),
     model: str = typer.Option("ridge", "--model"),
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     min_rows: int = typer.Option(100, "--min-rows"),
@@ -159,12 +174,18 @@ def run_real_training_v7(
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
     from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
 
+    resolved_output = Path(output_dir) if output_dir is not None else default_artifact_root()
+    resolved_training_dataset = (
+        Path(training_dataset_path)
+        if training_dataset_path is not None
+        else default_v7_lake_root() / "gold" / "training_dataset" / "training_dataset.parquet"
+    )
     horizons_tuple = tuple(int(item) for item in parse_csv_tuple(horizons))
     dataset_result = build_v7_training_dataset_artifact(
         V7TrainingDatasetConfig(
             market_panel_path=str(market_panel_path),
             labels_path=str(labels_path),
-            output_path=str(training_dataset_path),
+            output_path=str(resolved_training_dataset),
             fundamentals_root=str(fundamentals_root) if fundamentals_root else None,
             valuation_path=str(valuation_path) if valuation_path else None,
             disclosures_path=str(disclosures_path) if disclosures_path else None,
@@ -180,7 +201,7 @@ def run_real_training_v7(
             model=model,
             horizons=horizons_tuple,
             min_train_rows=min_train_rows,
-            output_dir=str(output_dir),
+            output_dir=str(resolved_output),
             mark_production_ready=mark_production_ready,
             paper_report_path=str(paper_report) if paper_report else None,
         ),
@@ -199,7 +220,7 @@ def run_real_training_v7(
 def predict_alpha_v7(
     model_dir: Path = typer.Option(..., "--model-dir"),
     feature_dataset: Path = typer.Option(..., "--feature-dataset"),
-    output_path: Path = typer.Option(Path("artifacts/v7_alpha/predictions/predictions.parquet"), "--output"),
+    output_path: Path = typer.Option(None, "--output"),
     primary_horizon: int | None = typer.Option(None, "--primary-horizon"),
 ) -> None:
     """Run inference against a trained V7 alpha artifact directory.
@@ -210,12 +231,17 @@ def predict_alpha_v7(
     """
     from quantagent.training.v7_predictor import predict_v7_alpha
 
+    resolved_output = (
+        Path(output_path)
+        if output_path is not None
+        else default_artifact_root() / "predictions" / "predictions.parquet"
+    )
     result = predict_v7_alpha(
         model_dir,
         read_frame(feature_dataset),
         primary_horizon=primary_horizon,
     )
-    written = write_frame(result.predictions, output_path)
+    written = write_frame(result.predictions, resolved_output)
     summary = {
         "model_kind": result.model_kind,
         "horizons": list(result.horizons),
@@ -234,7 +260,7 @@ def build_target_weights_v7(
     predictions_path: Path = typer.Option(..., "--predictions"),
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     sector_map_path: Path | None = typer.Option(None, "--sector-map"),
-    output_path: Path = typer.Option(Path("artifacts/v7_alpha/target_weights/target_weights.parquet"), "--output"),
+    output_path: Path = typer.Option(None, "--output"),
     top_k: int = typer.Option(30, "--top-k"),
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
@@ -273,7 +299,12 @@ def build_target_weights_v7(
         sector_map=sector_frame,
         config=config,
     )
-    written = write_v7_target_weights(result, output_path)
+    resolved_output = (
+        Path(output_path)
+        if output_path is not None
+        else default_artifact_root() / "target_weights" / "target_weights.parquet"
+    )
+    written = write_v7_target_weights(result, resolved_output)
     diagnostics_path = Path(written).with_suffix(".diagnostics.json")
     diagnostics_path.write_text(json_dump(result.diagnostics), encoding="utf-8")
     typer.echo(
@@ -292,14 +323,12 @@ def build_target_weights_v7(
 def run_full_real_training_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     labels_path: Path = typer.Option(..., "--labels"),
-    output_dir: Path = typer.Option(Path("artifacts/v7_alpha"), "--output-dir"),
+    output_dir: Path = typer.Option(None, "--output-dir"),
     fundamentals_root: Path | None = typer.Option(None, "--fundamentals-root"),
     valuation_path: Path | None = typer.Option(None, "--valuation"),
     disclosures_path: Path | None = typer.Option(None, "--disclosures"),
     sector_map_path: Path | None = typer.Option(None, "--sector-map"),
-    training_dataset_path: Path = typer.Option(
-        Path("data/v7/gold/training_dataset/training_dataset.parquet"), "--training-dataset"
-    ),
+    training_dataset_path: Path = typer.Option(None, "--training-dataset"),
     model: str = typer.Option("ridge", "--model"),
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     primary_horizon: int = typer.Option(5, "--primary-horizon"),
@@ -331,14 +360,19 @@ def run_full_real_training_v7(
     from quantagent.training.v7_predictor import predict_v7_alpha
 
     horizons_tuple = tuple(int(item) for item in parse_csv_tuple(horizons))
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir) if output_dir is not None else default_artifact_root()
     output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_training_dataset = (
+        Path(training_dataset_path)
+        if training_dataset_path is not None
+        else default_v7_lake_root() / "gold" / "training_dataset" / "training_dataset.parquet"
+    )
 
     dataset_result = build_v7_training_dataset_artifact(
         V7TrainingDatasetConfig(
             market_panel_path=str(market_panel_path),
             labels_path=str(labels_path),
-            output_path=str(training_dataset_path),
+            output_path=str(resolved_training_dataset),
             fundamentals_root=str(fundamentals_root) if fundamentals_root else None,
             valuation_path=str(valuation_path) if valuation_path else None,
             disclosures_path=str(disclosures_path) if disclosures_path else None,

@@ -35,31 +35,36 @@ V7 覆盖：
 - Optional dependencies must degrade gracefully；real-data commands must report actionable install/setup errors。
 - 优先做 wrappers、adapters、integration seams，不删除仍被引用的 SOTA components。
 - 删除 unused code 或 obsolete `.md` 前，必须证明未被 imports、CLI、tests、README、AGENTS 或 docs 引用。
-- 所有 silver / gold artifact 必须伴随一份 `data/v7/manifests/<dataset>.json`（`quantagent.data.manifest.DataManifest`）。
+- 所有 silver / gold artifact 必须伴随一份 `<lake_root>/manifests/<dataset>.json`（`quantagent.data.manifest.DataManifest`）。
+- 大数据/模型/报告默认写入 `E:\AI量化\`（Windows）或 `~/AI_quant`（POSIX），通过 `QUANTAGENT_HOME` 环境变量覆盖。`quantagent.config.paths.quant_paths` 是单一来源。
 
 ## Real-Data Commands / 真实数据命令
 
 ```powershell
-quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
-quantagent check-qlib-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH
-quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
+quantagent storage-info-v7 --ensure
+quantagent setup-qlib-v7 --region cn                      # 仅打印官方下载命令
+quantagent setup-qlib-v7 --region cn --run --allow-community-fallback   # 若 pyqlib 已装则直接下载
+quantagent download-qlib-v7 --target-dir E:\AI量化\data\raw\qlib\cn_data --region cn
+quantagent check-qlib-v7 --provider-uri E:\AI量化\data\raw\qlib\cn_data --symbols 600519.SH
+quantagent build-market-panel-v7 --provider-uri E:\AI量化\data\raw\qlib\cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
 quantagent build-valuation-v7 --as-of-dates 2026-05-15 --allow-network
-quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
-quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --output data/v7/gold/training_dataset/training_dataset.parquet
-quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha
+quantagent build-labels-v7 --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet
+quantagent build-training-dataset-v7 --market-panel ... --labels ... --fundamentals-root ...
+quantagent train-alpha-v7 --dataset ...
 quantagent train-alpha-v7 --dataset ... --model lightgbm           # real LightGBM, fail-loud if missing
 quantagent train-alpha-v7 --dataset ... --model xgboost --allow-model-downgrade   # ridge fallback only with the flag
-quantagent train-deep-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha/deep --horizons 1,5,20,60,120,126
-quantagent predict-alpha-v7 --model-dir artifacts/v7_alpha --feature-dataset data/v7/gold/training_dataset/training_dataset.parquet --output artifacts/v7_alpha/predictions/predictions.parquet
-quantagent build-target-weights-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet --sector-map data/v7/silver/sector/sector_map.csv --output artifacts/v7_alpha/target_weights/target_weights.parquet
-quantagent run-real-training-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals
+quantagent train-deep-alpha-v7 --dataset ... --horizons 1,5,20,60,120,126
+quantagent optimize-alpha-v7 --dataset ... --search-space search.json --sampler grid
+quantagent predict-alpha-v7 --model-dir ... --feature-dataset ...
+quantagent build-target-weights-v7 --predictions ... --market-panel ... --sector-map ...
+quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
 quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
-quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
-quantagent walk-forward-backtest-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent walk-forward-backtest-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel ... --sector-map ...   # optimiser runs first
-quantagent paper-trade-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
+quantagent evaluate-alpha-v7 --metrics ... --paper-report ...
+quantagent walk-forward-backtest-v7 --target-weights ... --market-panel ...
+quantagent walk-forward-backtest-v7 --predictions ... --market-panel ... --sector-map ...   # optimiser runs first
+quantagent paper-trade-v7 --target-weights ... --market-panel ...
+quantagent v7-live-readiness-report --metrics ... --paper-report ...
 ```
 
 Qlib CN official command:
@@ -87,6 +92,17 @@ Model 不能标记 production-ready，除非：
 - `AkShareSectorProvider` 必须用 per-board membership endpoint 或 local mapping；**绝不** 把所有 industry 当成 cross-join 应用到每个 symbol。
 - 财务报表合并必须走 `pit_wide_merge_statements`：按 statement type 加列前缀（income_revenue / balance_total_assets / cashflow_operating_cash_flow / indicator_*），按 PIT 四键 outer-merge，重复 `(symbol, report_period, available_at)` 必须 raise。
 - 真实数据 manifest（`DataManifest`）必须包含 provider、source paths、generated_at、row_count、date_range、symbols、schema report、PIT violations、duplicate rate、warnings 和 content hash。
+
+## New Modules / 新增模块
+
+- `quantagent.config.paths` — 统一 `E:\AI量化\` 存储布局，环境变量 `QUANTAGENT_HOME` / `QUANTAGENT_DATA_ROOT` 覆盖。
+- `quantagent.training.splitters` — expanding / rolling / purged / chronological 走式 walk-forward 切分。
+- `quantagent.training.optimize` — alpha 超参 grid / random search，写 `reports/v7/optimization/`。
+- `quantagent.factors.expr` — Alpha101-style 符号化因子 DSL，`Rank(TsMean(Returns(Close, 1), 5))`，零 lookahead 测试覆盖。
+- `quantagent.models.ft_transformer` — FT-Transformer 表格架构（PyTorch 可选）。
+- `quantagent.training.ft_transformer_trainer` — FT-Transformer trainer（AMP / checkpoint resume / 时序 validation 切分）。
+- `quantagent.cli.v7_storage` — `storage-info-v7` / `setup-qlib-v7`。
+- `quantagent.cli.v7_optimize` — `optimize-alpha-v7`。
 
 ## Testing Commands / 测试命令
 

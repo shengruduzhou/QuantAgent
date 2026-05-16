@@ -53,13 +53,24 @@ class V7TargetWeightsConfig:
     block_limit_down_sell: bool = True
 
 
+# Tradability constraint table: (market_column, config_attribute, audit_reason).
+# This is the single source of truth for which configuration flag gates
+# which market-panel column. Keep it in sync with ``V7TargetWeightsConfig``.
+_TRADABILITY_CONSTRAINTS: tuple[tuple[str, str, str], ...] = (
+    ("is_suspended", "block_suspended", "suspended"),
+    ("is_st", "block_st", "st"),
+    ("is_limit_up", "block_limit_up_buy", "limit_up_buy_block"),
+    ("is_limit_down", "block_limit_down_sell", "limit_down_sell_block"),
+)
+
+
 @dataclass(frozen=True)
 class V7TargetWeightsResult:
     target_weights: pd.DataFrame
     diagnostics: dict[str, object] = field(default_factory=dict)
 
 
-_TRADABILITY_FLAGS: tuple[str, ...] = ("is_suspended", "is_st", "is_limit_up", "is_limit_down")
+_TRADABILITY_FLAGS: tuple[str, ...] = tuple(column for column, *_ in _TRADABILITY_CONSTRAINTS)
 
 
 def build_v7_target_weights(
@@ -107,17 +118,15 @@ def build_v7_target_weights(
         merged = day.merge(day_market, on=["symbol", "trade_date"], how="left", suffixes=("", "_mkt"))
         rejected: list[dict[str, object]] = []
         keep_mask = pd.Series(True, index=merged.index)
-        for column, reason in (
-            ("is_suspended", "suspended"),
-            ("is_st", "st"),
-            ("is_limit_up", "limit_up_buy_block"),
-            ("is_limit_down", "limit_down_sell_block"),
-        ):
-            if column in merged.columns and getattr(config, f"block_{reason.split('_')[0]}", False):
-                blocked = merged[column].fillna(False).astype(bool)
-                for symbol in merged.loc[blocked, "symbol"]:
-                    rejected.append({"trade_date": str(date), "symbol": str(symbol), "reason": reason})
-                keep_mask = keep_mask & ~blocked
+        for column, config_attr, reason in _TRADABILITY_CONSTRAINTS:
+            if column not in merged.columns:
+                continue
+            if not getattr(config, config_attr, False):
+                continue
+            blocked = merged[column].fillna(False).astype(bool)
+            for symbol in merged.loc[blocked, "symbol"]:
+                rejected.append({"trade_date": str(date), "symbol": str(symbol), "reason": reason})
+            keep_mask = keep_mask & ~blocked
         if "amount" in merged.columns and config.min_amount_yuan > 0:
             illiquid = merged["amount"].fillna(0.0) < config.min_amount_yuan
             for symbol in merged.loc[illiquid, "symbol"]:

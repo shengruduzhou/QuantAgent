@@ -11,17 +11,42 @@ QuantAgent V7 是面向 A 股散户现实约束的 Point-in-Time quant research 
 - 任何 QMT submit path 前必须通过 Risk Gate、Kill Switch、execution constraint simulation、reconciliation 和 audit replay。
 - Production / realdata 模式不允许 synthetic fallback；mock data 只用于 tests 和 smoke examples。
 
+## 存储布局 / Storage Layout
+
+所有大数据 (raw 行情 dump、silver/gold dataset、模型 checkpoint、predictions、target weights、回测报告、日志) 默认写入 **仓库外** 的统一目录。Windows 默认根目录是 `E:\AI量化\`，POSIX 是 `~/AI_quant`；可通过 `QUANTAGENT_HOME` 环境变量覆盖。
+
+```
+E:\AI量化\
+  data\raw\{qlib,akshare,tushare,disclosures}\
+  data\silver\{market_panel,fundamentals,valuation,disclosures}\
+  data\gold\training_dataset\
+  models\v7_alpha\
+  predictions\
+  target_weights\
+  reports\v7\
+  logs\v7\
+  cache\
+```
+
+CLI 命令的所有 `--output` / `--output-dir` 参数在未显式传入时都会落到上面的对应子目录。`src/quantagent/config/paths.py:quant_paths` 是单一来源；`src/quantagent/data/lake.py` 在它之上派生 V7 medallion lake 布局。
+
+```powershell
+quantagent storage-info-v7 --ensure           # 显示并创建当前 home 下所有目录
+$env:QUANTAGENT_HOME = "D:\quant_storage"     # 一行覆盖全局存储根
+```
+
 ## 真实数据流程 / Real-Data Flow
 
 ```text
-download / prepare Qlib CN data
+download / prepare Qlib CN data (setup-qlib-v7)
 -> build-market-panel-v7              # qlib → silver/market_panel + manifest
 -> build-akshare-v7 or build-fundamentals-v7   # akshare/tushare → silver/fundamentals + manifest
 -> build-valuation-v7                 # akshare snapshot or local CSV → silver/valuation + manifest
 -> build-labels-v7                    # multi-horizon forward returns
 -> build-training-dataset-v7          # PIT as-of join → gold/training_dataset + manifest + feature schema
 -> train-alpha-v7 / train-deep-alpha-v7   # purged WF CV + experiment manifest + model registry
--> predict-alpha-v7                   # forward-pass against feature dataset → gold/predictions
+-> optimize-alpha-v7                  # grid / random search over hyperparameters (optional)
+-> predict-alpha-v7                   # forward-pass against feature dataset → predictions
 -> build-target-weights-v7            # alpha → constrained target_weights + diagnostics
 -> walk-forward-backtest-v7           # OrderManager + VirtualBroker dry-run
                                       # accepts --target-weights OR --predictions
@@ -32,18 +57,6 @@ download / prepare Qlib CN data
 `run-full-real-training-v7` 串联了 dataset → train → predict → target_weights → walk-forward backtest 全流程，写一份 `full_pipeline_report.json`。
 
 Qlib 负责 market OHLCV、technical features、labels、backtest base。TuShare / AkShare 负责 financial statements、financial indicators、valuation fields 和 disclosure dates，必须保存 `report_period / ann_date / available_at`。TradingView public pages 仅作为 sentiment / attention context。
-
-## 数据湖布局 / Data Lake
-
-```
-data/v7/
-  raw/{qlib,akshare,tushare,disclosures}/
-  silver/{market_panel,fundamentals,valuation,disclosures}/
-  gold/training_dataset/
-  manifests/
-```
-
-`src/quantagent/data/lake.py` 是布局单一来源；`src/quantagent/data/manifest.py:DataManifest` 是每个 dataset 必带的 provenance + quality 记录。
 
 ## 安装 / Install
 
@@ -59,36 +72,54 @@ Optional extras 缺失时仍可 import 核心包；真实数据 CLI 会报错给
 
 ## CLI / 命令
 
+存储/Qlib 准备：
+
 ```powershell
-quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
-quantagent check-qlib-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH
-quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
+quantagent storage-info-v7 --ensure
+quantagent setup-qlib-v7 --region cn                 # 仅打印官方下载命令
+quantagent setup-qlib-v7 --region cn --run --allow-community-fallback   # 若 pyqlib 已装则直接下载
+quantagent download-qlib-v7 --target-dir E:\AI量化\data\raw\qlib\cn_data --region cn
+quantagent check-qlib-v7 --provider-uri E:\AI量化\data\raw\qlib\cn_data --symbols 600519.SH
+```
+
+数据建表：
+
+```powershell
+quantagent build-market-panel-v7 --provider-uri E:\AI量化\data\raw\qlib\cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
 quantagent build-fundamentals-v7 --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15 --provider tushare --allow-network
 quantagent build-valuation-v7 --as-of-dates 2026-05-15 --symbols 600519.SH --allow-network
-quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
-quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --valuation data/v7/silver/valuation/valuation.parquet --output data/v7/gold/training_dataset/training_dataset.parquet
-quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha --model ridge
-quantagent train-alpha-v7 --dataset ... --model lightgbm --allow-model-downgrade   # real LGBM when installed; ridge fallback only with the flag
-quantagent train-deep-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha/deep --horizons 1,5,20,60,120,126
-quantagent predict-alpha-v7 --model-dir artifacts/v7_alpha --feature-dataset data/v7/gold/training_dataset/training_dataset.parquet --output artifacts/v7_alpha/predictions/predictions.parquet
-quantagent build-target-weights-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet --sector-map data/v7/silver/sector/sector_map.csv --output artifacts/v7_alpha/target_weights/target_weights.parquet
-quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
-quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
-quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
-quantagent walk-forward-backtest-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent walk-forward-backtest-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel ... --sector-map ...   # optimiser runs first
-quantagent paper-trade-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
+quantagent build-labels-v7 --market-panel E:\AI量化\data\v7\silver\market_panel\market_panel.parquet
+quantagent build-training-dataset-v7 --market-panel ... --labels ... --fundamentals-root ... --valuation ...
 ```
 
-Qlib 官方 CN download command：
+训练 / 预测 / 组合 / 回测：
 
 ```powershell
-python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
+quantagent train-alpha-v7 --dataset ... --model ridge
+quantagent train-alpha-v7 --dataset ... --model lightgbm --allow-model-downgrade   # real LGBM, ridge fallback only with the flag
+quantagent train-deep-alpha-v7 --dataset ... --horizons 1,5,20,60,120,126
+quantagent optimize-alpha-v7 --dataset ... --search-space configs/example_search_space.json --sampler grid
+quantagent predict-alpha-v7 --model-dir ... --feature-dataset ...
+quantagent build-target-weights-v7 --predictions ... --market-panel ... --sector-map ...
+quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
+quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
+quantagent walk-forward-backtest-v7 --target-weights ... --market-panel ...
+quantagent walk-forward-backtest-v7 --predictions ... --market-panel ... --sector-map ...   # optimiser runs first
+quantagent paper-trade-v7 --target-weights ... --market-panel ...
+quantagent v7-live-readiness-report --metrics ... --paper-report ...
 ```
 
-CLI 已经拆分为 `cli/v7_data.py / v7_train.py / v7_backtest.py / v7_readiness.py / v7_research.py`，共享 `cli/_utils.py`。
+CLI 已经拆分为 `cli/v7_data.py / v7_train.py / v7_backtest.py / v7_readiness.py / v7_research.py / v7_storage.py / v7_optimize.py`，共享 `cli/_utils.py`。
+
+## 新增模块 / New Modules
+
+- `quantagent.config.paths`：统一 `E:\AI量化\` 存储布局，环境变量 `QUANTAGENT_HOME` / `QUANTAGENT_DATA_ROOT` 覆盖。
+- `quantagent.training.splitters`：expanding / rolling / purged / chronological 走式 walk-forward 切分。
+- `quantagent.training.optimize`：alpha 超参 grid / random search，结果写入 `reports/v7/optimization/`。
+- `quantagent.factors.expr`：Alpha101-style 符号化因子 DSL (`Rank(TsMean(Close, 5))`)，零 lookahead 测试覆盖。
+- `quantagent.models.ft_transformer`：FT-Transformer 表格架构（PyTorch 可选）。
+- `quantagent.training.ft_transformer_trainer`：FT-Transformer trainer，带 AMP / checkpoint resume / 时序 validation 切分。
 
 ## 关键配置 / Configs
 
@@ -101,8 +132,8 @@ CLI 已经拆分为 `cli/v7_data.py / v7_train.py / v7_backtest.py / v7_readines
 ## 验证 / Validation
 
 ```powershell
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m pytest tests/
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall src
+python -m pytest tests/
+python -m compileall -q src
 git diff --check
 ```
 
@@ -124,6 +155,7 @@ git diff --check
 - Qlib CN 数据需要用户自行准备 provider_uri；TuShare 需要 token；AkShare 网络抓取需要 `--allow-network`。
 - LightGBM / XGBoost 在 `train-alpha-v7 --model lightgbm`（或 `xgboost`）下是 **真实** 训练；未安装时默认 fail-loud，需显式 `--allow-model-downgrade` 才退回 ridge。
 - `train-deep-alpha-v7` 在 PyTorch 缺失时回退到 numpy ridge head，仍写出可 round-trip 的 state；预测能力会下降。
+- `FTTransformerTrainer` 需要 PyTorch；未安装时构造抛 `ImportError`。
 - `build-valuation-v7` 默认拉取 AkShare 当日 snapshot；离线环境需用 `--csv-snapshot` 提供历史快照。
 - `AkShareSectorProvider` 不再 cross-join 行业到所有 symbol；离线/未提供 `--local-mapping` 时直接 fail-loud。
 - `pit_wide_merge_statements` 在做 PIT wide-merge 之前会按 statement 类型加列前缀，并拒绝任何 `(symbol, report_period, available_at)` 重复。

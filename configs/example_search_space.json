@@ -1,0 +1,4 @@
+{
+  "model": ["ridge", "elastic_net"],
+  "min_train_rows": [100, 250, 500]
+}

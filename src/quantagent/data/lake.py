@@ -1,6 +1,6 @@
 """Canonical V7 data lake layout.
 
-The V7 lake is split into three medallion tiers under ``data/v7``:
+The V7 lake is split into three medallion tiers under the configured root:
 
 * ``raw/<vendor>/`` — vendor-native dumps (qlib, akshare, tushare, disclosures).
 * ``silver/<dataset>/`` — normalised, schema-validated, PIT-tagged tables.
@@ -10,15 +10,41 @@ Every silver/gold writer must also emit a sibling ``manifests/<dataset>.json``
 recording provenance and data-quality status. Helpers in this module keep
 all those paths in one place so the CLI, bootstrap and dataset builders
 agree on where to read and write.
+
+The default root is resolved through :func:`quantagent.config.paths.quant_paths`
+so large datasets are written outside the repository (``E:\\AI量化\\data`` on
+Windows by default; overridable through ``QUANTAGENT_HOME`` /
+``QUANTAGENT_DATA_ROOT``). Callers passing a relative path still work — the
+relative path is honoured verbatim, which keeps tiny test fixtures working
+inside ``tmp_path``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
+from quantagent.config.paths import DEFAULT_DATA_ROOT_ENV, quant_paths
 
-DEFAULT_V7_ROOT = "data/v7"
+
+def _default_v7_root() -> Path:
+    """Return the default V7 lake root.
+
+    Prefers the unified storage layout under ``QUANTAGENT_HOME`` but
+    keeps the legacy ``data/v7`` directory when it already exists so a
+    running checkout doesn't silently move its artefacts.
+    """
+    env = os.environ.get(DEFAULT_DATA_ROOT_ENV)
+    if env:
+        return Path(env).expanduser() / "v7"
+    legacy = Path("data") / "v7"
+    if legacy.exists():
+        return legacy
+    return quant_paths().data_root / "v7"
+
+
+DEFAULT_V7_ROOT: str | Path = _default_v7_root()
 
 
 @dataclass(frozen=True)

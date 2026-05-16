@@ -63,7 +63,16 @@ class QlibProvider:
                 "$amount": "amount",
             }
         )
-        data["available_at"] = data["trade_date"]
+        # Close-derived market features become available the next trading row,
+        # not the same day. We compute the per-symbol next trade_date and fall
+        # back to trade_date + 1 calendar day at the right edge so newly listed
+        # tail rows still have an ``available_at``.
+        data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+        data = data.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+        data["available_at"] = data.groupby("symbol")["trade_date"].shift(-1)
+        data["available_at"] = data["available_at"].fillna(
+            data["trade_date"] + pd.Timedelta(days=1)
+        )
         data["source"] = "qlib"
         data["source_type"] = "market_data"
         data["source_reliability"] = 0.90

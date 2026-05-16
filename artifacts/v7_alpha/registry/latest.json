@@ -1,15 +1,15 @@
 {
-  "artifact_path": "artifacts\\v7_alpha\\registry\\v7_ridge_20260516T101759Z.json",
-  "created_at": "2026-05-16T10:17:59+00:00",
+  "artifact_path": "artifacts\\v7_alpha\\registry\\v7_ridge_20260516T114543Z.json",
+  "created_at": "2026-05-16T11:45:43+00:00",
   "feature_version": "7",
   "metadata": {
-    "git_commit": "106095e13ebd1f60d57a09e4621a01dcd601c326",
+    "git_commit": "3b02c8b0312cde4928e6cdc308cb17820fd73ff9",
     "horizons": [
       1,
       5
     ],
     "model": "ridge",
-    "output_dir": "C:\\Users\\shanh\\AppData\\Local\\Temp\\pytest-of-shanh\\pytest-87\\test_v7_training_experiment_wr0\\alpha",
+    "output_dir": "C:\\Users\\shanh\\AppData\\Local\\Temp\\pytest-of-shanh\\pytest-98\\test_v7_training_experiment_wr0\\alpha",
     "production_ready": false
   },
   "metrics": {
@@ -24,5 +24,5 @@
     "turnover_adjusted_net_return": 0.24093788245381403,
     "uses_mock_or_synthetic": 0.0
   },
-  "model_version": "v7_ridge_20260516T101759Z"
+  "model_version": "v7_ridge_20260516T114543Z"
 }
