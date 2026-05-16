@@ -376,6 +376,17 @@ def _resolve_backend(model: str, allow_downgrade: bool) -> str:
                     "Install quantagent[training] or pass --allow-model-downgrade."
                 ) from exc
             return "ridge"
+    if model == "ft_transformer":
+        try:
+            import torch  # type: ignore  # noqa: F401
+            return "ft_transformer"
+        except Exception as exc:  # pragma: no cover - optional dep
+            if not allow_downgrade:
+                raise RuntimeError(
+                    "model='ft_transformer' but torch is not installed. "
+                    "Install quantagent[training] or pass --allow-model-downgrade."
+                ) from exc
+            return "ridge"
     raise ValueError(f"unsupported V7 model: {model}")
 
 
@@ -601,6 +612,7 @@ def _write_artifacts(
         "feature_schema": output_dir / "feature_schema.json",
         "label_schema": output_dir / "label_schema.json",
         "training_config": output_dir / "training_config.json",
+        "training_manifest": output_dir / "training_manifest.json",
         "metrics": output_dir / "metrics.json",
         "data_quality_report": output_dir / "data_quality_report.json",
         "acceptance_report": output_dir / "acceptance_report.json",
@@ -637,6 +649,26 @@ def _write_artifacts(
     )
     _write_json(artifacts["label_schema"], {"horizons": list(config.horizons), "label_columns": [f"forward_return_{h}d" for h in config.horizons]})
     _write_json(artifacts["training_config"], asdict(config))
+    _write_json(
+        artifacts["training_manifest"],
+        {
+            "model_kind": config.model,
+            "backend": backend,
+            "feature_count": len(feature_columns),
+            "feature_schema_path": str(artifacts["feature_schema"]),
+            "prediction_rows": int(len(predictions)),
+            "fold_count": int(metrics.get("fold_count", 0)),
+            "data_range": metrics.get("data_range", {}),
+            "missing_value_policy": "numeric NaN values are converted to 0.0 inside model fit/predict only; source artifacts are not imputed in place",
+            "split_mode": config.split_mode,
+            "purge_days": config.purge_days,
+            "embargo_days": config.embargo_days,
+            "seed": 1729,
+            "uses_mock_or_synthetic": False,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "git_commit": commit,
+        },
+    )
     _write_json(artifacts["metrics"], metrics)
     _write_json(artifacts["data_quality_report"], quality)
     _write_json(artifacts["acceptance_report"], acceptance)

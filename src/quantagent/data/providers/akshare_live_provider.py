@@ -56,33 +56,49 @@ class AkShareLiveProvider:
         if not request.symbols:
             raise ProviderUnavailable("AkShare live daily_ohlcv requires explicit symbols")
         frames = []
+        failed_symbols: list[str] = []
+        warnings: list[str] = []
         for symbol in request.symbols:
-            raw = ak.stock_zh_a_hist(
-                symbol=_plain_a_code(symbol),
-                period="daily",
-                start_date=request.start_date.replace("-", ""),
-                end_date=request.end_date.replace("-", ""),
-                adjust=self.adjust,
-            )
-            if raw.empty:
+            try:
+                raw = ak.stock_zh_a_hist(
+                    symbol=_plain_a_code(symbol),
+                    period="daily",
+                    start_date=request.start_date.replace("-", ""),
+                    end_date=request.end_date.replace("-", ""),
+                    adjust=self.adjust,
+                )
+            except Exception as exc:  # pragma: no cover - network path
+                failed_symbols.append(str(symbol))
+                warnings.append(f"akshare_daily_failed:{symbol}:{exc}")
+                continue
+            if raw is None or raw.empty:
+                warnings.append(f"akshare_empty_daily_ohlcv:{symbol}")
                 continue
             frames.append(_normalize_akshare_daily(raw, symbol))
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         schema_report = akshare_market_schema_report(frame)
-        warnings = [] if not frame.empty else ["akshare_empty_daily_ohlcv"]
         warnings.extend(f"akshare_schema_missing:{column}" for column in schema_report["missing_columns"])
         return ProviderResult(
             frame,
-            source="akshare_live_provider",
+            source="akshare_live_provider:stock_zh_a_hist",
             point_in_time=True,
             quality_score=0.78 if not frame.empty and schema_report["status"] == "passed" else 0.0,
             warnings=tuple(warnings),
-            metadata={"schema_report": schema_report},
+            metadata={
+                "schema_report": schema_report,
+                "function_name": "stock_zh_a_hist",
+                "failed_symbols": failed_symbols,
+            },
         )
 
 
 def _plain_a_code(symbol: str) -> str:
-    return str(symbol).split(".")[0]
+    text = str(symbol).split(".")[0]
+    lower = text.lower()
+    for prefix in ("sh", "sz", "bj"):
+        if lower.startswith(prefix):
+            return text[len(prefix):]
+    return text
 
 
 def _normalize_akshare_daily(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -99,7 +115,11 @@ def _normalize_akshare_daily(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
     keep = [column for column in columns.values() if column in data.columns]
     data = data[keep].copy()
     data["symbol"] = symbol
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     data["available_at"] = data["trade_date"]
+    for column in ("open", "high", "low", "close", "volume", "amount"):
+        if column in data.columns:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
     data["source"] = "akshare"
     data["source_type"] = "market_data"
     data["source_reliability"] = 0.72

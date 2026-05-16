@@ -24,6 +24,7 @@ materialise them as a tidy long-format DataFrame.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable
 
 import numpy as np
@@ -77,6 +78,19 @@ class Column(Expr):
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         if self.name not in frame.columns:
             raise KeyError(f"factor expression references missing column '{self.name}'")
+        return pd.to_numeric(frame[self.name], errors="coerce")
+
+
+@dataclass(frozen=True)
+class OptionalColumn(Expr):
+    """Column node for optional valuation/fundamental inputs."""
+
+    name: str
+    default: float = np.nan
+
+    def evaluate(self, frame: pd.DataFrame) -> pd.Series:
+        if self.name not in frame.columns:
+            return pd.Series(self.default, index=frame.index, dtype=float)
         return pd.to_numeric(frame[self.name], errors="coerce")
 
 
@@ -294,6 +308,14 @@ Close = Column("close")
 Volume = Column("volume")
 Amount = Column("amount")
 Vwap = Div(Amount, Volume)
+TurnoverRate = OptionalColumn("turnover_rate")
+PeTtm = OptionalColumn("pe_ttm")
+Pb = OptionalColumn("pb")
+Roe = OptionalColumn("roe")
+Revenue = OptionalColumn("revenue")
+GrossMargin = OptionalColumn("gross_margin")
+DebtToAsset = OptionalColumn("debt_to_asset")
+OperatingCashFlow = OptionalColumn("operating_cash_flow")
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +337,7 @@ class FactorDefinition:
             "lookback": _expr_lookback(self.expr),
             "required_columns": sorted(_expr_required_columns(self.expr)),
             "backend": backend,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "fallback": fallback,
             "no_lookahead_check": True,
         }
@@ -398,7 +421,7 @@ def build_factor_manifest(registry: FactorRegistry | None = None, backend: str =
 
 
 def _expr_required_columns(expr: Expr) -> set[str]:
-    if isinstance(expr, Column):
+    if isinstance(expr, (Column, OptionalColumn)):
         return {expr.name}
     if isinstance(expr, (Constant,)):
         return set()
@@ -465,6 +488,10 @@ def _polars_value_frame(expr: Expr, pl_frame, pl):
     if isinstance(expr, Column):
         if expr.name not in pl_frame.columns:
             raise KeyError(f"factor expression references missing column '{expr.name}'")
+        return pl_frame.select("__row_id", pl.col(expr.name).cast(pl.Float64, strict=False).alias("factor_value"))
+    if isinstance(expr, OptionalColumn):
+        if expr.name not in pl_frame.columns:
+            return pl_frame.select("__row_id", pl.lit(float(expr.default)).alias("factor_value"))
         return pl_frame.select("__row_id", pl.col(expr.name).cast(pl.Float64, strict=False).alias("factor_value"))
     if isinstance(expr, Constant):
         return pl_frame.select("__row_id", pl.lit(float(expr.value)).alias("factor_value"))
@@ -572,6 +599,76 @@ def _seed_default_registry() -> None:
         Div(Sub(Volume, TsMean(Volume, 5)), TsStd(Volume, 5)),
         description="Trailing 5-day volume z-score.",
     )
+    _DEFAULT_REGISTRY.register(
+        "momentum_20",
+        Rank(TsMean(Returns(Close, 1), 20)),
+        description="Rank of 20-day mean daily return.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "reversal_5",
+        -Rank(Returns(Close, 5)),
+        description="Negative rank of 5-day return.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "volatility_60",
+        Rank(TsStd(Returns(Close, 1), 60)),
+        description="Rank of trailing 60-day daily-return volatility.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "liquidity_amount_20",
+        Rank(Log(TsMean(Amount, 20))),
+        description="Rank of trailing 20-day traded amount.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "intraday_range_5",
+        Rank(TsMean(Div(Sub(High, Low), Close), 5)),
+        description="Rank of trailing 5-day intraday range over close.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "price_volume_divergence_5",
+        Rank(Delta(Close, 5)) - Rank(Delta(Volume, 5)),
+        description="5-day price momentum minus 5-day volume momentum rank.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "turnover_rate_20",
+        Rank(TsMean(TurnoverRate, 20)),
+        description="Rank of optional trailing 20-day turnover rate.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "valuation_pe_inverse",
+        Rank(Div(Constant(1.0), PeTtm)),
+        description="Rank of inverse PE TTM from optional PIT valuation data.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "valuation_pb_inverse",
+        Rank(Div(Constant(1.0), Pb)),
+        description="Rank of inverse PB from optional PIT valuation data.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "quality_roe",
+        Rank(Roe),
+        description="Rank of optional PIT return on equity.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "growth_revenue_delta_4",
+        Rank(Delta(Revenue, 4)),
+        description="Rank of optional four-report revenue change.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "profitability_gross_margin",
+        Rank(GrossMargin),
+        description="Rank of optional gross margin.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "leverage_low_debt_to_asset",
+        -Rank(DebtToAsset),
+        description="Negative rank of optional debt-to-asset ratio.",
+    )
+    _DEFAULT_REGISTRY.register(
+        "cashflow_operating_cash_flow",
+        Rank(OperatingCashFlow),
+        description="Rank of optional operating cash flow.",
+    )
 
 
 _seed_default_registry()
@@ -580,6 +677,7 @@ _seed_default_registry()
 __all__ = [
     "Expr",
     "Column",
+    "OptionalColumn",
     "Constant",
     "Add",
     "Sub",
@@ -605,6 +703,14 @@ __all__ = [
     "Volume",
     "Amount",
     "Vwap",
+    "TurnoverRate",
+    "PeTtm",
+    "Pb",
+    "Roe",
+    "Revenue",
+    "GrossMargin",
+    "DebtToAsset",
+    "OperatingCashFlow",
     "FactorDefinition",
     "FactorRegistry",
     "register_factor",

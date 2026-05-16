@@ -86,7 +86,16 @@ def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, o
             required_columns=AKSHARE_FINANCIAL_REQUIRED_COLUMNS,
             pit_violation_count=int(result.metadata.get("schema_report", {}).get("pit_violation_count", 0) if result.metadata else 0),
             warnings=tuple(result.warnings),
-            extra={"statement": statement, "source": result.source},
+            extra={
+                "statement": statement,
+                "source": result.source,
+                "function_name": result.metadata.get("function_name") if result.metadata else None,
+                "params": result.metadata.get("params", {}) if result.metadata else {},
+                "schema_hash": result.metadata.get("schema_hash") if result.metadata else None,
+                "fetched_at": result.metadata.get("fetched_at") if result.metadata else None,
+                "failed_symbols": result.metadata.get("failed_symbols", []) if result.metadata else [],
+                "license_warning": "AkShare endpoints and upstream website fields may change; verify vendor terms before production use.",
+            },
         )
         manifest_path = (lake.manifests / f"fundamentals_{statement}.json") if lake else (silver_root / f"{statement}_manifest.json")
         manifest.write(manifest_path)
@@ -97,6 +106,9 @@ def build_akshare_financial_cache(config: AkShareBootstrapConfig) -> dict[str, o
             "path": str(_existing_written_path(silver_path)),
             "manifest_path": str(manifest_path),
             "warnings": list(result.warnings),
+            "failed_symbols": list(result.metadata.get("failed_symbols", []) if result.metadata else []),
+            "function_name": result.metadata.get("function_name") if result.metadata else None,
+            "schema_hash": result.metadata.get("schema_hash") if result.metadata else None,
             "schema_report": result.metadata.get("schema_report", {}) if result.metadata else {},
         }
     return {

@@ -47,7 +47,7 @@ def setup_qlib_v7(
     """Prepare Qlib CN data with an auditable setup path.
 
     Without ``--run`` this command only resolves the destination and
-    prints the official Qlib download command 鈥?runnable verbatim inside
+    prints the official Qlib download command, runnable verbatim inside
     a Qlib checkout. With ``--run`` it attempts to invoke pyqlib's
     ``GetData`` API directly so the dataset lands at the resolved path.
 
@@ -67,7 +67,33 @@ def setup_qlib_v7(
             f"python scripts/get_data.py qlib_data --target_dir {resolved} "
             f"--region {region} --interval {interval}"
         ),
-        "note": "run the official command inside a Qlib repository checkout",
+        "official_module_command": (
+            f"python -m qlib.cli.data qlib_data --target_dir {resolved} "
+            f"--region {region} --interval {interval}"
+        ),
+        "windows_powershell_command_chain": [
+            "cd E:\\Project\\QuantAgent",
+            "py -3.12 -m venv .venv",
+            ".\\.venv\\Scripts\\Activate.ps1",
+            "pip install -U pip",
+            'pip install -e ".[training,research]"',
+            "pip install pyqlib akshare polars lightgbm xgboost torch",
+            '$env:QUANTAGENT_HOME = "E:\\Project\\QuantAgent\\runtime"',
+            "quantagent storage-info-v7 --ensure",
+            (
+                f"quantagent setup-qlib-v7 --region {region} --interval {interval} "
+                f"--target-dir {resolved} --run --allow-community-fallback"
+            ),
+            (
+                f"quantagent check-qlib-v7 --provider-uri {resolved} --region {region} "
+                "--symbols SH600519,SZ000001 --start-date 2018-01-01 --end-date 2020-09-25"
+            ),
+        ],
+        "note": (
+            "qlib CN instruments use uppercase exchange prefix (SH600519). "
+            "The official free CN release covers 2000-01-04..2020-09-25; "
+            "prepare a custom dump via scripts/dump_bin.py for newer data."
+        ),
     }
     if run:
         try:
@@ -101,18 +127,23 @@ def _community_fallback_notes(target_dir: Path, region: str, interval: str) -> d
 
     These point at well-known mirrors (qlib official release tarball,
     community ``qlib-server`` packages) without endorsing any specific
-    third party 鈥?the operator decides which fallback is acceptable.
+    third party; the operator decides which fallback is acceptable.
     """
     return {
         "notes": [
             "If the official mirror is unreachable, download the dataset tarball "
-            "from a trusted Qlib release on https://github.com/microsoft/qlib/releases "
+            "from a trusted community mirror such as the Qlib README referenced "
+            "investment_data release, or from an internally approved mirror, "
             f"and extract it into {target_dir}.",
             "Alternatively prepare a custom dataset via scripts/dump_bin.py from CSV/Parquet "
             "OHLCV inputs you control.",
             "After preparing data, verify it via: quantagent check-qlib-v7 "
             f"--provider-uri {target_dir} --region {region}.",
         ],
+        "community_mirror_example": (
+            "https://github.com/chenditc/investment_data/releases/latest/download/qlib_bin.tar.gz"
+        ),
+        "custom_dump_bin_path": "Use Qlib scripts/dump_bin.py with your own PIT CSV/Parquet OHLCV dump.",
         "verify_command": (
             f"quantagent check-qlib-v7 --provider-uri {target_dir} --region {region}"
         ),

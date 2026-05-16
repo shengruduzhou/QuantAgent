@@ -1,23 +1,8 @@
 """AkShare valuation / universe / sector adapters.
 
-These adapters round out the AkShare coverage needed by the V7 silver
-layer:
-
-* ``AkShareUniverseProvider`` — the A-share universe (symbol, name,
-  list date, market). Used to build ``data/v7/silver/universe`` and
-  filter downstream features to active listings.
-* ``AkShareValuationProvider`` — daily valuation snapshots (PE/PB/PS
-  TTM, market cap, free-float market cap, dividend yield) from the
-  Eastmoney quote interface, normalised into ``symbol / trade_date /
-  available_at`` PIT rows.
-* ``AkShareSectorProvider`` — industry / sector classification. Falls
-  back to an explicit ``ProviderUnavailable`` when AkShare changes its
-  endpoint, so the caller can decide whether to use a local override
-  table.
-
-Network access requires ``allow_network=True``; all adapters fail-loud
-when AkShare is missing or returns an empty/changed schema so we never
-silently use stale or partial data.
+Network access requires ``allow_network=True``. The sector adapter resolves
+symbol-level membership through board constituent endpoints or a local mapping;
+it never cross-joins every industry onto every symbol.
 """
 
 from __future__ import annotations
@@ -105,7 +90,7 @@ class AkShareUniverseProvider:
             raise ProviderUnavailable(f"AkShare stock_info_a_code_name failed: {exc}") from exc
         if raw is None or raw.empty:
             return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=("akshare_empty_universe",))
-        frame = raw.rename(columns={"code": "symbol_raw", "name": "name"}).copy()
+        frame = raw.rename(columns={"code": "symbol_raw", "name": "name", "代码": "symbol_raw", "名称": "name"}).copy()
         frame["symbol"] = frame["symbol_raw"].apply(_suffix_from_code)
         frame["exchange"] = frame["symbol"].str.split(".").str[-1]
         if "list_date" not in frame.columns:
@@ -134,14 +119,7 @@ def akshare_universe_schema_report(frame: pd.DataFrame) -> dict[str, object]:
 
 @dataclass
 class AkShareValuationProvider:
-    """Daily valuation snapshot adapter.
-
-    AkShare's spot quote endpoint returns one row per A-share with PE/PB
-    /market-cap fields. We treat the snapshot as ``trade_date=as_of_date``
-    and ``available_at=as_of_date`` so it lines up with the close-derived
-    market panel. Repeated snapshots can be concatenated to form a
-    valuation history.
-    """
+    """Daily valuation snapshot adapter from AkShare spot quote data."""
 
     allow_network: bool = False
     source: str = "akshare_valuation"
@@ -166,7 +144,7 @@ class AkShareValuationProvider:
             point_in_time=True,
             quality_score=0.75 if report["status"] == "passed" else 0.0,
             warnings=warnings,
-            metadata={"schema_report": report, "as_of_date": as_of_date},
+            metadata={"schema_report": report, "as_of_date": as_of_date, "function_name": "stock_zh_a_spot_em"},
         )
 
     def _normalize(self, frame: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
@@ -212,20 +190,7 @@ def akshare_valuation_schema_report(frame: pd.DataFrame) -> dict[str, object]:
 
 @dataclass
 class AkShareSectorProvider:
-    """Industry classification from AkShare with strict symbol-level joins.
-
-    AkShare's ``stock_board_industry_*`` endpoints return board (industry)
-    rows, NOT symbol rows. Resolving a per-symbol mapping requires hitting
-    ``stock_board_industry_cons_ths`` / ``stock_board_industry_cons_em``
-    once per board to fetch its constituents. This adapter never
-    cross-joins boards onto every requested symbol — that produced fake
-    mappings (every symbol assigned to every industry).
-
-    Failure mode: if neither the per-board membership endpoint nor a
-    preloaded ``local_mapping`` is available, we raise
-    ``ProviderUnavailable`` so the caller can supply a local symbol-level
-    mapping file and we never poison downstream features with bogus data.
-    """
+    """Industry classification from AkShare with strict symbol-level joins."""
 
     allow_network: bool = False
     source: str = "akshare_sector"
@@ -252,40 +217,27 @@ class AkShareSectorProvider:
         )
         if list_endpoint is None or cons_endpoint is None:
             raise ProviderUnavailable(
-                "AkShare symbol-level sector mapping requires both board-list and "
-                "board-constituent endpoints; none are available in this akshare version. "
-                "Supply a local sector mapping CSV instead.",
+                "AkShare symbol-level sector mapping requires board-list and board-constituent endpoints. "
+                "Supply a local sector mapping CSV instead."
             )
         try:
             boards = list_endpoint()
         except Exception as exc:  # pragma: no cover - network path
             raise ProviderUnavailable(f"AkShare industry list endpoint failed: {exc}") from exc
         if boards is None or boards.empty:
-            return ProviderResult(
-                pd.DataFrame(),
-                source=self.source,
-                quality_score=0.0,
-                warnings=("akshare_empty_sector_board_list",),
-            )
+            return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=("akshare_empty_sector_board_list",))
         column = "板块名称" if "板块名称" in boards.columns else boards.columns[0]
         board_names = boards[column].astype(str).dropna().unique().tolist()
         rows: list[dict[str, object]] = []
-        symbols_filter = (
-            {str(s) for s in request.symbols} if request is not None and request.symbols else None
-        )
+        symbols_filter = {str(s) for s in request.symbols} if request is not None and request.symbols else None
         for board in board_names:
             try:
                 members = cons_endpoint(symbol=board)
-            except Exception as exc:  # pragma: no cover - network path
-                # Skip this board but keep going — losing one board is fine,
-                # silently cross-joining is not.
+            except Exception:  # pragma: no cover - network path
                 continue
             if members is None or members.empty:
                 continue
-            code_col = next(
-                (c for c in ("代码", "code", "symbol_raw", "股票代码") if c in members.columns),
-                None,
-            )
+            code_col = next((c for c in ("代码", "code", "symbol_raw", "股票代码") if c in members.columns), None)
             if code_col is None:
                 continue
             for raw_code in members[code_col].astype(str):
@@ -296,12 +248,7 @@ class AkShareSectorProvider:
             if self.rate_limit_seconds > 0:
                 time.sleep(self.rate_limit_seconds)
         if not rows:
-            return ProviderResult(
-                pd.DataFrame(),
-                source=self.source,
-                quality_score=0.0,
-                warnings=("akshare_empty_sector_membership",),
-            )
+            return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=("akshare_empty_sector_membership",))
         frame = pd.DataFrame(rows).drop_duplicates(subset=("symbol", "industry"))
         return self._wrap(frame, source=self.source, quality=0.75)
 
@@ -313,9 +260,7 @@ class AkShareSectorProvider:
     ) -> pd.DataFrame:
         data = frame.copy()
         if "symbol" not in data.columns or "industry" not in data.columns:
-            raise ProviderUnavailable(
-                "local sector mapping must contain 'symbol' and 'industry' columns"
-            )
+            raise ProviderUnavailable("local sector mapping must contain 'symbol' and 'industry' columns")
         if "available_at" not in data.columns:
             data["available_at"] = as_of
         if request is not None and request.symbols:
@@ -359,5 +304,4 @@ __all__ = [
 ]
 
 
-# silence unused import warning while keeping the helper available to users
 _ = to_akshare_symbol

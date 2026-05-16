@@ -1,0 +1,8 @@
+[console_scripts]
+quantagent = quantagent.cli:app
+quantagent-build-factors = quantagent.cli:build_factors_entry
+quantagent-build-flow-features = quantagent.cli:build_flow_features_entry
+quantagent-build-sector-rotation = quantagent.cli:build_sector_rotation_entry
+quantagent-evaluate-factors = quantagent.cli:evaluate_factors_entry
+quantagent-generate-factor-report = quantagent.cli:generate_factor_report_entry
+quantagent-generate-valuation-report = quantagent.cli:generate_valuation_report_entry

@@ -43,13 +43,22 @@ def download_qlib_v7(
 @app.command("check-qlib-v7")
 def check_qlib_v7(
     provider_uri: str = typer.Option(..., "--provider-uri"),
-    start_date: str = typer.Option("2026-05-01", "--start-date"),
-    end_date: str = typer.Option("2026-05-15", "--end-date"),
-    symbols: str = typer.Option("", "--symbols", help="Optional comma-separated symbols for a schema probe."),
+    start_date: str = typer.Option("2018-01-01", "--start-date"),
+    end_date: str = typer.Option("2020-09-25", "--end-date"),
+    symbols: str = typer.Option(
+        "",
+        "--symbols",
+        help="Comma-separated qlib instruments, e.g. SH600519,SZ000001 (qlib CN uses uppercase prefix).",
+    ),
     universe: str = typer.Option("", "--universe", help="Optional qlib universe name."),
     region: str = typer.Option("cn", "--region"),
 ) -> None:
-    """Check local Qlib CN provider readiness and PIT market schema."""
+    """Check local Qlib CN provider readiness and PIT market schema.
+
+    Defaults to a range covered by the official Qlib CN free release
+    (2000-01-04 .. 2020-09-25). For more recent data, prepare a custom
+    dump via ``scripts/dump_bin.py`` and pass an explicit range.
+    """
     from quantagent.data.providers.base import ProviderRequest
     from quantagent.data.providers.qlib_provider import QlibProvider
 
@@ -120,6 +129,8 @@ def build_akshare_v7(
         )
     )
     typer.echo(json_dump(result))
+    if result.get("status") == "empty":
+        raise typer.Exit(code=1)
 
 
 @app.command("smoke-akshare-v7")
@@ -137,6 +148,7 @@ def smoke_akshare_v7(
     status when every probe fails.
     """
     from quantagent.data.providers.akshare_financial_provider import AkShareFinancialProvider
+    from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
     from quantagent.data.providers.akshare_valuation_provider import AkShareValuationProvider
     from quantagent.data.providers.base import ProviderRequest
 
@@ -144,11 +156,26 @@ def smoke_akshare_v7(
     probes: dict[str, object] = {}
     warnings: list[str] = []
 
+    try:
+        market = AkShareLiveProvider(allow_network=allow_network).daily_ohlcv(request)
+        probes["market"] = {
+            "status": "passed" if not market.frame.empty else "empty",
+            "rows": int(len(market.frame)),
+            "warnings": list(market.warnings),
+            "schema_report": market.metadata.get("schema_report", {}),
+        }
+        warnings.extend(market.warnings)
+    except Exception as exc:
+        warning = f"market_failed:{type(exc).__name__}:{exc}"
+        probes["market"] = {"status": "failed", "warning": warning}
+        warnings.append(warning)
+
     provider = AkShareFinancialProvider(allow_network=allow_network)
     for name, fetch in {
         "income": provider.income,
         "balance_sheet": provider.balance_sheet,
         "cashflow": provider.cashflow,
+        "financial_indicator": provider.financial_indicator,
     }.items():
         try:
             result = fetch(request)

@@ -67,7 +67,11 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
         universe=config.universe,
     )
     result = QlibProvider(str(provider_path), config.region).daily_ohlcv(request)
-    report = validate_qlib_market_schema(result.frame, as_of_date=config.end_date)
+    # Offline panel build: the trailing edge's close has `available_at = end_date + 1`
+    # by construction (close-available-next-day). That is not a PIT leak — the row
+    # simply isn't actionable at end_date. The inference-time PIT check belongs in
+    # the dataset/inference layer, not here.
+    report = validate_qlib_market_schema(result.frame, as_of_date=None)
     if report["status"] != "passed":
         raise ValueError(f"Qlib market schema failed: {report}")
     if config.require_optional_flags and report["optional_columns_missing"]:

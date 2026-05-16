@@ -1,3 +1,32 @@
+Metadata-Version: 2.4
+Name: quantagent
+Version: 0.3.0
+Summary: Production-oriented AI quant research, backtesting, and live-trading scaffold.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2
+Requires-Dist: scipy>=1.13
+Requires-Dist: pydantic>=2.7
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: typer>=0.12
+Provides-Extra: data
+Requires-Dist: akshare; extra == "data"
+Requires-Dist: tushare; extra == "data"
+Requires-Dist: pyarrow>=16.0; extra == "data"
+Provides-Extra: training
+Requires-Dist: torch>=2.3; extra == "training"
+Requires-Dist: transformers>=4.43; extra == "training"
+Requires-Dist: scikit-learn>=1.5; extra == "training"
+Requires-Dist: pyarrow>=16.0; extra == "training"
+Provides-Extra: research
+Requires-Dist: pyqlib>=0.9.6; extra == "research"
+Requires-Dist: vectorbt>=0.26; extra == "research"
+Provides-Extra: optimization
+Requires-Dist: cvxpy>=1.4; extra == "optimization"
+Dynamic: license-file
+
 # QuantAgent V7 / A-share PIT Research System
 
 QuantAgent V7 是面向 A 股现实约束的 Point-in-Time quant research system。它不是 toy LLM trading demo，不提供 financial advice，不承诺收益，也不默认连接真实券商。工程目标是用真实数据、严格 OOS、交易成本、风控和 paper/backtest 报告生成可审计证据。
@@ -59,16 +88,10 @@ quantagent setup-qlib-v7 `
 quantagent check-qlib-v7 `
   --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --region cn `
-  --symbols SH600519,SZ000001 `
-  --start-date 2018-01-01 `
-  --end-date 2020-09-25
+  --symbols 600519.SH,000858.SZ `
+  --start-date 2020-01-01 `
+  --end-date 2026-05-15
 ```
-
-> Qlib instruments use uppercase exchange prefix (`SH600519`), not the
-> `600519.SH` suffix style. AkShare uses the suffix style. The official
-> free Qlib CN release covers `2000-01-04 .. 2020-09-25`; for more
-> recent data, prepare a custom dump via `scripts/dump_bin.py` from
-> your own PIT CSV/Parquet OHLCV and re-run `check-qlib-v7`.
 
 如果官方 Qlib 下载不可用，`setup-qlib-v7 --run` 会 fail-loud，并输出 community mirror、自备 CSV/Parquet `scripts/dump_bin.py`、以及 `check-qlib-v7` 校验命令；不会静默切到 mock/synthetic。
 
@@ -77,26 +100,23 @@ quantagent check-qlib-v7 `
 ```powershell
 quantagent build-market-panel-v7 `
   --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --symbols SH600519,SH600036,SZ000001 `
-  --start-date 2018-01-01 `
-  --end-date 2020-09-25
+  --symbols 600519.SH,000858.SZ `
+  --start-date 2020-01-01 `
+  --end-date 2026-05-15
 
 quantagent build-akshare-v7 `
-  --symbols 600519.SH,000001.SZ `
+  --symbols 600519.SH,000858.SZ `
   --start-date 2020-01-01 `
-  --end-date 2024-12-31 `
+  --end-date 2026-05-15 `
   --allow-network
 
 quantagent smoke-akshare-v7 `
   --symbols 600519.SH,000001.SZ `
-  --start-date 2024-01-01 `
-  --end-date 2024-12-31 `
-  --as-of-date 2024-12-31 `
   --allow-network
 
 quantagent build-valuation-v7 `
-  --as-of-dates 2024-12-31 `
-  --symbols 600519.SH,000001.SZ `
+  --as-of-dates 2026-05-15 `
+  --symbols 600519.SH,000858.SZ `
   --allow-network
 
 quantagent build-labels-v7 `
@@ -204,10 +224,10 @@ User-facing paper outputs include:
 ## Validation
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/
-.\.venv\Scripts\python.exe -m compileall -q src
+C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m pytest tests/
+C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall -q src
 git diff --check
-.\.venv\Scripts\quantagent.exe --help
+quantagent --help
 ```
 
-`git diff --check` 在 Windows checkout 可能报告 CRLF warning；真正 whitespace error 必须修复。在 PowerShell sandbox 下，`py.exe` launcher 可能被拒绝；直接调用 venv 内的 `python.exe` / `quantagent.exe` 即可。
+`git diff --check` 在 Windows checkout 可能报告 CRLF warning；真正 whitespace error 必须修复。

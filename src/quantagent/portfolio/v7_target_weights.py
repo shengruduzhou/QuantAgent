@@ -74,6 +74,11 @@ class V7TargetWeightsResult:
 
 
 _TRADABILITY_FLAGS: tuple[str, ...] = tuple(column for column, *_ in _TRADABILITY_CONSTRAINTS)
+_SUPPORTED_OBJECTIVES: tuple[str, ...] = (
+    "max_expected_alpha",
+    "min_turnover",
+    "max_information_ratio_proxy",
+)
 
 
 def build_v7_target_weights(
@@ -83,6 +88,8 @@ def build_v7_target_weights(
     config: V7TargetWeightsConfig | None = None,
 ) -> V7TargetWeightsResult:
     config = config or V7TargetWeightsConfig()
+    if config.objective not in _SUPPORTED_OBJECTIVES:
+        raise ValueError(f"unsupported optimizer objective: {config.objective}; supported: {_SUPPORTED_OBJECTIVES}")
     if predictions is None or predictions.empty:
         return V7TargetWeightsResult(pd.DataFrame(), {"status": "no_predictions"})
     if market_panel is None or market_panel.empty:
@@ -253,6 +260,15 @@ def build_v7_target_weights(
         "symbol_count": int(pivot.shape[1]),
         "average_gross_exposure": float(pivot.abs().sum(axis=1).mean()),
         "average_turnover": float(pivot.diff().abs().sum(axis=1).mean()),
+        "supported_objectives": list(_SUPPORTED_OBJECTIVES),
+        "constraint_surface": {
+            "sector_cap": config.max_sector_weight,
+            "single_name_cap": config.max_weight_per_name,
+            "liquidity_cap": config.liquidity_participation,
+            "cash_floor": config.cash_floor,
+            "long_short": config.long_short,
+            "max_turnover": config.max_turnover,
+        },
         "config": asdict(config),
         **diagnostics,
     }
@@ -308,7 +324,13 @@ def _try_cvxpy_long_only(
         if previous_weights is not None
         else np.zeros(len(symbols), dtype=float)
     )
-    objective = cp.Maximize(alpha @ w - float(config.cost_bps) / 10_000.0 * cp.norm1(w - prev))
+    if config.objective == "min_turnover":
+        objective = cp.Minimize(cp.norm1(w - prev) - 1e-4 * (alpha @ w))
+    elif config.objective == "max_information_ratio_proxy":
+        scaled_alpha = alpha / (np.nanstd(alpha) + 1e-9)
+        objective = cp.Maximize(scaled_alpha @ w - float(config.cost_bps) / 10_000.0 * cp.norm1(w - prev))
+    else:
+        objective = cp.Maximize(alpha @ w - float(config.cost_bps) / 10_000.0 * cp.norm1(w - prev))
     constraints = [w >= 0, w <= caps, cp.sum(w) <= 1.0]
     if config.cash_floor > 0:
         constraints.append(cp.sum(w) <= 1.0 - float(config.cash_floor))

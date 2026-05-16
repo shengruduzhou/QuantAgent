@@ -23,6 +23,23 @@ class LLMSkillConfig:
     temperature: float = 0.0
     response_format: str = "json_object"
 
+    @classmethod
+    def from_env(cls, prefix: str = "QUANTAGENT_LLM_") -> "LLMSkillConfig":
+        """Build a config from environment variables without reading secrets."""
+        provider = os.getenv(f"{prefix}PROVIDER", "disabled")
+        return cls(
+            provider=provider,
+            enabled=_env_bool(os.getenv(f"{prefix}ENABLED"), default=provider != "disabled"),
+            allow_network=_env_bool(os.getenv(f"{prefix}ALLOW_NETWORK"), default=False),
+            endpoint=os.getenv(f"{prefix}ENDPOINT", "https://api.openai.com/v1/responses"),
+            model=os.getenv(f"{prefix}MODEL", "gpt-4.1-mini"),
+            api_key_env=os.getenv(f"{prefix}API_KEY_ENV", "OPENAI_API_KEY"),
+            timeout_seconds=float(os.getenv(f"{prefix}TIMEOUT_SECONDS", "30")),
+            max_input_chars=int(os.getenv(f"{prefix}MAX_INPUT_CHARS", "16000")),
+            temperature=float(os.getenv(f"{prefix}TEMPERATURE", "0")),
+            response_format=os.getenv(f"{prefix}RESPONSE_FORMAT", "json_object"),
+        )
+
 
 @dataclass(frozen=True)
 class LLMSkillResult:
@@ -54,6 +71,8 @@ class LLMSkillClient:
         user_text: str,
         fallback: dict[str, Any] | None = None,
     ) -> LLMSkillResult:
+        if self.config.provider not in {"disabled", "openai", "openai-compatible"}:
+            return LLMSkillResult(skill_name, fallback or {}, "", True, f"unsupported_provider:{self.config.provider}")
         if self.config.provider == "disabled" or not self.config.enabled:
             return LLMSkillResult(skill_name, fallback or {}, "", True, "skill_disabled")
         if not self.config.allow_network:
@@ -139,3 +158,9 @@ def _coerce_config(config: LLMSkillConfig | dict[str, Any] | None) -> LLMSkillCo
         temperature=float(config.get("temperature", 0.0)),
         response_format=str(config.get("response_format", "json_object")),
     )
+
+
+def _env_bool(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
