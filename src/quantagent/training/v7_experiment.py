@@ -15,6 +15,7 @@ from quantagent.data.v7_label_builder import V7_LABEL_HORIZONS
 from quantagent.data.v7_quality_gates import (
     V7DataQualityGateConfig,
     V7ModelAcceptanceGateConfig,
+    evaluate_adverse_regime,
     evaluate_data_quality_gates,
     evaluate_model_acceptance_gates,
 )
@@ -42,6 +43,10 @@ class V7TrainingConfig:
     registry_root: str = "artifacts/v7_alpha/registry"
     experiment_name: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    allow_model_downgrade: bool = False
+    n_estimators: int = 200
+    max_depth: int = 6
+    learning_rate: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,7 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         raise ValueError(f"unsupported V7 training model: {config.model}; supported: {SUPPORTED_MODELS}")
     if dataset is None or dataset.empty:
         raise ValueError("V7 training requires a non-empty real-data dataset")
+    backend = _resolve_backend(config.model, config.allow_model_downgrade)
     data = dataset.copy()
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["trade_date", "symbol"]).reset_index(drop=True)
@@ -74,6 +80,7 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     if not feature_columns:
         raise ValueError("V7 training found no numeric feature columns")
     coefficients: dict[str, dict[str, float]] = {}
+    boosters: dict[str, object] = {}
     all_predictions: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, object]] = []
     for horizon in config.horizons:
@@ -89,24 +96,48 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
             label_end,
             PurgedKFoldConfig(n_splits=min(config.n_splits, max(2, len(horizon_data) // 2)), embargo_pct=config.embargo_pct),
         )
+        last_artifact = None
         for fold, (train_idx, test_idx) in enumerate(splits):
             if len(train_idx) < max(10, len(feature_columns)):
                 continue
             train = horizon_data.iloc[train_idx]
             test = horizon_data.iloc[test_idx]
-            coef, intercept = _fit_linear(train[feature_columns], train[label_column], config)
-            prediction = _predict_linear(test[feature_columns], coef, intercept)
+            if backend in {"lightgbm", "xgboost"}:
+                booster, prediction = _fit_predict_booster(
+                    train[feature_columns],
+                    train[label_column],
+                    test[feature_columns],
+                    backend,
+                    config,
+                )
+                last_artifact = booster
+            else:
+                coef, intercept = _fit_linear(train[feature_columns], train[label_column], config, backend)
+                prediction = _predict_linear(test[feature_columns], coef, intercept)
+                coefficients[str(horizon)] = {column: float(value) for column, value in zip(feature_columns, coef)} | {"intercept": float(intercept)}
             fold_frame = test[["trade_date", "symbol", label_column]].copy()
             fold_frame["horizon"] = horizon
             fold_frame["prediction"] = prediction
             all_predictions.append(fold_frame)
             fold_metrics.append(_fold_metrics(fold_frame, label_column, fold, horizon, config.cost_bps))
-            coefficients[str(horizon)] = {column: float(value) for column, value in zip(feature_columns, coef)} | {"intercept": float(intercept)}
+        if last_artifact is not None:
+            boosters[str(horizon)] = last_artifact
 
     if not all_predictions:
         raise ValueError("V7 training produced no walk-forward predictions")
     prediction_frame = pd.concat(all_predictions, ignore_index=True)
-    metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients)
+    metrics = _aggregate_metrics(
+        prediction_frame,
+        fold_metrics,
+        coefficients,
+        feature_importance=_feature_importance(boosters, feature_columns) if boosters else None,
+    )
+    adverse_report = evaluate_adverse_regime(prediction_frame, label_column="forward_return_1d")
+    metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
+    metrics["adverse_regime_report"] = adverse_report
+    metrics["backend"] = backend
+    metrics["model_requested"] = config.model
+    metrics["model_downgraded"] = backend != config.model
     acceptance = evaluate_model_acceptance_gates(
         metrics,
         V7ModelAcceptanceGateConfig(require_paper_report=config.mark_production_ready),
@@ -115,7 +146,18 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     status = "production_ready" if config.mark_production_ready and acceptance.passed else "validation_only"
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    artifact_paths = _write_artifacts(output_dir, config, feature_columns, coefficients, metrics, quality.to_dict(), acceptance.to_dict(), prediction_frame)
+    artifact_paths = _write_artifacts(
+        output_dir,
+        config,
+        feature_columns,
+        coefficients,
+        metrics,
+        quality.to_dict(),
+        acceptance.to_dict(),
+        prediction_frame,
+        boosters=boosters,
+        backend=backend,
+    )
     return V7TrainingResult(
         status=status,
         output_dir=str(output_dir),
@@ -126,7 +168,35 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     )
 
 
-def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig) -> tuple[np.ndarray, float]:
+def _resolve_backend(model: str, allow_downgrade: bool) -> str:
+    if model in {"ridge", "elastic_net"}:
+        return model
+    if model == "lightgbm":
+        try:
+            import lightgbm  # type: ignore  # noqa: F401
+            return "lightgbm"
+        except Exception as exc:  # pragma: no cover - optional dep
+            if not allow_downgrade:
+                raise RuntimeError(
+                    "model='lightgbm' but lightgbm is not installed. "
+                    "Install quantagent[training] or pass --allow-model-downgrade."
+                ) from exc
+            return "ridge"
+    if model == "xgboost":
+        try:
+            import xgboost  # type: ignore  # noqa: F401
+            return "xgboost"
+        except Exception as exc:  # pragma: no cover - optional dep
+            if not allow_downgrade:
+                raise RuntimeError(
+                    "model='xgboost' but xgboost is not installed. "
+                    "Install quantagent[training] or pass --allow-model-downgrade."
+                ) from exc
+            return "ridge"
+    raise ValueError(f"unsupported V7 model: {model}")
+
+
+def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig, backend: str) -> tuple[np.ndarray, float]:
     x_values = x.to_numpy(dtype=float)
     y_values = y.to_numpy(dtype=float)
     mean_x = np.nanmean(x_values, axis=0)
@@ -134,19 +204,7 @@ def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig) -> tupl
     x_values = np.nan_to_num(x_values, nan=0.0, posinf=0.0, neginf=0.0)
     centred_x = x_values - mean_x
     centred_y = y_values - mean_y
-    model = config.model
-    if model in {"lightgbm", "xgboost"}:
-        # Tree models are optional extras. When unavailable we fall back to the
-        # ridge linear path so the experiment still produces a comparable
-        # baseline rather than crashing in environments without the extras.
-        try:
-            if model == "lightgbm":
-                import lightgbm as _  # type: ignore  # noqa: F401
-            else:
-                import xgboost as _  # type: ignore  # noqa: F401
-        except Exception:  # pragma: no cover - optional dependency
-            model = "ridge"
-    if model == "elastic_net":
+    if backend == "elastic_net":
         coef = np.zeros(centred_x.shape[1])
         l1 = config.alpha * config.l1_ratio
         l2 = config.alpha * (1.0 - config.l1_ratio)
@@ -164,6 +222,58 @@ def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig) -> tupl
 def _predict_linear(x: pd.DataFrame, coef: np.ndarray, intercept: float) -> np.ndarray:
     values = np.nan_to_num(x.to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     return values @ coef + intercept
+
+
+def _fit_predict_booster(
+    train_x: pd.DataFrame,
+    train_y: pd.Series,
+    test_x: pd.DataFrame,
+    backend: str,
+    config: V7TrainingConfig,
+) -> tuple[object, np.ndarray]:
+    if backend == "lightgbm":
+        import lightgbm as lgb  # type: ignore
+
+        booster = lgb.LGBMRegressor(
+            n_estimators=config.n_estimators,
+            max_depth=config.max_depth if config.max_depth > 0 else -1,
+            learning_rate=config.learning_rate,
+            random_state=1729,
+            n_jobs=1,
+            verbose=-1,
+        )
+        booster.fit(train_x.to_numpy(dtype=float), train_y.to_numpy(dtype=float))
+        prediction = booster.predict(test_x.to_numpy(dtype=float))
+        return booster, np.asarray(prediction, dtype=float)
+    if backend == "xgboost":
+        import xgboost as xgb  # type: ignore
+
+        booster = xgb.XGBRegressor(
+            n_estimators=config.n_estimators,
+            max_depth=max(1, config.max_depth),
+            learning_rate=config.learning_rate,
+            random_state=1729,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        )
+        booster.fit(train_x.to_numpy(dtype=float), train_y.to_numpy(dtype=float))
+        prediction = booster.predict(test_x.to_numpy(dtype=float))
+        return booster, np.asarray(prediction, dtype=float)
+    raise ValueError(f"unsupported booster backend: {backend}")
+
+
+def _feature_importance(boosters: dict[str, object], feature_columns: list[str]) -> dict[str, dict[str, float]]:
+    importance: dict[str, dict[str, float]] = {}
+    for horizon, booster in boosters.items():
+        weights = getattr(booster, "feature_importances_", None)
+        if weights is None:
+            continue
+        arr = np.asarray(weights, dtype=float)
+        if arr.size != len(feature_columns):
+            continue
+        importance[horizon] = {column: float(value) for column, value in zip(feature_columns, arr)}
+    return importance
 
 
 def _auto_feature_columns(frame: pd.DataFrame) -> tuple[str, ...]:
@@ -226,17 +336,22 @@ def _rank_ic(label_column: str):
     return inner
 
 
-def _aggregate_metrics(predictions: pd.DataFrame, fold_metrics: list[dict[str, object]], coefficients: dict[str, dict[str, float]]) -> dict[str, object]:
+def _aggregate_metrics(
+    predictions: pd.DataFrame,
+    fold_metrics: list[dict[str, object]],
+    coefficients: dict[str, dict[str, float]],
+    feature_importance: dict[str, dict[str, float]] | None = None,
+) -> dict[str, object]:
     rank_ics = [float(item["rank_ic_mean"]) for item in fold_metrics]
     net_returns = [float(item["net_return"]) for item in fold_metrics]
     drawdowns = [float(item["max_drawdown"]) for item in fold_metrics]
+    dominance = _single_factor_dominance(coefficients) if coefficients else _booster_dominance(feature_importance or {})
     return {
         "rank_ic_mean": float(np.mean(rank_ics)) if rank_ics else 0.0,
         "rank_ic_stability": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-12)) if rank_ics else 0.0,
         "turnover_adjusted_net_return": float(np.sum(net_returns)) if net_returns else 0.0,
         "max_drawdown": float(min(drawdowns)) if drawdowns else 0.0,
-        "single_factor_dominance": _single_factor_dominance(coefficients),
-        "adverse_regime_passed": True,
+        "single_factor_dominance": dominance,
         "uses_mock_or_synthetic": False,
         "prediction_rows": int(len(predictions)),
         "fold_count": int(len(fold_metrics)),
@@ -245,6 +360,12 @@ def _aggregate_metrics(predictions: pd.DataFrame, fold_metrics: list[dict[str, o
 
 def _single_factor_dominance(coefficients: dict[str, dict[str, float]]) -> float:
     values = [abs(value) for coef in coefficients.values() for key, value in coef.items() if key != "intercept"]
+    total = sum(values)
+    return float(max(values) / total) if total > 0 else 0.0
+
+
+def _booster_dominance(importance: dict[str, dict[str, float]]) -> float:
+    values = [abs(v) for ent in importance.values() for v in ent.values()]
     total = sum(values)
     return float(max(values) / total) if total > 0 else 0.0
 
@@ -258,6 +379,8 @@ def _write_artifacts(
     quality: dict[str, object],
     acceptance: dict[str, object],
     predictions: pd.DataFrame,
+    boosters: dict[str, object] | None = None,
+    backend: str = "ridge",
 ) -> dict[str, str]:
     artifacts = {
         "model_artifact": output_dir / "model_coefficients.json",
@@ -271,8 +394,33 @@ def _write_artifacts(
         "experiment_manifest": output_dir / "experiment_manifest.json",
     }
     commit = _git_commit()
-    _write_json(artifacts["model_artifact"], {"model": config.model, "coefficients": coefficients, "git_commit": commit})
-    _write_json(artifacts["feature_schema"], {"feature_columns": feature_columns})
+    model_payload: dict[str, object] = {
+        "model": config.model,
+        "backend": backend,
+        "coefficients": coefficients,
+        "git_commit": commit,
+    }
+    if boosters:
+        booster_dir = output_dir / "boosters"
+        booster_dir.mkdir(parents=True, exist_ok=True)
+        booster_paths: dict[str, str] = {}
+        for horizon, booster in boosters.items():
+            path = booster_dir / f"horizon_{horizon}.{backend}.txt"
+            try:
+                if backend == "lightgbm":
+                    booster.booster_.save_model(str(path))  # type: ignore[attr-defined]
+                elif backend == "xgboost":
+                    booster.get_booster().save_model(str(path))  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive
+                continue
+            booster_paths[horizon] = str(path)
+        model_payload["booster_paths"] = booster_paths
+        artifacts["booster_dir"] = booster_dir
+    _write_json(artifacts["model_artifact"], model_payload)
+    _write_json(
+        artifacts["feature_schema"],
+        {"feature_columns": feature_columns, "backend": backend, "version": "v7"},
+    )
     _write_json(artifacts["label_schema"], {"horizons": list(config.horizons), "label_columns": [f"forward_return_{h}d" for h in config.horizons]})
     _write_json(artifacts["training_config"], asdict(config))
     _write_json(artifacts["metrics"], metrics)

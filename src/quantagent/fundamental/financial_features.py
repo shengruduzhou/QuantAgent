@@ -141,12 +141,108 @@ def derive_v7_financial_columns(features: pd.DataFrame) -> pd.DataFrame:
     return features[keep].copy()
 
 
+_PIT_KEYS: tuple[str, ...] = ("symbol", "report_period", "ann_date", "available_at")
+_PRESERVED_COLUMNS: frozenset[str] = frozenset(_PIT_KEYS)
+
+
+def normalize_statement_frame(
+    frame: pd.DataFrame | None,
+    statement_type: str,
+    *,
+    prefix_collisions: bool = True,
+) -> pd.DataFrame:
+    """Return a deterministic copy of ``frame`` for ``statement_type``.
+
+    * Required keys (``symbol``, ``report_period``, ``ann_date``,
+      ``available_at``) are kept as-is.
+    * All other columns are optionally prefixed with ``<statement>_`` so a
+      later wide-merge cannot silently collapse columns that share a name
+      across income / balance / cashflow / indicator statements.
+    * Duplicate ``(symbol, report_period, available_at)`` rows are
+      collapsed deterministically (last write wins after sorting).
+    """
+
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    data = frame.copy()
+    if prefix_collisions:
+        rename: dict[str, str] = {}
+        prefix = f"{statement_type}_"
+        for column in data.columns:
+            if column in _PRESERVED_COLUMNS:
+                continue
+            if column.startswith(prefix):
+                continue
+            rename[column] = f"{prefix}{column}"
+        if rename:
+            data = data.rename(columns=rename)
+    sort_columns = [column for column in _PIT_KEYS if column in data.columns]
+    if sort_columns:
+        data = data.sort_values(sort_columns)
+    dedup_keys = [column for column in ("symbol", "report_period", "available_at") if column in data.columns]
+    if dedup_keys:
+        data = data.drop_duplicates(subset=dedup_keys, keep="last")
+    return data.reset_index(drop=True)
+
+
+def pit_wide_merge_statements(
+    statements: dict[str, pd.DataFrame],
+    *,
+    prefix_collisions: bool = True,
+) -> pd.DataFrame:
+    """Wide-merge per-statement PIT frames on the canonical PIT keys.
+
+    ``statements`` maps statement type → raw frame. Each frame is run
+    through :func:`normalize_statement_frame`, then outer-merged on
+    ``(symbol, report_period, ann_date, available_at)``. Result is sorted
+    and guaranteed unique per ``(symbol, report_period, available_at)``.
+    Raises ``ValueError`` if any duplicate slips through (so a schema
+    drift can never poison the downstream feature panel silently).
+    """
+
+    normalised = {
+        name: normalize_statement_frame(frame, name, prefix_collisions=prefix_collisions)
+        for name, frame in statements.items()
+    }
+    non_empty = [(name, frame) for name, frame in normalised.items() if not frame.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    _, merged = non_empty[0]
+    merged = merged.copy()
+    for _, frame in non_empty[1:]:
+        on = [column for column in _PIT_KEYS if column in merged.columns and column in frame.columns]
+        if not on:
+            continue
+        merged = merged.merge(frame, on=on, how="outer", suffixes=("", "_dup"))
+        for column in list(merged.columns):
+            if column.endswith("_dup"):
+                base = column[: -len("_dup")]
+                if base in merged.columns:
+                    merged[base] = merged[base].combine_first(merged[column])
+                merged = merged.drop(columns=[column])
+    sort_columns = [column for column in _PIT_KEYS if column in merged.columns]
+    if sort_columns:
+        merged = merged.sort_values(sort_columns)
+    dedup_keys = [column for column in ("symbol", "report_period", "available_at") if column in merged.columns]
+    if dedup_keys:
+        duplicate_count = int(merged.duplicated(subset=dedup_keys).sum())
+        if duplicate_count:
+            raise ValueError(
+                f"PIT wide-merge produced {duplicate_count} duplicate (symbol, report_period, available_at) rows"
+            )
+    return merged.reset_index(drop=True)
+
+
 def _merge_statements(
     income: pd.DataFrame,
     balance_sheet: pd.DataFrame,
     cashflow: pd.DataFrame,
     indicator: pd.DataFrame | None,
 ) -> pd.DataFrame:
+    # Back-compat path: keep behaviour stable for tests that pass already-merged
+    # statement columns (revenue, total_assets, operating_cash_flow, ...).
+    # New callers should prefer :func:`pit_wide_merge_statements` which
+    # adds explicit statement-prefixing and duplicate detection.
     frames = [frame for frame in (income, balance_sheet, cashflow) if frame is not None and not frame.empty]
     if not frames:
         return pd.DataFrame()
@@ -159,7 +255,7 @@ def _merge_statements(
 
 
 def _outer_merge(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
-    on = [column for column in ("symbol", "report_period", "ann_date", "available_at") if column in left.columns and column in right.columns]
+    on = [column for column in _PIT_KEYS if column in left.columns and column in right.columns]
     if not on:
         return left
     merged = left.merge(right, on=on, how="outer", suffixes=("", "_dup"))

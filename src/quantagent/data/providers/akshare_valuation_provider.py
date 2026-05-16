@@ -212,43 +212,125 @@ def akshare_valuation_schema_report(frame: pd.DataFrame) -> dict[str, object]:
 
 @dataclass
 class AkShareSectorProvider:
-    """Industry classification from AkShare's industry endpoints."""
+    """Industry classification from AkShare with strict symbol-level joins.
+
+    AkShare's ``stock_board_industry_*`` endpoints return board (industry)
+    rows, NOT symbol rows. Resolving a per-symbol mapping requires hitting
+    ``stock_board_industry_cons_ths`` / ``stock_board_industry_cons_em``
+    once per board to fetch its constituents. This adapter never
+    cross-joins boards onto every requested symbol — that produced fake
+    mappings (every symbol assigned to every industry).
+
+    Failure mode: if neither the per-board membership endpoint nor a
+    preloaded ``local_mapping`` is available, we raise
+    ``ProviderUnavailable`` so the caller can supply a local symbol-level
+    mapping file and we never poison downstream features with bogus data.
+    """
 
     allow_network: bool = False
     source: str = "akshare_sector"
+    rate_limit_seconds: float = 0.2
+    retry_count: int = 1
+    retry_sleep_seconds: float = 0.5
+    local_mapping: pd.DataFrame | None = None
 
-    def industry_classification(self, request: ProviderRequest | None = None, as_of_date: str | None = None) -> ProviderResult:
+    def industry_classification(
+        self,
+        request: ProviderRequest | None = None,
+        as_of_date: str | None = None,
+    ) -> ProviderResult:
+        as_of = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.today().normalize()
+        if self.local_mapping is not None and not self.local_mapping.empty:
+            frame = self._normalize_local(self.local_mapping, as_of, request)
+            return self._wrap(frame, source=f"{self.source}:local", quality=0.85)
         ak = _ensure_akshare(self.allow_network)
-        endpoint = getattr(ak, "stock_board_industry_summary_ths", None) or getattr(ak, "stock_board_industry_name_em", None)
-        if endpoint is None:
-            raise ProviderUnavailable("AkShare industry endpoints are not available in this version")
-        try:
-            raw = endpoint()
-        except Exception as exc:  # pragma: no cover - network path
-            raise ProviderUnavailable(f"AkShare industry endpoint failed: {exc}") from exc
-        if raw is None or raw.empty:
-            return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=("akshare_empty_sector",))
-        # The two known endpoints both return per-board rows; we attach the
-        # board name as ``industry`` and let downstream resolvers join by symbol.
-        column = "板块名称" if "板块名称" in raw.columns else raw.columns[0]
-        frame = pd.DataFrame({"industry": raw[column].astype(str)})
-        frame["symbol"] = pd.NA
-        frame["available_at"] = pd.Timestamp(as_of_date or pd.Timestamp.today().normalize())
-        if request is not None and request.symbols:
-            frame = pd.concat(
-                [
-                    frame.assign(symbol=str(symbol))
-                    for symbol in request.symbols
-                ],
-                ignore_index=True,
+        list_endpoint = getattr(ak, "stock_board_industry_name_em", None) or getattr(
+            ak, "stock_board_industry_summary_ths", None
+        )
+        cons_endpoint = getattr(ak, "stock_board_industry_cons_em", None) or getattr(
+            ak, "stock_board_industry_cons_ths", None
+        )
+        if list_endpoint is None or cons_endpoint is None:
+            raise ProviderUnavailable(
+                "AkShare symbol-level sector mapping requires both board-list and "
+                "board-constituent endpoints; none are available in this akshare version. "
+                "Supply a local sector mapping CSV instead.",
             )
+        try:
+            boards = list_endpoint()
+        except Exception as exc:  # pragma: no cover - network path
+            raise ProviderUnavailable(f"AkShare industry list endpoint failed: {exc}") from exc
+        if boards is None or boards.empty:
+            return ProviderResult(
+                pd.DataFrame(),
+                source=self.source,
+                quality_score=0.0,
+                warnings=("akshare_empty_sector_board_list",),
+            )
+        column = "板块名称" if "板块名称" in boards.columns else boards.columns[0]
+        board_names = boards[column].astype(str).dropna().unique().tolist()
+        rows: list[dict[str, object]] = []
+        symbols_filter = (
+            {str(s) for s in request.symbols} if request is not None and request.symbols else None
+        )
+        for board in board_names:
+            try:
+                members = cons_endpoint(symbol=board)
+            except Exception as exc:  # pragma: no cover - network path
+                # Skip this board but keep going — losing one board is fine,
+                # silently cross-joining is not.
+                continue
+            if members is None or members.empty:
+                continue
+            code_col = next(
+                (c for c in ("代码", "code", "symbol_raw", "股票代码") if c in members.columns),
+                None,
+            )
+            if code_col is None:
+                continue
+            for raw_code in members[code_col].astype(str):
+                symbol = _suffix_from_code(raw_code)
+                if symbols_filter is not None and symbol not in symbols_filter:
+                    continue
+                rows.append({"symbol": symbol, "industry": board, "available_at": as_of})
+            if self.rate_limit_seconds > 0:
+                time.sleep(self.rate_limit_seconds)
+        if not rows:
+            return ProviderResult(
+                pd.DataFrame(),
+                source=self.source,
+                quality_score=0.0,
+                warnings=("akshare_empty_sector_membership",),
+            )
+        frame = pd.DataFrame(rows).drop_duplicates(subset=("symbol", "industry"))
+        return self._wrap(frame, source=self.source, quality=0.75)
+
+    @staticmethod
+    def _normalize_local(
+        frame: pd.DataFrame,
+        as_of: pd.Timestamp,
+        request: ProviderRequest | None,
+    ) -> pd.DataFrame:
+        data = frame.copy()
+        if "symbol" not in data.columns or "industry" not in data.columns:
+            raise ProviderUnavailable(
+                "local sector mapping must contain 'symbol' and 'industry' columns"
+            )
+        if "available_at" not in data.columns:
+            data["available_at"] = as_of
+        if request is not None and request.symbols:
+            symbols = {str(s) for s in request.symbols}
+            data = data[data["symbol"].astype(str).isin(symbols)]
+        return data.reset_index(drop=True)
+
+    def _wrap(self, frame: pd.DataFrame, *, source: str, quality: float) -> ProviderResult:
         report = akshare_sector_schema_report(frame)
         warnings = tuple(f"akshare_schema_missing:{c}" for c in report["missing_columns"])
         return ProviderResult(
             frame.reset_index(drop=True),
-            source=self.source,
+            source=source,
             point_in_time=True,
-            quality_score=0.55 if report["status"] == "passed" else 0.0,
+            quality_score=quality if report["status"] == "passed" else 0.0,
             warnings=warnings,
             metadata={"schema_report": report},
         )

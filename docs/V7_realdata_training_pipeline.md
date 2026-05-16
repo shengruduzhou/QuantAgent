@@ -57,36 +57,60 @@ quantagent train-alpha-v7 \
   --dataset data/v7/gold/training_dataset/training_dataset.parquet \
   --output-dir artifacts/v7_alpha --model ridge
 
-# 7. 走 OrderManager → VirtualBroker dry-run 回测/纸面交易
-quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv \
+# 7. 模型 inference → 写 wide alpha frame + sidecar JSON summary
+quantagent predict-alpha-v7 \
+  --model-dir artifacts/v7_alpha \
+  --feature-dataset data/v7/gold/training_dataset/training_dataset.parquet \
+  --output artifacts/v7_alpha/predictions/predictions.parquet
+
+# 8. 把 alpha 转成受约束的 target weights（ST/停牌/涨跌停过滤 + 行业/单票/换手上限）
+quantagent build-target-weights-v7 \
+  --predictions artifacts/v7_alpha/predictions/predictions.parquet \
+  --market-panel data/v7/silver/market_panel/market_panel.parquet \
+  --sector-map data/v7/silver/sector/sector_map.csv \
+  --output artifacts/v7_alpha/target_weights/target_weights.parquet
+
+# 9. 走 OrderManager → VirtualBroker dry-run 回测/纸面交易
+quantagent walk-forward-backtest-v7 \
+  --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet \
   --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv \
+# 或者直接用 predictions（CLI 会先调用 target-weights 优化器）：
+quantagent walk-forward-backtest-v7 \
+  --predictions artifacts/v7_alpha/predictions/predictions.parquet \
+  --market-panel data/v7/silver/market_panel/market_panel.parquet \
+  --sector-map data/v7/silver/sector/sector_map.csv
+quantagent paper-trade-v7 \
+  --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet \
   --market-panel data/v7/silver/market_panel/market_panel.parquet
 
-# 8. live-readiness gate（不会开启实盘，只是报告）
+# 10. live-readiness gate（不会开启实盘，只是报告）
 quantagent v7-live-readiness-report \
   --metrics artifacts/v7_alpha/metrics.json \
   --paper-report reports/v7/paper_trade_report.json
 ```
 
-可选：
+可选 / 一键串联：
 
 ```powershell
 quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
+quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
 quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 ```
 
 ## 大规模训练 / Large-Scale Training
 
 - Baseline：Ridge（默认）、ElasticNet。
-- 可选 tree 模型：`--model lightgbm` / `--model xgboost`。未安装 extras 时优雅降级回 Ridge，并保留 manifest 中真实使用的模型记录。
+- 真实 tree 模型：`--model lightgbm` / `--model xgboost` 调用真正的 LightGBM / XGBoost 实现，并把每个 horizon 的 booster 序列化到 `boosters/horizon_<h>.<backend>.txt`。未安装 extras 时默认 **fail-loud**；只有显式 `--allow-model-downgrade` 才会降级到 ridge，manifest 同时写下 `model_requested` / `backend` / `model_downgraded`。
 - 深度模型：`quantagent train-deep-alpha-v7` —— 支持 fit / predict / save / load / 检查点 / early stopping / CPU+单卡。Huber 损失 + cross-sectional rank loss + 可选 long-short utility loss。无 PyTorch 时回退 numpy ridge head。
 - 全部模型走 purged walk-forward CV（`quantagent.quant_math.purged_cv`）+ embargo + multi-horizon training。
 - 训练 artifact 写入 `artifacts/v7_alpha/`：
   - `model_coefficients.json`、`metrics.json`、`feature_schema.json`、`label_schema.json`、`training_config.json`
   - `data_quality_report.json`、`acceptance_report.json`、`walk_forward_predictions.csv`
-  - `experiment_manifest.json`（experiment name、horizons、git commit、fold count、production_ready）
-  - `deep/deep_alpha_state.json` + `deep/deep_alpha_config.json`（深度模型 round-trip 状态）
+  - `experiment_manifest.json`（experiment name、horizons、git commit、fold count、production_ready、backend、model_downgraded、adverse_regime_report）
+  - `boosters/horizon_<h>.<backend>.txt`（LightGBM/XGBoost 原生模型文件）
+  - `predictions/predictions.parquet` + `predictions.summary.json`（`predict-alpha-v7` 写入）
+  - `target_weights/target_weights.parquet` + `target_weights.diagnostics.json`（`build-target-weights-v7` 写入）
+  - `deep/deep_alpha_state.json` + `deep/deep_alpha_config.json` + `deep/deep_alpha_feature_schema.json` + `deep/deep_alpha_metrics.json` + `deep/deep_alpha_experiment_manifest.json`（深度模型 round-trip 状态）
 - `artifacts/v7_alpha/registry/<experiment>.json` + `latest.json`（`ModelRegistry`）。
 - 评估指标在 `quantagent.training.metrics` 中统一：IC、rank IC、ICIR、top-minus-bottom spread、Sharpe、Sortino、max drawdown、hit rate、capacity proxy。`compose_alpha_metrics` 给出一组完整结果，可直接写入 `metrics.json`。
 
@@ -95,4 +119,7 @@ quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-r
 - `live_trading_enabled=false`、`dry_run=true`、`virtual_broker_only=true` 永远是默认。
 - AkShare/TuShare network 必须 `--allow-network` 显式开启。
 - `build-training-dataset-v7` 拒绝 `allow_synthetic_fallback=true`，PIT 违反会被 quality gate 阻断。
-- Production-ready 标记需通过 `evaluate_model_acceptance_gates` 中所有 gate：rank IC、stability、turnover-adjusted net return、drawdown、adverse regime、paper report、非 mock。
+- `AkShareSectorProvider` 离线时直接 `ProviderUnavailable`，绝不 cross-join 行业到所有 symbol。
+- `pit_wide_merge_statements` 对每个 statement 做 prefix 化，重复 `(symbol, report_period, available_at)` 会 raise。
+- `evaluate_adverse_regime` 真实计算 bottom-quartile 交易日的 rank-IC；不再硬编码 `adverse_regime_passed=True`。
+- Production-ready 标记需通过 `evaluate_model_acceptance_gates` 中所有 gate：rank IC、stability、turnover-adjusted net return、drawdown、adverse regime（真实计算）、paper report、非 mock。

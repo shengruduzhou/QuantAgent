@@ -1,42 +1,64 @@
-"""V7 feature-group taxonomy and PIT join helper.
+"""V7 feature-group registry, feature builders, and PIT join helper.
 
-The training pipeline reasons about features in groups: short-term flow,
-medium-term momentum, long-horizon macro, fundamentals, valuation, risk,
-liquidity, regime. ``select_v7_feature_columns`` resolves which columns
-from a frame fall into which group, ``join_pit_features`` performs
-strict PIT as-of merges across multiple auxiliary feature frames.
+This module is the single source of truth for which columns belong to
+which V7 feature group (short_term, medium_term, long_horizon,
+fundamental, valuation, risk, liquidity, regime). It also exposes:
 
-This module is intentionally kept apart from the existing V4-era
-``FeatureStore`` in ``data/feature_store.py`` so we do not break the
-legacy daily-research path; it only deals with feature *selection* and
-*as-of merging*, not factor computation.
+* ``V7FeatureGroup`` — group metadata: required source kind, builder,
+  PIT policy, lookback window, missingness policy, expected columns.
+* ``select_v7_feature_columns`` — resolves which columns from an
+  arbitrary frame fall into which group.
+* ``build_v7_feature_groups`` — runs registered builders that can
+  synthesise group columns from a market panel (returns/momentum/etc.).
+* ``join_pit_features`` — strict per-symbol PIT as-of merge across
+  multiple auxiliary frames.
+
+Important: builders never write future labels and never use forward
+prices. ``build_v7_feature_groups`` only consumes the inputs declared
+in ``V7FeatureGroup.required_columns`` and fails loudly if they are
+absent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
+import numpy as np
 import pandas as pd
 
+
+# ---------------------------------------------------------------------------
+# Static column catalogues (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
 
 SHORT_TERM_FEATURES: tuple[str, ...] = (
     "return_1d",
     "momentum_5d",
     "intraday_return",
+    "gap_open_return",
     "volume_zscore_5d",
+    "amount_zscore_5d",
+    "turnover_rate_5d",
     "fund_flow_5d",
     "news_sentiment_score",
 )
 MEDIUM_TERM_FEATURES: tuple[str, ...] = (
     "momentum_20d",
+    "momentum_60d",
     "volatility_20d",
+    "reversal_5d",
     "sector_rotation_score",
     "earnings_revision_score",
     "amount_mean_20d",
     "volume_mean_20d",
+    "liquidity_20d",
 )
 LONG_HORIZON_FEATURES: tuple[str, ...] = (
+    "momentum_120d",
+    "momentum_252d",
+    "trend_strength_252d",
+    "drawdown_252d",
     "policy_strength",
     "policy_chain_centrality_120d",
     "macro_industry_phase_120d",
@@ -77,6 +99,8 @@ RISK_FEATURES: tuple[str, ...] = (
     "quick_ratio",
     "regulatory_penalty_score",
     "audit_opinion_score",
+    "is_st",
+    "is_suspended",
 )
 LIQUIDITY_FEATURES: tuple[str, ...] = (
     "turnover_rate",
@@ -91,6 +115,7 @@ REGIME_FEATURES: tuple[str, ...] = (
     "liquidity_regime",
     "breadth_score",
     "drawdown_risk",
+    "market_drawdown_120d",
 )
 
 
@@ -103,6 +128,216 @@ V7_FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
     "risk": RISK_FEATURES,
     "liquidity": LIQUIDITY_FEATURES,
     "regime": REGIME_FEATURES,
+}
+
+
+# ---------------------------------------------------------------------------
+# Real feature-group registry
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class V7FeatureGroup:
+    """Registry entry describing how to materialise a feature group.
+
+    ``builder`` is optional; some groups (e.g. fundamentals, valuation)
+    are joined in from external sources rather than computed from the
+    market panel.
+    """
+
+    name: str
+    required_source_kinds: tuple[str, ...]
+    required_columns: tuple[str, ...]
+    produced_columns: tuple[str, ...]
+    pit_policy: str
+    lookback_days: int
+    missingness_policy: str = "fillna_with_zero"
+    builder: Callable[[pd.DataFrame], pd.DataFrame] | None = None
+    description: str = ""
+
+
+def _require(frame: pd.DataFrame, name: str, columns: Iterable[str]) -> None:
+    missing = [c for c in columns if c not in frame.columns]
+    if missing:
+        raise ValueError(f"feature group '{name}' requires missing columns {missing}")
+
+
+def _short_term_features(market: pd.DataFrame) -> pd.DataFrame:
+    _require(market, "short_term", ("symbol", "trade_date", "open", "close", "volume", "amount"))
+    data = market.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    group = data.groupby("symbol", sort=False)
+    data["return_1d"] = group["close"].pct_change()
+    data["momentum_5d"] = group["close"].pct_change(5)
+    data["intraday_return"] = data["close"] / data["open"].replace(0, np.nan) - 1.0
+    data["gap_open_return"] = data["open"] / group["close"].shift(1) - 1.0
+    data["volume_zscore_5d"] = group["volume"].transform(_zscore(5))
+    data["amount_zscore_5d"] = group["amount"].transform(_zscore(5))
+    if "turnover_rate" in data.columns:
+        data["turnover_rate_5d"] = group["turnover_rate"].transform(
+            lambda s: s.rolling(5, min_periods=2).mean()
+        )
+    return data
+
+
+def _medium_term_features(market: pd.DataFrame) -> pd.DataFrame:
+    _require(market, "medium_term", ("symbol", "trade_date", "close", "volume", "amount"))
+    data = market.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    group = data.groupby("symbol", sort=False)
+    ret = group["close"].pct_change()
+    data["momentum_20d"] = group["close"].pct_change(20)
+    data["momentum_60d"] = group["close"].pct_change(60)
+    data["volatility_20d"] = ret.groupby(data["symbol"]).transform(
+        lambda s: s.rolling(20, min_periods=5).std()
+    )
+    data["reversal_5d"] = -group["close"].pct_change(5)
+    data["amount_mean_20d"] = group["amount"].transform(
+        lambda s: s.rolling(20, min_periods=5).mean()
+    )
+    data["volume_mean_20d"] = group["volume"].transform(
+        lambda s: s.rolling(20, min_periods=5).mean()
+    )
+    data["liquidity_20d"] = (
+        data["amount_mean_20d"] / data["volume_mean_20d"].replace(0, np.nan)
+    )
+    return data
+
+
+def _long_horizon_features(market: pd.DataFrame) -> pd.DataFrame:
+    _require(market, "long_horizon", ("symbol", "trade_date", "close"))
+    data = market.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    group = data.groupby("symbol", sort=False)
+    data["momentum_120d"] = group["close"].pct_change(120)
+    data["momentum_252d"] = group["close"].pct_change(252)
+    # Trend strength: rolling close > rolling mean ratio.
+    rolling_mean_120 = group["close"].transform(lambda s: s.rolling(120, min_periods=20).mean())
+    data["trend_strength_252d"] = data["close"] / rolling_mean_120.replace(0, np.nan) - 1.0
+    rolling_max_252 = group["close"].transform(lambda s: s.rolling(252, min_periods=20).max())
+    data["drawdown_252d"] = data["close"] / rolling_max_252.replace(0, np.nan) - 1.0
+    return data
+
+
+def _regime_features(market: pd.DataFrame) -> pd.DataFrame:
+    _require(market, "regime", ("symbol", "trade_date", "close"))
+    data = market.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    # Market-level breadth & drawdown proxy from the cross-section.
+    by_date = data.groupby("trade_date")
+    breadth = by_date["close"].apply(_breadth)
+    data["breadth_score"] = data["trade_date"].map(breadth)
+    market_close = by_date["close"].mean()
+    rolling_max = market_close.rolling(120, min_periods=20).max()
+    drawdown = market_close / rolling_max - 1.0
+    data["market_drawdown_120d"] = data["trade_date"].map(drawdown)
+    return data
+
+
+def _zscore(window: int):
+    def inner(series: pd.Series) -> pd.Series:
+        mean = series.rolling(window, min_periods=max(2, window // 2)).mean()
+        std = series.rolling(window, min_periods=max(2, window // 2)).std()
+        return (series - mean) / std.replace(0, np.nan)
+
+    return inner
+
+
+def _breadth(group: pd.Series) -> float:
+    if group.empty:
+        return 0.0
+    advances = (group.pct_change() > 0).sum()
+    return float(advances) / max(1, len(group))
+
+
+V7_FEATURE_GROUP_REGISTRY: dict[str, V7FeatureGroup] = {
+    "short_term": V7FeatureGroup(
+        name="short_term",
+        required_source_kinds=("market",),
+        required_columns=("symbol", "trade_date", "open", "close", "volume", "amount"),
+        produced_columns=SHORT_TERM_FEATURES,
+        pit_policy="close-derived; available_at = next trading day",
+        lookback_days=5,
+        builder=_short_term_features,
+        description="1-5 day flow & price action.",
+    ),
+    "medium_term": V7FeatureGroup(
+        name="medium_term",
+        required_source_kinds=("market",),
+        required_columns=("symbol", "trade_date", "close", "volume", "amount"),
+        produced_columns=MEDIUM_TERM_FEATURES,
+        pit_policy="close-derived; available_at = next trading day",
+        lookback_days=60,
+        builder=_medium_term_features,
+        description="20-60 day momentum and volatility.",
+    ),
+    "long_horizon": V7FeatureGroup(
+        name="long_horizon",
+        required_source_kinds=("market",),
+        required_columns=("symbol", "trade_date", "close"),
+        produced_columns=LONG_HORIZON_FEATURES,
+        pit_policy="close-derived; available_at = next trading day",
+        lookback_days=252,
+        builder=_long_horizon_features,
+        description="120-252 day trend, drawdown, and structural exposure.",
+    ),
+    "fundamental": V7FeatureGroup(
+        name="fundamental",
+        required_source_kinds=("fundamentals",),
+        required_columns=("symbol", "available_at"),
+        produced_columns=FUNDAMENTAL_FEATURES,
+        pit_policy="available_at = ann_date resolved via trading calendar",
+        lookback_days=400,
+        missingness_policy="leave_nan_with_missingness_flag",
+        builder=None,
+        description="Quality / growth / margin from PIT statements.",
+    ),
+    "valuation": V7FeatureGroup(
+        name="valuation",
+        required_source_kinds=("valuation",),
+        required_columns=("symbol", "available_at"),
+        produced_columns=VALUATION_FEATURES,
+        pit_policy="available_at = snapshot trade_date",
+        lookback_days=120,
+        missingness_policy="leave_nan_with_missingness_flag",
+        builder=None,
+        description="PE/PB/PS/EV/EBITDA + history & industry z-scores.",
+    ),
+    "risk": V7FeatureGroup(
+        name="risk",
+        required_source_kinds=("fundamentals", "tradability"),
+        required_columns=("symbol",),
+        produced_columns=RISK_FEATURES,
+        pit_policy="available_at = ann_date or trade_date",
+        lookback_days=120,
+        missingness_policy="leave_nan_with_missingness_flag",
+        builder=None,
+        description="ST / suspension / leverage / fraud / audit risk.",
+    ),
+    "liquidity": V7FeatureGroup(
+        name="liquidity",
+        required_source_kinds=("market", "valuation"),
+        required_columns=("symbol", "trade_date"),
+        produced_columns=LIQUIDITY_FEATURES,
+        pit_policy="close-derived; available_at = next trading day",
+        lookback_days=120,
+        missingness_policy="fillna_with_zero",
+        builder=None,
+        description="Amount / turnover / capacity proxies.",
+    ),
+    "regime": V7FeatureGroup(
+        name="regime",
+        required_source_kinds=("market",),
+        required_columns=("symbol", "trade_date", "close"),
+        produced_columns=REGIME_FEATURES,
+        pit_policy="cross-sectional; available_at = next trading day",
+        lookback_days=120,
+        builder=_regime_features,
+        description="Market breadth, drawdown, volatility regime proxies.",
+    ),
 }
 
 
@@ -136,6 +371,50 @@ def select_v7_feature_columns(
             seen.add(column)
             selected.append(column)
     return V7FeatureSelection(selected=tuple(selected), group_to_columns=group_map)
+
+
+def build_v7_feature_groups(
+    market_panel: pd.DataFrame,
+    groups: Iterable[str] = (),
+) -> pd.DataFrame:
+    """Run all registered builders that can run against ``market_panel``.
+
+    Groups without a builder are skipped silently (they need PIT joins).
+    Builders fail loudly when their required columns are missing.
+    """
+    if market_panel is None or market_panel.empty:
+        return pd.DataFrame()
+    target_groups = tuple(groups) or tuple(V7_FEATURE_GROUP_REGISTRY.keys())
+    output = market_panel.copy()
+    for group_name in target_groups:
+        group = V7_FEATURE_GROUP_REGISTRY.get(group_name)
+        if group is None or group.builder is None:
+            continue
+        produced = group.builder(output)
+        new_columns = [c for c in produced.columns if c not in output.columns]
+        for column in new_columns:
+            output[column] = produced[column].values
+    return output
+
+
+def feature_schema_for_groups(groups: Iterable[str] = ()) -> dict[str, object]:
+    """Emit a feature schema (group → columns + PIT policy + lookback)."""
+    target = tuple(groups) or tuple(V7_FEATURE_GROUP_REGISTRY.keys())
+    schema: dict[str, object] = {"groups": {}, "version": "v7"}
+    for name in target:
+        group = V7_FEATURE_GROUP_REGISTRY.get(name)
+        if group is None:
+            continue
+        schema["groups"][name] = {  # type: ignore[index]
+            "required_source_kinds": list(group.required_source_kinds),
+            "required_columns": list(group.required_columns),
+            "produced_columns": list(group.produced_columns),
+            "pit_policy": group.pit_policy,
+            "lookback_days": group.lookback_days,
+            "missingness_policy": group.missingness_policy,
+            "has_builder": group.builder is not None,
+        }
+    return schema
 
 
 def join_pit_features(
@@ -177,8 +456,12 @@ def join_pit_features(
 
 __all__ = [
     "V7_FEATURE_GROUPS",
+    "V7_FEATURE_GROUP_REGISTRY",
+    "V7FeatureGroup",
     "V7FeatureSelection",
     "select_v7_feature_columns",
+    "build_v7_feature_groups",
+    "feature_schema_for_groups",
     "join_pit_features",
     "SHORT_TERM_FEATURES",
     "MEDIUM_TERM_FEATURES",

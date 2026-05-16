@@ -1,0 +1,28 @@
+{
+  "artifact_path": "artifacts\\v7_alpha\\registry\\v7_ridge_20260516T014522Z.json",
+  "created_at": "2026-05-16T01:45:22+00:00",
+  "feature_version": "7",
+  "metadata": {
+    "git_commit": "106095e13ebd1f60d57a09e4621a01dcd601c326",
+    "horizons": [
+      1,
+      5
+    ],
+    "model": "ridge",
+    "output_dir": "C:\\Users\\shanh\\AppData\\Local\\Temp\\pytest-of-shanh\\pytest-79\\test_v7_training_experiment_wr0\\alpha",
+    "production_ready": false
+  },
+  "metrics": {
+    "adverse_regime_passed": 1.0,
+    "fold_count": 8.0,
+    "max_drawdown": -0.0012000000000000899,
+    "model_downgraded": 0.0,
+    "prediction_rows": 162.0,
+    "rank_ic_mean": 0.9330357142857143,
+    "rank_ic_stability": 13.871817212233173,
+    "single_factor_dominance": 0.5829997405006125,
+    "turnover_adjusted_net_return": 0.24093788245381403,
+    "uses_mock_or_synthetic": 0.0
+  },
+  "model_version": "v7_ridge_20260516T014522Z"
+}

@@ -48,11 +48,17 @@ quantagent build-valuation-v7 --as-of-dates 2026-05-15 --allow-network
 quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
 quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --output data/v7/gold/training_dataset/training_dataset.parquet
 quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha
+quantagent train-alpha-v7 --dataset ... --model lightgbm           # real LightGBM, fail-loud if missing
+quantagent train-alpha-v7 --dataset ... --model xgboost --allow-model-downgrade   # ridge fallback only with the flag
 quantagent train-deep-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha/deep --horizons 1,5,20,60,120,126
+quantagent predict-alpha-v7 --model-dir artifacts/v7_alpha --feature-dataset data/v7/gold/training_dataset/training_dataset.parquet --output artifacts/v7_alpha/predictions/predictions.parquet
+quantagent build-target-weights-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet --sector-map data/v7/silver/sector/sector_map.csv --output artifacts/v7_alpha/target_weights/target_weights.parquet
 quantagent run-real-training-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals
+quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
 quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
-quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent walk-forward-backtest-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent walk-forward-backtest-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel ... --sector-map ...   # optimiser runs first
+quantagent paper-trade-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
 quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 ```
 
@@ -72,9 +78,15 @@ Model 不能标记 production-ready，除非：
 - turnover-adjusted net return after cost 通过阈值。
 - max drawdown 低于配置阈值。
 - no single factor dominates unrealistically。
-- 至少一个 adverse market regime 验证通过。
+- 至少一个 adverse market regime 验证通过（`evaluate_adverse_regime` 真实计算 bottom-quartile-day rank-IC；旧的 `adverse_regime_passed=True` 硬编码已删除）。
 - paper trading report exists before live readiness can pass。
 - 结果不是只在 mock data 上成立。
+
+## Data 防错铁律 / Data Anti-Footgun
+
+- `AkShareSectorProvider` 必须用 per-board membership endpoint 或 local mapping；**绝不** 把所有 industry 当成 cross-join 应用到每个 symbol。
+- 财务报表合并必须走 `pit_wide_merge_statements`：按 statement type 加列前缀（income_revenue / balance_total_assets / cashflow_operating_cash_flow / indicator_*），按 PIT 四键 outer-merge，重复 `(symbol, report_period, available_at)` 必须 raise。
+- 真实数据 manifest（`DataManifest`）必须包含 provider、source paths、generated_at、row_count、date_range、symbols、schema report、PIT violations、duplicate rate、warnings 和 content hash。
 
 ## Testing Commands / 测试命令
 

@@ -113,6 +113,18 @@ class V7DeepAlphaTrainer:
         horizons = [h for h in self.config.horizons if f"forward_return_{h}d" in dataset.columns]
         if not horizons:
             raise ValueError("deep alpha trainer needs at least one forward_return_*d label")
+        # Auto-split a validation set out of the training dataset if none was supplied
+        # so the early-stopping path always has something to monitor.
+        if validation_dataset is None or validation_dataset.empty:
+            sorted_dataset = dataset.copy()
+            sorted_dataset["trade_date"] = pd.to_datetime(sorted_dataset["trade_date"], errors="coerce")
+            sorted_dataset = sorted_dataset.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+            unique_dates = sorted_dataset["trade_date"].dropna().unique()
+            if len(unique_dates) >= 5:
+                cutoff = unique_dates[int(0.8 * len(unique_dates))]
+                train_frame = sorted_dataset[sorted_dataset["trade_date"] < cutoff]
+                validation_dataset = sorted_dataset[sorted_dataset["trade_date"] >= cutoff]
+                dataset = train_frame
         train_x, train_y, train_dates = self._prepare(dataset, feature_columns, horizons)
         val_x, val_y, val_dates = (
             self._prepare(validation_dataset, feature_columns, horizons) if validation_dataset is not None and not validation_dataset.empty else (None, None, None)
@@ -120,7 +132,7 @@ class V7DeepAlphaTrainer:
 
         backend = self._select_backend()
         if backend == "torch":
-            state = self._fit_torch(train_x, train_y, val_x, val_y, feature_columns, horizons)
+            state = self._fit_torch(train_x, train_y, val_x, val_y, train_dates, val_dates, feature_columns, horizons)
         else:
             state = self._fit_numpy(train_x, train_y, val_x, val_y, feature_columns, horizons)
         self.state = state
@@ -149,8 +161,59 @@ class V7DeepAlphaTrainer:
         path.mkdir(parents=True, exist_ok=True)
         state_path = path / "deep_alpha_state.json"
         config_path = path / "deep_alpha_config.json"
+        schema_path = path / "deep_alpha_feature_schema.json"
+        metrics_path = path / "deep_alpha_metrics.json"
         state_path.write_text(json.dumps(self.state.to_dict(), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         config_path.write_text(json.dumps(asdict(self.config), ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "feature_columns": list(self.state.feature_columns),
+                    "horizons": list(self.state.horizons),
+                    "backend": self.state.backend,
+                    "feature_count": len(self.state.feature_columns),
+                    "version": "v7",
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "training_history": list(self.state.training_history),
+                    "backend": self.state.backend,
+                    "horizons": list(self.state.horizons),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        # Write experiment manifest pointing at every artifact.
+        manifest_path = path / "deep_alpha_experiment_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "backend": self.state.backend,
+                    "horizons": list(self.state.horizons),
+                    "feature_columns_count": len(self.state.feature_columns),
+                    "artifact_paths": {
+                        "state": str(state_path),
+                        "config": str(config_path),
+                        "feature_schema": str(schema_path),
+                        "metrics": str(metrics_path),
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         return state_path
 
     def load(self, path: str | Path) -> V7DeepAlphaState:
@@ -265,6 +328,8 @@ class V7DeepAlphaTrainer:
         train_y: np.ndarray,
         val_x: np.ndarray | None,
         val_y: np.ndarray | None,
+        train_dates: pd.Series | None,
+        val_dates: pd.Series | None,
         feature_columns: list[str],
         horizons: list[int],
     ) -> V7DeepAlphaState:  # pragma: no cover - depends on torch
@@ -283,6 +348,17 @@ class V7DeepAlphaTrainer:
         else:
             val_tensor = None
             val_target = None
+
+        # Build date-aware batch groups so the rank loss is cross-sectional.
+        train_date_codes = (
+            torch.tensor(
+                pd.Categorical(train_dates).codes if train_dates is not None else np.zeros(train_tensor.shape[0]),
+                dtype=torch.long,
+                device=device,
+            )
+            if train_dates is not None
+            else None
+        )
 
         layers: list[nn.Module] = []
         input_dim = train_tensor.shape[1]
@@ -303,23 +379,41 @@ class V7DeepAlphaTrainer:
         history: list[dict[str, float]] = []
         for epoch in range(self.config.max_epochs):
             model.train()
-            permutation = torch.randperm(train_tensor.shape[0])
+            # Sample by date so each batch is a cross-section, not random rows.
+            if train_date_codes is not None:
+                unique_dates = torch.unique(train_date_codes)
+                date_order = unique_dates[torch.randperm(unique_dates.shape[0])]
+            else:
+                date_order = torch.zeros(1, dtype=torch.long, device=device)
             epoch_loss = 0.0
-            for start in range(0, train_tensor.shape[0], self.config.batch_size):
-                idx = permutation[start : start + self.config.batch_size]
-                xb = train_tensor[idx]
-                yb = target_tensor[idx]
+            total_rows = 0
+            batch_dates: list[torch.Tensor] = []
+            for date_code in date_order:
+                batch_dates.append(date_code.view(1))
+                # Group dates into batches that fit batch_size approximately.
+                idx = torch.cat(batch_dates)
+                if train_date_codes is not None:
+                    mask = torch.isin(train_date_codes, idx)
+                else:
+                    mask = torch.ones(train_tensor.shape[0], dtype=torch.bool, device=device)
+                if int(mask.sum()) < self.config.batch_size and date_code is not date_order[-1]:
+                    continue
+                xb = train_tensor[mask]
+                yb = target_tensor[mask]
+                date_b = train_date_codes[mask] if train_date_codes is not None else None
+                batch_dates = []
                 preds = model(xb)
                 loss = huber(preds, yb)
                 if self.config.rank_loss_weight > 0:
-                    loss = loss + self.config.rank_loss_weight * _rank_loss_torch(preds, yb)
+                    loss = loss + self.config.rank_loss_weight * _cross_section_rank_loss_torch(preds, yb, date_b)
                 if self.config.utility_loss_weight > 0:
                     loss = loss + self.config.utility_loss_weight * _utility_loss_torch(preds, yb, self.config.long_short_topk)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 epoch_loss += float(loss.detach().cpu()) * xb.shape[0]
-            epoch_loss /= max(1, train_tensor.shape[0])
+                total_rows += int(xb.shape[0])
+            epoch_loss /= max(1, total_rows)
             entry = {"epoch": epoch, "loss": epoch_loss}
             if val_tensor is not None:
                 model.eval()
@@ -378,6 +472,34 @@ def _rank_loss_torch(predictions, targets):  # pragma: no cover - torch path
     pred_rank = predictions.argsort(dim=0).argsort(dim=0).float()
     target_rank = targets.argsort(dim=0).argsort(dim=0).float()
     return torch.mean((pred_rank - target_rank) ** 2) / max(1, predictions.shape[0])
+
+
+def _cross_section_rank_loss_torch(predictions, targets, date_codes):  # pragma: no cover - torch path
+    """Rank loss computed per trading-date cross-section.
+
+    Random mini-batch rank loss conflates cross-sectional and time-series
+    structure. Here we group rows by their date code and accumulate a
+    rank MSE per cross-section so the optimiser shapes per-day rankings
+    directly.
+    """
+    import torch
+
+    if date_codes is None or predictions.shape[0] <= 1:
+        return _rank_loss_torch(predictions, targets)
+    unique = torch.unique(date_codes)
+    total = predictions.new_zeros(())
+    count = 0
+    for code in unique:
+        mask = date_codes == code
+        if int(mask.sum()) < 2:
+            continue
+        pred_g = predictions[mask]
+        target_g = targets[mask]
+        pred_rank = pred_g.argsort(dim=0).argsort(dim=0).float()
+        target_rank = target_g.argsort(dim=0).argsort(dim=0).float()
+        total = total + torch.mean((pred_rank - target_rank) ** 2) / max(1, pred_g.shape[0])
+        count += 1
+    return total / max(1, count)
 
 
 def _utility_loss_torch(predictions, targets, topk: int):  # pragma: no cover - torch path

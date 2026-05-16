@@ -1,0 +1,27 @@
+{
+  "artifact_path": "artifacts\\v7_alpha\\registry\\v7_lightgbm_20260516T101758Z.json",
+  "created_at": "2026-05-16T10:17:58+00:00",
+  "feature_version": "2",
+  "metadata": {
+    "git_commit": "106095e13ebd1f60d57a09e4621a01dcd601c326",
+    "horizons": [
+      1
+    ],
+    "model": "lightgbm",
+    "output_dir": "C:\\Users\\shanh\\AppData\\Local\\Temp\\pytest-of-shanh\\pytest-87\\test_train_alpha_lightgbm_down1\\alpha",
+    "production_ready": false
+  },
+  "metrics": {
+    "adverse_regime_passed": 1.0,
+    "fold_count": 2.0,
+    "max_drawdown": -0.0024798353288602026,
+    "model_downgraded": 1.0,
+    "prediction_rows": 200.0,
+    "rank_ic_mean": 0.9149999999999998,
+    "rank_ic_stability": 91.4999999908504,
+    "single_factor_dominance": 0.7223911611229109,
+    "turnover_adjusted_net_return": 1.8017676907023652,
+    "uses_mock_or_synthetic": 0.0
+  },
+  "model_version": "v7_lightgbm_20260516T101758Z"
+}

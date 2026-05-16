@@ -27,6 +27,8 @@ class V7ModelAcceptanceGateConfig:
     max_single_factor_dominance: float = 0.60
     require_adverse_regime: bool = True
     require_paper_report: bool = True
+    adverse_regime_min_rank_ic: float = -0.02
+    adverse_regime_max_drawdown: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -113,3 +115,58 @@ def _uses_mock_or_synthetic(frame: pd.DataFrame | None) -> bool:
             if values.str.contains("mock|synthetic|demo").any():
                 return True
     return False
+
+
+def evaluate_adverse_regime(
+    predictions: pd.DataFrame | None,
+    market_panel: pd.DataFrame | None = None,
+    label_column: str = "forward_return_1d",
+    config: V7ModelAcceptanceGateConfig | None = None,
+) -> dict[str, Any]:
+    """Score the model in adverse regimes.
+
+    Adverse regime is defined as trading days where the cross-sectional
+    market return is in the bottom-quartile of the prediction window.
+    We compute the rank-IC inside that subset and compare with the
+    ``adverse_regime_*`` thresholds in ``V7ModelAcceptanceGateConfig``.
+
+    Falls back to ``passed=False`` (not ``True``) when there is not
+    enough data to evaluate — silent passes are no longer allowed.
+    """
+    config = config or V7ModelAcceptanceGateConfig()
+    report: dict[str, Any] = {
+        "passed": False,
+        "reason": "insufficient_data",
+        "adverse_dates_count": 0,
+        "adverse_rank_ic_mean": 0.0,
+    }
+    if predictions is None or predictions.empty:
+        return report
+    if label_column not in predictions.columns or "prediction" not in predictions.columns:
+        report["reason"] = "missing_prediction_or_label_columns"
+        return report
+    data = predictions.copy()
+    data["trade_date"] = pd.to_datetime(data.get("trade_date"), errors="coerce")
+    data = data.dropna(subset=["trade_date", "prediction", label_column])
+    if data.empty:
+        return report
+    daily_return = data.groupby("trade_date")[label_column].mean()
+    if daily_return.empty:
+        return report
+    threshold = daily_return.quantile(0.25)
+    adverse_dates = daily_return[daily_return <= threshold].index
+    if len(adverse_dates) == 0:
+        report["reason"] = "no_adverse_dates"
+        return report
+    subset = data[data["trade_date"].isin(adverse_dates)]
+    by_date_ic = subset.groupby("trade_date").apply(
+        lambda f: float(f["prediction"].rank().corr(f[label_column].rank()))
+        if len(f) >= 2 and f["prediction"].nunique() >= 2 and f[label_column].nunique() >= 2
+        else float("nan")
+    ).dropna()
+    rank_ic_mean = float(by_date_ic.mean()) if not by_date_ic.empty else 0.0
+    report["adverse_dates_count"] = int(len(adverse_dates))
+    report["adverse_rank_ic_mean"] = rank_ic_mean
+    report["passed"] = bool(rank_ic_mean >= config.adverse_regime_min_rank_ic)
+    report["reason"] = "evaluated"
+    return report

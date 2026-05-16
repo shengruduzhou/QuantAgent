@@ -17,13 +17,19 @@ QuantAgent V7 是面向 A 股散户现实约束的 Point-in-Time quant research 
 download / prepare Qlib CN data
 -> build-market-panel-v7              # qlib → silver/market_panel + manifest
 -> build-akshare-v7 or build-fundamentals-v7   # akshare/tushare → silver/fundamentals + manifest
+-> build-valuation-v7                 # akshare snapshot or local CSV → silver/valuation + manifest
 -> build-labels-v7                    # multi-horizon forward returns
 -> build-training-dataset-v7          # PIT as-of join → gold/training_dataset + manifest + feature schema
--> train-alpha-v7                     # purged WF CV + experiment manifest + model registry
+-> train-alpha-v7 / train-deep-alpha-v7   # purged WF CV + experiment manifest + model registry
+-> predict-alpha-v7                   # forward-pass against feature dataset → gold/predictions
+-> build-target-weights-v7            # alpha → constrained target_weights + diagnostics
 -> walk-forward-backtest-v7           # OrderManager + VirtualBroker dry-run
+                                      # accepts --target-weights OR --predictions
 -> paper-trade-v7                     # 同一条 dry-run 路径
 -> v7-live-readiness-report           # 输出 readiness gate 报告（不会开启实盘）
 ```
+
+`run-full-real-training-v7` 串联了 dataset → train → predict → target_weights → walk-forward backtest 全流程，写一份 `full_pipeline_report.json`。
 
 Qlib 负责 market OHLCV、technical features、labels、backtest base。TuShare / AkShare 负责 financial statements、financial indicators、valuation fields 和 disclosure dates，必须保存 `report_period / ann_date / available_at`。TradingView public pages 仅作为 sentiment / attention context。
 
@@ -63,11 +69,16 @@ quantagent build-valuation-v7 --as-of-dates 2026-05-15 --symbols 600519.SH --all
 quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
 quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --valuation data/v7/silver/valuation/valuation.parquet --output data/v7/gold/training_dataset/training_dataset.parquet
 quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha --model ridge
+quantagent train-alpha-v7 --dataset ... --model lightgbm --allow-model-downgrade   # real LGBM when installed; ridge fallback only with the flag
 quantagent train-deep-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha/deep --horizons 1,5,20,60,120,126
+quantagent predict-alpha-v7 --model-dir artifacts/v7_alpha --feature-dataset data/v7/gold/training_dataset/training_dataset.parquet --output artifacts/v7_alpha/predictions/predictions.parquet
+quantagent build-target-weights-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet --sector-map data/v7/silver/sector/sector_map.csv --output artifacts/v7_alpha/target_weights/target_weights.parquet
 quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
+quantagent run-full-real-training-v7 --market-panel ... --labels ... --sector-map ...   # dataset → train → predict → target_weights → backtest
 quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
-quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
-quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent walk-forward-backtest-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent walk-forward-backtest-v7 --predictions artifacts/v7_alpha/predictions/predictions.parquet --market-panel ... --sector-map ...   # optimiser runs first
+quantagent paper-trade-v7 --target-weights artifacts/v7_alpha/target_weights/target_weights.parquet --market-panel data/v7/silver/market_panel/market_panel.parquet
 quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 ```
 
@@ -111,7 +122,10 @@ git diff --check
 - 不提供任何收益保证。
 - 默认禁止实盘交易；任何 production toggle 必须经独立人工 sign-off。
 - Qlib CN 数据需要用户自行准备 provider_uri；TuShare 需要 token；AkShare 网络抓取需要 `--allow-network`。
-- LightGBM / XGBoost / PyTorch 等深度依赖为可选 extras，未安装时 ridge / 线性 baseline 仍能正常训练。
+- LightGBM / XGBoost 在 `train-alpha-v7 --model lightgbm`（或 `xgboost`）下是 **真实** 训练；未安装时默认 fail-loud，需显式 `--allow-model-downgrade` 才退回 ridge。
 - `train-deep-alpha-v7` 在 PyTorch 缺失时回退到 numpy ridge head，仍写出可 round-trip 的 state；预测能力会下降。
 - `build-valuation-v7` 默认拉取 AkShare 当日 snapshot；离线环境需用 `--csv-snapshot` 提供历史快照。
+- `AkShareSectorProvider` 不再 cross-join 行业到所有 symbol；离线/未提供 `--local-mapping` 时直接 fail-loud。
+- `pit_wide_merge_statements` 在做 PIT wide-merge 之前会按 statement 类型加列前缀，并拒绝任何 `(symbol, report_period, available_at)` 重复。
+- `evaluate_adverse_regime` 真实计算 bottom-quartile-day rank-IC；不再硬编码 `adverse_regime_passed=True`。
 - 业务日历 `TradingCalendar` 从 silver market panel 派生；若未生成 panel，PIT 解析会退回 calendar-day fallback 并写 warning。
