@@ -9,59 +9,73 @@ QuantAgent V7 是面向 A 股散户现实约束的 Point-in-Time quant research 
 - Optimizer / Portfolio Construction 只能输出 `target_weights`。
 - 只有 `OrderManager` 可以把 `target_weights` 转成 order intents。
 - 任何 QMT submit path 前必须通过 Risk Gate、Kill Switch、execution constraint simulation、reconciliation 和 audit replay。
-- Production mode 不允许 synthetic fallback；mock data 只用于 tests 和 smoke examples。
+- Production / realdata 模式不允许 synthetic fallback；mock data 只用于 tests 和 smoke examples。
 
 ## 真实数据流程 / Real-Data Flow
 
 ```text
 download / prepare Qlib CN data
--> build-market-panel-v7
--> build-akshare-v7 or build-fundamentals-v7
--> build-labels-v7
--> build V7 training dataset
--> train-alpha-v7
--> walk-forward-backtest-v7
--> paper-trade-v7
--> v7-live-readiness-report
+-> build-market-panel-v7              # qlib → silver/market_panel + manifest
+-> build-akshare-v7 or build-fundamentals-v7   # akshare/tushare → silver/fundamentals + manifest
+-> build-labels-v7                    # multi-horizon forward returns
+-> build-training-dataset-v7          # PIT as-of join → gold/training_dataset + manifest + feature schema
+-> train-alpha-v7                     # purged WF CV + experiment manifest + model registry
+-> walk-forward-backtest-v7           # OrderManager + VirtualBroker dry-run
+-> paper-trade-v7                     # 同一条 dry-run 路径
+-> v7-live-readiness-report           # 输出 readiness gate 报告（不会开启实盘）
 ```
 
-Qlib 负责 market OHLCV、technical features、labels 和 backtest base。TuShare / AkShare 负责 financial statements、financial indicators、valuation fields 和 disclosure dates，并必须保存 `report_period / ann_date / available_at`。TradingView public pages 只作为 sentiment / attention context，不作为行情或基本面真值。
+Qlib 负责 market OHLCV、technical features、labels、backtest base。TuShare / AkShare 负责 financial statements、financial indicators、valuation fields 和 disclosure dates，必须保存 `report_period / ann_date / available_at`。TradingView public pages 仅作为 sentiment / attention context。
+
+## 数据湖布局 / Data Lake
+
+```
+data/v7/
+  raw/{qlib,akshare,tushare,disclosures}/
+  silver/{market_panel,fundamentals,valuation,disclosures}/
+  gold/training_dataset/
+  manifests/
+```
+
+`src/quantagent/data/lake.py` 是布局单一来源；`src/quantagent/data/manifest.py:DataManifest` 是每个 dataset 必带的 provenance + quality 记录。
 
 ## 安装 / Install
 
-核心依赖保持轻量：
-
 ```powershell
-pip install -e .
+pip install -e .                 # core
+pip install -e ".[data]"         # akshare / tushare / pyarrow
+pip install -e ".[research]"     # pyqlib / vectorbt
+pip install -e ".[training]"     # torch / transformers / scikit-learn / pyarrow
+pip install -e ".[optimization]" # cvxpy
 ```
 
-真实数据依赖使用 optional extra：
-
-```powershell
-pip install -e ".[data]"
-pip install -e ".[research]"
-```
-
-`data` 包含 AkShare、TuShare、pyarrow；`research` 保留 pyqlib/vectorbt。缺少 optional dependency 时，import 不应破坏离线研究流程；真实数据 CLI 会给出可操作错误。
+Optional extras 缺失时仍可 import 核心包；真实数据 CLI 会报错给出可执行的安装/配置提示。
 
 ## CLI / 命令
 
 ```powershell
 quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
+quantagent check-qlib-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH
 quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
-quantagent build-labels-v7 --market-panel data/v7/market_panel.parquet --output data/v7/labels.parquet
-quantagent train-alpha-v7 --dataset data/v7/training_dataset.parquet --output-dir artifacts/v7_alpha
-quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
-quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
+quantagent build-fundamentals-v7 --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15 --provider tushare --allow-network
+quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
+quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --output data/v7/gold/training_dataset/training_dataset.parquet
+quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha --model ridge
+quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
+quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
+quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
 quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 ```
 
-Qlib 官方 CN download command 是：
+Qlib 官方 CN download command：
 
 ```powershell
 python scripts/get_data.py qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn
 ```
+
+CLI 已经拆分为 `cli/v7_data.py / v7_train.py / v7_backtest.py / v7_readiness.py / v7_research.py`，共享 `cli/_utils.py`。
 
 ## 关键配置 / Configs
 
@@ -84,6 +98,15 @@ git diff --check
 ## 文档 / Docs
 
 - [V7 系统架构与 Agent 接口](docs/V7_系统架构与Agent接口.md)
-- [V7 PIT 数据与财务特征](docs/V7_PIT数据与财务特征.md)
-- [V7 算法风控回测与验收](docs/V7_算法风控回测与验收.md)
 - [V7 证据摄取与交易规则](docs/V7_证据摄取与交易规则.md)
+- [V7 Real-Data Training Pipeline](docs/V7_realdata_training_pipeline.md)
+- [V7 PIT Data Contract](docs/V7_PIT_data_contract.md)
+- [V7 Training Dataset Schema](docs/V7_training_dataset_schema.md)
+- [V7 Live Readiness Gates](docs/V7_live_readiness_gates.md)
+
+## 已知限制 / Known Limitations
+
+- 不提供任何收益保证。
+- 默认禁止实盘交易；任何 production toggle 必须经独立人工 sign-off。
+- Qlib CN 数据需要用户自行准备 provider_uri；TuShare 需要 token；AkShare 网络抓取需要 `--allow-network`。
+- LightGBM / XGBoost / PyTorch 等深度依赖为可选 extras，未安装时 ridge / 线性 baseline 仍能正常训练。

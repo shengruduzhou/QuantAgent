@@ -35,17 +35,22 @@ V7 覆盖：
 - Optional dependencies must degrade gracefully；real-data commands must report actionable install/setup errors。
 - 优先做 wrappers、adapters、integration seams，不删除仍被引用的 SOTA components。
 - 删除 unused code 或 obsolete `.md` 前，必须证明未被 imports、CLI、tests、README、AGENTS 或 docs 引用。
+- 所有 silver / gold artifact 必须伴随一份 `data/v7/manifests/<dataset>.json`（`quantagent.data.manifest.DataManifest`）。
 
 ## Real-Data Commands / 真实数据命令
 
 ```powershell
 quantagent download-qlib-v7 --target-dir ~/.qlib/qlib_data/cn_data --region cn
+quantagent check-qlib-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH
 quantagent build-market-panel-v7 --provider-uri ~/.qlib/qlib_data/cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
-quantagent build-labels-v7 --market-panel data/v7/market_panel.parquet --output data/v7/labels.parquet
-quantagent train-alpha-v7 --dataset data/v7/training_dataset.parquet --output-dir artifacts/v7_alpha
-quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
-quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/market_panel.parquet
+quantagent build-labels-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --output data/v7/labels.parquet
+quantagent build-training-dataset-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals --output data/v7/gold/training_dataset/training_dataset.parquet
+quantagent train-alpha-v7 --dataset data/v7/gold/training_dataset/training_dataset.parquet --output-dir artifacts/v7_alpha
+quantagent run-real-training-v7 --market-panel data/v7/silver/market_panel/market_panel.parquet --labels data/v7/labels.parquet --fundamentals-root data/v7/silver/fundamentals
+quantagent evaluate-alpha-v7 --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
+quantagent walk-forward-backtest-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
+quantagent paper-trade-v7 --target-weights reports/v7/target_weights.csv --market-panel data/v7/silver/market_panel/market_panel.parquet
 quantagent v7-live-readiness-report --metrics artifacts/v7_alpha/metrics.json --paper-report reports/v7/paper_trade_report.json
 ```
 

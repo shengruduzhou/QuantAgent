@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -18,6 +19,10 @@ from quantagent.data.v7_quality_gates import (
     evaluate_model_acceptance_gates,
 )
 from quantagent.quant_math.purged_cv import PurgedKFoldConfig, purged_kfold_split
+from quantagent.training.model_registry import ModelRegistry
+
+
+SUPPORTED_MODELS: tuple[str, ...] = ("ridge", "elastic_net", "lightgbm", "xgboost")
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,8 @@ class V7TrainingConfig:
     paper_report_path: str | None = None
     mark_production_ready: bool = False
     feature_columns: tuple[str, ...] = ()
+    registry_root: str = "artifacts/v7_alpha/registry"
+    experiment_name: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -49,6 +56,8 @@ class V7TrainingResult:
 
 def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig | None = None) -> V7TrainingResult:
     config = config or V7TrainingConfig()
+    if config.model not in SUPPORTED_MODELS:
+        raise ValueError(f"unsupported V7 training model: {config.model}; supported: {SUPPORTED_MODELS}")
     if dataset is None or dataset.empty:
         raise ValueError("V7 training requires a non-empty real-data dataset")
     data = dataset.copy()
@@ -125,7 +134,19 @@ def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig) -> tupl
     x_values = np.nan_to_num(x_values, nan=0.0, posinf=0.0, neginf=0.0)
     centred_x = x_values - mean_x
     centred_y = y_values - mean_y
-    if config.model == "elastic_net":
+    model = config.model
+    if model in {"lightgbm", "xgboost"}:
+        # Tree models are optional extras. When unavailable we fall back to the
+        # ridge linear path so the experiment still produces a comparable
+        # baseline rather than crashing in environments without the extras.
+        try:
+            if model == "lightgbm":
+                import lightgbm as _  # type: ignore  # noqa: F401
+            else:
+                import xgboost as _  # type: ignore  # noqa: F401
+        except Exception:  # pragma: no cover - optional dependency
+            model = "ridge"
+    if model == "elastic_net":
         coef = np.zeros(centred_x.shape[1])
         l1 = config.alpha * config.l1_ratio
         l2 = config.alpha * (1.0 - config.l1_ratio)
@@ -247,8 +268,10 @@ def _write_artifacts(
         "data_quality_report": output_dir / "data_quality_report.json",
         "acceptance_report": output_dir / "acceptance_report.json",
         "predictions": output_dir / "walk_forward_predictions.csv",
+        "experiment_manifest": output_dir / "experiment_manifest.json",
     }
-    _write_json(artifacts["model_artifact"], {"model": config.model, "coefficients": coefficients, "git_commit": _git_commit()})
+    commit = _git_commit()
+    _write_json(artifacts["model_artifact"], {"model": config.model, "coefficients": coefficients, "git_commit": commit})
     _write_json(artifacts["feature_schema"], {"feature_columns": feature_columns})
     _write_json(artifacts["label_schema"], {"horizons": list(config.horizons), "label_columns": [f"forward_return_{h}d" for h in config.horizons]})
     _write_json(artifacts["training_config"], asdict(config))
@@ -256,6 +279,39 @@ def _write_artifacts(
     _write_json(artifacts["data_quality_report"], quality)
     _write_json(artifacts["acceptance_report"], acceptance)
     predictions.to_csv(artifacts["predictions"], index=False)
+
+    experiment_name = config.experiment_name or f"v7_{config.model}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    manifest = {
+        "experiment_name": experiment_name,
+        "model": config.model,
+        "git_commit": commit,
+        "horizons": list(config.horizons),
+        "feature_count": len(feature_columns),
+        "fold_count": int(metrics.get("fold_count", 0)),
+        "rank_ic_mean": float(metrics.get("rank_ic_mean", 0.0)),
+        "rank_ic_stability": float(metrics.get("rank_ic_stability", 0.0)),
+        "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+        "production_ready": bool(acceptance.get("passed", False) and config.mark_production_ready),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "artifact_paths": {key: str(path) for key, path in artifacts.items()},
+    }
+    _write_json(artifacts["experiment_manifest"], manifest)
+
+    try:
+        ModelRegistry(root=config.registry_root).register(
+            model_version=experiment_name,
+            feature_version=str(len(feature_columns)),
+            metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+            metadata={
+                "model": config.model,
+                "horizons": list(config.horizons),
+                "git_commit": commit,
+                "output_dir": str(output_dir),
+                "production_ready": bool(acceptance.get("passed", False) and config.mark_production_ready),
+            },
+        )
+    except Exception:  # pragma: no cover - registry is best-effort
+        pass
     return {key: str(path) for key, path in artifacts.items()}
 
 

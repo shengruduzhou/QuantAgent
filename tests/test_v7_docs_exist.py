@@ -6,14 +6,17 @@ def test_v7_docs_and_config_exist_and_cover_required_boundaries():
         Path("README.md"),
         Path("AGENTS.md"),
         Path("docs/V7_系统架构与Agent接口.md"),
-        Path("docs/V7_算法风控回测与验收.md"),
-        Path("docs/V7_PIT数据与财务特征.md"),
+        Path("docs/V7_证据摄取与交易规则.md"),
+        Path("docs/V7_realdata_training_pipeline.md"),
+        Path("docs/V7_PIT_data_contract.md"),
+        Path("docs/V7_training_dataset_schema.md"),
+        Path("docs/V7_live_readiness_gates.md"),
         Path("configs/v7.default.yaml"),
     ]
     for path in docs:
-        assert path.exists()
+        assert path.exists(), path
         text = path.read_text(encoding="utf-8")
-        assert len(text) > 200
+        assert len(text) > 200, path
 
     combined = "\n".join(path.read_text(encoding="utf-8") for path in docs[:-1])
     for term in [
@@ -28,4 +31,4 @@ def test_v7_docs_and_config_exist_and_cover_required_boundaries():
         "Theme Discovery",
         "Financial Fraud Risk",
     ]:
-        assert term in combined
+        assert term in combined, term
