@@ -16,6 +16,8 @@ from quantagent.execution.virtual_broker import VirtualBroker
 class AShareExecutionSimulationConfig:
     initial_cash: float = 1_000_000.0
     lot_size: int = 100
+    min_order_value_yuan: float = 5_000.0
+    allow_odd_lot_sell_only_for_full_liquidation: bool = True
     volume_participation_cap: float = 0.10
     slippage_bps: float = 8.0
     block_st_buy: bool = True
@@ -29,6 +31,7 @@ class AShareExecutionSimulationResult:
     order_audit: pd.DataFrame
     position_history: pd.DataFrame
     failed_order_audit: pd.DataFrame
+    skipped_order_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
     config: dict[str, object] = field(default_factory=dict)
 
 
@@ -40,7 +43,7 @@ def simulate_ashare_target_weights(
     config = config or AShareExecutionSimulationConfig()
     audit_log_dir = config.audit_log_dir or str(quant_paths().logs / "v7_backtest")
     if target_weight_history is None or target_weight_history.empty:
-        return AShareExecutionSimulationResult(pd.Series(dtype=float), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), asdict(config))
+        return AShareExecutionSimulationResult(pd.Series(dtype=float), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), asdict(config))
     market = market_panel.copy()
     market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce")
     market = market.dropna(subset=["trade_date", "symbol"]).sort_values(["trade_date", "symbol"])
@@ -61,12 +64,15 @@ def simulate_ashare_target_weights(
         broker=broker,
         config=OrderManagerConfig(
             lot_size=config.lot_size,
+            min_order_value_yuan=config.min_order_value_yuan,
+            allow_odd_lot_sell_only_for_full_liquidation=config.allow_odd_lot_sell_only_for_full_liquidation,
             max_participation_rate=config.volume_participation_cap,
             strategy_version="v7_ashare_simulation",
         ),
     )
     nav_rows: list[tuple[pd.Timestamp, float]] = []
     order_rows: list[dict[str, object]] = []
+    skipped_rows: list[dict[str, object]] = []
     position_rows: list[dict[str, object]] = []
 
     for date, weights in target.iterrows():
@@ -80,6 +86,8 @@ def simulate_ashare_target_weights(
         adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
         nav = _mark_to_market_nav(broker, prices)
         states = manager.reconcile(adjusted, prices, nav)
+        for skipped in manager.last_skipped_orders:
+            skipped_rows.append({"trade_date": date, **skipped})
         for state in states:
             order = broker.order_objects.get(state.client_order_id)
             row = {
@@ -119,6 +127,7 @@ def simulate_ashare_target_weights(
         order_audit=order_audit,
         position_history=pd.DataFrame(position_rows),
         failed_order_audit=failed.reset_index(drop=True),
+        skipped_order_audit=pd.DataFrame(skipped_rows),
         config=asdict(config),
     )
 

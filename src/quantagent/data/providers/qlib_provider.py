@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
+from quantagent.data.v7_auto_range import from_qlib_instrument, to_qlib_instrument
 
 
 QLIB_MARKET_COLUMNS: tuple[str, ...] = (
@@ -44,7 +45,7 @@ class QlibProvider:
         if not self.provider_uri:
             raise ProviderUnavailable("qlib provider_uri is required for V7 qlib data")
         qlib.init(provider_uri=self.provider_uri, region=self.region)
-        instruments = list(request.symbols) if request.symbols else request.universe
+        instruments = [to_qlib_instrument(symbol) for symbol in request.symbols] if request.symbols else request.universe
         if not instruments:
             raise ProviderUnavailable("qlib request requires symbols or universe")
         fields = ["$open", "$high", "$low", "$close", "$volume", "$amount"]
@@ -63,6 +64,8 @@ class QlibProvider:
                 "$amount": "amount",
             }
         )
+        if "symbol" in data.columns:
+            data["symbol"] = data["symbol"].astype(str).map(from_qlib_instrument)
         # Close-derived market features become available the next trading row,
         # not the same day. We compute the per-symbol next trade_date and fall
         # back to trade_date + 1 calendar day at the right edge so newly listed

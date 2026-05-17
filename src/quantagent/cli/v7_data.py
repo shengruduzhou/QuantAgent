@@ -10,6 +10,7 @@ from quantagent.cli._utils import (
     app,
     default_v7_lake_root,
     json_dump,
+    merge_symbols,
     parse_csv_tuple,
     read_frame,
     write_frame,
@@ -50,6 +51,7 @@ def check_qlib_v7(
         "--symbols",
         help="Comma-separated qlib instruments, e.g. SH600519,SZ000001 (qlib CN uses uppercase prefix).",
     ),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     universe: str = typer.Option("", "--universe", help="Optional qlib universe name."),
     region: str = typer.Option("cn", "--region"),
 ) -> None:
@@ -63,7 +65,7 @@ def check_qlib_v7(
     from quantagent.data.providers.qlib_provider import QlibProvider
 
     request = None
-    symbol_tuple = parse_csv_tuple(symbols)
+    symbol_tuple = merge_symbols(symbols, symbols_file)
     if symbol_tuple or universe:
         request = ProviderRequest(
             start_date=start_date,
@@ -82,6 +84,7 @@ def build_market_panel_v7(
     end_date: str = typer.Option(..., "--end-date"),
     output_root: Path = typer.Option(None, "--output-root"),
     symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     universe: str = typer.Option("", "--universe"),
     region: str = typer.Option("cn", "--region"),
     require_optional_flags: bool = typer.Option(False, "--require-optional-flags"),
@@ -95,7 +98,7 @@ def build_market_panel_v7(
             provider_uri=provider_uri,
             start_date=start_date,
             end_date=end_date,
-            symbols=parse_csv_tuple(symbols),
+            symbols=merge_symbols(symbols, symbols_file),
             universe=universe or None,
             region=region,
             output_root=str(resolved_root),
@@ -107,7 +110,8 @@ def build_market_panel_v7(
 
 @app.command("build-akshare-v7")
 def build_akshare_v7(
-    symbols: str = typer.Option(..., "--symbols"),
+    symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     start_date: str = typer.Option(..., "--start-date"),
     end_date: str = typer.Option(..., "--end-date"),
     fundamentals_root: Path = typer.Option(None, "--fundamentals-root"),
@@ -122,7 +126,7 @@ def build_akshare_v7(
         AkShareBootstrapConfig(
             start_date=start_date,
             end_date=end_date,
-            symbols=parse_csv_tuple(symbols),
+            symbols=merge_symbols(symbols, symbols_file),
             fundamentals_root=str(fundamentals_root) if fundamentals_root else None,
             allow_network=allow_network,
             lake_root=str(resolved_lake),
@@ -135,13 +139,20 @@ def build_akshare_v7(
 
 @app.command("build-akshare-market-panel-v7")
 def build_akshare_market_panel_v7(
-    symbols: str = typer.Option(..., "--symbols", help="Comma-separated A-share symbols, e.g. 600519.SH,000001.SZ."),
-    start_date: str = typer.Option(..., "--start-date"),
-    end_date: str = typer.Option(..., "--end-date"),
+    symbols: str = typer.Option("", "--symbols", help="Comma-separated A-share symbols, e.g. 600519.SH,000001.SZ."),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
     output_root: Path = typer.Option(None, "--output-root"),
     output_path: Path = typer.Option(None, "--output"),
     allow_network: bool = typer.Option(False, "--allow-network"),
     adjust: str = typer.Option("qfq", "--adjust"),
+    provider_uri_for_range: Path | None = typer.Option(
+        None,
+        "--provider-uri-for-range",
+        help="Optional Qlib provider_uri used to infer the AkShare start date after the local Qlib calendar.",
+    ),
+    as_of_date: str | None = typer.Option(None, "--as-of-date", help="Default end-date anchor; weekends roll back to Friday."),
 ) -> None:
     """Build a recent PIT market panel from AkShare daily OHLCV.
 
@@ -149,53 +160,24 @@ def build_akshare_market_panel_v7(
     dump. Daily bars are marked available on the next business day so labels
     and training can enforce PIT semantics downstream.
     """
-    from quantagent.data.lake import v7_lake_paths
-    from quantagent.data.manifest import build_manifest_for_frame
-    from quantagent.data.providers.akshare_live_provider import (
-        AKSHARE_MARKET_REQUIRED_COLUMNS,
-        AkShareLiveProvider,
-        akshare_market_schema_report,
-    )
-    from quantagent.data.providers.base import ProviderRequest
+    from quantagent.config.paths import quant_paths
+    from quantagent.data.bootstrap.akshare_market_bootstrap import AkShareMarketPanelConfig, build_akshare_market_panel
 
     resolved_root = Path(output_root) if output_root is not None else default_v7_lake_root()
-    lake = v7_lake_paths(resolved_root).ensure()
-    resolved_output = Path(output_path) if output_path is not None else lake.silver_market_panel / "market_panel.parquet"
-    request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=parse_csv_tuple(symbols))
-    result = AkShareLiveProvider(allow_network=allow_network, adjust=adjust).daily_ohlcv(request)
-    written = write_frame(result.frame, resolved_output)
-    schema_report = akshare_market_schema_report(result.frame)
-    manifest = build_manifest_for_frame(
-        dataset_name="market_panel",
-        vendor="akshare",
-        frame=result.frame,
-        output_paths=[written],
-        start_date=start_date,
-        end_date=end_date,
-        symbols=request.symbols,
-        required_columns=AKSHARE_MARKET_REQUIRED_COLUMNS,
-        pit_violation_count=int(schema_report.get("pit_violation_count", 0)),
-        warnings=result.warnings,
-        extra={
-            "source": result.source,
-            "adjust": adjust,
-            "function_name": result.metadata.get("function_name"),
-            "failed_symbols": result.metadata.get("failed_symbols", []),
-            "schema_report": schema_report,
-            "availability_rule": "daily_ohlcv_available_next_business_day",
-        },
+    range_provider = provider_uri_for_range or (quant_paths().raw / "qlib" / "cn_data")
+    payload = build_akshare_market_panel(
+        AkShareMarketPanelConfig(
+            symbols=merge_symbols(symbols, symbols_file),
+            start_date=start_date,
+            end_date=end_date,
+            output_root=str(resolved_root),
+            output_path=str(output_path) if output_path else None,
+            allow_network=allow_network,
+            adjust=adjust,
+            provider_uri_for_range=str(range_provider) if range_provider else None,
+            as_of_date=as_of_date,
+        )
     )
-    manifest_path = lake.manifests / "market_panel.json"
-    manifest.write(manifest_path)
-    payload = {
-        "status": "passed" if not result.frame.empty and schema_report["status"] == "passed" else "empty",
-        "output": str(written),
-        "manifest": str(manifest_path),
-        "rows": int(len(result.frame)),
-        "symbols": list(request.symbols),
-        "warnings": list(result.warnings),
-        "schema_report": schema_report,
-    }
     typer.echo(json_dump(payload))
     if payload["status"] != "passed":
         raise typer.Exit(code=1)
@@ -203,7 +185,8 @@ def build_akshare_market_panel_v7(
 
 @app.command("smoke-akshare-v7")
 def smoke_akshare_v7(
-    symbols: str = typer.Option(..., "--symbols"),
+    symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     start_date: str = typer.Option("2025-01-01", "--start-date"),
     end_date: str = typer.Option("2026-05-15", "--end-date"),
     as_of_date: str = typer.Option("2026-05-15", "--as-of-date"),
@@ -220,7 +203,7 @@ def smoke_akshare_v7(
     from quantagent.data.providers.akshare_valuation_provider import AkShareValuationProvider
     from quantagent.data.providers.base import ProviderRequest
 
-    request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=parse_csv_tuple(symbols))
+    request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=merge_symbols(symbols, symbols_file))
     probes: dict[str, object] = {}
     warnings: list[str] = []
 
@@ -290,6 +273,7 @@ def smoke_akshare_v7(
 def build_valuation_v7(
     as_of_dates: str = typer.Option("", "--as-of-dates", help="Comma-separated valuation snapshot dates (YYYY-MM-DD)."),
     symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     lake_root: Path = typer.Option(None, "--lake-root"),
     allow_network: bool = typer.Option(False, "--allow-network"),
     csv_snapshot: Path | None = typer.Option(None, "--csv-snapshot", help="Optional pre-collected valuation snapshot."),
@@ -302,7 +286,7 @@ def build_valuation_v7(
     result = build_valuation_cache(
         ValuationBootstrapConfig(
             as_of_dates=parse_csv_tuple(as_of_dates),
-            symbols=parse_csv_tuple(symbols),
+            symbols=merge_symbols(symbols, symbols_file),
             lake_root=str(resolved_lake),
             allow_network=allow_network,
             csv_snapshot=str(csv_snapshot) if csv_snapshot else None,
@@ -314,7 +298,8 @@ def build_valuation_v7(
 
 @app.command("build-fundamentals-v7")
 def build_fundamentals_v7(
-    symbols: str = typer.Option(..., "--symbols", help="Comma-separated A-share symbols (e.g. 600519.SH,000858.SZ)"),
+    symbols: str = typer.Option("", "--symbols", help="Comma-separated A-share symbols (e.g. 600519.SH,000858.SZ)"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     start_date: str = typer.Option(..., "--start-date"),
     end_date: str = typer.Option(..., "--end-date"),
     provider: str = typer.Option("tushare", "--provider", help="tushare or akshare"),
@@ -331,7 +316,7 @@ def build_fundamentals_v7(
     request = ProviderRequest(
         start_date=start_date,
         end_date=end_date,
-        symbols=parse_csv_tuple(symbols),
+        symbols=merge_symbols(symbols, symbols_file),
     )
     if provider == "tushare":
         adapter = TuShareFinancialProvider(allow_network=allow_network, token_env=token_env)
@@ -362,12 +347,17 @@ def build_labels_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     output_path: Path = typer.Option(None, "--output"),
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
+    symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
 ) -> None:
     """Build future-return labels for training; labels must never be used for inference."""
     from quantagent.data.v7_label_builder import build_forward_return_labels
 
     resolved_output = Path(output_path) if output_path is not None else default_v7_lake_root() / "labels.parquet"
     frame = read_frame(market_panel_path)
+    symbol_tuple = merge_symbols(symbols, symbols_file)
+    if symbol_tuple:
+        frame = frame[frame["symbol"].astype(str).isin(set(symbol_tuple))].reset_index(drop=True)
     result = build_forward_return_labels(frame, tuple(int(item) for item in parse_csv_tuple(horizons)))
     actual = write_frame(result.frame, resolved_output)
     typer.echo(json_dump({"status": "passed", "output": str(actual), "rows": len(result.frame), "label_schema": result.label_schema}))
@@ -384,6 +374,7 @@ def build_training_dataset_v7(
     start_date: str | None = typer.Option(None, "--start-date"),
     end_date: str | None = typer.Option(None, "--end-date"),
     symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     min_rows: int = typer.Option(100, "--min-rows"),
     min_symbols: int = typer.Option(2, "--min-symbols"),
@@ -410,7 +401,7 @@ def build_training_dataset_v7(
         disclosures_path=str(disclosures_path) if disclosures_path else None,
         start_date=start_date,
         end_date=end_date,
-        symbols=parse_csv_tuple(symbols),
+        symbols=merge_symbols(symbols, symbols_file),
         horizons=tuple(int(item) for item in parse_csv_tuple(horizons)),
         min_rows=min_rows,
         min_symbols=min_symbols,

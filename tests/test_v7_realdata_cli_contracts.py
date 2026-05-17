@@ -161,3 +161,57 @@ def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "passed"
     assert (output_root / "manifests" / "market_panel.json").exists()
+
+
+def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, tmp_path):
+    from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
+    from quantagent.data.providers.base import ProviderResult
+
+    qlib_root = tmp_path / "qlib" / "cn_data"
+    calendar = qlib_root / "calendars"
+    calendar.mkdir(parents=True)
+    (calendar / "day.txt").write_text("2020-09-24\n2020-09-25\n", encoding="utf-8")
+
+    def fake_daily(self, request):
+        assert request.start_date == "2020-09-28"
+        assert request.end_date == "2026-05-15"
+        frame = pd.DataFrame(
+            [
+                {
+                    "symbol": "600519.SH",
+                    "trade_date": "2021-01-04",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.5,
+                    "close": 10.5,
+                    "volume": 1000,
+                    "amount": 10500.0,
+                    "available_at": "2021-01-05",
+                }
+            ]
+        )
+        return ProviderResult(frame, source="akshare_live_provider:stock_zh_a_hist", point_in_time=True)
+
+    monkeypatch.setattr(AkShareLiveProvider, "daily_ohlcv", fake_daily)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "build-akshare-market-panel-v7",
+            "--symbols",
+            "600519.SH",
+            "--output-root",
+            str(tmp_path / "lake"),
+            "--provider-uri-for-range",
+            str(qlib_root),
+            "--as-of-date",
+            "2026-05-17",
+            "--allow-network",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["resolved_range"]["source"] == "after_qlib_calendar"
+    assert payload["resolved_range"]["start_date"] == "2020-09-28"
+    assert payload["resolved_range"]["end_date"] == "2026-05-15"

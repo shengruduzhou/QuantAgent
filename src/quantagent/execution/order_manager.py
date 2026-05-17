@@ -23,6 +23,8 @@ from quantagent.quant_math.ashare import AshareRuleEngine
 @dataclass(frozen=True)
 class OrderManagerConfig:
     lot_size: int = 100
+    min_order_value_yuan: float = 5_000.0
+    allow_odd_lot_sell_only_for_full_liquidation: bool = True
     max_orders_per_symbol_per_day: int = 5
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
@@ -47,6 +49,8 @@ class OrderManager:
     rule_engine: AshareRuleEngine = field(default_factory=AshareRuleEngine)
     history: dict[str, OrderRecord] = field(default_factory=dict)
     counts_today: dict[str, int] = field(default_factory=dict)
+    last_skipped_orders: list[dict[str, object]] = field(default_factory=list)
+    skipped_orders: list[dict[str, object]] = field(default_factory=list)
 
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
@@ -91,6 +95,7 @@ class OrderManager:
         positions = positions or {p.symbol: p for p in self.broker.query_positions()}
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         intents: list[OrderIntent] = []
+        self.last_skipped_orders = []
         for symbol, weight in target_weights.reindex(prices.index).fillna(0.0).items():
             price = float(prices.loc[symbol])
             if price <= 0 or nav <= 0:
@@ -98,12 +103,36 @@ class OrderManager:
             current = positions.get(str(symbol))
             current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0
             raw_target = float(weight) * nav / price
+            delta_shares = raw_target - current_shares
+            delta_value = abs(delta_shares) * price
             if raw_target >= current_shares:
                 side = OrderSide.BUY
-                quantity = self.rule_engine.round_order_quantity(str(symbol), "buy", raw_target - current_shares)
+                quantity = self.rule_engine.round_order_quantity(str(symbol), "buy", delta_shares)
+                if quantity <= 0:
+                    self._skip(str(symbol), side, 0, float(weight), price, "skipped_invalid_lot", now, delta_value)
+                    continue
+                if quantity * price < self.config.min_order_value_yuan:
+                    self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
+                    continue
             else:
                 side = OrderSide.SELL
-                quantity = self.rule_engine.round_order_quantity(str(symbol), "sell", current_shares - raw_target)
+                desired_sell = current_shares - raw_target
+                full_liquidation = current_shares < self.config.lot_size and float(weight) <= 1e-6
+                if full_liquidation and self.config.allow_odd_lot_sell_only_for_full_liquidation:
+                    quantity = current_shares
+                else:
+                    quantity = int(desired_sell // self.config.lot_size * self.config.lot_size)
+                if quantity <= 0:
+                    reason = (
+                        "skipped_not_full_odd_lot_liquidation"
+                        if current_shares < self.config.lot_size and not full_liquidation
+                        else "skipped_invalid_lot"
+                    )
+                    self._skip(str(symbol), side, 0, float(weight), price, reason, now, delta_value)
+                    continue
+                if quantity * price < self.config.min_order_value_yuan and not full_liquidation:
+                    self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
+                    continue
             if quantity <= 0:
                 continue
             intent_id = self._make_id(str(symbol), side, signal_id=signal_id, model_version=model_version)
@@ -124,6 +153,30 @@ class OrderManager:
                 )
             )
         return intents
+
+    def _skip(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: int,
+        target_weight: float,
+        reference_price: float,
+        reason: str,
+        timestamp: str,
+        delta_value: float,
+    ) -> None:
+        row = {
+            "symbol": symbol,
+            "side": side.value,
+            "quantity": int(quantity),
+            "target_weight": float(target_weight),
+            "reference_price": float(reference_price),
+            "reason": reason,
+            "delta_value": float(delta_value),
+            "timestamp": timestamp,
+        }
+        self.last_skipped_orders.append(row)
+        self.skipped_orders.append(row)
 
     def cancel_all_open(self) -> list[OrderState]:
         results: list[OrderState] = []

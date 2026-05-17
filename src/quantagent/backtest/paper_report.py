@@ -21,6 +21,9 @@ class PaperReportConfig:
     output_dir: str | Path = "paper_report"
     title: str = "QuantAgent V7 Paper Trading Report"
     target_weights_path: str | None = None
+    acceptance_report_path: str | Path | None = None
+    metrics_path: str | Path | None = None
+    full_pipeline_report_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,7 @@ class PaperReportResult:
     output_dir: str
     files: dict[str, str] = field(default_factory=dict)
     summary: dict[str, object] = field(default_factory=dict)
+    quant_acceptance_status: str = "not_evaluated"
 
 
 def write_paper_report(
@@ -44,38 +48,49 @@ def write_paper_report(
 
     trades = _trade_frame(result.order_audit, config)
     failed = result.failed_order_audit.copy()
+    skipped = result.skipped_order_audit.copy()
     holdings = result.position_history.copy()
     pnl = _pnl_frame(result.nav, config.initial_cash, market_panel, config.benchmark_symbol)
     selected = _selected_stocks(trades, holdings)
-    summary = _summary(pnl, trades, failed, config.initial_cash)
+    summary = _summary(pnl, trades, failed, skipped, config.initial_cash)
+    acceptance = _load_quant_acceptance(config, output_dir)
 
     files = {
         "selected_stocks": str(_write_csv(selected, output_dir / "selected_stocks.csv")),
         "trades": str(_write_csv(trades, output_dir / "trades.csv")),
         "failed_orders": str(_write_csv(failed, output_dir / "failed_orders.csv")),
+        "skipped_orders": str(_write_csv(skipped, output_dir / "skipped_orders.csv")),
         "holdings": str(_write_csv(holdings, output_dir / "holdings.csv")),
         "pnl": str(_write_csv(pnl, output_dir / "pnl.csv")),
     }
     if config.target_weights_path:
         files["target_weights"] = str(config.target_weights_path)
+
+    warnings = [
+        "paper_report_is_not_financial_advice",
+        "paper_report_uses_out_of_sample_target_weights_only_if_upstream_pipeline_enforced_it",
+    ]
+    if not config.benchmark_symbol:
+        warnings.append("benchmark_missing_quant_alpha_not_validated")
+
     payload = {
-        "status": "passed",
+        "status": "report_generation_passed",
+        "report_generation_status": "passed",
+        "quant_acceptance_status": acceptance["status"],
         "summary": summary,
+        "acceptance": acceptance["payload"],
         "config": asdict(config),
         "files": files,
-        "warnings": [
-            "paper_report_is_not_financial_advice",
-            "paper_report_uses_out_of_sample_target_weights_only_if_upstream_pipeline_enforced_it",
-        ],
+        "warnings": warnings,
     }
     json_path = output_dir / "paper_report.json"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
     md_path = output_dir / "paper_report.md"
     md_path.write_text(_markdown_report(payload), encoding="utf-8")
     html_path = output_dir / "paper_report.html"
-    html_path.write_text(_html_report(payload, pnl, trades, failed), encoding="utf-8")
+    html_path.write_text(_html_report(payload, pnl, trades, failed, skipped), encoding="utf-8")
     files |= {"json": str(json_path), "markdown": str(md_path), "html": str(html_path)}
-    return PaperReportResult("passed", str(output_dir), files, summary)
+    return PaperReportResult("passed", str(output_dir), files, summary, str(acceptance["status"]))
 
 
 def _trade_frame(orders: pd.DataFrame, config: PaperReportConfig) -> pd.DataFrame:
@@ -208,7 +223,13 @@ def _selected_stocks(trades: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFra
     return pd.DataFrame(rows, columns=columns)
 
 
-def _summary(pnl: pd.DataFrame, trades: pd.DataFrame, failed: pd.DataFrame, initial_cash: float) -> dict[str, object]:
+def _summary(
+    pnl: pd.DataFrame,
+    trades: pd.DataFrame,
+    failed: pd.DataFrame,
+    skipped: pd.DataFrame,
+    initial_cash: float,
+) -> dict[str, object]:
     if pnl.empty:
         final_nav = float(initial_cash)
         gross_return = 0.0
@@ -221,17 +242,45 @@ def _summary(pnl: pd.DataFrame, trades: pd.DataFrame, failed: pd.DataFrame, init
     fees = float(trades.get("estimated_fee", pd.Series(dtype=float)).sum())
     slippage = float(trades.get("estimated_slippage", pd.Series(dtype=float)).sum())
     completed = trades[trades.get("status", pd.Series(dtype=str)).astype(str).isin(["filled", "partial"])] if not trades.empty else trades
+    net_return = (final_nav - fees - slippage) / float(initial_cash) - 1.0
+    daily_returns = pd.to_numeric(pnl.get("daily_return", pd.Series(dtype=float)), errors="coerce").dropna() if not pnl.empty else pd.Series(dtype=float)
+    annualized_return = float((1.0 + gross_return) ** (252.0 / max(len(daily_returns), 1)) - 1.0) if len(daily_returns) else 0.0
+    daily_std = float(daily_returns.std(ddof=0)) if len(daily_returns) else 0.0
+    annualized_volatility = float(daily_std * (252.0**0.5))
+    sharpe = float(daily_returns.mean() / daily_std * (252.0**0.5)) if daily_std > 0 else None
+    benchmark_return = None
+    benchmark_max_drawdown = None
+    information_ratio = None
+    if not pnl.empty and "benchmark_return" in pnl.columns:
+        bench_returns = pd.to_numeric(pnl["benchmark_return"], errors="coerce").fillna(0.0)
+        benchmark_curve = (1.0 + bench_returns).cumprod()
+        benchmark_return = float(benchmark_curve.iloc[-1] - 1.0) if not benchmark_curve.empty else None
+        benchmark_max_drawdown = float((benchmark_curve / benchmark_curve.cummax() - 1.0).min()) if not benchmark_curve.empty else None
+        excess_daily = daily_returns.reset_index(drop=True).reindex(bench_returns.reset_index(drop=True).index).fillna(0.0) - bench_returns.reset_index(drop=True)
+        tracking_error = float(excess_daily.std(ddof=0))
+        information_ratio = float(excess_daily.mean() / tracking_error * (252.0**0.5)) if tracking_error > 0 else None
+    excess_return = None if benchmark_return is None else float(net_return - benchmark_return)
     return {
         "initial_cash": float(initial_cash),
         "final_nav": final_nav,
         "realized_money_earned_lost": realized_pnl,
         "gross_return": gross_return,
-        "net_return_after_estimated_costs": (final_nav - fees - slippage) / float(initial_cash) - 1.0,
+        "net_return_after_estimated_costs": net_return,
+        "turnover_adjusted_net_return": net_return,
+        "benchmark_return": benchmark_return,
+        "excess_return": excess_return,
+        "excess_return_after_costs": excess_return,
+        "annualized_return": annualized_return,
+        "annualized_volatility": annualized_volatility,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "benchmark_max_drawdown": benchmark_max_drawdown,
+        "information_ratio": information_ratio,
         "total_estimated_fees": fees,
         "total_estimated_slippage": slippage,
-        "max_drawdown": max_drawdown,
         "trade_count": int(len(completed)),
         "failed_order_count": int(0 if failed is None else len(failed)),
+        "skipped_order_count": int(0 if skipped is None else len(skipped)),
     }
 
 
@@ -242,13 +291,34 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> Path:
 
 def _markdown_report(payload: dict[str, object]) -> str:
     summary = payload["summary"]
+    acceptance = payload.get("acceptance", {})
+    metrics = acceptance.get("metrics", {}) if isinstance(acceptance, dict) else {}
     lines = [
         "# QuantAgent V7 Paper Trading Report",
         "",
         "本报告只描述 paper/backtest 结果，不构成 financial advice；LLM/Agent 不生成订单。",
         "",
+        "## Quant Acceptance",
+        f"- `status`: {payload.get('quant_acceptance_status')}",
     ]
-    lines.append("## Summary")
+    if isinstance(acceptance, dict):
+        for failure in acceptance.get("failures", []):
+            lines.append(f"- `failure`: {failure}")
+    for key in (
+        "rank_ic_mean",
+        "rank_ic_stability",
+        "ICIR",
+        "turnover_adjusted_net_return",
+        "max_drawdown",
+        "adverse_regime_passed",
+        "single_factor_dominance",
+        "benchmark_excess_return",
+        "excess_return",
+        "selection_pressure_min",
+    ):
+        if key in metrics:
+            lines.append(f"- `{key}`: {metrics[key]}")
+    lines.extend(["", "## Summary"])
     for key, value in summary.items():  # type: ignore[union-attr]
         lines.append(f"- `{key}`: {value}")
     lines.append("")
@@ -258,8 +328,31 @@ def _markdown_report(payload: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _html_report(payload: dict[str, object], pnl: pd.DataFrame, trades: pd.DataFrame, failed: pd.DataFrame) -> str:
+def _html_report(
+    payload: dict[str, object],
+    pnl: pd.DataFrame,
+    trades: pd.DataFrame,
+    failed: pd.DataFrame,
+    skipped: pd.DataFrame,
+) -> str:
     summary_rows = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in payload["summary"].items())  # type: ignore[union-attr]
+    acceptance = payload.get("acceptance", {})
+    acceptance_metrics = acceptance.get("metrics", {}) if isinstance(acceptance, dict) else {}
+    acceptance_rows = "".join(
+        f"<tr><th>{k}</th><td>{v}</td></tr>"
+        for k, v in {
+            "status": payload.get("quant_acceptance_status"),
+            "failures": acceptance.get("failures", []) if isinstance(acceptance, dict) else [],
+            "rank_ic_mean": acceptance_metrics.get("rank_ic_mean"),
+            "rank_ic_stability": acceptance_metrics.get("rank_ic_stability", acceptance_metrics.get("ICIR")),
+            "turnover_adjusted_net_return": acceptance_metrics.get("turnover_adjusted_net_return"),
+            "max_drawdown": acceptance_metrics.get("max_drawdown"),
+            "adverse_regime_passed": acceptance_metrics.get("adverse_regime_passed"),
+            "single_factor_dominance": acceptance_metrics.get("single_factor_dominance"),
+            "benchmark_excess_return": acceptance_metrics.get("benchmark_excess_return", acceptance_metrics.get("excess_return")),
+            "selection_pressure": acceptance_metrics.get("selection_pressure_min"),
+        }.items()
+    )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>QuantAgent V7 Paper Trading Report</title>
@@ -267,8 +360,44 @@ def _html_report(payload: dict[str, object], pnl: pd.DataFrame, trades: pd.DataF
 <body>
 <h1>QuantAgent V7 Paper Trading Report</h1>
 <p>本报告只描述 paper/backtest 结果，不构成 financial advice；LLM/Agent 不生成订单。</p>
+<h2>Quant Acceptance</h2><table>{acceptance_rows}</table>
 <h2>Summary</h2><table>{summary_rows}</table>
 <h2>Recent PnL</h2>{pnl.tail(20).to_html(index=False)}
 <h2>Trades</h2>{trades.tail(50).to_html(index=False)}
 <h2>Failed Orders</h2>{failed.tail(50).to_html(index=False) if failed is not None and not failed.empty else '<p>None</p>'}
+<h2>Skipped Orders</h2>{skipped.tail(50).to_html(index=False) if skipped is not None and not skipped.empty else '<p>None</p>'}
 </body></html>"""
+
+
+def _load_quant_acceptance(config: PaperReportConfig, output_dir: Path) -> dict[str, object]:
+    candidates = [
+        config.acceptance_report_path,
+        output_dir / "acceptance_report.json",
+        output_dir.parent / "acceptance_report.json",
+        config.full_pipeline_report_path,
+        config.metrics_path,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if "acceptance_report" in payload and isinstance(payload["acceptance_report"], dict):
+            payload = payload["acceptance_report"]
+        if "passed" in payload or "failures" in payload or "metrics" in payload:
+            status = "passed" if bool(payload.get("passed", False)) else "failed"
+            return {"status": status, "payload": payload, "path": str(path)}
+    return {
+        "status": "not_evaluated",
+        "payload": {
+            "passed": False,
+            "failures": [],
+            "metrics": {},
+            "reason": "metrics_or_acceptance_report_missing",
+        },
+    }

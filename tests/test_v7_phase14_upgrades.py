@@ -49,6 +49,14 @@ def test_v7_sources_validate_frame_against_schema_reports_missing_columns():
     assert "available_at" in set(report.missing_columns)
 
 
+def test_qlib_symbol_helpers_align_with_akshare_suffix_style():
+    from quantagent.data.v7_auto_range import from_qlib_instrument, standard_a_symbol, to_qlib_instrument
+
+    assert standard_a_symbol("sh600519") == "600519.SH"
+    assert to_qlib_instrument("600519.SH") == "SH600519"
+    assert from_qlib_instrument("SZ000001") == "000001.SZ"
+
+
 # ---------------------------------------------------------------------------
 # Sector provider — no cross-join
 # ---------------------------------------------------------------------------
@@ -439,6 +447,31 @@ def test_train_alpha_outputs_validation_only_predictions(tmp_path):
     assert (pd.to_datetime(predictions["train_end"]) < pd.to_datetime(predictions["valid_start"])).all()
 
 
+def test_train_alpha_ignores_all_nan_optional_features(tmp_path):
+    from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
+
+    dataset = _toy_training_frame(rows=300)
+    dataset["amount_mean_20d"] = np.nan
+    result = run_v7_training_experiment(
+        dataset,
+        V7TrainingConfig(
+            model="ridge",
+            horizons=(1,),
+            output_dir=str(tmp_path / "alpha"),
+            min_train_rows=20,
+            n_splits=2,
+            split_mode="rolling",
+            valid_size_days=5,
+            min_train_days=20,
+            purge_days=1,
+            embargo_days=1,
+        ),
+    )
+    schema = json.loads(Path(result.artifact_paths["feature_schema"]).read_text(encoding="utf-8"))
+    assert "amount_mean_20d" not in schema["feature_columns"]
+    assert result.metrics["prediction_rows"] > 0
+
+
 def test_run_full_pipeline_uses_oos_predictions_loader(tmp_path):
     from quantagent.cli.v7_train import _load_oos_predictions
 
@@ -458,6 +491,13 @@ def test_run_full_pipeline_uses_oos_predictions_loader(tmp_path):
     bad.to_csv(bad_path, index=False)
     with pytest.raises(ValueError, match="out-of-sample"):
         _load_oos_predictions(bad_path, primary_horizon=5)
+
+
+def test_backtest_nav_series_serializes_timestamp_index():
+    from quantagent.cli.v7_train import _series_to_json_dict
+
+    nav = pd.Series([1.0, 1.01], index=pd.to_datetime(["2025-01-02", "2025-01-03"]))
+    assert _series_to_json_dict(nav) == {"2025-01-02": 1.0, "2025-01-03": 1.01}
 
 
 def test_predict_v7_alpha_round_trip_ft_transformer(tmp_path):
@@ -494,6 +534,16 @@ def test_predict_v7_alpha_round_trip_ft_transformer(tmp_path):
     assert {"alpha_1d", "prediction"}.issubset(pred.predictions.columns)
 
 
+def test_ft_transformer_require_gpu_fails_when_cuda_absent(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from quantagent.training import ft_transformer_trainer as trainer
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="GPU training was required"):
+        trainer._resolve_device("auto", require_gpu=True)  # type: ignore[attr-defined]
+    assert trainer._resolve_device("auto", require_gpu=False) == "cpu"  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------
@@ -508,8 +558,65 @@ def test_new_cli_commands_are_registered():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     output = result.stdout
-    for command in ("predict-alpha-v7", "build-target-weights-v7", "run-full-real-training-v7", "materialize-factors-v7"):
+    for command in ("predict-alpha-v7", "build-target-weights-v7", "run-full-real-training-v7", "auto-train-v7", "materialize-factors-v7"):
         assert command in output, f"CLI is missing {command} in --help output"
+
+
+def test_auto_train_v7_uses_existing_market_panel_and_writes_labels(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from quantagent.cli import app
+    import quantagent.cli.v7_train as v7_train
+
+    dates = pd.date_range("2025-01-02", periods=8, freq="B")
+    rows = []
+    for symbol in ("600519.SH", "000001.SZ"):
+        for idx, date in enumerate(dates):
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": date.strftime("%Y-%m-%d"),
+                    "open": 10 + idx,
+                    "high": 11 + idx,
+                    "low": 9 + idx,
+                    "close": 10.5 + idx,
+                    "volume": 1000,
+                    "amount": 10000,
+                    "available_at": (date + pd.offsets.BDay(1)).strftime("%Y-%m-%d"),
+                }
+            )
+    market_path = tmp_path / "market.csv"
+    pd.DataFrame(rows).to_csv(market_path, index=False)
+
+    calls = {}
+
+    def fake_run_full_real_training_v7(**kwargs):
+        calls.update(kwargs)
+
+    monkeypatch.setattr(v7_train, "run_full_real_training_v7", fake_run_full_real_training_v7)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "auto-train-v7",
+            "--symbols",
+            "600519.SH,000001.SZ",
+            "--market-panel",
+            str(market_path),
+            "--horizons",
+            "1,5",
+            "--min-rows",
+            "4",
+            "--min-train-rows",
+            "4",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["status"] == "started_and_completed"
+    assert calls["market_panel_path"] == market_path
+    assert Path(calls["labels_path"]).exists()
 
 
 def test_walk_forward_backtest_v7_requires_predictions_or_weights(tmp_path):

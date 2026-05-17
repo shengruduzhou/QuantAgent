@@ -46,6 +46,7 @@ class FTTransformerTrainerConfig:
     huber_delta: float = 1.0
     rank_loss_weight: float = 0.5
     device: str = "auto"
+    require_gpu: bool = False
     seed: int = 1729
     feature_columns: tuple[str, ...] = ()
     use_missing_mask: bool = True
@@ -62,6 +63,9 @@ class FTTransformerArtifacts:
     schema_path: Path
     metrics_path: Path
     backend: str
+    device: str
+    cuda_available: bool
+    gpu_name: str | None
     horizons: list[int]
     feature_columns: list[str]
     training_history: list[dict[str, float]]
@@ -134,7 +138,8 @@ class FTTransformerTrainer:
             else (None, None, None)
         )
 
-        device = _resolve_device(self.config.device)
+        device = _resolve_device(self.config.device, require_gpu=self.config.require_gpu)
+        device_report = _torch_device_report(device)
         means = np.nan_to_num(train_x.mean(axis=0))
         scales = np.nan_to_num(train_x.std(axis=0)) + 1e-9
         train_tensor = torch.tensor((train_x - means) / scales, dtype=torch.float32, device=device)
@@ -267,7 +272,14 @@ class FTTransformerTrainer:
         )
         metrics_path.write_text(
             json.dumps(
-                {"training_history": history, "backend": "torch", "horizons": horizons},
+                {
+                    "training_history": history,
+                    "backend": "torch",
+                    "device": device,
+                    "cuda_available": device_report["cuda_available"],
+                    "gpu_name": device_report["gpu_name"],
+                    "horizons": horizons,
+                },
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -280,6 +292,9 @@ class FTTransformerTrainer:
             schema_path=schema_path,
             metrics_path=metrics_path,
             backend="torch",
+            device=device,
+            cuda_available=bool(device_report["cuda_available"]),
+            gpu_name=device_report["gpu_name"],
             horizons=horizons,
             feature_columns=feature_columns,
             training_history=history,
@@ -314,17 +329,33 @@ def _prepare(
     return features, labels, dates
 
 
-def _resolve_device(device: str) -> str:  # pragma: no cover - torch path
+def _resolve_device(device: str, *, require_gpu: bool = False) -> str:  # pragma: no cover - torch path
+    import torch  # type: ignore
+
     if device == "cpu":
+        if require_gpu:
+            raise RuntimeError("GPU training was required, but device='cpu' was requested")
         return "cpu"
     if device == "auto":
-        try:
-            import torch  # type: ignore
-
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            return "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if require_gpu:
+            raise RuntimeError("GPU training was required, but torch.cuda.is_available() is false")
+        return "cpu"
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA device requested ({device}), but torch.cuda.is_available() is false")
     return device
+
+
+def _torch_device_report(device: str) -> dict[str, object]:  # pragma: no cover - torch path
+    import torch  # type: ignore
+
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    return {
+        "device": device,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "gpu_name": gpu_name,
+    }
 
 
 def predict_ft_transformer_artifact(

@@ -22,6 +22,12 @@ def walk_forward_backtest_v7(
     ),
     sector_map_path: Path | None = typer.Option(None, "--sector-map"),
     top_k: int = typer.Option(30, "--top-k"),
+    top_k_ratio: float | None = typer.Option(0.10, "--top-k-ratio"),
+    min_selection_pressure: float = typer.Option(3.0, "--min-selection-pressure"),
+    fail_if_top_k_covers_universe: bool = typer.Option(
+        True,
+        "--fail-if-top-k-covers-universe/--allow-top-k-covers-universe",
+    ),
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
     max_turnover: float = typer.Option(0.50, "--max-turnover"),
@@ -55,6 +61,9 @@ def walk_forward_backtest_v7(
             config=V7TargetWeightsConfig(
                 long_short=long_short,
                 top_k=top_k,
+                top_k_ratio=top_k_ratio,
+                min_selection_pressure=min_selection_pressure,
+                fail_if_top_k_covers_universe=fail_if_top_k_covers_universe,
                 max_weight_per_name=max_weight_per_name,
                 max_sector_weight=max_sector_weight,
                 max_turnover=max_turnover,
@@ -83,6 +92,7 @@ def walk_forward_backtest_v7(
         "nav": result.nav.to_dict(),
         "orders": result.order_audit.to_dict("records"),
         "failed_orders": result.failed_order_audit.to_dict("records"),
+        "skipped_orders": result.skipped_order_audit.to_dict("records"),
         "holdings": result.position_history.to_dict("records"),
         "config": result.config,
     }
@@ -102,6 +112,7 @@ def run_paper_backtest_v7(
     lot_size: int = typer.Option(100, "--lot-size"),
     volume_participation_cap: float = typer.Option(0.10, "--volume-participation-cap"),
     slippage_bps: float = typer.Option(8.0, "--slippage-bps"),
+    min_order_value_yuan: float = typer.Option(5_000.0, "--min-order-value-yuan"),
 ) -> None:
     """Run A-share constrained paper backtest and write user-facing reports."""
     from quantagent.backtest.ashare_execution_simulator import (
@@ -123,6 +134,7 @@ def run_paper_backtest_v7(
         AShareExecutionSimulationConfig(
             initial_cash=initial_cash,
             lot_size=lot_size,
+            min_order_value_yuan=min_order_value_yuan,
             volume_participation_cap=volume_participation_cap,
             slippage_bps=slippage_bps,
             audit_log_dir=str(resolved_dir / "audit"),
@@ -160,6 +172,7 @@ def generate_paper_report_v7(
         lot_size=100,
         volume_participation_cap=0.10,
         slippage_bps=8.0,
+        min_order_value_yuan=5_000.0,
     )
 
 

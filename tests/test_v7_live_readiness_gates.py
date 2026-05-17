@@ -22,6 +22,14 @@ def _passing_metrics() -> dict[str, object]:
         "single_factor_dominance": 0.20,
         "adverse_regime_passed": True,
         "uses_mock_or_synthetic": False,
+        "pit_violation_count": 0,
+        "benchmark_symbol": "000300.SH",
+        "benchmark_return": 0.01,
+        "excess_return_after_costs": 0.01,
+        "selection_pressure_min": 5.0,
+        "training_dataset_symbol_count": 100,
+        "prediction_symbol_count": 100,
+        "eligible_symbol_count_min": 100,
     }
 
 

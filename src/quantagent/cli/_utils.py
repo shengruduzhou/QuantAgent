@@ -86,3 +86,32 @@ def parse_csv_tuple(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def parse_symbols_file(path: Path | str | None) -> tuple[str, ...]:
+    """Read one-symbol-per-line universe files.
+
+    Blank lines and lines starting with ``#`` are ignored. Inline comments
+    are also stripped so users can annotate large universe files.
+    """
+    if path is None:
+        return ()
+    symbols: list[str] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            symbols.append(line)
+    return tuple(symbols)
+
+
+def merge_symbols(symbols: str | None = None, symbols_file: Path | str | None = None) -> tuple[str, ...]:
+    """Merge comma-separated symbols and a symbols file with stable de-dupe."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for symbol in (*parse_csv_tuple(symbols), *parse_symbols_file(symbols_file)):
+        normalized = str(symbol).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    return tuple(merged)

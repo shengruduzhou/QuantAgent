@@ -68,6 +68,8 @@ class V7TrainingConfig:
     ft_n_blocks: int = 3
     ft_n_heads: int = 4
     ft_use_amp: bool = True
+    ft_device: str = "auto"
+    require_gpu: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,7 +170,14 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     metrics["model_downgraded"] = backend != config.model
     acceptance = evaluate_model_acceptance_gates(
         metrics,
-        V7ModelAcceptanceGateConfig(require_paper_report=config.mark_production_ready),
+        V7ModelAcceptanceGateConfig(
+            require_paper_report=config.mark_production_ready,
+            require_benchmark=False,
+            min_training_symbols=1,
+            min_prediction_symbols=1,
+            min_effective_universe_by_date=1,
+            min_selection_pressure=0.0,
+        ),
         paper_report_path=config.paper_report_path,
     )
     status = "production_ready" if config.mark_production_ready and acceptance.passed else "validation_only"
@@ -274,12 +283,14 @@ def _run_ft_transformer_experiment(
                 batch_size=config.ft_batch_size,
                 max_epochs=config.ft_max_epochs,
                 use_amp=config.ft_use_amp,
+                device=config.ft_device,
+                require_gpu=config.require_gpu,
                 feature_columns=tuple(feature_columns),
                 output_dir=str(fold_dir),
             )
         )
-        trainer.fit_and_save(train, validation_dataset=valid)
-        pred = predict_ft_transformer_artifact(fold_dir, valid)
+        fold_artifacts = trainer.fit_and_save(train, validation_dataset=valid)
+        pred = predict_ft_transformer_artifact(fold_dir, valid, device=fold_artifacts.device)
         for horizon in used_horizons:
             label_column = f"forward_return_{horizon}d"
             alpha_column = f"alpha_{horizon}d"
@@ -307,11 +318,13 @@ def _run_ft_transformer_experiment(
             batch_size=config.ft_batch_size,
             max_epochs=config.ft_max_epochs,
             use_amp=config.ft_use_amp,
+            device=config.ft_device,
+            require_gpu=config.require_gpu,
             feature_columns=tuple(feature_columns),
             output_dir=str(output_dir),
         )
     )
-    final_trainer.fit_and_save(fit_frame)
+    final_artifacts = final_trainer.fit_and_save(fit_frame)
 
     prediction_frame = pd.concat(all_predictions, ignore_index=True)
     metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients={})
@@ -323,9 +336,20 @@ def _run_ft_transformer_experiment(
     metrics["backend"] = "ft_transformer"
     metrics["model_requested"] = config.model
     metrics["model_downgraded"] = False
+    metrics["training_device"] = final_artifacts.device
+    metrics["cuda_available"] = final_artifacts.cuda_available
+    metrics["gpu_name"] = final_artifacts.gpu_name
+    metrics["gpu_required"] = config.require_gpu
     acceptance = evaluate_model_acceptance_gates(
         metrics,
-        V7ModelAcceptanceGateConfig(require_paper_report=config.mark_production_ready),
+        V7ModelAcceptanceGateConfig(
+            require_paper_report=config.mark_production_ready,
+            require_benchmark=False,
+            min_training_symbols=1,
+            min_prediction_symbols=1,
+            min_effective_universe_by_date=1,
+            min_selection_pressure=0.0,
+        ),
         paper_report_path=config.paper_report_path,
     )
     status = "production_ready" if config.mark_production_ready and acceptance.passed else "validation_only"
@@ -472,11 +496,14 @@ def _feature_importance(boosters: dict[str, object], feature_columns: list[str])
 
 def _auto_feature_columns(frame: pd.DataFrame) -> tuple[str, ...]:
     excluded = {"open", "high", "low", "close", "volume", "amount"}
-    return tuple(
-        column
-        for column in frame.select_dtypes("number").columns
-        if not column.startswith("forward_return_") and not column.startswith("label_end_") and column not in excluded
-    )
+    selected: list[str] = []
+    for column in frame.select_dtypes("number").columns:
+        if column.startswith("forward_return_") or column.startswith("label_end_") or column in excluded:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if np.isfinite(values.dropna().to_numpy(dtype=float)).any():
+            selected.append(column)
+    return tuple(selected)
 
 
 def _label_end_times(frame: pd.DataFrame, horizon: int) -> pd.Series:

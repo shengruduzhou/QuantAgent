@@ -39,6 +39,9 @@ class V7TargetWeightsConfig:
     objective: str = "max_expected_alpha"
     long_short: bool = False
     top_k: int = 30
+    top_k_ratio: float | None = 0.10
+    min_selection_pressure: float = 3.0
+    fail_if_top_k_covers_universe: bool = True
     max_weight_per_name: float = 0.10
     max_sector_weight: float = 0.30
     max_turnover: float = 0.50
@@ -104,6 +107,12 @@ def build_v7_target_weights(
             raise ValueError("predictions frame must include 'prediction' or 'alpha_*' columns")
         column = config.horizon_column or alpha_columns[0]
         preds = preds.rename(columns={column: "prediction"})
+        prediction_source = column
+    elif "risk_adjusted_prediction" in preds.columns:
+        preds["prediction"] = pd.to_numeric(preds["risk_adjusted_prediction"], errors="coerce")
+        prediction_source = "risk_adjusted_prediction"
+    else:
+        prediction_source = "prediction"
 
     market = market_panel.copy()
     market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce")
@@ -120,7 +129,13 @@ def build_v7_target_weights(
         )
 
     by_date_weights: list[pd.DataFrame] = []
-    diagnostics: dict[str, list[dict[str, object]]] = {"rejected": [], "exposures": []}
+    diagnostics: dict[str, list[dict[str, object]]] = {
+        "rejected": [],
+        "exposures": [],
+        "daily_selection": [],
+        "alpha_distribution_by_date": [],
+        "warnings": [],
+    }
     previous_weights: pd.Series | None = None
 
     for date, day in preds.groupby("trade_date", sort=True):
@@ -155,10 +170,16 @@ def build_v7_target_weights(
 
         # Top-K selection by predicted alpha (long side); for long-short keep both tails.
         alpha = eligible["prediction"].astype(float)
+        effective_top_k = _effective_top_k(len(eligible), config)
+        if config.fail_if_top_k_covers_universe and effective_top_k >= len(eligible):
+            raise ValueError(
+                "top_k selection covers the eligible universe; increase the universe or lower --top-k/--top-k-ratio"
+            )
         if config.long_short:
-            top_k = min(config.top_k, len(eligible) // 2 or 1)
+            top_k = min(effective_top_k, len(eligible) // 2 or 1)
             longs = eligible.nlargest(top_k, "prediction")
             shorts = eligible.nsmallest(top_k, "prediction")
+            selected_count = int(pd.concat([longs[["symbol"]], shorts[["symbol"]]]).drop_duplicates("symbol").shape[0])
             longs_w = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
             shorts_w = -_softmax_weights(-shorts["prediction"].to_numpy(dtype=float), config.alpha_temperature)
             weights = pd.Series(
@@ -166,8 +187,10 @@ def build_v7_target_weights(
                 index=pd.Index(np.concatenate([longs["symbol"].to_numpy(), shorts["symbol"].to_numpy()]), name="symbol"),
             )
         else:
-            top_k = min(config.top_k, len(eligible))
+            top_k = effective_top_k
             longs = eligible.nlargest(top_k, "prediction")
+            shorts = pd.DataFrame(columns=eligible.columns)
+            selected_count = int(len(longs))
             cvx_weights, cvx_note = _try_cvxpy_long_only(longs, previous_weights, sector_lookup, config)
             if cvx_weights is not None:
                 weights = cvx_weights
@@ -176,6 +199,38 @@ def build_v7_target_weights(
                 scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
                 weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
                 diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "deterministic", "note": cvx_note})
+        selection_pressure = float(len(eligible) / max(selected_count, 1))
+        whether_selection_is_real = bool(selection_pressure >= config.min_selection_pressure and selected_count < len(eligible))
+        selected_symbols = set(longs["symbol"].astype(str))
+        if config.long_short and not shorts.empty:
+            selected_symbols |= set(shorts["symbol"].astype(str))
+        selected_alpha = eligible[eligible["symbol"].astype(str).isin(selected_symbols)]["prediction"].astype(float)
+        unselected_alpha = eligible[~eligible["symbol"].astype(str).isin(selected_symbols)]["prediction"].astype(float)
+        alpha_stats = _alpha_distribution_stats(selected_alpha, unselected_alpha)
+        if alpha_stats["selected_vs_unselected_alpha_spread"] <= 0:
+            diagnostics["warnings"].append(
+                {
+                    "trade_date": str(date),
+                    "warning": "selected_alpha_not_above_unselected_alpha",
+                    "selected_vs_unselected_alpha_spread": alpha_stats["selected_vs_unselected_alpha_spread"],
+                }
+            )
+        diagnostics["daily_selection"].append(
+            {
+                "trade_date": str(date),
+                "eligible_count": int(len(eligible)),
+                "selected_count": selected_count,
+                "effective_top_k": int(effective_top_k),
+                "selection_pressure": selection_pressure,
+                "top_k_ratio": config.top_k_ratio,
+                "whether_selection_is_real": whether_selection_is_real,
+            }
+        )
+        diagnostics["alpha_distribution_by_date"].append({"trade_date": str(date), **alpha_stats})
+        if selection_pressure < config.min_selection_pressure:
+            raise ValueError(
+                f"selection_pressure={selection_pressure:.3f} is below min_selection_pressure={config.min_selection_pressure:.3f}"
+            )
         # Apply per-name cap.
         caps = longs.set_index("symbol")["liquidity_cap"] if not config.long_short else pd.concat(
             [longs.set_index("symbol")["liquidity_cap"], shorts.set_index("symbol")["liquidity_cap"]]
@@ -256,6 +311,35 @@ def build_v7_target_weights(
     pivot = long_format.pivot_table(index="trade_date", columns="symbol", values="weight", aggfunc="last").fillna(0.0)
     diagnostics_payload = {
         "status": "passed",
+        "raw_symbol_count": int(preds["symbol"].nunique()),
+        "market_panel_symbol_count": int(market["symbol"].nunique()),
+        "prediction_symbol_count": int(preds["symbol"].nunique()),
+        "eligible_symbol_count_by_date": {
+            item["trade_date"]: item["eligible_count"] for item in diagnostics["daily_selection"]
+        },
+        "selected_symbol_count_by_date": {
+            item["trade_date"]: item["selected_count"] for item in diagnostics["daily_selection"]
+        },
+        "selection_pressure_mean": float(np.mean([item["selection_pressure"] for item in diagnostics["daily_selection"]]))
+        if diagnostics["daily_selection"]
+        else 0.0,
+        "selection_pressure_min": float(np.min([item["selection_pressure"] for item in diagnostics["daily_selection"]]))
+        if diagnostics["daily_selection"]
+        else 0.0,
+        "selected_count_mean": float(np.mean([item["selected_count"] for item in diagnostics["daily_selection"]]))
+        if diagnostics["daily_selection"]
+        else 0.0,
+        "selected_count_min": int(np.min([item["selected_count"] for item in diagnostics["daily_selection"]]))
+        if diagnostics["daily_selection"]
+        else 0,
+        "selected_count_max": int(np.max([item["selected_count"] for item in diagnostics["daily_selection"]]))
+        if diagnostics["daily_selection"]
+        else 0,
+        "whether_selection_is_real": bool(
+            diagnostics["daily_selection"]
+            and all(bool(item["whether_selection_is_real"]) for item in diagnostics["daily_selection"])
+        ),
+        "prediction_source": prediction_source,
         "dates": int(pivot.shape[0]),
         "symbol_count": int(pivot.shape[1]),
         "average_gross_exposure": float(pivot.abs().sum(axis=1).mean()),
@@ -287,6 +371,34 @@ def _softmax_weights(values: np.ndarray, temperature: float) -> np.ndarray:
     if total <= 0:
         return np.ones_like(safe) / len(safe)
     return expo / total
+
+
+def _effective_top_k(eligible_count: int, config: V7TargetWeightsConfig) -> int:
+    if eligible_count <= 0:
+        return 0
+    if config.top_k_ratio is None:
+        ratio_cap = int(config.top_k)
+    else:
+        ratio_cap = int(np.floor(float(eligible_count) * float(config.top_k_ratio)))
+    return max(1, min(int(config.top_k), max(1, ratio_cap), int(eligible_count)))
+
+
+def _alpha_distribution_stats(selected_alpha: pd.Series, unselected_alpha: pd.Series) -> dict[str, float]:
+    def stats(prefix: str, values: pd.Series) -> dict[str, float]:
+        clean = pd.to_numeric(values, errors="coerce").dropna()
+        if clean.empty:
+            return {f"{prefix}_alpha_min": 0.0, f"{prefix}_alpha_mean": 0.0, f"{prefix}_alpha_max": 0.0}
+        return {
+            f"{prefix}_alpha_min": float(clean.min()),
+            f"{prefix}_alpha_mean": float(clean.mean()),
+            f"{prefix}_alpha_max": float(clean.max()),
+        }
+
+    payload = {**stats("selected", selected_alpha), **stats("unselected", unselected_alpha)}
+    payload["selected_vs_unselected_alpha_spread"] = (
+        payload["selected_alpha_mean"] - payload["unselected_alpha_mean"]
+    )
+    return payload
 
 
 def _apply_turnover_cap(target: pd.Series, previous: pd.Series, cap: float) -> pd.Series:

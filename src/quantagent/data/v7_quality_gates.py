@@ -27,6 +27,14 @@ class V7ModelAcceptanceGateConfig:
     max_single_factor_dominance: float = 0.60
     require_adverse_regime: bool = True
     require_paper_report: bool = True
+    require_benchmark: bool = True
+    min_excess_return_after_costs: float = 0.0
+    min_selection_pressure: float = 3.0
+    min_training_symbols: int = 50
+    min_prediction_symbols: int = 50
+    min_effective_universe_by_date: int = 50
+    no_mock_or_synthetic: bool = True
+    no_pit_violations: bool = True
     adverse_regime_min_rank_ic: float = -0.02
     adverse_regime_max_drawdown: float = 0.40
 
@@ -36,10 +44,12 @@ class V7GateReport:
     passed: bool
     failures: tuple[str, ...] = ()
     metrics: dict[str, Any] = field(default_factory=dict)
+    gates: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["failures"] = list(self.failures)
+        data["gates"] = list(self.gates)
         return data
 
 
@@ -72,24 +82,131 @@ def evaluate_model_acceptance_gates(
     paper_report_path: str | Path | None = None,
 ) -> V7GateReport:
     config = config or V7ModelAcceptanceGateConfig()
-    failures: list[str] = []
-    if float(metrics.get("rank_ic_mean", 0.0)) <= config.min_rank_ic_mean:
-        failures.append("rank_ic_mean_not_positive")
-    if float(metrics.get("rank_ic_stability", 0.0)) <= config.min_rank_ic_stability:
-        failures.append("rank_ic_stability_not_positive")
-    if float(metrics.get("turnover_adjusted_net_return", 0.0)) <= config.min_turnover_adjusted_return:
-        failures.append("turnover_adjusted_net_return_failed")
-    if abs(float(metrics.get("max_drawdown", 0.0))) > config.max_drawdown:
-        failures.append("max_drawdown_exceeded")
-    if float(metrics.get("single_factor_dominance", 0.0)) > config.max_single_factor_dominance:
-        failures.append("single_factor_dominance_too_high")
-    if config.require_adverse_regime and not bool(metrics.get("adverse_regime_passed", False)):
-        failures.append("adverse_regime_not_validated")
-    if config.require_paper_report and not (paper_report_path and Path(paper_report_path).exists()):
-        failures.append("paper_trading_report_missing")
-    if bool(metrics.get("uses_mock_or_synthetic", False)):
-        failures.append("mock_data_model_not_production_ready")
-    return V7GateReport(not failures, tuple(failures), dict(metrics))
+    gates: list[dict[str, Any]] = []
+
+    def add_gate(name: str, passed: bool, actual: Any, threshold: Any, reason: str) -> None:
+        gates.append(
+            {
+                "name": name,
+                "passed": bool(passed),
+                "actual": actual,
+                "threshold": threshold,
+                "reason": "passed" if passed else reason,
+            }
+        )
+
+    add_gate(
+        "rank_ic_mean",
+        float(metrics.get("rank_ic_mean", 0.0)) > config.min_rank_ic_mean,
+        float(metrics.get("rank_ic_mean", 0.0)),
+        f"> {config.min_rank_ic_mean}",
+        "rank_ic_mean_not_positive",
+    )
+    add_gate(
+        "rank_ic_stability",
+        float(metrics.get("rank_ic_stability", metrics.get("ICIR", 0.0))) > config.min_rank_ic_stability,
+        float(metrics.get("rank_ic_stability", metrics.get("ICIR", 0.0))),
+        f"> {config.min_rank_ic_stability}",
+        "rank_ic_stability_not_positive",
+    )
+    add_gate(
+        "turnover_adjusted_net_return",
+        float(metrics.get("turnover_adjusted_net_return", 0.0)) > config.min_turnover_adjusted_return,
+        float(metrics.get("turnover_adjusted_net_return", 0.0)),
+        f"> {config.min_turnover_adjusted_return}",
+        "turnover_adjusted_net_return_failed",
+    )
+    add_gate(
+        "max_drawdown",
+        abs(float(metrics.get("max_drawdown", 0.0))) <= config.max_drawdown,
+        float(metrics.get("max_drawdown", 0.0)),
+        f"abs(drawdown) <= {config.max_drawdown}",
+        "max_drawdown_exceeded",
+    )
+    add_gate(
+        "single_factor_dominance",
+        float(metrics.get("single_factor_dominance", 0.0)) <= config.max_single_factor_dominance,
+        float(metrics.get("single_factor_dominance", 0.0)),
+        f"<= {config.max_single_factor_dominance}",
+        "single_factor_dominance_too_high",
+    )
+    adverse_actual = bool(metrics.get("adverse_regime_passed", False))
+    add_gate(
+        "adverse_regime",
+        (not config.require_adverse_regime) or adverse_actual,
+        adverse_actual,
+        f"required={config.require_adverse_regime}, min_rank_ic={config.adverse_regime_min_rank_ic}",
+        "adverse_regime_not_validated",
+    )
+    add_gate(
+        "paper_report",
+        (not config.require_paper_report) or bool(paper_report_path and Path(paper_report_path).exists()),
+        str(paper_report_path) if paper_report_path else None,
+        f"required={config.require_paper_report}",
+        "paper_trading_report_missing",
+    )
+    has_benchmark = bool(metrics.get("benchmark_symbol")) or metrics.get("benchmark_return") is not None
+    add_gate(
+        "benchmark",
+        (not config.require_benchmark) or has_benchmark,
+        metrics.get("benchmark_symbol") or metrics.get("benchmark_return"),
+        f"required={config.require_benchmark}",
+        "benchmark_missing_quant_alpha_not_validated",
+    )
+    add_gate(
+        "excess_return_after_costs",
+        float(metrics.get("excess_return_after_costs", metrics.get("excess_return", 0.0))) > config.min_excess_return_after_costs,
+        float(metrics.get("excess_return_after_costs", metrics.get("excess_return", 0.0))),
+        f"> {config.min_excess_return_after_costs}",
+        "excess_return_after_costs_failed",
+    )
+    add_gate(
+        "selection_pressure",
+        float(metrics.get("selection_pressure_min", metrics.get("selection_pressure", 0.0))) >= config.min_selection_pressure,
+        float(metrics.get("selection_pressure_min", metrics.get("selection_pressure", 0.0))),
+        f">= {config.min_selection_pressure}",
+        "selection_pressure_too_low",
+    )
+    add_gate(
+        "training_symbols",
+        int(metrics.get("training_dataset_symbol_count", metrics.get("training_symbol_count", metrics.get("symbol_count", 0)))) >= config.min_training_symbols,
+        int(metrics.get("training_dataset_symbol_count", metrics.get("training_symbol_count", metrics.get("symbol_count", 0)))),
+        f">= {config.min_training_symbols}",
+        "insufficient_training_symbols",
+    )
+    add_gate(
+        "prediction_symbols",
+        int(metrics.get("prediction_symbol_count", 0)) >= config.min_prediction_symbols,
+        int(metrics.get("prediction_symbol_count", 0)),
+        f">= {config.min_prediction_symbols}",
+        "insufficient_prediction_symbols",
+    )
+    effective_universe = int(metrics.get("effective_universe_min", metrics.get("eligible_symbol_count_min", 0)))
+    add_gate(
+        "effective_universe_by_date",
+        effective_universe >= config.min_effective_universe_by_date,
+        effective_universe,
+        f">= {config.min_effective_universe_by_date}",
+        "insufficient_effective_universe_by_date",
+    )
+    uses_mock = bool(metrics.get("uses_mock_or_synthetic", False))
+    add_gate(
+        "no_mock_or_synthetic",
+        (not config.no_mock_or_synthetic) or not uses_mock,
+        uses_mock,
+        "False",
+        "mock_data_model_not_production_ready",
+    )
+    pit_violations = int(metrics.get("pit_violation_count", 0))
+    add_gate(
+        "no_pit_violations",
+        (not config.no_pit_violations) or pit_violations == 0,
+        pit_violations,
+        "0",
+        "pit_violations_present",
+    )
+    failures = [str(gate["reason"]) for gate in gates if not gate["passed"]]
+    return V7GateReport(not failures, tuple(failures), dict(metrics), tuple(gates))
 
 
 def _pit_violations(frame: pd.DataFrame | None) -> int:
