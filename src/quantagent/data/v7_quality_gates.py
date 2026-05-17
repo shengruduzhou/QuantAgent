@@ -153,35 +153,63 @@ def evaluate_model_acceptance_gates(
         f"required={config.require_benchmark}",
         "benchmark_missing_quant_alpha_not_validated",
     )
+    def _safe_float(key_chain: tuple[str, ...], default: float = 0.0) -> float:
+        for key in key_chain:
+            value = metrics.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return float(default)
+
+    def _safe_int(key_chain: tuple[str, ...], default: int = 0) -> int:
+        for key in key_chain:
+            value = metrics.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    continue
+        return int(default)
+
+    excess_after_costs = _safe_float(("excess_return_after_costs", "excess_return"))
     add_gate(
         "excess_return_after_costs",
-        float(metrics.get("excess_return_after_costs", metrics.get("excess_return", 0.0))) > config.min_excess_return_after_costs,
-        float(metrics.get("excess_return_after_costs", metrics.get("excess_return", 0.0))),
+        excess_after_costs > config.min_excess_return_after_costs,
+        excess_after_costs,
         f"> {config.min_excess_return_after_costs}",
         "excess_return_after_costs_failed",
     )
+    selection_pressure_actual = _safe_float(("selection_pressure_min", "selection_pressure"))
     add_gate(
         "selection_pressure",
-        float(metrics.get("selection_pressure_min", metrics.get("selection_pressure", 0.0))) >= config.min_selection_pressure,
-        float(metrics.get("selection_pressure_min", metrics.get("selection_pressure", 0.0))),
+        selection_pressure_actual >= config.min_selection_pressure,
+        selection_pressure_actual,
         f">= {config.min_selection_pressure}",
         "selection_pressure_too_low",
     )
+    training_symbols_actual = _safe_int((
+        "training_dataset_symbol_count",
+        "training_symbol_count",
+        "symbol_count",
+    ))
     add_gate(
         "training_symbols",
-        int(metrics.get("training_dataset_symbol_count", metrics.get("training_symbol_count", metrics.get("symbol_count", 0)))) >= config.min_training_symbols,
-        int(metrics.get("training_dataset_symbol_count", metrics.get("training_symbol_count", metrics.get("symbol_count", 0)))),
+        training_symbols_actual >= config.min_training_symbols,
+        training_symbols_actual,
         f">= {config.min_training_symbols}",
         "insufficient_training_symbols",
     )
+    prediction_symbols_actual = _safe_int(("prediction_symbol_count",))
     add_gate(
         "prediction_symbols",
-        int(metrics.get("prediction_symbol_count", 0)) >= config.min_prediction_symbols,
-        int(metrics.get("prediction_symbol_count", 0)),
+        prediction_symbols_actual >= config.min_prediction_symbols,
+        prediction_symbols_actual,
         f">= {config.min_prediction_symbols}",
         "insufficient_prediction_symbols",
     )
-    effective_universe = int(metrics.get("effective_universe_min", metrics.get("eligible_symbol_count_min", 0)))
+    effective_universe = _safe_int(("effective_universe_min", "eligible_symbol_count_min"))
     add_gate(
         "effective_universe_by_date",
         effective_universe >= config.min_effective_universe_by_date,

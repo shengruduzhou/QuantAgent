@@ -29,3 +29,6 @@ reports/
 
 .claude/
 logs/
+AI_quant/
+AI_quant_runtime/
+AI_quant_venv/

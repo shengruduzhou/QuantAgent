@@ -38,7 +38,7 @@ QuantAgent V7 是面向 A 股现实约束的 Point-in-Time quant research system
 - Optimizer / portfolio construction 只能输出 `target_weights`。
 - 只有 `OrderManager` 可以把 `target_weights` 转成 order intents。
 - QMT submit 前必须经过 Risk Gate、Kill Switch、execution constraint simulation、Reconciliation、Audit Replay。
-- Production / real-data path 禁止 synthetic fallback；mock data 只允许 tests 和 smoke examples。
+- Production / real-data path 禁止 synthetic fallback；mock data 只允许在 tests 和 smoke examples。
 
 ## Runtime Layout
 
@@ -65,169 +65,186 @@ E:\Project\QuantAgent\runtime\
 
 `quantagent.config.paths.quant_paths()` 是单一来源。`QUANTAGENT_HOME` 覆盖全局 root，`QUANTAGENT_DATA_ROOT` 只覆盖 data tier。
 
-## Windows PowerShell Setup
+## Windows Setup
 
 ```powershell
 cd E:\Project\QuantAgent
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -U pip
-pip install -e ".[data,training,research,optimization]"
-pip install pyqlib akshare polars lightgbm xgboost torch
+.\.venv\Scripts\python.exe -m pip install -U pip wheel setuptools
+.\.venv\Scripts\python.exe -m pip install -e ".[data,training,research,optimization]"
+.\.venv\Scripts\python.exe -m pip install pyqlib akshare polars lightgbm xgboost torch cvxpy
 $env:QUANTAGENT_HOME = "E:\Project\QuantAgent\runtime"
 
-quantagent storage-info-v7 --ensure
+.\.venv\Scripts\quantagent.exe storage-info-v7 --ensure
+```
 
-quantagent setup-qlib-v7 `
+## Qlib 历史数据
+
+Qlib CN instruments 使用 uppercase exchange prefix，例如 `SH600519`、`SZ000001`，不是 AkShare 的 `600519.SH` 后缀风格。官方 free Qlib CN release 覆盖 `2000-01-04 .. 2020-09-25`；超过这个日期必须用自备 PIT CSV/Parquet 通过 Qlib `scripts/dump_bin.py` dump，或者走下面的 AkShare 近年行情面板。
+
+```powershell
+.\.venv\Scripts\quantagent.exe setup-qlib-v7 `
   --region cn `
   --interval 1d `
   --target-dir E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --run `
   --allow-community-fallback
 
-quantagent check-qlib-v7 `
+.\.venv\Scripts\quantagent.exe check-qlib-v7 `
   --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --region cn `
-  --symbols 600519.SH,000858.SZ `
-  --start-date 2020-01-01 `
-  --end-date 2026-05-15
+  --symbols SH600519,SZ000001 `
+  --start-date 2018-01-01 `
+  --end-date 2020-09-25
 ```
 
-如果官方 Qlib 下载不可用，`setup-qlib-v7 --run` 会 fail-loud，并输出 community mirror、自备 CSV/Parquet `scripts/dump_bin.py`、以及 `check-qlib-v7` 校验命令；不会静默切到 mock/synthetic。
+## AkShare 近年数据
 
-## Real-Data Training Chain
+近年 OHLCV 直接用 AkShare 构建 PIT market panel。日线 `available_at` 标记为下一 business day，避免 close 当天被训练当作盘中可用信息。
 
 ```powershell
-quantagent build-market-panel-v7 `
-  --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --symbols 600519.SH,000858.SZ `
-  --start-date 2020-01-01 `
-  --end-date 2026-05-15
+.\.venv\Scripts\quantagent.exe build-akshare-market-panel-v7 `
+  --symbols 600519.SH,600036.SH,000001.SZ `
+  --provider-uri-for-range E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
+  --as-of-date 2026-05-17 `
+  --allow-network
 
-quantagent build-akshare-v7 `
-  --symbols 600519.SH,000858.SZ `
-  --start-date 2020-01-01 `
+.\.venv\Scripts\quantagent.exe build-akshare-v7 `
+  --symbols 600519.SH,600036.SH,000001.SZ `
+  --start-date 2015-01-01 `
   --end-date 2026-05-15 `
   --allow-network
 
-quantagent smoke-akshare-v7 `
+.\.venv\Scripts\quantagent.exe smoke-akshare-v7 `
   --symbols 600519.SH,000001.SZ `
+  --start-date 2024-01-01 `
+  --end-date 2024-12-31 `
+  --as-of-date 2024-12-31 `
   --allow-network
+```
 
-quantagent build-valuation-v7 `
-  --as-of-dates 2026-05-15 `
-  --symbols 600519.SH,000858.SZ `
-  --allow-network
+## LLM API Setup
 
-quantagent build-labels-v7 `
+LLM 默认 disabled，不阻塞非 LLM 训练。不要把 key 写入源码、配置或日志；只在本地 shell 或安全 secret store 设置。Google AI Studio / Gemini API 使用 `GOOGLE_API_KEY`，model id 以 AI Studio 或 `models.list` 返回值为准。
+
+```powershell
+$env:GOOGLE_API_KEY = "<local-only-never-commit>"
+$env:QUANTAGENT_LLM_PROVIDER = "gemini"
+$env:QUANTAGENT_LLM_ENABLED = "true"
+$env:QUANTAGENT_LLM_ALLOW_NETWORK = "true"
+$env:QUANTAGENT_LLM_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
+$env:QUANTAGENT_LLM_MODEL = "<google-ai-studio-model-id>"
+$env:QUANTAGENT_LLM_API_KEY_ENV = "GOOGLE_API_KEY"
+```
+
+LLM 只用于解释、归因、财报摘要、新闻可信度、Theme Discovery、industry-chain reasoning、Financial Fraud Risk 解释等研究辅助。最终交易只能来自 deterministic/cvxpy target-weight builder、Risk Gate 和 `OrderManager`。
+
+## End-to-End Paper Workflow
+
+下面链路从真实 market panel 开始，生成 labels、factors、gold training dataset、walk-forward OOS predictions、`target_weights` 和完整 paper report。你可以先用 `ridge` sanity；如果要求 GPU training，使用 `--model ft_transformer --ft-device cuda --require-gpu`，CUDA 不可用时命令会 fail-loud，不会悄悄退回 CPU。
+
+```powershell
+.\.venv\Scripts\quantagent.exe build-labels-v7 `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet
 
-quantagent materialize-factors-v7 `
+.\.venv\Scripts\quantagent.exe materialize-factors-v7 `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
   --backend polars
 
-quantagent build-training-dataset-v7 `
+.\.venv\Scripts\quantagent.exe run-full-real-training-v7 `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
   --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
-  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\raw\akshare\fundamentals `
-  --valuation E:\Project\QuantAgent\runtime\data\v7\silver\valuation\valuation.parquet
+  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\silver\fundamentals `
+  --model ridge `
+  --split-mode rolling `
+  --purge-days 126 `
+  --embargo-days 5 `
+  --optimizer-backend auto `
+  --objective max_expected_alpha `
+  --initial-cash 1000000 `
+  --paper-report-output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
+```
 
-quantagent train-alpha-v7 `
-  --dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet `
+GPU FT-Transformer 训练示例：
+
+```powershell
+.\.venv\Scripts\quantagent.exe auto-train-v7 `
+  --symbols auto `
+  --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
   --model ft_transformer `
+  --ft-device cuda `
+  --require-gpu `
   --split-mode rolling `
   --purge-days 126 `
-  --embargo-days 5
+  --embargo-days 5 `
+  --initial-cash 1000000
+```
 
-quantagent optimize-alpha-v7 `
-  --dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet `
-  --search-space configs/example_search_space.json `
-  --sampler grid `
-  --split-mode rolling `
-  --purge-days 126 `
-  --embargo-days 5
+`run-full-real-training-v7` 只读取 `sample_role=validation` 的 walk-forward out-of-sample predictions；如果出现 in-sample predictions，会直接 raise。输出包括：
 
-quantagent run-full-real-training-v7 `
+- `runtime\models\v7_alpha\metrics.json`
+- `runtime\predictions\predictions.parquet`
+- `runtime\target_weights\target_weights.parquet`
+- `runtime\reports\v7\full_pipeline_report.json`
+- `runtime\reports\v7\walk_forward_backtest.json`
+- `runtime\reports\v7\paper_report\selected_stocks.csv`
+- `runtime\reports\v7\paper_report\target_weights.parquet`
+- `runtime\reports\v7\paper_report\trades.csv`
+- `runtime\reports\v7\paper_report\failed_orders.csv`
+- `runtime\reports\v7\paper_report\holdings.csv`
+- `runtime\reports\v7\paper_report\pnl.csv`
+- `runtime\reports\v7\paper_report\paper_report.json`
+- `runtime\reports\v7\paper_report\paper_report.md`
+- `runtime\reports\v7\paper_report\paper_report.html`
+
+`selected_stocks.csv` 会列出买了什么股、首次买入日、交易次数、期末市值和估算单票盈亏；`trades.csv` 会列出什么时候买卖；`pnl.csv` 会列出 daily NAV、daily PnL、drawdown。
+
+## Separate Risk / Backtest Commands
+
+如果你要自己训练风控回测，可以拆开执行：
+
+```powershell
+.\.venv\Scripts\quantagent.exe build-training-dataset-v7 `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
   --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
-  --sector-map E:\Project\QuantAgent\runtime\data\v7\silver\sector\sector_map.csv `
+  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\silver\fundamentals
+
+.\.venv\Scripts\quantagent.exe train-alpha-v7 `
+  --dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet `
   --model ridge `
   --split-mode rolling `
   --purge-days 126 `
   --embargo-days 5
 
-quantagent build-target-weights-v7 `
+.\.venv\Scripts\quantagent.exe predict-alpha-v7 `
+  --model-dir E:\Project\QuantAgent\runtime\models\v7_alpha `
+  --feature-dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet
+
+.\.venv\Scripts\quantagent.exe build-target-weights-v7 `
   --predictions E:\Project\QuantAgent\runtime\predictions\predictions.parquet `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --optimizer-backend auto `
-  --objective max_expected_alpha
+  --optimizer-backend cvxpy `
+  --objective max_information_ratio_proxy
 
-quantagent run-paper-backtest-v7 `
+.\.venv\Scripts\quantagent.exe run-paper-backtest-v7 `
   --target-weights E:\Project\QuantAgent\runtime\target_weights\target_weights.parquet `
   --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
   --initial-cash 1000000 `
   --output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
 
-quantagent generate-paper-report-v7 `
-  --target-weights E:\Project\QuantAgent\runtime\target_weights\target_weights.parquet `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --initial-cash 1000000 `
-  --output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
-
-quantagent v7-live-readiness-report `
+.\.venv\Scripts\quantagent.exe v7-live-readiness-report `
   --metrics E:\Project\QuantAgent\runtime\models\v7_alpha\metrics.json `
   --paper-report E:\Project\QuantAgent\runtime\reports\v7\paper_report\paper_report.json
 ```
 
-`run-full-real-training-v7` 只读取 `sample_role=validation` 的 walk-forward out-of-sample predictions；如果出现 in-sample predictions，会直接 raise。
-
-## AkShare Contract
-
-- `build-akshare-v7` 支持批量 symbols，并抓取 income、balance sheet、cashflow、financial indicator、dividend。
-- 所有财报类数据必须有 `report_period`、`ann_date`、`available_at`。
-- 网络必须显式 `--allow-network`。
-- 每个 statement 写 manifest，包含 `source`、`function_name`、`params`、`row_count`、`schema_hash`、`fetched_at`、`warnings`、`failed_symbols`。
-- AkShare 接口变更、空表、字段缺失、限流、网络错误不会伪造数据。
-
-## LLM API Setup
-
-LLM 默认 disabled，不阻塞非 LLM 训练。不要把 key 写入源码、配置或日志；只在本地 shell 或安全 secret store 里设置：
-
-```powershell
-$env:OPENAI_API_KEY = "<local-only>"
-$env:QUANTAGENT_LLM_PROVIDER = "openai"              # openai | openai-compatible | disabled
-$env:QUANTAGENT_LLM_ENABLED = "true"
-$env:QUANTAGENT_LLM_ALLOW_NETWORK = "true"
-$env:QUANTAGENT_LLM_ENDPOINT = "https://api.openai.com/v1/responses"
-$env:QUANTAGENT_LLM_MODEL = "gpt-4.1-mini"
-$env:QUANTAGENT_LLM_API_KEY_ENV = "OPENAI_API_KEY"
-```
-
-LLM 只用于解释、归因、财报摘要、新闻可信度、主题链路分析、风险解释。最终交易只能来自 deterministic/cvxpy target-weight builder、risk gate 和 `OrderManager`。
-
-## Outputs
-
-User-facing paper outputs include:
-
-- `selected_stocks.csv`
-- `target_weights.parquet`
-- `trades.csv`
-- `failed_orders.csv`
-- `holdings.csv`
-- `pnl.csv`
-- `paper_report.json`
-- `paper_report.md`
-- `paper_report.html`
-- `metrics.json`
-- `training_manifest.json`
-
 ## Validation
 
 ```powershell
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m pytest tests/
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall -q src
+.\.venv\Scripts\python.exe -m pytest tests/
+.\.venv\Scripts\python.exe -m compileall -q src
 git diff --check
-quantagent --help
+.\.venv\Scripts\quantagent.exe --help
 ```
 
 `git diff --check` 在 Windows checkout 可能报告 CRLF warning；真正 whitespace error 必须修复。

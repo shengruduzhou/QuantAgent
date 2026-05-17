@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Convenience wrapper: load /home/shanhefu/QuantAgent/.env, then run the
+# venv Python with the rest of the args. Avoids the PATH/anaconda
+# resolution headaches that come from `source activate`.
+set -a
+[ -f /home/shanhefu/QuantAgent/.env ] && . /home/shanhefu/QuantAgent/.env
+set +a
+exec /home/shanhefu/QuantAgent/AI_quant_venv/bin/python "$@"

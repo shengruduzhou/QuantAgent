@@ -32,6 +32,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .dynamic_top_k import DynamicTopKConfig, resolve_dynamic_top_k
+from .timing_gate import TimingGateConfig, apply_timing_gate
+from .position_age_tracker import PositionAgeTracker
+
 
 @dataclass(frozen=True)
 class V7TargetWeightsConfig:
@@ -57,6 +61,17 @@ class V7TargetWeightsConfig:
     block_suspended: bool = True
     block_limit_up_buy: bool = True
     block_limit_down_sell: bool = True
+    # Phase 3 dynamic / lifecycle controls.
+    dynamic_top_k_enabled: bool = False
+    top_k_min: int = 8
+    top_k_max: int = 50
+    timing_gate_enabled: bool = False
+    holding_period_mode: str = "off"  # off | soft | hard
+    holding_period_max_delta: float = 0.02  # |Δw| ceiling for locked names
+    shrink_on_small_universe: bool = False
+    # ((capital_threshold, participation_rate)) ladder — first row whose
+    # threshold is ≥ capital_yuan wins. Set to () to disable.
+    capital_tier_overrides: tuple[tuple[float, float], ...] = ()
 
 
 # Tradability constraint table: (market_column, config_attribute, audit_reason).
@@ -84,12 +99,49 @@ _SUPPORTED_OBJECTIVES: tuple[str, ...] = (
 )
 
 
+def _effective_participation_rate(config: V7TargetWeightsConfig) -> float:
+    """Derive the effective liquidity participation rate from the
+    capital-tier ladder. Returns ``config.liquidity_participation``
+    unchanged when no override matches.
+    """
+
+    if not config.capital_tier_overrides:
+        return float(config.liquidity_participation)
+    ladder = sorted(config.capital_tier_overrides, key=lambda row: float(row[0]))
+    rate = float(config.liquidity_participation)
+    for threshold, candidate in ladder:
+        if float(config.capital_yuan) >= float(threshold):
+            rate = float(candidate)
+    return rate
+
+
 def build_v7_target_weights(
     predictions: pd.DataFrame,
     market_panel: pd.DataFrame,
     sector_map: pd.DataFrame | None = None,
     config: V7TargetWeightsConfig | None = None,
+    *,
+    theme_signals: pd.DataFrame | None = None,
+    timing_plan: pd.DataFrame | None = None,
+    position_state_path: Path | None = None,
 ) -> V7TargetWeightsResult:
+    """Convert per-symbol predictions into a daily target-weights panel.
+
+    The optional keyword arguments enable Phase 3 dynamic behaviour:
+
+    * ``theme_signals`` — frame with ``trade_date``, ``symbol``,
+      ``lifecycle_stage``, ``policy_strength``, ``confidence``,
+      ``expected_horizon_days``. Drives dynamic ``top_k`` and the
+      holding-period lock.
+    * ``timing_plan`` — frame from
+      :func:`agents.technical_timing_agent.compute_technical_timing`
+      (or any compatible producer). When ``timing_gate_enabled`` is
+      ``True`` the optimiser uses it to gate new opens and force closes.
+    * ``position_state_path`` — parquet path the position-age tracker
+      persists to. State survives walk-forward fold boundaries, so the
+      holding-period constraint actually binds.
+    """
+
     config = config or V7TargetWeightsConfig()
     if config.objective not in _SUPPORTED_OBJECTIVES:
         raise ValueError(f"unsupported optimizer objective: {config.objective}; supported: {_SUPPORTED_OBJECTIVES}")
@@ -135,8 +187,41 @@ def build_v7_target_weights(
         "daily_selection": [],
         "alpha_distribution_by_date": [],
         "warnings": [],
+        "dynamic_top_k_decisions": [],
+        "timing_gate_summary": [],
+        "holding_period_locks": [],
     }
     previous_weights: pd.Series | None = None
+
+    effective_participation = _effective_participation_rate(config)
+
+    theme_frame: pd.DataFrame | None = None
+    if theme_signals is not None and not theme_signals.empty:
+        theme_frame = theme_signals.copy()
+        theme_frame["trade_date"] = pd.to_datetime(theme_frame["trade_date"], errors="coerce")
+        theme_frame = theme_frame.dropna(subset=["trade_date", "symbol"]).reset_index(drop=True)
+
+    timing_gate_decisions: pd.DataFrame | None = None
+    timing_gate_diag: dict[str, object] | None = None
+    if config.timing_gate_enabled and timing_plan is not None and not timing_plan.empty:
+        gate_cfg = TimingGateConfig(enabled=True, require_in_entry_zone=True, enforce_invalidation=True)
+        gate_result = apply_timing_gate(market_panel, timing_plan, gate_cfg)
+        timing_gate_decisions = gate_result.decisions
+        timing_gate_diag = gate_result.diagnostics
+
+    age_tracker: PositionAgeTracker | None = None
+    if config.holding_period_mode != "off":
+        age_tracker = (
+            PositionAgeTracker.from_state(Path(position_state_path))
+            if position_state_path is not None
+            else PositionAgeTracker()
+        )
+
+    dynamic_topk_cfg = DynamicTopKConfig(
+        top_k_min=int(config.top_k_min),
+        top_k_max=int(config.top_k_max),
+        base_top_k=int(config.top_k),
+    )
 
     for date, day in preds.groupby("trade_date", sort=True):
         day_market = market[market["trade_date"] == date]
@@ -161,20 +246,65 @@ def build_v7_target_weights(
         if eligible.empty or len(eligible) < config.min_universe:
             diagnostics["rejected"].extend(rejected)
             continue
-        # Liquidity cap (max weight by participation in amount).
+        # Liquidity cap (max weight by participation in amount), with capital tiering.
         if "amount" in eligible.columns and config.capital_yuan > 0:
-            cap = (eligible["amount"].fillna(0.0) * config.liquidity_participation) / max(1.0, config.capital_yuan)
+            cap = (eligible["amount"].fillna(0.0) * effective_participation) / max(1.0, config.capital_yuan)
             eligible["liquidity_cap"] = cap.clip(upper=config.max_weight_per_name)
         else:
             eligible["liquidity_cap"] = config.max_weight_per_name
 
+        # Apply timing gate (Phase 3.3): drop names whose previous-day
+        # close fell outside the entry zone; mark force_close on
+        # invalidation breaches. Strictly post-A-share-filter so it
+        # cannot bypass the suspension/ST/limit gates.
+        force_close_symbols: set[str] = set()
+        if timing_gate_decisions is not None and not timing_gate_decisions.empty:
+            gate_today = timing_gate_decisions[timing_gate_decisions["trade_date"] == date]
+            if not gate_today.empty:
+                blocked = set(gate_today.loc[~gate_today["allow_open"].astype(bool), "symbol"].astype(str))
+                force_close_symbols = set(gate_today.loc[gate_today["force_close"].astype(bool), "symbol"].astype(str))
+                if blocked:
+                    held = set(previous_weights.index.astype(str)) if previous_weights is not None else set()
+                    new_only_blocked = blocked - held
+                    if new_only_blocked:
+                        eligible = eligible[~eligible["symbol"].astype(str).isin(new_only_blocked)]
+                diagnostics["timing_gate_summary"].append(
+                    {
+                        "trade_date": str(date),
+                        "blocked_new_entries": int(len(blocked)),
+                        "force_close": int(len(force_close_symbols)),
+                    }
+                )
+
+        if eligible.empty:
+            diagnostics["rejected"].extend(rejected)
+            continue
+
         # Top-K selection by predicted alpha (long side); for long-short keep both tails.
         alpha = eligible["prediction"].astype(float)
-        effective_top_k = _effective_top_k(len(eligible), config)
-        if config.fail_if_top_k_covers_universe and effective_top_k >= len(eligible):
-            raise ValueError(
-                "top_k selection covers the eligible universe; increase the universe or lower --top-k/--top-k-ratio"
+        if config.dynamic_top_k_enabled:
+            theme_today = (
+                theme_frame[theme_frame["trade_date"] == date]
+                if theme_frame is not None
+                else None
             )
+            decision = resolve_dynamic_top_k(
+                eligible_count=len(eligible),
+                predictions_for_date=eligible["prediction"],
+                theme_signals_for_date=theme_today,
+                config=dynamic_topk_cfg,
+            )
+            effective_top_k = int(max(1, decision.top_k))
+            diagnostics["dynamic_top_k_decisions"].append({"trade_date": str(date), **decision.diagnostics, "top_k": effective_top_k, "contributions": decision.contributions})
+        else:
+            effective_top_k = _effective_top_k(len(eligible), config)
+        if effective_top_k >= len(eligible):
+            if config.dynamic_top_k_enabled or config.shrink_on_small_universe:
+                effective_top_k = max(1, len(eligible) - 1)
+            elif config.fail_if_top_k_covers_universe:
+                raise ValueError(
+                    "top_k selection covers the eligible universe; increase the universe or lower --top-k/--top-k-ratio"
+                )
         if config.long_short:
             top_k = min(effective_top_k, len(eligible) // 2 or 1)
             longs = eligible.nlargest(top_k, "prediction")
@@ -277,11 +407,43 @@ def build_v7_target_weights(
             sign = np.sign(weights.replace(0.0, 1.0))
             weights = weights + redistribute * sign
 
+        # Holding-period lock (Phase 3.4): force ``|Δw| ≤ holding_period_max_delta``
+        # for names whose age < expected_horizon, unless timing-gate
+        # marks them force_close.
+        locked_symbols: list[str] = []
+        if age_tracker is not None and previous_weights is not None:
+            prev_aligned = previous_weights.reindex(weights.index).fillna(0.0)
+            for symbol in list(weights.index.astype(str)):
+                if symbol in force_close_symbols:
+                    weights.loc[symbol] = 0.0
+                    continue
+                if age_tracker.is_locked(symbol, date, force_close=False):
+                    prev_w = float(prev_aligned.get(symbol, 0.0))
+                    delta = float(weights.loc[symbol] - prev_w)
+                    if abs(delta) > config.holding_period_max_delta:
+                        direction = 1.0 if delta >= 0 else -1.0
+                        weights.loc[symbol] = prev_w + direction * config.holding_period_max_delta
+                        locked_symbols.append(symbol)
+        if locked_symbols:
+            diagnostics["holding_period_locks"].append(
+                {"trade_date": str(date), "locked_symbols": locked_symbols}
+            )
+
         # Apply turnover cap vs previous weights.
         if previous_weights is not None and config.max_turnover > 0:
             blended = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
             weights = blended
         previous_weights = weights.copy()
+
+        if age_tracker is not None:
+            expected_horizons: dict[str, int | None] = {}
+            if theme_frame is not None:
+                today_theme = theme_frame[theme_frame["trade_date"] == date]
+                if not today_theme.empty and "expected_horizon_days" in today_theme.columns:
+                    for sym, eh in zip(today_theme["symbol"], today_theme["expected_horizon_days"]):
+                        if pd.notna(eh):
+                            expected_horizons[str(sym)] = int(eh)
+            age_tracker.record_session(date, weights.to_dict(), expected_horizons)
 
         exposures_report: dict[str, float] = {}
         if sector_lookup:
@@ -357,6 +519,16 @@ def build_v7_target_weights(
         **diagnostics,
     }
     pivot.index.name = "trade_date"
+
+    if age_tracker is not None:
+        persisted = age_tracker.persist()
+        if persisted is not None:
+            diagnostics_payload["position_state_path"] = str(persisted)
+        diagnostics_payload["position_state_rows"] = int(len(age_tracker.snapshot()))
+    if timing_gate_diag is not None:
+        diagnostics_payload["timing_gate"] = timing_gate_diag
+    diagnostics_payload["effective_participation_rate"] = float(effective_participation)
+
     return V7TargetWeightsResult(pivot.reset_index(), diagnostics_payload)
 
 

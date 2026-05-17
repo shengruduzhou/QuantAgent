@@ -605,6 +605,35 @@ def run_full_real_training_v7(
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
     allow_model_downgrade: bool = typer.Option(False, "--allow-model-downgrade"),
+    # Phase 3 dynamic-portfolio knobs.
+    multi_horizon_blend: bool = typer.Option(
+        True,
+        "--multi-horizon-blend/--no-multi-horizon-blend",
+        help="Blend multi-horizon predictions instead of filtering to --primary-horizon.",
+    ),
+    dynamic_top_k: bool = typer.Option(
+        False,
+        "--dynamic-top-k/--no-dynamic-top-k",
+        help="Resolve top_k per-date from lifecycle / alpha signals.",
+    ),
+    top_k_min: int = typer.Option(8, "--top-k-min"),
+    top_k_max: int = typer.Option(50, "--top-k-max"),
+    timing_gate: bool = typer.Option(
+        False,
+        "--timing-gate/--no-timing-gate",
+        help="Enable ATR-based entry/exit gate before optimisation.",
+    ),
+    holding_period_mode: str = typer.Option(
+        "off",
+        "--holding-period-mode",
+        help="off | soft. Soft locks per-name |Δw| while age < expected_horizon.",
+    ),
+    holding_period_max_delta: float = typer.Option(0.02, "--holding-period-max-delta"),
+    capital_tier: str = typer.Option(
+        "",
+        "--capital-tier",
+        help="Capital-tier ladder, e.g. '1e6:0.10,1e7:0.05,1e8:0.02'. Empty disables tiering.",
+    ),
 ) -> None:
     """End-to-end real-data pipeline: dataset -> train -> predict -> target weights -> paper report.
 
@@ -673,15 +702,56 @@ def run_full_real_training_v7(
         ),
     )
 
-    predictions_frame = _load_oos_predictions(
-        Path(training_result.artifact_paths["predictions"]),
-        primary_horizon=primary_horizon,
-    )
+    raw_predictions = read_frame(Path(training_result.artifact_paths["predictions"]))
+    if multi_horizon_blend and "horizon" in raw_predictions.columns and raw_predictions["horizon"].nunique() > 1:
+        from quantagent.portfolio.multi_horizon_blender import (
+            MultiHorizonBlendConfig,
+            blend_multi_horizon_predictions,
+        )
+
+        blend_result = blend_multi_horizon_predictions(
+            raw_predictions,
+            config=MultiHorizonBlendConfig(primary_horizon=primary_horizon),
+        )
+        predictions_frame = blend_result.blended.copy()
+        predictions_frame["sample_role"] = "validation"
+        predictions_frame["fold_id"] = 0
+        blender_diagnostics = blend_result.diagnostics
+    else:
+        predictions_frame = _load_oos_predictions(
+            Path(training_result.artifact_paths["predictions"]),
+            primary_horizon=primary_horizon,
+        )
+        blender_diagnostics = {"status": "skipped", "reason": "single_horizon_or_disabled"}
     predictions_path = default_predictions_root() / "predictions.parquet"
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
     written_predictions = write_frame(predictions_frame, predictions_path)
 
     sector_frame = read_frame(sector_map_path) if sector_map_path else None
+
+    capital_tier_overrides: tuple[tuple[float, float], ...] = ()
+    if capital_tier.strip():
+        parsed: list[tuple[float, float]] = []
+        for item in capital_tier.split(","):
+            piece = item.strip()
+            if not piece or ":" not in piece:
+                continue
+            threshold_str, rate_str = piece.split(":", 1)
+            parsed.append((float(threshold_str), float(rate_str)))
+        capital_tier_overrides = tuple(parsed)
+
+    timing_plan_frame = None
+    if timing_gate:
+        from quantagent.agents.technical_timing_agent import compute_technical_timing
+
+        timing_plan_frame = compute_technical_timing(read_frame(market_panel_path))
+
+    position_state_path = (
+        default_target_weights_root() / "position_state.parquet"
+        if holding_period_mode != "off"
+        else None
+    )
+
     weights_result = build_v7_target_weights(
         predictions_frame,
         read_frame(market_panel_path),
@@ -698,8 +768,18 @@ def run_full_real_training_v7(
             objective=objective,
             cash_floor=cash_floor,
             capital_yuan=initial_cash,
+            dynamic_top_k_enabled=dynamic_top_k,
+            top_k_min=top_k_min,
+            top_k_max=top_k_max,
+            timing_gate_enabled=timing_gate,
+            holding_period_mode=holding_period_mode,
+            holding_period_max_delta=holding_period_max_delta,
+            capital_tier_overrides=capital_tier_overrides,
         ),
+        timing_plan=timing_plan_frame,
+        position_state_path=position_state_path,
     )
+    weights_result.diagnostics["multi_horizon_blend"] = blender_diagnostics
     weights_result.diagnostics["training_dataset_symbol_count"] = (
         int(training_dataset["symbol"].nunique()) if "symbol" in training_dataset.columns else 0
     )

@@ -55,6 +55,7 @@ src/quantagent/data/manifest.py
 src/quantagent/data/point_in_time.py
 src/quantagent/data/trading_calendar.py
 src/quantagent/data/universe.py
+src/quantagent/data/v7_auto_range.py
 src/quantagent/data/v7_datahub.py
 src/quantagent/data/v7_dataset_builder.py
 src/quantagent/data/v7_feature_groups.py
@@ -63,6 +64,7 @@ src/quantagent/data/v7_quality_gates.py
 src/quantagent/data/v7_sources.py
 src/quantagent/data/bootstrap/__init__.py
 src/quantagent/data/bootstrap/akshare_bootstrap.py
+src/quantagent/data/bootstrap/akshare_market_bootstrap.py
 src/quantagent/data/bootstrap/qlib_bootstrap.py
 src/quantagent/data/bootstrap/valuation_bootstrap.py
 src/quantagent/data/crawler/__init__.py
@@ -206,10 +208,6 @@ src/quantagent/quant_math/signal_fusion.py
 src/quantagent/quant_math/technical_indicators.py
 src/quantagent/quant_math/transaction_cost.py
 src/quantagent/quant_math/triple_barrier.py
-src/quantagent/reports/__init__.py
-src/quantagent/reports/factor_report.py
-src/quantagent/reports/risk_report.py
-src/quantagent/reports/valuation_report.py
 src/quantagent/risk/__init__.py
 src/quantagent/risk/kill_switch.py
 src/quantagent/risk/retail_hft_risk.py
@@ -295,6 +293,7 @@ tests/test_v7_feature_groups_metrics.py
 tests/test_v7_full_pipeline_backtester.py
 tests/test_v7_ingestion_layer.py
 tests/test_v7_label_variants.py
+tests/test_v7_large_universe_acceptance_execution.py
 tests/test_v7_lifecycle_and_hedge.py
 tests/test_v7_live_readiness_gates.py
 tests/test_v7_news_cross_validator.py
