@@ -3,8 +3,8 @@
 The most important entry point here is :mod:`quantagent.config.paths`, which
 resolves the canonical storage layout for the large real-data assets (Qlib
 panels, AkShare snapshots, model checkpoints, predictions, target weights,
-backtest reports, logs). By default everything lives under ``E:\\Project\\QuantAgent\\runtime\\``
-on Windows and ``~/AI_quant`` on POSIX systems; both can be overridden
+backtest reports, logs). By default everything lives under the repository
+``runtime`` directory; it can be overridden
 with a single environment variable ``QUANTAGENT_HOME``.
 
 Keeping path resolution centralised lets the CLI, bootstrap modules and

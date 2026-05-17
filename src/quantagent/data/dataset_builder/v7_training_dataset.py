@@ -174,7 +174,7 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         + ([config.disclosures_path] if config.disclosures_path else []),
         start_date=config.start_date,
         end_date=config.end_date,
-        symbols=config.symbols,
+        symbols=config.symbols or tuple(sorted(dataset["symbol"].astype(str).dropna().unique())),
         required_columns=("symbol", "trade_date", "available_at", *label_column_names),
         pit_violation_count=int(quality_report.get("metrics", {}).get("pit_violation_count", 0)),
         warnings=tuple(quality_report.get("failures", ())),

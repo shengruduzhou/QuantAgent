@@ -35,6 +35,13 @@ def test_windows_default_quant_home_is_repo_runtime(monkeypatch):
         assert resolve_quant_home().parent.name == "QuantAgent"
 
 
+def test_posix_default_quant_home_is_repo_runtime(monkeypatch):
+    monkeypatch.delenv(DEFAULT_QUANT_HOME_ENV, raising=False)
+    if platform.system() != "Windows":
+        assert resolve_quant_home().name == "runtime"
+        assert resolve_quant_home().parent.name == "QuantAgent"
+
+
 def test_quant_paths_layout_contains_required_directories(tmp_path, monkeypatch):
     monkeypatch.setenv(DEFAULT_QUANT_HOME_ENV, str(tmp_path))
     monkeypatch.delenv("QUANTAGENT_DATA_ROOT", raising=False)

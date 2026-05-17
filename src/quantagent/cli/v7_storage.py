@@ -8,6 +8,7 @@ import typer
 
 from quantagent.cli._utils import app, json_dump
 from quantagent.config.paths import quant_paths
+from quantagent.cuda_runtime import configure_cuda_environment, cuda_runtime_probe, format_cuda_diagnostic
 
 
 @app.command("storage-info-v7")
@@ -17,8 +18,7 @@ def storage_info_v7(
 ) -> None:
     """Report the resolved storage layout used for all V7 large artefacts.
 
-    The default home is ``<repo>/runtime`` on Windows and ``~/AI_quant`` on
-    other platforms. ``QUANTAGENT_HOME`` overrides it. Use ``--ensure`` to
+    The default home is ``<repo>/runtime``. ``QUANTAGENT_HOME`` overrides it. Use ``--ensure`` to
     create the directory tree.
     """
     layout = quant_paths(home=home)
@@ -29,6 +29,29 @@ def storage_info_v7(
         "ensured": ensure,
         "layout": layout.as_dict(),
     }
+    typer.echo(json_dump(payload))
+
+
+@app.command("cuda-info-v7")
+def cuda_info_v7(
+    expose_device: str | None = typer.Option(
+        None,
+        "--expose-device",
+        help="Optional default CUDA_VISIBLE_DEVICES value when the environment did not set one, e.g. 0.",
+    ),
+) -> None:
+    """Report CUDA visibility before launching GPU training."""
+    configure_cuda_environment(default_visible_devices=expose_device)
+    try:
+        import torch  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        payload = cuda_runtime_probe()
+        payload["status"] = "torch_unavailable"
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        payload = cuda_runtime_probe(torch)
+        payload["status"] = "cuda_available" if payload.get("torch_cuda_available") else "cuda_unavailable"
+    payload["diagnostic"] = format_cuda_diagnostic(payload)
     typer.echo(json_dump(payload))
 
 

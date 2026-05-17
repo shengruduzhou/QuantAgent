@@ -24,6 +24,13 @@ import numpy as np
 import pandas as pd
 
 from quantagent.config.paths import quant_paths
+from quantagent.cuda_runtime import (
+    configure_cuda_environment,
+    cuda_runtime_probe,
+    format_cuda_diagnostic,
+)
+
+configure_cuda_environment()
 
 
 def _default_ft_output_dir() -> str:
@@ -33,18 +40,21 @@ def _default_ft_output_dir() -> str:
 @dataclass(frozen=True)
 class FTTransformerTrainerConfig:
     horizons: tuple[int, ...] = (1, 5, 20, 60, 120, 126)
-    d_token: int = 64
-    n_blocks: int = 3
-    n_heads: int = 4
+    d_token: int = 128
+    n_blocks: int = 5
+    n_heads: int = 8
     attention_dropout: float = 0.10
     ffn_dropout: float = 0.10
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
-    batch_size: int = 1024
-    max_epochs: int = 30
-    early_stopping_patience: int = 5
+    batch_size: int = 8192
+    max_epochs: int = 60
+    early_stopping_patience: int = 10
     huber_delta: float = 1.0
     rank_loss_weight: float = 0.5
+    dates_per_step: int = 8
+    train_micro_batch: int | None = None
+    log_gpu_memory: bool = True
     device: str = "auto"
     require_gpu: bool = False
     seed: int = 1729
@@ -183,6 +193,8 @@ class FTTransformerTrainer:
         best_state: dict[str, torch.Tensor] | None = None
         patience = 0
         history: list[dict[str, float]] = []
+        dates_per_step = max(1, int(self.config.dates_per_step))
+        micro_batch = self.config.train_micro_batch
         for epoch in range(self.config.max_epochs):
             model.train()
             if date_codes is not None:
@@ -192,36 +204,90 @@ class FTTransformerTrainer:
                 date_order = torch.tensor([0], device=device)
             epoch_loss = 0.0
             total_rows = 0
-            for code in date_order:
+            chunks = torch.split(date_order, dates_per_step)
+            for chunk in chunks:
                 if date_codes is not None:
-                    mask = date_codes == code
+                    mask = torch.isin(date_codes, chunk)
                 else:
                     mask = torch.ones(train_tensor.shape[0], dtype=torch.bool, device=device)
                 if int(mask.sum()) < 2:
                     continue
                 xb = train_tensor[mask]
                 yb = target_tensor[mask]
+                chunk_codes = date_codes[mask] if date_codes is not None else None
+                # Optional micro-batch split to control activation memory for
+                # very wide cross-sections without losing per-date rank loss.
+                if micro_batch and int(xb.shape[0]) > int(micro_batch) and chunk_codes is not None:
+                    sub_dates = chunk
+                else:
+                    sub_dates = [None]
                 optimizer.zero_grad()
-                with torch.cuda.amp.autocast(enabled=(self.config.use_amp and device == "cuda")):
-                    preds = model(xb)
-                    loss = huber(preds, yb)
-                    if self.config.rank_loss_weight > 0 and xb.shape[0] >= 2:
-                        rank_pred = preds.argsort(dim=0).argsort(dim=0).float()
-                        rank_target = yb.argsort(dim=0).argsort(dim=0).float()
-                        rank_loss = ((rank_pred - rank_target) ** 2).mean() / max(1, xb.shape[0])
-                        loss = loss + self.config.rank_loss_weight * rank_loss
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                epoch_loss += float(loss.detach().cpu()) * xb.shape[0]
-                total_rows += int(xb.shape[0])
+                step_loss_value = 0.0
+                step_rows = 0
+                if micro_batch and int(xb.shape[0]) > int(micro_batch) and chunk_codes is not None:
+                    # split chunk by date groups, each forward/backward over one sub-batch
+                    for d in chunk:
+                        sub_mask = chunk_codes == d
+                        if int(sub_mask.sum()) < 2:
+                            continue
+                        xs = xb[sub_mask]
+                        ys = yb[sub_mask]
+                        with torch.cuda.amp.autocast(enabled=(self.config.use_amp and device == "cuda")):
+                            preds_s = model(xs)
+                            loss_s = huber(preds_s, ys)
+                            if self.config.rank_loss_weight > 0 and xs.shape[0] >= 2:
+                                rp = preds_s.argsort(dim=0).argsort(dim=0).float()
+                                rt = ys.argsort(dim=0).argsort(dim=0).float()
+                                rank_loss_s = ((rp - rt) ** 2).mean() / max(1, int(xs.shape[0]))
+                                loss_s = loss_s + self.config.rank_loss_weight * rank_loss_s
+                            loss_s = loss_s / max(1, len(chunk))
+                        scaler.scale(loss_s).backward()
+                        step_loss_value += float(loss_s.detach().cpu()) * int(xs.shape[0])
+                        step_rows += int(xs.shape[0])
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    with torch.cuda.amp.autocast(enabled=(self.config.use_amp and device == "cuda")):
+                        preds = model(xb)
+                        loss = huber(preds, yb)
+                        if self.config.rank_loss_weight > 0 and xb.shape[0] >= 2:
+                            if chunk_codes is not None:
+                                rank_loss_acc = torch.zeros((), device=preds.device, dtype=preds.dtype)
+                                n_groups = 0
+                                for d in chunk:
+                                    m = chunk_codes == d
+                                    if int(m.sum()) >= 2:
+                                        rp = preds[m].argsort(dim=0).argsort(dim=0).float()
+                                        rt = yb[m].argsort(dim=0).argsort(dim=0).float()
+                                        rank_loss_acc = rank_loss_acc + ((rp - rt) ** 2).mean() / max(1, int(m.sum()))
+                                        n_groups += 1
+                                if n_groups > 0:
+                                    rank_loss = rank_loss_acc / float(n_groups)
+                                    loss = loss + self.config.rank_loss_weight * rank_loss
+                            else:
+                                rank_pred = preds.argsort(dim=0).argsort(dim=0).float()
+                                rank_target = yb.argsort(dim=0).argsort(dim=0).float()
+                                rank_loss = ((rank_pred - rank_target) ** 2).mean() / max(1, xb.shape[0])
+                                loss = loss + self.config.rank_loss_weight * rank_loss
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    step_loss_value = float(loss.detach().cpu()) * int(xb.shape[0])
+                    step_rows = int(xb.shape[0])
+                epoch_loss += step_loss_value
+                total_rows += step_rows
             epoch_loss /= max(1, total_rows)
             entry = {"epoch": epoch, "loss": epoch_loss}
             if val_tensor is not None:
                 model.eval()
                 with torch.no_grad():
-                    val_preds = model(val_tensor)
-                    val_loss = float(huber(val_preds, val_target).item())
+                    val_loss = _batched_loss(
+                        model,
+                        val_tensor,
+                        val_target,
+                        huber,
+                        batch_size=self.config.batch_size,
+                    )
                 entry["val_loss"] = val_loss
                 if val_loss < best_val - 1e-6:
                     best_val = val_loss
@@ -236,6 +302,15 @@ class FTTransformerTrainer:
 
         if best_state is not None:
             model.load_state_dict(best_state)
+
+        if torch.cuda.is_available() and self.config.log_gpu_memory and str(device).startswith("cuda"):
+            try:
+                peak_mb = float(torch.cuda.max_memory_allocated() / (1024 ** 2))
+                reserved_mb = float(torch.cuda.max_memory_reserved() / (1024 ** 2))
+                device_report["peak_gpu_memory_mb"] = peak_mb
+                device_report["peak_gpu_memory_reserved_mb"] = reserved_mb
+            except Exception:
+                pass
 
         output_dir = Path(self.config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -279,6 +354,14 @@ class FTTransformerTrainer:
                     "cuda_available": device_report["cuda_available"],
                     "gpu_name": device_report["gpu_name"],
                     "horizons": horizons,
+                    "peak_gpu_memory_mb": device_report.get("peak_gpu_memory_mb"),
+                    "peak_gpu_memory_reserved_mb": device_report.get("peak_gpu_memory_reserved_mb"),
+                    "dates_per_step": int(self.config.dates_per_step),
+                    "d_token": int(self.config.d_token),
+                    "n_blocks": int(self.config.n_blocks),
+                    "n_heads": int(self.config.n_heads),
+                    "batch_size": int(self.config.batch_size),
+                    "max_epochs": int(self.config.max_epochs),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -340,21 +423,29 @@ def _resolve_device(device: str, *, require_gpu: bool = False) -> str:  # pragma
         if torch.cuda.is_available():
             return "cuda"
         if require_gpu:
-            raise RuntimeError("GPU training was required, but torch.cuda.is_available() is false")
+            raise RuntimeError(
+                "GPU training was required, but torch.cuda.is_available() is false. "
+                + format_cuda_diagnostic(cuda_runtime_probe(torch))
+            )
         return "cpu"
     if device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError(f"CUDA device requested ({device}), but torch.cuda.is_available() is false")
+        raise RuntimeError(
+            f"CUDA device requested ({device}), but torch.cuda.is_available() is false. "
+            + format_cuda_diagnostic(cuda_runtime_probe(torch))
+        )
     return device
 
 
 def _torch_device_report(device: str) -> dict[str, object]:  # pragma: no cover - torch path
     import torch  # type: ignore
 
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    probe = cuda_runtime_probe(torch)
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else probe.get("nvidia_smi_gpu_name")
     return {
         "device": device,
         "cuda_available": bool(torch.cuda.is_available()),
         "gpu_name": gpu_name,
+        "cuda_diagnostic": probe,
     }
 
 
@@ -396,7 +487,7 @@ def predict_ft_transformer_artifact(
     values = feature_frame[list(feature_columns)].to_numpy(dtype=float)
     tensor = torch.tensor((values - means) / scales, dtype=torch.float32, device=resolved_device)
     with torch.no_grad():
-        outputs = model(tensor).detach().cpu().numpy()
+        outputs = _batched_predict_tensor(model, tensor, batch_size=4096).detach().cpu().numpy()
     base_columns = [c for c in ("symbol", "trade_date") if c in feature_frame.columns]
     output = feature_frame[base_columns].copy()
     for index, horizon in enumerate(horizons):
@@ -409,6 +500,45 @@ def predict_ft_transformer_artifact(
         feature_columns=feature_columns,
         artifact_dir=str(artifact),
     )
+
+
+def _batched_loss(
+    model: object,
+    features: "torch.Tensor",
+    targets: "torch.Tensor",
+    loss_fn: object,
+    *,
+    batch_size: int,
+) -> float:  # pragma: no cover - torch path
+    import torch
+
+    total_loss = 0.0
+    total_rows = 0
+    size = max(1, int(batch_size))
+    for start in range(0, int(features.shape[0]), size):
+        end = min(start + size, int(features.shape[0]))
+        preds = model(features[start:end])
+        loss = loss_fn(preds, targets[start:end])
+        rows = end - start
+        total_loss += float(loss.detach().cpu()) * rows
+        total_rows += rows
+    return total_loss / max(1, total_rows)
+
+
+def _batched_predict_tensor(
+    model: object,
+    features: "torch.Tensor",
+    *,
+    batch_size: int,
+) -> "torch.Tensor":  # pragma: no cover - torch path
+    import torch
+
+    outputs = []
+    size = max(1, int(batch_size))
+    for start in range(0, int(features.shape[0]), size):
+        end = min(start + size, int(features.shape[0]))
+        outputs.append(model(features[start:end]).detach().cpu())
+    return torch.cat(outputs, dim=0)
 
 
 __all__ = [

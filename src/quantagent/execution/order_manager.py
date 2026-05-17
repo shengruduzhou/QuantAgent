@@ -23,7 +23,7 @@ from quantagent.quant_math.ashare import AshareRuleEngine
 @dataclass(frozen=True)
 class OrderManagerConfig:
     lot_size: int = 100
-    min_order_value_yuan: float = 5_000.0
+    min_order_value_yuan: float = 100.0
     allow_odd_lot_sell_only_for_full_liquidation: bool = True
     max_orders_per_symbol_per_day: int = 5
     block_buy_limit_up: bool = True

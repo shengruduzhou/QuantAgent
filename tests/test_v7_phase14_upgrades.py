@@ -539,8 +539,9 @@ def test_ft_transformer_require_gpu_fails_when_cuda_absent(monkeypatch):
     from quantagent.training import ft_transformer_trainer as trainer
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(RuntimeError, match="GPU training was required"):
+    with pytest.raises(RuntimeError, match="GPU training was required") as exc_info:
         trainer._resolve_device("auto", require_gpu=True)  # type: ignore[attr-defined]
+    assert "CUDA diagnostic" in str(exc_info.value)
     assert trainer._resolve_device("auto", require_gpu=False) == "cpu"  # type: ignore[attr-defined]
 
 
@@ -617,6 +618,31 @@ def test_auto_train_v7_uses_existing_market_panel_and_writes_labels(monkeypatch,
     assert payload["status"] == "started_and_completed"
     assert calls["market_panel_path"] == market_path
     assert Path(calls["labels_path"]).exists()
+
+
+def test_full_ai_refresh_pit_cache_requires_network(monkeypatch):
+    import typer
+
+    import quantagent.cli.v7_train as v7_train
+
+    monkeypatch.setattr(v7_train, "_resolve_full_ai_symbols", lambda **kwargs: ("600519.SH",))
+    with pytest.raises(typer.BadParameter, match="requires explicit --allow-network"):
+        v7_train._prepare_full_ai_quant_inputs(
+            symbols="600519.SH",
+            symbols_file=None,
+            max_symbols=0,
+            provider_uri=None,
+            market_panel_path=None,
+            allow_network=False,
+            refresh_akshare_market=False,
+            refresh_fundamentals=True,
+            refresh_valuation=True,
+            refresh_sector_map=False,
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+            as_of_date="2020-12-31",
+            horizons="1,5",
+        )
 
 
 def test_walk_forward_backtest_v7_requires_predictions_or_weights(tmp_path):

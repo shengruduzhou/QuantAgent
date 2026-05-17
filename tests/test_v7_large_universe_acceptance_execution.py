@@ -36,7 +36,7 @@ def test_top_k_ratio_limits_large_universe_to_ten_percent():
     result = build_v7_target_weights(
         preds,
         market,
-        config=V7TargetWeightsConfig(top_k=30, top_k_ratio=0.10),
+        config=V7TargetWeightsConfig(selection_mode="top_k", top_k=30, top_k_ratio=0.10),
     )
 
     daily = result.diagnostics["daily_selection"][0]
@@ -53,7 +53,7 @@ def test_top_k_covering_universe_fails_when_ratio_disabled():
         build_v7_target_weights(
             preds,
             market,
-            config=V7TargetWeightsConfig(top_k=30, top_k_ratio=None, fail_if_top_k_covers_universe=True),
+            config=V7TargetWeightsConfig(selection_mode="top_k", top_k=30, top_k_ratio=None, fail_if_top_k_covers_universe=True),
         )
 
 
@@ -64,7 +64,7 @@ def test_small_universe_ratio_selects_three_not_thirty():
     result = build_v7_target_weights(
         preds,
         market,
-        config=V7TargetWeightsConfig(top_k=30, top_k_ratio=0.10),
+        config=V7TargetWeightsConfig(selection_mode="top_k", top_k=30, top_k_ratio=0.10),
     )
 
     assert result.diagnostics["daily_selection"][0]["selected_count"] == 3
@@ -78,7 +78,7 @@ def test_selection_pressure_below_threshold_fails():
         build_v7_target_weights(
             preds,
             market,
-            config=V7TargetWeightsConfig(top_k=30, top_k_ratio=0.50, min_selection_pressure=3.0),
+            config=V7TargetWeightsConfig(selection_mode="top_k", top_k=30, top_k_ratio=0.50, min_selection_pressure=3.0),
         )
 
 
@@ -89,7 +89,7 @@ def test_selected_alpha_spread_warning_when_selection_has_no_alpha_edge():
     result = build_v7_target_weights(
         preds,
         market,
-        config=V7TargetWeightsConfig(top_k=2, top_k_ratio=0.20, min_selection_pressure=1.0),
+        config=V7TargetWeightsConfig(selection_mode="top_k", top_k=2, top_k_ratio=0.20, min_selection_pressure=1.0),
     )
 
     warnings = result.diagnostics.get("warnings", [])

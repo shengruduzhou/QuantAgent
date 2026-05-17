@@ -16,7 +16,7 @@ from quantagent.execution.virtual_broker import VirtualBroker
 class AShareExecutionSimulationConfig:
     initial_cash: float = 1_000_000.0
     lot_size: int = 100
-    min_order_value_yuan: float = 5_000.0
+    min_order_value_yuan: float = 100.0
     allow_odd_lot_sell_only_for_full_liquidation: bool = True
     volume_participation_cap: float = 0.10
     slippage_bps: float = 8.0

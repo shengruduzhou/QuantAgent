@@ -22,9 +22,12 @@ from quantagent.data.v7_quality_gates import (
 )
 from quantagent.training.model_registry import ModelRegistry
 from quantagent.training.splitters import WalkForwardSplitConfig, split_walk_forward
+from quantagent.cuda_runtime import configure_cuda_environment
 
 
 SUPPORTED_MODELS: tuple[str, ...] = ("ridge", "elastic_net", "lightgbm", "xgboost", "ft_transformer")
+
+configure_cuda_environment()
 
 
 def _default_output_dir() -> str:
@@ -62,11 +65,15 @@ class V7TrainingConfig:
     n_estimators: int = 200
     max_depth: int = 6
     learning_rate: float = 0.05
-    ft_max_epochs: int = 30
-    ft_batch_size: int = 1024
-    ft_d_token: int = 64
-    ft_n_blocks: int = 3
-    ft_n_heads: int = 4
+    ft_max_epochs: int = 60
+    ft_batch_size: int = 8192
+    ft_d_token: int = 128
+    ft_n_blocks: int = 5
+    ft_n_heads: int = 8
+    ft_dates_per_step: int = 8
+    ft_attention_dropout: float = 0.10
+    ft_ffn_dropout: float = 0.10
+    ft_weight_decay: float = 1e-4
     ft_use_amp: bool = True
     ft_device: str = "auto"
     require_gpu: bool = False
@@ -279,9 +286,13 @@ def _run_ft_transformer_experiment(
                 d_token=config.ft_d_token,
                 n_blocks=config.ft_n_blocks,
                 n_heads=config.ft_n_heads,
+                attention_dropout=config.ft_attention_dropout,
+                ffn_dropout=config.ft_ffn_dropout,
                 learning_rate=config.learning_rate,
+                weight_decay=config.ft_weight_decay,
                 batch_size=config.ft_batch_size,
                 max_epochs=config.ft_max_epochs,
+                dates_per_step=config.ft_dates_per_step,
                 use_amp=config.ft_use_amp,
                 device=config.ft_device,
                 require_gpu=config.require_gpu,
@@ -314,7 +325,10 @@ def _run_ft_transformer_experiment(
             d_token=config.ft_d_token,
             n_blocks=config.ft_n_blocks,
             n_heads=config.ft_n_heads,
+            attention_dropout=config.ft_attention_dropout,
+            ffn_dropout=config.ft_ffn_dropout,
             learning_rate=config.learning_rate,
+            weight_decay=config.ft_weight_decay,
             batch_size=config.ft_batch_size,
             max_epochs=config.ft_max_epochs,
             use_amp=config.ft_use_amp,

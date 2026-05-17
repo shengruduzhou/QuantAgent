@@ -112,7 +112,7 @@ def run_paper_backtest_v7(
     lot_size: int = typer.Option(100, "--lot-size"),
     volume_participation_cap: float = typer.Option(0.10, "--volume-participation-cap"),
     slippage_bps: float = typer.Option(8.0, "--slippage-bps"),
-    min_order_value_yuan: float = typer.Option(5_000.0, "--min-order-value-yuan"),
+    min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
 ) -> None:
     """Run A-share constrained paper backtest and write user-facing reports."""
     from quantagent.backtest.ashare_execution_simulator import (
@@ -172,7 +172,7 @@ def generate_paper_report_v7(
         lot_size=100,
         volume_participation_cap=0.10,
         slippage_bps=8.0,
-        min_order_value_yuan=5_000.0,
+        min_order_value_yuan=100.0,
     )
 
 

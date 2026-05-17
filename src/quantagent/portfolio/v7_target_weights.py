@@ -42,6 +42,14 @@ class V7TargetWeightsConfig:
     optimizer_backend: str = "auto"
     objective: str = "max_expected_alpha"
     long_short: bool = False
+    # selection_mode: "top_k" (legacy: nlargest by prediction) or
+    # "ai_threshold" (filter by prediction > alpha_threshold AND
+    # confidence >= confidence_floor, with safety bounds).
+    selection_mode: str = "ai_threshold"
+    alpha_threshold: float = 0.0
+    confidence_floor: float = 0.55
+    selection_top_k_min: int = 5
+    selection_top_k_max: int = 100
     top_k: int = 30
     top_k_ratio: float | None = 0.10
     min_selection_pressure: float = 3.0
@@ -280,55 +288,88 @@ def build_v7_target_weights(
             diagnostics["rejected"].extend(rejected)
             continue
 
-        # Top-K selection by predicted alpha (long side); for long-short keep both tails.
+        # Selection: either AI-threshold (prediction & confidence gates with
+        # min/max safety bounds) or legacy top-K (nlargest by prediction).
         alpha = eligible["prediction"].astype(float)
-        if config.dynamic_top_k_enabled:
-            theme_today = (
-                theme_frame[theme_frame["trade_date"] == date]
-                if theme_frame is not None
-                else None
-            )
-            decision = resolve_dynamic_top_k(
-                eligible_count=len(eligible),
-                predictions_for_date=eligible["prediction"],
-                theme_signals_for_date=theme_today,
-                config=dynamic_topk_cfg,
-            )
-            effective_top_k = int(max(1, decision.top_k))
-            diagnostics["dynamic_top_k_decisions"].append({"trade_date": str(date), **decision.diagnostics, "top_k": effective_top_k, "contributions": decision.contributions})
-        else:
-            effective_top_k = _effective_top_k(len(eligible), config)
-        if effective_top_k >= len(eligible):
-            if config.dynamic_top_k_enabled or config.shrink_on_small_universe:
-                effective_top_k = max(1, len(eligible) - 1)
-            elif config.fail_if_top_k_covers_universe:
-                raise ValueError(
-                    "top_k selection covers the eligible universe; increase the universe or lower --top-k/--top-k-ratio"
-                )
-        if config.long_short:
-            top_k = min(effective_top_k, len(eligible) // 2 or 1)
-            longs = eligible.nlargest(top_k, "prediction")
-            shorts = eligible.nsmallest(top_k, "prediction")
-            selected_count = int(pd.concat([longs[["symbol"]], shorts[["symbol"]]]).drop_duplicates("symbol").shape[0])
-            longs_w = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
-            shorts_w = -_softmax_weights(-shorts["prediction"].to_numpy(dtype=float), config.alpha_temperature)
-            weights = pd.Series(
-                np.concatenate([longs_w, shorts_w]),
-                index=pd.Index(np.concatenate([longs["symbol"].to_numpy(), shorts["symbol"].to_numpy()]), name="symbol"),
-            )
-        else:
-            top_k = effective_top_k
-            longs = eligible.nlargest(top_k, "prediction")
+        if config.selection_mode == "ai_threshold":
+            pool = eligible.copy()
+            pool = pool[pool["prediction"].astype(float) > float(config.alpha_threshold)]
+            if "confidence" in pool.columns and float(config.confidence_floor) > 0:
+                pool = pool[pool["confidence"].astype(float) >= float(config.confidence_floor)]
+            min_n = max(1, int(config.selection_top_k_min))
+            max_n = max(min_n, int(config.selection_top_k_max))
+            fallback_to_min = False
+            capped_at_max = False
+            if len(pool) < min_n:
+                pool = eligible.nlargest(min(min_n, len(eligible)), "prediction")
+                fallback_to_min = True
+            if len(pool) > max_n:
+                pool = pool.nlargest(max_n, "prediction")
+                capped_at_max = True
+            longs = pool
             shorts = pd.DataFrame(columns=eligible.columns)
             selected_count = int(len(longs))
-            cvx_weights, cvx_note = _try_cvxpy_long_only(longs, previous_weights, sector_lookup, config)
-            if cvx_weights is not None:
-                weights = cvx_weights
-                diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "cvxpy", "note": cvx_note})
+            effective_top_k = selected_count
+            scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+            weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
+            diagnostics.setdefault("optimizer_backend", []).append({
+                "trade_date": str(date),
+                "backend": "ai_threshold",
+                "alpha_threshold": float(config.alpha_threshold),
+                "confidence_floor": float(config.confidence_floor),
+                "selected_count": selected_count,
+                "eligible_count": int(len(eligible)),
+                "fallback_to_min": fallback_to_min,
+                "capped_at_max": capped_at_max,
+            })
+        else:
+            if config.dynamic_top_k_enabled:
+                theme_today = (
+                    theme_frame[theme_frame["trade_date"] == date]
+                    if theme_frame is not None
+                    else None
+                )
+                decision = resolve_dynamic_top_k(
+                    eligible_count=len(eligible),
+                    predictions_for_date=eligible["prediction"],
+                    theme_signals_for_date=theme_today,
+                    config=dynamic_topk_cfg,
+                )
+                effective_top_k = int(max(1, decision.top_k))
+                diagnostics["dynamic_top_k_decisions"].append({"trade_date": str(date), **decision.diagnostics, "top_k": effective_top_k, "contributions": decision.contributions})
             else:
-                scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
-                weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
-                diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "deterministic", "note": cvx_note})
+                effective_top_k = _effective_top_k(len(eligible), config)
+            if effective_top_k >= len(eligible):
+                if config.dynamic_top_k_enabled or config.shrink_on_small_universe:
+                    effective_top_k = max(1, len(eligible) - 1)
+                elif config.fail_if_top_k_covers_universe:
+                    raise ValueError(
+                        "top_k selection covers the eligible universe; increase the universe or lower --top-k/--top-k-ratio"
+                    )
+            if config.long_short:
+                top_k = min(effective_top_k, len(eligible) // 2 or 1)
+                longs = eligible.nlargest(top_k, "prediction")
+                shorts = eligible.nsmallest(top_k, "prediction")
+                selected_count = int(pd.concat([longs[["symbol"]], shorts[["symbol"]]]).drop_duplicates("symbol").shape[0])
+                longs_w = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                shorts_w = -_softmax_weights(-shorts["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                weights = pd.Series(
+                    np.concatenate([longs_w, shorts_w]),
+                    index=pd.Index(np.concatenate([longs["symbol"].to_numpy(), shorts["symbol"].to_numpy()]), name="symbol"),
+                )
+            else:
+                top_k = effective_top_k
+                longs = eligible.nlargest(top_k, "prediction")
+                shorts = pd.DataFrame(columns=eligible.columns)
+                selected_count = int(len(longs))
+                cvx_weights, cvx_note = _try_cvxpy_long_only(longs, previous_weights, sector_lookup, config)
+                if cvx_weights is not None:
+                    weights = cvx_weights
+                    diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "cvxpy", "note": cvx_note})
+                else:
+                    scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                    weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
+                    diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "deterministic", "note": cvx_note})
         selection_pressure = float(len(eligible) / max(selected_count, 1))
         whether_selection_is_real = bool(selection_pressure >= config.min_selection_pressure and selected_count < len(eligible))
         selected_symbols = set(longs["symbol"].astype(str))
@@ -357,7 +398,7 @@ def build_v7_target_weights(
             }
         )
         diagnostics["alpha_distribution_by_date"].append({"trade_date": str(date), **alpha_stats})
-        if selection_pressure < config.min_selection_pressure:
+        if selection_pressure < config.min_selection_pressure and config.selection_mode != "ai_threshold":
             raise ValueError(
                 f"selection_pressure={selection_pressure:.3f} is below min_selection_pressure={config.min_selection_pressure:.3f}"
             )

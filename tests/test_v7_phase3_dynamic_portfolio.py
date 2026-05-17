@@ -235,6 +235,7 @@ def test_build_target_weights_with_dynamic_topk_does_not_raise_on_small_universe
         ]
     )
     cfg = V7TargetWeightsConfig(
+        selection_mode="top_k",
         dynamic_top_k_enabled=True,
         top_k_min=2,
         top_k_max=50,  # over the 5-name universe — must shrink

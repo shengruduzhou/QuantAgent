@@ -46,8 +46,8 @@ def train_alpha_v7(
     paper_report: Path | None = typer.Option(None, "--paper-report"),
     experiment_name: str | None = typer.Option(None, "--experiment-name"),
     registry_root: Path | None = typer.Option(None, "--registry-root"),
-    ft_max_epochs: int = typer.Option(30, "--ft-max-epochs"),
-    ft_batch_size: int = typer.Option(1024, "--ft-batch-size"),
+    ft_max_epochs: int = typer.Option(60, "--ft-max-epochs"),
+    ft_batch_size: int = typer.Option(8192, "--ft-batch-size"),
     ft_device: str = typer.Option("auto", "--ft-device", help="auto | cuda | cuda:0 | cpu for ft_transformer."),
     require_gpu: bool = typer.Option(False, "--require-gpu", help="Fail if ft_transformer cannot train on CUDA."),
     allow_model_downgrade: bool = typer.Option(
@@ -263,8 +263,8 @@ def auto_train_v7(
         rolling_train_days=rolling_train_days,
         embargo_days=embargo_days,
         purge_days=purge_days,
-        ft_max_epochs=30,
-        ft_batch_size=1024,
+        ft_max_epochs=60,
+        ft_batch_size=8192,
         ft_device=ft_device,
         require_gpu=require_gpu,
         min_symbols=min_symbols,
@@ -280,7 +280,7 @@ def auto_train_v7(
         objective="max_expected_alpha",
         cash_floor=0.0,
         initial_cash=initial_cash,
-        min_order_value_yuan=5_000.0,
+        min_order_value_yuan=100.0,
         benchmark_symbol=None,
         paper_report_output_dir=None,
         mark_production_ready=False,
@@ -489,6 +489,11 @@ def build_target_weights_v7(
         True,
         "--fail-if-top-k-covers-universe/--allow-top-k-covers-universe",
     ),
+    selection_mode: str = typer.Option("ai_threshold", "--selection-mode", help="ai_threshold | top_k"),
+    alpha_threshold: float = typer.Option(0.0, "--alpha-threshold"),
+    confidence_floor: float = typer.Option(0.55, "--confidence-floor"),
+    selection_top_k_min: int = typer.Option(5, "--selection-top-k-min"),
+    selection_top_k_max: int = typer.Option(100, "--selection-top-k-max"),
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
     max_turnover: float = typer.Option(0.50, "--max-turnover"),
@@ -519,6 +524,11 @@ def build_target_weights_v7(
         top_k_ratio=top_k_ratio,
         min_selection_pressure=min_selection_pressure,
         fail_if_top_k_covers_universe=fail_if_top_k_covers_universe,
+        selection_mode=selection_mode,
+        alpha_threshold=alpha_threshold,
+        confidence_floor=confidence_floor,
+        selection_top_k_min=selection_top_k_min,
+        selection_top_k_max=selection_top_k_max,
         max_weight_per_name=max_weight_per_name,
         max_sector_weight=max_sector_weight,
         max_turnover=max_turnover,
@@ -579,8 +589,8 @@ def run_full_real_training_v7(
     embargo_days: int = typer.Option(5, "--embargo-days"),
     purge_days: int | None = typer.Option(None, "--purge-days"),
     n_splits: int = typer.Option(4, "--n-splits", help="Walk-forward fold count; raise to cover the full OOS span."),
-    ft_max_epochs: int = typer.Option(30, "--ft-max-epochs"),
-    ft_batch_size: int = typer.Option(1024, "--ft-batch-size"),
+    ft_max_epochs: int = typer.Option(60, "--ft-max-epochs"),
+    ft_batch_size: int = typer.Option(8192, "--ft-batch-size"),
     ft_device: str = typer.Option("auto", "--ft-device", help="auto | cuda | cuda:0 | cpu for ft_transformer."),
     require_gpu: bool = typer.Option(False, "--require-gpu", help="Fail if ft_transformer cannot train on CUDA."),
     min_symbols: int = typer.Option(2, "--min-symbols"),
@@ -592,6 +602,11 @@ def run_full_real_training_v7(
         True,
         "--fail-if-top-k-covers-universe/--allow-top-k-covers-universe",
     ),
+    selection_mode: str = typer.Option("ai_threshold", "--selection-mode", help="ai_threshold | top_k"),
+    alpha_threshold: float = typer.Option(0.0, "--alpha-threshold"),
+    confidence_floor: float = typer.Option(0.55, "--confidence-floor"),
+    selection_top_k_min: int = typer.Option(5, "--selection-top-k-min"),
+    selection_top_k_max: int = typer.Option(100, "--selection-top-k-max"),
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
     max_turnover: float = typer.Option(0.50, "--max-turnover"),
@@ -599,7 +614,7 @@ def run_full_real_training_v7(
     objective: str = typer.Option("max_expected_alpha", "--objective"),
     cash_floor: float = typer.Option(0.0, "--cash-floor"),
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
-    min_order_value_yuan: float = typer.Option(5_000.0, "--min-order-value-yuan"),
+    min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
     benchmark_symbol: str | None = typer.Option(None, "--benchmark-symbol"),
     paper_report_output_dir: Path | None = typer.Option(None, "--paper-report-output-dir"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
@@ -761,6 +776,11 @@ def run_full_real_training_v7(
             top_k_ratio=top_k_ratio,
             min_selection_pressure=min_selection_pressure,
             fail_if_top_k_covers_universe=fail_if_top_k_covers_universe,
+            selection_mode=selection_mode,
+            alpha_threshold=alpha_threshold,
+            confidence_floor=confidence_floor,
+            selection_top_k_min=selection_top_k_min,
+            selection_top_k_max=selection_top_k_max,
             max_weight_per_name=max_weight_per_name,
             max_sector_weight=max_sector_weight,
             max_turnover=max_turnover,
@@ -1009,3 +1029,608 @@ def _load_oos_predictions(path: Path, primary_horizon: int) -> "pd.DataFrame":
     if selected["trade_date"].isna().any():
         raise ValueError("out-of-sample predictions contain invalid trade_date values")
     return selected[["symbol", "trade_date", "prediction", "sample_role", "fold_id"]].reset_index(drop=True)
+
+
+@app.command("hp-search")
+def hp_search(
+    dataset_path: Path = typer.Option(None, "--dataset"),
+    n_trials: int = typer.Option(100, "--n-trials"),
+    gpu: bool = typer.Option(False, "--gpu/--no-gpu"),
+    study_name: str = typer.Option("v7_alpha", "--study-name"),
+    model: str = typer.Option("ft_transformer", "--model"),
+    ft_batch_size: int = typer.Option(8192, "--ft-batch-size"),
+    ft_max_epochs: int = typer.Option(60, "--ft-max-epochs"),
+    require_gpu: bool = typer.Option(True, "--require-gpu/--no-require-gpu"),
+) -> None:
+    """Layer A: Optuna HP search over FT-Transformer and portfolio knobs."""
+    from quantagent.optimization.optuna_search import OptunaSearchConfig, run_optuna_hp_search
+
+    resolved_dataset = _default_training_dataset_path(dataset_path)
+    result = run_optuna_hp_search(
+        read_frame(resolved_dataset),
+        OptunaSearchConfig(
+            study_name=study_name,
+            n_trials=n_trials,
+            model=model,
+            ft_device="cuda" if gpu else "auto",
+            require_gpu=require_gpu if gpu else False,
+            ft_batch_size=ft_batch_size,
+            ft_max_epochs=ft_max_epochs,
+        ),
+    )
+    typer.echo(json_dump(result.to_dict()))
+
+
+@app.command("evolve-factors")
+def evolve_factors(
+    dataset_path: Path = typer.Option(None, "--dataset"),
+    generations: int = typer.Option(30, "--generations"),
+    population: int = typer.Option(60, "--population"),
+    seed_from_optuna: str = typer.Option("v7_alpha", "--seed-from-optuna"),
+    model: str = typer.Option("ridge", "--model"),
+) -> None:
+    """Layer B: GA search over factor mask, horizon blend, and ensemble weights."""
+    from quantagent.optimization.factor_evolution import FactorEvolutionConfig, run_factor_evolution
+
+    resolved_dataset = _default_training_dataset_path(dataset_path)
+    result = run_factor_evolution(
+        read_frame(resolved_dataset),
+        FactorEvolutionConfig(
+            generations=generations,
+            population=population,
+            seed_from_optuna=seed_from_optuna,
+            model=model,
+        ),
+    )
+    typer.echo(json_dump(result.to_dict()))
+
+
+@app.command("train-rl-agent")
+def train_rl_agent(
+    predictions_path: Path = typer.Option(None, "--predictions"),
+    market_panel_path: Path = typer.Option(None, "--market-panel"),
+    timesteps: int = typer.Option(2_000_000, "--timesteps"),
+    device: str = typer.Option("cuda", "--device"),
+    env_config: Path | None = typer.Option(None, "--env-config"),
+    n_envs: int = typer.Option(4, "--n-envs"),
+    require_gpu: bool = typer.Option(True, "--require-gpu/--no-require-gpu"),
+) -> None:
+    """Layer C: train a PPO portfolio delta policy on paper/backtest data."""
+    from quantagent.rl.portfolio_env import PortfolioEnvConfig
+    from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
+
+    resolved_predictions = predictions_path or (quant_paths().predictions / "predictions.parquet")
+    resolved_market = market_panel_path or (quant_paths().data_root / "v7" / "silver" / "market_panel" / "market_panel.parquet")
+    env_kwargs = _load_env_config(env_config)
+    result = train_ppo_policy(
+        read_frame(resolved_predictions),
+        read_frame(resolved_market),
+        PPOTrainingConfig(
+            timesteps=timesteps,
+            device=device,
+            n_envs=n_envs,
+            require_gpu=require_gpu,
+            env=PortfolioEnvConfig(**env_kwargs),
+        ),
+    )
+    typer.echo(json_dump(result))
+
+
+@app.command("autopilot")
+def autopilot(
+    dataset_path: Path = typer.Option(None, "--dataset"),
+    market_panel_path: Path | None = typer.Option(None, "--market-panel"),
+    predictions_path: Path | None = typer.Option(None, "--predictions"),
+    n_trials: int = typer.Option(100, "--n-trials"),
+    generations: int = typer.Option(30, "--generations"),
+    timesteps: int = typer.Option(2_000_000, "--timesteps"),
+    study_name: str = typer.Option("v7_alpha", "--study-name"),
+    require_gpu: bool = typer.Option(True, "--require-gpu/--no-require-gpu"),
+    report_out: Path | None = typer.Option(None, "--report-out"),
+) -> None:
+    """Run Layer A -> B -> C and write a unified research report."""
+    result = _run_autopilot_impl(
+        dataset_path=_default_training_dataset_path(dataset_path),
+        market_panel_path=market_panel_path,
+        predictions_path=predictions_path,
+        n_trials=n_trials,
+        generations=generations,
+        timesteps=timesteps,
+        study_name=study_name,
+        require_gpu=require_gpu,
+        report_out=report_out,
+    )
+    typer.echo(json_dump(result))
+
+
+@app.command("run-full-ai-quant-v7")
+def run_full_ai_quant_v7(
+    symbols: str = typer.Option(
+        "auto",
+        "--symbols",
+        help="Comma-separated A-share symbols, or 'auto' to use local Qlib features / AkShare universe.",
+    ),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
+    max_symbols: int = typer.Option(0, "--max-symbols", help="0 means no cap for the resolved universe."),
+    provider_uri: Path | None = typer.Option(None, "--provider-uri", help="Local Qlib provider_uri for symbol/date discovery."),
+    market_panel_path: Path | None = typer.Option(None, "--market-panel"),
+    allow_network: bool = typer.Option(False, "--allow-network", help="Enable AkShare online loading explicitly."),
+    refresh_akshare_market: bool = typer.Option(False, "--refresh-akshare-market"),
+    refresh_fundamentals: bool = typer.Option(False, "--refresh-fundamentals"),
+    refresh_valuation: bool = typer.Option(False, "--refresh-valuation"),
+    refresh_sector_map: bool = typer.Option(False, "--refresh-sector-map"),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
+    as_of_date: str | None = typer.Option(None, "--as-of-date"),
+    model: str = typer.Option("ft_transformer", "--model"),
+    require_gpu: bool = typer.Option(True, "--require-gpu/--no-require-gpu"),
+    ft_device: str = typer.Option("cuda", "--ft-device"),
+    ft_max_epochs: int = typer.Option(60, "--ft-max-epochs"),
+    ft_batch_size: int = typer.Option(8192, "--ft-batch-size"),
+    horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
+    primary_horizon: int = typer.Option(5, "--primary-horizon"),
+    split_mode: str = typer.Option("rolling", "--split-mode"),
+    valid_size_days: int = typer.Option(20, "--valid-size-days"),
+    min_train_days: int = typer.Option(120, "--min-train-days"),
+    rolling_train_days: int = typer.Option(756, "--rolling-train-days"),
+    embargo_days: int = typer.Option(5, "--embargo-days"),
+    purge_days: int | None = typer.Option(None, "--purge-days", help="Defaults to max configured label horizon."),
+    min_rows: int = typer.Option(1000, "--min-rows"),
+    min_train_rows: int = typer.Option(1000, "--min-train-rows"),
+    min_symbols: int = typer.Option(50, "--min-symbols"),
+    min_dates: int = typer.Option(252, "--min-dates"),
+    top_k: int = typer.Option(30, "--top-k"),
+    top_k_ratio: float | None = typer.Option(0.10, "--top-k-ratio"),
+    min_selection_pressure: float = typer.Option(3.0, "--min-selection-pressure"),
+    selection_mode: str = typer.Option("ai_threshold", "--selection-mode", help="ai_threshold | top_k"),
+    alpha_threshold: float = typer.Option(0.0, "--alpha-threshold"),
+    confidence_floor: float = typer.Option(0.55, "--confidence-floor"),
+    selection_top_k_min: int = typer.Option(5, "--selection-top-k-min"),
+    selection_top_k_max: int = typer.Option(100, "--selection-top-k-max"),
+    max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
+    max_sector_weight: float = typer.Option(0.30, "--max-sector"),
+    max_turnover: float = typer.Option(0.40, "--max-turnover"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
+    min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
+    dynamic_top_k: bool = typer.Option(True, "--dynamic-top-k/--no-dynamic-top-k"),
+    timing_gate: bool = typer.Option(True, "--timing-gate/--no-timing-gate"),
+    holding_period_mode: str = typer.Option("soft", "--holding-period-mode"),
+    capital_tier: str = typer.Option("1000000:0.10,10000000:0.05,100000000:0.02", "--capital-tier"),
+    run_autopilot_search: bool = typer.Option(True, "--run-autopilot-search/--skip-autopilot-search"),
+    n_trials: int = typer.Option(100, "--n-trials"),
+    generations: int = typer.Option(30, "--generations"),
+    rl_timesteps: int = typer.Option(5_000_000, "--rl-timesteps"),
+    allow_model_downgrade: bool = typer.Option(False, "--allow-model-downgrade"),
+) -> None:
+    """Full V7 AI quant research autopilot.
+
+    This is the opinionated "full data, full dates" entrypoint. It
+    ingests/refreshes requested AkShare layers, rebuilds PIT labels and the
+    gold dataset, trains all configured horizons, builds A-share-safe target
+    weights, runs the T+1 / 100-share / liquidity paper simulator, and then
+    optionally launches Optuna + GA + RL research search.
+
+    It never enables live trading and never emits broker orders.
+    """
+
+    stages = _prepare_full_ai_quant_inputs(
+        symbols=symbols,
+        symbols_file=symbols_file,
+        max_symbols=max_symbols,
+        provider_uri=provider_uri,
+        market_panel_path=market_panel_path,
+        allow_network=allow_network,
+        refresh_akshare_market=refresh_akshare_market,
+        refresh_fundamentals=refresh_fundamentals,
+        refresh_valuation=refresh_valuation,
+        refresh_sector_map=refresh_sector_map,
+        start_date=start_date,
+        end_date=end_date,
+        as_of_date=as_of_date,
+        horizons=horizons,
+    )
+
+    run_full_real_training_v7(
+        market_panel_path=Path(str(stages["market_panel_path"])),
+        labels_path=Path(str(stages["labels_path"])),
+        output_dir=quant_paths().models / "v7_alpha_full_ai",
+        fundamentals_root=Path(str(stages["fundamentals_root"])) if stages.get("fundamentals_root") else None,
+        valuation_path=Path(str(stages["valuation_path"])) if stages.get("valuation_path") else None,
+        disclosures_path=None,
+        sector_map_path=Path(str(stages["sector_map_path"])) if stages.get("sector_map_path") else None,
+        training_dataset_path=Path(str(stages["training_dataset_path"])),
+        symbols=",".join(stages["symbols"]),
+        symbols_file=None,
+        model=model,
+        horizons=horizons,
+        primary_horizon=primary_horizon,
+        min_rows=min_rows,
+        min_train_rows=min_train_rows,
+        split_mode=split_mode,
+        valid_size_days=valid_size_days,
+        min_train_days=min_train_days,
+        rolling_train_days=rolling_train_days,
+        embargo_days=embargo_days,
+        purge_days=purge_days,
+        n_splits=4,
+        ft_max_epochs=ft_max_epochs,
+        ft_batch_size=ft_batch_size,
+        ft_device=ft_device,
+        require_gpu=require_gpu,
+        min_symbols=min_symbols,
+        min_dates=min_dates,
+        top_k=top_k,
+        top_k_ratio=top_k_ratio,
+        min_selection_pressure=min_selection_pressure,
+        fail_if_top_k_covers_universe=True,
+        selection_mode=selection_mode,
+        alpha_threshold=alpha_threshold,
+        confidence_floor=confidence_floor,
+        selection_top_k_min=selection_top_k_min,
+        selection_top_k_max=selection_top_k_max,
+        max_weight_per_name=max_weight_per_name,
+        max_sector_weight=max_sector_weight,
+        max_turnover=max_turnover,
+        optimizer_backend="auto",
+        objective="max_expected_alpha",
+        cash_floor=0.0,
+        initial_cash=initial_cash,
+        min_order_value_yuan=min_order_value_yuan,
+        benchmark_symbol=None,
+        paper_report_output_dir=None,
+        mark_production_ready=False,
+        paper_report=None,
+        allow_model_downgrade=allow_model_downgrade,
+        multi_horizon_blend=True,
+        dynamic_top_k=dynamic_top_k,
+        top_k_min=8,
+        top_k_max=50,
+        timing_gate=timing_gate,
+        holding_period_mode=holding_period_mode,
+        holding_period_max_delta=0.02,
+        capital_tier=capital_tier,
+    )
+
+    autopilot_status: dict[str, object]
+    if run_autopilot_search:
+        autopilot_status = _run_autopilot_impl(
+            dataset_path=Path(str(stages["training_dataset_path"])),
+            market_panel_path=Path(str(stages["market_panel_path"])),
+            predictions_path=quant_paths().predictions / "predictions.parquet",
+            n_trials=n_trials,
+            generations=generations,
+            timesteps=rl_timesteps,
+            study_name="v7_full_ai",
+            require_gpu=require_gpu,
+            report_out=quant_paths().reports / "autopilot" / "v7_full_ai.html",
+        )
+    else:
+        autopilot_status = {"status": "skipped"}
+
+    typer.echo(
+        json_dump(
+            {
+                "status": "passed",
+                "safe_execution": "target_weights_and_paper_simulation_only; live_trading_disabled",
+                "ashare_constraints": {
+                    "t_plus_1": True,
+                    "lot_size": 100,
+                    "min_order_value_yuan": min_order_value_yuan,
+                    "limit_up_down_blocks": True,
+                    "suspension_and_st_blocks": True,
+                },
+                "stages": stages,
+                "autopilot": autopilot_status,
+            }
+        )
+    )
+
+
+def _run_autopilot_impl(
+    *,
+    dataset_path: Path,
+    market_panel_path: Path | None,
+    predictions_path: Path | None,
+    n_trials: int,
+    generations: int,
+    timesteps: int,
+    study_name: str,
+    require_gpu: bool,
+    report_out: Path | None = None,
+) -> dict[str, object]:
+    from datetime import datetime
+
+    from quantagent.optimization.factor_evolution import FactorEvolutionConfig, run_factor_evolution
+    from quantagent.optimization.optuna_search import OptunaSearchConfig, run_optuna_hp_search
+    from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
+
+    dataset = read_frame(dataset_path)
+    stages: dict[str, object] = {"dataset": str(dataset_path)}
+    hp = run_optuna_hp_search(
+        dataset,
+        OptunaSearchConfig(
+            study_name=study_name,
+            n_trials=n_trials,
+            ft_device="cuda" if require_gpu else "auto",
+            require_gpu=require_gpu,
+        ),
+    )
+    stages["layer_a_optuna"] = hp.to_dict()
+    ga = run_factor_evolution(
+        dataset,
+        FactorEvolutionConfig(
+            generations=generations,
+            population=max(8, min(60, generations * 20)),
+            seed_from_optuna=study_name,
+        ),
+    )
+    stages["layer_b_factor_evolution"] = ga.to_dict()
+    rl_status: dict[str, object]
+    resolved_predictions = predictions_path or (quant_paths().predictions / "predictions.parquet")
+    resolved_market = market_panel_path or (quant_paths().data_root / "v7" / "silver" / "market_panel" / "market_panel.parquet")
+    if Path(resolved_predictions).exists() and Path(resolved_market).exists() and timesteps > 0:
+        rl_status = train_ppo_policy(
+            read_frame(Path(resolved_predictions)),
+            read_frame(Path(resolved_market)),
+            PPOTrainingConfig(timesteps=timesteps, require_gpu=require_gpu, device="cuda" if require_gpu else "auto"),
+        )
+    else:
+        rl_status = {
+            "status": "skipped",
+            "reason": "predictions_or_market_panel_missing_or_timesteps_zero",
+            "predictions": str(resolved_predictions),
+            "market_panel": str(resolved_market),
+        }
+    stages["layer_c_rl"] = rl_status
+    report_path = report_out or (
+        quant_paths().reports / "autopilot" / f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.html"
+    )
+    _write_autopilot_report(Path(report_path), stages)
+    stages["report_out"] = str(report_path)
+    stages["safe_execution"] = "research_only_target_weights_downstream; live_trading_disabled"
+    return stages
+
+
+def _prepare_full_ai_quant_inputs(
+    *,
+    symbols: str,
+    symbols_file: Path | None,
+    max_symbols: int,
+    provider_uri: Path | None,
+    market_panel_path: Path | None,
+    allow_network: bool,
+    refresh_akshare_market: bool,
+    refresh_fundamentals: bool,
+    refresh_valuation: bool,
+    refresh_sector_map: bool,
+    start_date: str | None,
+    end_date: str | None,
+    as_of_date: str | None,
+    horizons: str,
+) -> dict[str, object]:
+    from quantagent.data.bootstrap.akshare_bootstrap import AkShareBootstrapConfig, build_akshare_financial_cache
+    from quantagent.data.bootstrap.akshare_market_bootstrap import AkShareMarketPanelConfig, build_akshare_market_panel
+    from quantagent.data.bootstrap.valuation_bootstrap import ValuationBootstrapConfig, build_valuation_cache
+    from quantagent.data.lake import v7_lake_paths
+    from quantagent.data.providers.akshare_valuation_provider import AkShareUniverseProvider
+    from quantagent.data.v7_label_builder import build_forward_return_labels
+
+    paths = quant_paths().ensure()
+    lake = v7_lake_paths(default_v7_lake_root()).ensure()
+    resolved_provider_uri = Path(provider_uri) if provider_uri else paths.raw / "qlib" / "cn_data"
+    resolved_symbols = _resolve_full_ai_symbols(
+        symbols=symbols,
+        symbols_file=symbols_file,
+        provider_uri=resolved_provider_uri,
+        allow_network=allow_network,
+        max_symbols=max_symbols,
+        universe_provider=AkShareUniverseProvider,
+    )
+    if not resolved_symbols:
+        raise typer.BadParameter("No symbols resolved. Prepare Qlib features, pass --symbols/--symbols-file, or use --allow-network.")
+
+    stages: dict[str, object] = {
+        "symbols": list(resolved_symbols),
+        "symbol_count": len(resolved_symbols),
+        "provider_uri": str(resolved_provider_uri),
+    }
+    if (refresh_fundamentals or refresh_valuation) and not allow_network:
+        requested = ", ".join(
+            name
+            for name, enabled in (
+                ("--refresh-fundamentals", refresh_fundamentals),
+                ("--refresh-valuation", refresh_valuation),
+            )
+            if enabled
+        )
+        raise typer.BadParameter(
+            f"{requested} can pull AkShare data into the PIT cache and requires explicit --allow-network."
+        )
+
+    if refresh_akshare_market:
+        market_result = build_akshare_market_panel(
+            AkShareMarketPanelConfig(
+                symbols=resolved_symbols,
+                start_date=start_date,
+                end_date=end_date,
+                output_root=str(lake.root),
+                allow_network=allow_network,
+                provider_uri_for_range=str(resolved_provider_uri),
+                as_of_date=as_of_date,
+            )
+        )
+        if market_result["status"] != "passed":
+            raise RuntimeError(f"AkShare market refresh failed or empty: {market_result}")
+        resolved_market_panel = Path(str(market_result["output"]))
+        stages["market_refresh"] = market_result
+    elif market_panel_path is not None:
+        resolved_market_panel = Path(market_panel_path)
+    else:
+        resolved_market_panel = _existing_table_path(lake.silver_market_panel / "market_panel.parquet")
+    if not resolved_market_panel.exists():
+        raise typer.BadParameter(
+            f"market panel not found: {resolved_market_panel}. Pass --market-panel or enable --refresh-akshare-market --allow-network."
+        )
+
+    fundamentals_root = lake.silver_fundamentals
+    if refresh_fundamentals:
+        financial_result = build_akshare_financial_cache(
+            AkShareBootstrapConfig(
+                start_date=start_date or "1990-01-01",
+                end_date=end_date or as_of_date or pd.Timestamp.today().strftime("%Y-%m-%d"),
+                symbols=resolved_symbols,
+                allow_network=allow_network,
+                lake_root=str(lake.root),
+            )
+        )
+        stages["fundamentals_refresh"] = financial_result
+    has_fundamentals = any((fundamentals_root / name).exists() for name in ("income.parquet", "income.csv"))
+
+    valuation_path = _existing_table_path(lake.silver_valuation / "valuation.parquet")
+    if refresh_valuation:
+        valuation_result = build_valuation_cache(
+            ValuationBootstrapConfig(
+                as_of_dates=parse_csv_tuple(as_of_date or end_date or pd.Timestamp.today().strftime("%Y-%m-%d")),
+                symbols=resolved_symbols,
+                lake_root=str(lake.root),
+                allow_network=allow_network,
+            )
+        )
+        valuation_path = Path(str(valuation_result["output_path"]))
+        stages["valuation_refresh"] = valuation_result
+
+    sector_map_path = _existing_table_path(lake.root / "silver" / "sector_map" / "sector_map.parquet")
+    if refresh_sector_map:
+        sector_map_path = _build_akshare_sector_map(
+            symbols=resolved_symbols,
+            lake_root=lake.root,
+            allow_network=allow_network,
+            as_of_date=as_of_date or end_date,
+        )
+        stages["sector_map_refresh"] = {"status": "passed", "output": str(sector_map_path)}
+
+    label_result = build_forward_return_labels(read_frame(resolved_market_panel), tuple(int(item) for item in parse_csv_tuple(horizons)))
+    labels_path = write_frame(label_result.frame, lake.root / "labels.parquet")
+    training_dataset_path = lake.gold_training_dataset / "training_dataset.parquet"
+    stages.update(
+        {
+            "market_panel_path": str(resolved_market_panel),
+            "labels_path": str(labels_path),
+            "training_dataset_path": str(training_dataset_path),
+            "fundamentals_root": str(fundamentals_root) if has_fundamentals or refresh_fundamentals else None,
+            "valuation_path": str(valuation_path) if valuation_path.exists() else None,
+            "sector_map_path": str(sector_map_path) if sector_map_path.exists() else None,
+            "labels": {
+                "rows": int(len(label_result.frame)),
+                "horizons": list(parse_csv_tuple(horizons)),
+            },
+        }
+    )
+    return stages
+
+
+def _resolve_full_ai_symbols(
+    *,
+    symbols: str,
+    symbols_file: Path | None,
+    provider_uri: Path,
+    allow_network: bool,
+    max_symbols: int,
+    universe_provider: object,
+) -> tuple[str, ...]:
+    if symbols.strip().lower() != "auto":
+        resolved = merge_symbols(symbols, symbols_file)
+    else:
+        resolved = list_qlib_feature_symbols(provider_uri, include_indices=False, max_symbols=max_symbols)
+        extra = merge_symbols("", symbols_file)
+        if extra:
+            resolved = tuple(dict.fromkeys([*resolved, *extra]))
+        if not resolved and allow_network:
+            provider = universe_provider(allow_network=True)
+            result = provider.list_universe()
+            resolved = tuple(result.frame["symbol"].astype(str).tolist()) if not result.frame.empty else ()
+    if max_symbols and len(resolved) > max_symbols:
+        return tuple(resolved[:max_symbols])
+    return tuple(resolved)
+
+
+def _build_akshare_sector_map(
+    *,
+    symbols: tuple[str, ...],
+    lake_root: Path,
+    allow_network: bool,
+    as_of_date: str | None,
+) -> Path:
+    from quantagent.data.manifest import build_manifest_for_frame
+    from quantagent.data.providers.akshare_valuation_provider import (
+        AKSHARE_SECTOR_REQUIRED_COLUMNS,
+        AkShareSectorProvider,
+    )
+    from quantagent.data.providers.base import ProviderRequest
+
+    output_path = lake_root / "silver" / "sector_map" / "sector_map.parquet"
+    result = AkShareSectorProvider(allow_network=allow_network).industry_classification(
+        ProviderRequest("", as_of_date or "", symbols=symbols),
+        as_of_date=as_of_date,
+    )
+    written = write_frame(result.frame, output_path)
+    manifest = build_manifest_for_frame(
+        dataset_name="sector_map",
+        vendor="akshare",
+        frame=result.frame,
+        output_paths=[written],
+        symbols=symbols,
+        required_columns=AKSHARE_SECTOR_REQUIRED_COLUMNS,
+        warnings=result.warnings,
+        extra={"source": result.source, "schema_report": result.metadata.get("schema_report", {})},
+    )
+    manifest.write(lake_root / "manifests" / "sector_map.json")
+    return written
+
+
+def _default_training_dataset_path(path: Path | None) -> Path:
+    resolved = path or (quant_paths().data_root / "v7" / "gold" / "training_dataset" / "training_dataset.parquet")
+    if not Path(resolved).exists():
+        raise typer.BadParameter(
+            f"training dataset not found: {resolved}. Build it with build-training-dataset-v7 or auto-train-v7 first."
+        )
+    return Path(resolved)
+
+
+def _load_env_config(path: Path | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    try:
+        import yaml
+    except ImportError as exc:
+        raise typer.BadParameter("YAML env config requires pyyaml") from exc
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("env config must be a YAML object")
+    env = payload.get("rl_env", payload.get("env", payload))
+    if not isinstance(env, dict):
+        raise typer.BadParameter("env config must contain an object")
+    allowed = set(PortfolioEnvConfig.__dataclass_fields__) if "PortfolioEnvConfig" in globals() else {
+        "top_n",
+        "max_delta",
+        "max_weight_per_name",
+        "max_gross",
+        "max_turnover",
+        "cost_bps",
+        "drawdown_lambda",
+        "drawdown_limit",
+        "kill_switch_drawdown",
+        "initial_nav",
+    }
+    return {str(k): v for k, v in env.items() if str(k) in allowed}
+
+
+def _write_autopilot_report(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json_dump(payload)
+    path.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'><title>V7 Autopilot Report</title></head>"
+        "<body><h1>V7 Autopilot Report</h1><p>Live trading disabled; research artefacts only.</p>"
+        f"<pre>{body}</pre></body></html>",
+        encoding="utf-8",
+    )
