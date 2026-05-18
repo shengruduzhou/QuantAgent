@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+import types
 
 import pandas as pd
 import pytest
@@ -19,7 +21,7 @@ from quantagent.data.providers.akshare_valuation_provider import (
     akshare_universe_schema_report,
     akshare_valuation_schema_report,
 )
-from quantagent.data.providers.base import ProviderUnavailable
+from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
 from quantagent.data.v7_label_builder import build_forward_return_labels
 
 
@@ -67,6 +69,55 @@ def test_valuation_provider_normalises_chinese_columns():
     assert report["status"] == "passed"
     assert {"symbol", "trade_date", "available_at", "pe_ttm", "pb", "market_cap"}.issubset(normalised.columns)
     assert normalised["symbol"].tolist() == ["600519.SH", "000858.SZ"]
+
+
+def test_valuation_provider_falls_back_to_symbol_endpoints(monkeypatch):
+    def stock_zh_a_spot_em() -> pd.DataFrame:
+        raise ConnectionError("spot disconnected")
+
+    def stock_individual_info_em(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {"item": "股票代码", "value": symbol},
+                {"item": "股票简称", "value": "贵州茅台"},
+                {"item": "总市值", "value": 2_000_000_000_000},
+                {"item": "流通市值", "value": 1_900_000_000_000},
+            ]
+        )
+
+    def stock_zh_valuation_comparison_em(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "代码": "600519",
+                    "简称": "贵州茅台",
+                    "市盈率-TTM": 24.5,
+                    "市净率-MRQ": 8.5,
+                    "市销率-TTM": 12.0,
+                    "PEG": 1.2,
+                    "EV/EBITDA-24A": 18.0,
+                }
+            ]
+        )
+
+    fake_akshare = types.SimpleNamespace(
+        stock_zh_a_spot_em=stock_zh_a_spot_em,
+        stock_individual_info_em=stock_individual_info_em,
+        stock_zh_valuation_comparison_em=stock_zh_valuation_comparison_em,
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    request = ProviderRequest("2026-01-01", "2026-05-15", symbols=("600519.SH",))
+    result = AkShareValuationProvider(allow_network=True, retry_sleep_seconds=0).snapshot("2026-05-15", request)
+
+    assert result.metadata["schema_report"]["status"] == "passed"
+    assert result.frame[["symbol", "pe_ttm", "pb", "market_cap"]].iloc[0].to_dict() == {
+        "symbol": "600519.SH",
+        "pe_ttm": 24.5,
+        "pb": 8.5,
+        "market_cap": 2_000_000_000_000,
+    }
+    assert any("akshare_valuation_spot_em_failed" in warning for warning in result.warnings)
 
 
 def test_universe_schema_report_lists_required_columns():

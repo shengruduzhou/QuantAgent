@@ -66,7 +66,11 @@ def read_frame(path: Path) -> pd.DataFrame:
             csv = file_path.with_suffix(".csv")
             if csv.exists():
                 return pd.read_csv(csv)
-            raise
+            try:
+                import polars as pl
+            except ImportError:
+                raise
+            return pl.read_parquet(str(file_path)).to_pandas()
     return pd.read_csv(file_path)
 
 
@@ -77,7 +81,17 @@ def write_frame(frame: pd.DataFrame, path: Path) -> Path:
             frame.to_parquet(path, index=False)
             return path
         except Exception:
-            path = path.with_suffix(".csv")
+            try:
+                import polars as pl
+            except ImportError:
+                path = path.with_suffix(".csv")
+                frame.to_csv(path, index=False)
+                return path
+            try:
+                pl.from_pandas(frame).write_parquet(str(path))
+                return path
+            except Exception:
+                path = path.with_suffix(".csv")
     frame.to_csv(path, index=False)
     return path
 

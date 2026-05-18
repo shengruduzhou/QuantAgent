@@ -35,6 +35,9 @@ V7DataKind = Literal[
     "sector",
     "tradability",
     "disclosure",
+    "macro",
+    "flow",
+    "index",
 ]
 
 V7OfflineBehaviour = Literal["offline", "fail_loud", "require_local_snapshot"]
@@ -106,6 +109,23 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "symbol",
         "ann_date",
         "available_at",
+    ),
+    "macro": (
+        "observation_date",
+        "available_at",
+        "source",
+    ),
+    "flow": (
+        "observation_date",
+        "available_at",
+        "source",
+    ),
+    "index": (
+        "observation_date",
+        "symbol",
+        "close",
+        "available_at",
+        "source",
     ),
 }
 
@@ -193,6 +213,42 @@ V7_DATA_SOURCES: tuple[V7DataSource, ...] = (
         description="Local pre-collected announcement / disclosure snapshots.",
         offline_behaviour="offline",
         required_columns=REQUIRED_COLUMNS["disclosure"],
+    ),
+    V7DataSource(
+        name="akshare_macro",
+        kind="macro",
+        provider="akshare",
+        description="China macro: yield curve, Shibor, repo, central-bank OMO, social financing, M0/M1/M2, CPI, PPI.",
+        offline_behaviour="require_local_snapshot",
+        required_columns=REQUIRED_COLUMNS["macro"],
+        optional_columns=("maturity", "tenor", "yield_pct", "rate_pct",
+                          "inject_amount_cny", "expire_amount_cny", "net_amount_cny",
+                          "aggregate_financing_cny", "m0_cny", "m1_cny", "m2_cny",
+                          "cpi_yoy_pct", "ppi_yoy_pct"),
+        requires_network=True,
+        notes="Tracks the national-team money-flow thesis (bond curve + central-bank stance + money supply).",
+    ),
+    V7DataSource(
+        name="akshare_flow",
+        kind="flow",
+        provider="akshare",
+        description="China capital flow: northbound, margin balance, ETF fund flow, sector fund flow.",
+        offline_behaviour="require_local_snapshot",
+        required_columns=REQUIRED_COLUMNS["flow"],
+        optional_columns=("channel", "market", "symbol", "sector",
+                          "net_inflow_cny", "margin_balance_cny", "short_balance_cny",
+                          "net_flow", "main_net_inflow_cny"),
+        requires_network=True,
+    ),
+    V7DataSource(
+        name="akshare_index",
+        kind="index",
+        provider="akshare",
+        description="Major Chinese equity indices, commodity main-continuous, treasury futures.",
+        offline_behaviour="require_local_snapshot",
+        required_columns=REQUIRED_COLUMNS["index"],
+        optional_columns=("label", "kind", "open", "high", "low", "volume", "amount"),
+        requires_network=True,
     ),
 )
 

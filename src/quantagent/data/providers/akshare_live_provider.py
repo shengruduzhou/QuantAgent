@@ -205,8 +205,14 @@ def _normalize_akshare_daily(frame: pd.DataFrame, symbol: str, *, source: str = 
 def akshare_market_schema_report(frame: pd.DataFrame, as_of_date: str | None = None) -> dict[str, object]:
     missing = [column for column in AKSHARE_MARKET_REQUIRED_COLUMNS if column not in frame.columns]
     pit_violations = 0
-    if as_of_date and "available_at" in frame.columns:
-        pit_violations = int((pd.to_datetime(frame["available_at"], errors="coerce") > pd.Timestamp(as_of_date)).sum())
+    if "available_at" in frame.columns:
+        available_at = pd.to_datetime(frame["available_at"], errors="coerce")
+        trade_date = pd.to_datetime(frame["trade_date"], errors="coerce") if "trade_date" in frame.columns else None
+        pit_violations += int(available_at.isna().sum())
+        if trade_date is not None:
+            pit_violations += int((available_at.notna() & trade_date.notna() & (available_at < trade_date)).sum())
+        if as_of_date:
+            pit_violations += int((available_at.notna() & (available_at > pd.Timestamp(as_of_date))).sum())
     return {
         "status": "passed" if not missing and pit_violations == 0 else "failed",
         "row_count": int(0 if frame is None else len(frame)),

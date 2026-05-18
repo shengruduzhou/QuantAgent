@@ -61,6 +61,15 @@ class V7TrainingDatasetConfig:
     train_end_date: str | None = None
     validation_end_date: str | None = None
     source_name: str = "realdata"
+    factor_library: str = "basic"
+    synthesized_factors_path: str | None = None
+    factor_min_finite_ratio: float = 0.30
+    macro_root: str | None = None
+    flow_root: str | None = None
+    index_root: str | None = None
+    enable_macro: bool = True
+    enable_flow: bool = True
+    enable_index: bool = True
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -90,6 +99,13 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     market = _restrict_window(market, config.start_date, config.end_date, config.symbols)
     labels = _restrict_window(labels, config.start_date, config.end_date, config.symbols)
     features = build_market_features(market)
+    features, factor_report = _append_factor_library(
+        features,
+        market,
+        library=config.factor_library,
+        synthesized_factors_path=config.synthesized_factors_path,
+        min_finite_ratio=config.factor_min_finite_ratio,
+    )
 
     fundamentals = load_fundamentals_root(config.fundamentals_root) if config.fundamentals_root else pd.DataFrame()
     valuation = load_table(config.valuation_path) if config.valuation_path else pd.DataFrame()
@@ -102,6 +118,16 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     features = _asof_merge(features, fundamentals, suffix="_fund", add_flag=config.add_missingness_flags, flag_name="missing_fundamentals")
     features = _asof_merge(features, valuation, suffix="_val", add_flag=config.add_missingness_flags, flag_name="missing_valuation")
     features = _asof_merge(features, disclosures, suffix="_disc", add_flag=config.add_missingness_flags, flag_name="missing_disclosures")
+
+    macro_report: dict[str, object] = {"status": "skipped"}
+    flow_report: dict[str, object] = {"status": "skipped"}
+    index_report: dict[str, object] = {"status": "skipped"}
+    if config.enable_macro and config.macro_root:
+        features, macro_report = _append_macro_features(features, config.macro_root)
+    if config.enable_flow and config.flow_root:
+        features, flow_report = _append_flow_features(features, config.flow_root)
+    if config.enable_index and config.index_root:
+        features, index_report = _append_index_features(features, config.index_root)
 
     label_columns = [c for c in labels.columns if c.startswith("forward_return_")]
     label_end_columns = [c for c in labels.columns if c.startswith("label_end_")]
@@ -171,7 +197,8 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         raw_paths=[config.market_panel_path, config.labels_path]
         + ([config.fundamentals_root] if config.fundamentals_root else [])
         + ([config.valuation_path] if config.valuation_path else [])
-        + ([config.disclosures_path] if config.disclosures_path else []),
+        + ([config.disclosures_path] if config.disclosures_path else [])
+        + ([config.synthesized_factors_path] if config.synthesized_factors_path else []),
         start_date=config.start_date,
         end_date=config.end_date,
         symbols=config.symbols or tuple(sorted(dataset["symbol"].astype(str).dropna().unique())),
@@ -185,6 +212,11 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
             "disclosure_rows": disclosure_rows,
             "horizons": list(desired_horizons),
             "feature_column_count": len(feature_columns),
+            "factor_library": config.factor_library,
+            "factor_report": factor_report,
+            "macro_report": macro_report,
+            "flow_report": flow_report,
+            "index_report": index_report,
         },
     )
     manifest.write(manifest_path)
@@ -203,6 +235,11 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         "valuation_rows": valuation_rows,
         "disclosure_rows": disclosure_rows,
         "quality_status": manifest.quality_status,
+        "factor_library": config.factor_library,
+        "factor_report": factor_report,
+        "macro_report": macro_report,
+        "flow_report": flow_report,
+        "index_report": index_report,
     }
     return V7TrainingDatasetResult(
         dataset=dataset,
@@ -231,10 +268,14 @@ def load_table(path: str | Path | None) -> pd.DataFrame:
             csv = file_path.with_suffix(".csv")
             if csv.exists():
                 return pd.read_csv(csv)
-            raise RuntimeError(
-                f"failed to read parquet table {file_path}; install pyarrow/fastparquet "
-                "or provide a sibling CSV fallback"
-            ) from exc
+            try:
+                import polars as pl
+            except ImportError:
+                raise RuntimeError(
+                    f"failed to read parquet table {file_path}; install pyarrow/fastparquet "
+                    "or provide a sibling CSV fallback"
+                ) from exc
+            return pl.read_parquet(str(file_path)).to_pandas()
     return pd.read_csv(file_path)
 
 
@@ -332,11 +373,74 @@ def _feature_columns(frame: pd.DataFrame, horizons: Iterable[int]) -> list[str]:
     forbidden = set(FORBIDDEN_INFERENCE_COLUMNS)
     forbidden.update(f"forward_return_{h}d" for h in horizons)
     forbidden.update(f"label_end_{h}d" for h in horizons)
-    return [
-        column
-        for column in frame.select_dtypes(include=[np.number, bool]).columns
-        if column not in forbidden
-    ]
+    selected: list[str] = []
+    for column in frame.select_dtypes(include=[np.number, bool]).columns:
+        if column in forbidden:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        finite = values.replace([np.inf, -np.inf], np.nan).notna()
+        if not finite.any():
+            continue
+        if values[finite].nunique(dropna=True) <= 1:
+            continue
+        selected.append(column)
+    return selected
+
+
+def _append_factor_library(
+    features: pd.DataFrame,
+    market: pd.DataFrame,
+    *,
+    library: str,
+    synthesized_factors_path: str | None,
+    min_finite_ratio: float,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    selected = library.strip().lower()
+    if selected in {"", "basic", "none", "off"}:
+        return features, {"status": "skipped", "library": selected or "basic"}
+    if selected == "alpha101":
+        from quantagent.factors.alpha101 import compute_alpha101
+
+        factors = compute_alpha101(market)
+    elif selected == "alpha181":
+        from quantagent.factors.alpha181 import compute_alpha181
+
+        factors = compute_alpha181(market, synthesized_definitions_path=synthesized_factors_path)
+    elif selected in {"cicc80", "cicc_ashare80"}:
+        from quantagent.factors.cicc_ashare80 import compute_cicc_ashare80_factors
+
+        factors = compute_cicc_ashare80_factors(market)
+    else:
+        raise ValueError("factor_library must be basic, alpha101, alpha181, or cicc_ashare80")
+    if factors.empty:
+        return features, {"status": "empty", "library": selected, "columns_added": 0}
+    wide = factors.pivot_table(
+        index=["trade_date", "symbol"],
+        columns="factor_name",
+        values="factor_value",
+        aggfunc="last",
+    ).reset_index()
+    wide.columns = [str(column) for column in wide.columns]
+    kept = []
+    dropped = []
+    for column in [c for c in wide.columns if c not in {"trade_date", "symbol"}]:
+        values = pd.to_numeric(wide[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        finite_ratio = float(values.notna().mean())
+        if finite_ratio >= min_finite_ratio and values.nunique(dropna=True) > 1:
+            wide[column] = values
+            kept.append(column)
+        else:
+            dropped.append(column)
+    wide = wide[["trade_date", "symbol", *kept]]
+    merged = features.merge(wide, on=["trade_date", "symbol"], how="left")
+    return merged, {
+        "status": "passed",
+        "library": selected,
+        "columns_added": len(kept),
+        "columns_dropped": len(dropped),
+        "min_finite_ratio": min_finite_ratio,
+        "synthesized_factors_path": synthesized_factors_path,
+    }
 
 
 def _restrict_window(
@@ -366,7 +470,16 @@ def _write_table(frame: pd.DataFrame, path: Path) -> Path:
             frame.to_parquet(path, index=False)
             return path
         except Exception:
-            path = path.with_suffix(".csv")
+            try:
+                import polars as pl
+            except ImportError:
+                path = path.with_suffix(".csv")
+            else:
+                try:
+                    pl.from_pandas(frame).write_parquet(str(path))
+                    return path
+                except Exception:
+                    path = path.with_suffix(".csv")
     frame.to_csv(path, index=False)
     return path
 
@@ -431,6 +544,181 @@ def _strict_mode_assert(
         for window_name, frame in (("train", in_train), ("validation", in_val), ("test", in_test)):
             if frame.empty:
                 raise ValueError(f"strict mode: {window_name} window is empty")
+
+
+def _asof_merge_timeseries(
+    base: pd.DataFrame,
+    extra_wide: pd.DataFrame,
+    prefix: str,
+) -> tuple[pd.DataFrame, int]:
+    """Broadcast a pure time series (indexed by available_at) onto every symbol row.
+
+    Returns the new frame and the count of columns added.
+    """
+    if extra_wide is None or extra_wide.empty or "available_at" not in extra_wide.columns:
+        return base, 0
+    left = base.copy()
+    left["available_at"] = pd.to_datetime(left["available_at"], errors="coerce")
+    right = extra_wide.copy()
+    right["available_at"] = pd.to_datetime(right["available_at"], errors="coerce")
+    right = right.dropna(subset=["available_at"]).sort_values("available_at")
+    new_columns = [c for c in right.columns if c != "available_at"]
+    if not new_columns:
+        return base, 0
+    renamed = {c: f"{prefix}{c}" if not c.startswith(prefix) else c for c in new_columns}
+    right = right.rename(columns=renamed)
+    new_columns = [renamed[c] for c in new_columns]
+    left_sorted = left.sort_values("available_at").reset_index(drop=True)
+    merged = pd.merge_asof(left_sorted, right, on="available_at", direction="backward")
+    # Filter to numeric, finite columns only.
+    kept: list[str] = []
+    for column in new_columns:
+        if column not in merged.columns:
+            continue
+        values = pd.to_numeric(merged[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if values.notna().any() and values.nunique(dropna=True) > 1:
+            merged[column] = values
+            kept.append(column)
+        else:
+            merged = merged.drop(columns=[column])
+    return merged, len(kept)
+
+
+def _load_macro_wide(macro_root: str | Path) -> pd.DataFrame:
+    """Read every macro PIT parquet under ``macro_root`` and merge to one wide frame."""
+    root = Path(macro_root)
+    if not root.exists():
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    for spec in ("yield_curve", "shibor", "repo", "central_bank_omo",
+                 "aggregate_financing", "money_supply", "cpi", "ppi"):
+        path = root / f"{spec}.parquet"
+        frame = load_table(path)
+        if frame.empty:
+            continue
+        if spec == "yield_curve":
+            wide = frame.pivot_table(index="available_at", columns="maturity",
+                                     values="yield_pct", aggfunc="last")
+            wide.columns = [f"macro_yield_{str(c).lower()}" for c in wide.columns]
+        elif spec == "shibor":
+            wide = frame.pivot_table(index="available_at", columns="tenor",
+                                     values="rate_pct", aggfunc="last")
+            wide.columns = [f"macro_shibor_{str(c).lower().replace('/', '')}" for c in wide.columns]
+        elif spec == "repo":
+            wide = frame.pivot_table(index="available_at", columns="tenor",
+                                     values="rate_pct", aggfunc="last")
+            wide.columns = [f"macro_repo_{str(c).lower()}" for c in wide.columns]
+        elif spec == "central_bank_omo":
+            wide = frame.set_index("available_at")[
+                [c for c in ("inject_amount_cny", "expire_amount_cny", "net_amount_cny")
+                 if c in frame.columns]
+            ]
+            wide.columns = [f"macro_omo_{c.replace('_cny', '')}" for c in wide.columns]
+        elif spec == "aggregate_financing":
+            wide = frame.set_index("available_at")[["aggregate_financing_cny"]]
+            wide.columns = ["macro_afre"]
+        elif spec == "money_supply":
+            wide = frame.set_index("available_at")[
+                [c for c in ("m0_cny", "m1_cny", "m2_cny") if c in frame.columns]
+            ]
+            wide.columns = [f"macro_{c.replace('_cny', '')}" for c in wide.columns]
+        elif spec == "cpi":
+            wide = frame.set_index("available_at")[["cpi_yoy_pct"]]
+            wide.columns = ["macro_cpi_yoy"]
+        elif spec == "ppi":
+            wide = frame.set_index("available_at")[["ppi_yoy_pct"]]
+            wide.columns = ["macro_ppi_yoy"]
+        else:
+            continue
+        wide = wide.reset_index()
+        frames.append(wide)
+    if not frames:
+        return pd.DataFrame()
+    combined = frames[0]
+    for piece in frames[1:]:
+        combined = combined.merge(piece, on="available_at", how="outer")
+    combined = combined.sort_values("available_at").reset_index(drop=True)
+    return combined
+
+
+def _load_flow_wide(flow_root: str | Path) -> pd.DataFrame:
+    root = Path(flow_root)
+    if not root.exists():
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    nb_path = root / "northbound_flow.parquet"
+    nb = load_table(nb_path)
+    if not nb.empty:
+        wide = nb.pivot_table(index="available_at", columns="channel",
+                              values="net_inflow_cny", aggfunc="last")
+        wide.columns = [f"flow_{str(c).lower()}" for c in wide.columns]
+        frames.append(wide.reset_index())
+    mb_path = root / "margin_balance.parquet"
+    mb = load_table(mb_path)
+    if not mb.empty:
+        wide = mb.pivot_table(index="available_at", columns="market",
+                              values="margin_balance_cny", aggfunc="last")
+        wide.columns = [f"flow_margin_{str(c).lower()}" for c in wide.columns]
+        frames.append(wide.reset_index())
+    if not frames:
+        return pd.DataFrame()
+    combined = frames[0]
+    for piece in frames[1:]:
+        combined = combined.merge(piece, on="available_at", how="outer")
+    return combined.sort_values("available_at").reset_index(drop=True)
+
+
+def _load_index_wide(index_root: str | Path) -> pd.DataFrame:
+    root = Path(index_root)
+    if not root.exists():
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    for table in ("equity_index", "commodity_main", "treasury_future"):
+        frame = load_table(root / f"{table}.parquet")
+        if frame.empty:
+            continue
+        for value_col, suffix in (("close", "close"),):
+            if value_col not in frame.columns:
+                continue
+            wide = frame.pivot_table(index="available_at", columns="label",
+                                     values=value_col, aggfunc="last")
+            wide.columns = [f"idx_{str(c).lower()}_{suffix}" for c in wide.columns]
+            wide = wide.reset_index()
+            # 5-day log return as a more stationary derived feature
+            for col in [c for c in wide.columns if c != "available_at"]:
+                series = pd.to_numeric(wide[col], errors="coerce")
+                wide[f"{col[:-len('_close')]}_ret5"] = np.log(series / series.shift(5))
+            frames.append(wide)
+    if not frames:
+        return pd.DataFrame()
+    combined = frames[0]
+    for piece in frames[1:]:
+        combined = combined.merge(piece, on="available_at", how="outer")
+    return combined.sort_values("available_at").reset_index(drop=True)
+
+
+def _append_macro_features(features: pd.DataFrame, macro_root: str) -> tuple[pd.DataFrame, dict[str, object]]:
+    wide = _load_macro_wide(macro_root)
+    if wide.empty:
+        return features, {"status": "empty", "root": str(macro_root), "columns_added": 0}
+    merged, added = _asof_merge_timeseries(features, wide, prefix="macro_")
+    return merged, {"status": "passed", "root": str(macro_root), "columns_added": int(added)}
+
+
+def _append_flow_features(features: pd.DataFrame, flow_root: str) -> tuple[pd.DataFrame, dict[str, object]]:
+    wide = _load_flow_wide(flow_root)
+    if wide.empty:
+        return features, {"status": "empty", "root": str(flow_root), "columns_added": 0}
+    merged, added = _asof_merge_timeseries(features, wide, prefix="flow_")
+    return merged, {"status": "passed", "root": str(flow_root), "columns_added": int(added)}
+
+
+def _append_index_features(features: pd.DataFrame, index_root: str) -> tuple[pd.DataFrame, dict[str, object]]:
+    wide = _load_index_wide(index_root)
+    if wide.empty:
+        return features, {"status": "empty", "root": str(index_root), "columns_added": 0}
+    merged, added = _asof_merge_timeseries(features, wide, prefix="idx_")
+    return merged, {"status": "passed", "root": str(index_root), "columns_added": int(added)}
 
 
 __all__ = [

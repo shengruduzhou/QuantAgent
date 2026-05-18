@@ -70,6 +70,57 @@ def test_akshare_financial_provider_emits_indicator_dividend_metadata(monkeypatc
         assert {"report_period", "ann_date", "available_at"}.issubset(result.frame.columns)
 
 
+def test_akshare_financial_indicator_uses_start_year_and_date_column(monkeypatch):
+    from quantagent.data.providers.akshare_financial_provider import AkShareFinancialProvider
+    from quantagent.data.providers.base import ProviderRequest
+
+    captured: dict[str, object] = {}
+
+    def financial_indicator(symbol: str, start_year: str) -> pd.DataFrame:
+        captured["symbol"] = symbol
+        captured["start_year"] = start_year
+        return pd.DataFrame(
+            [
+                {"日期": "2019-12-31", "净资产收益率": 8.0},
+                {"日期": "2024-12-31", "净资产收益率": 12.0},
+            ]
+        )
+
+    fake_akshare = types.SimpleNamespace(stock_financial_analysis_indicator=financial_indicator)
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    request = ProviderRequest("2020-01-01", "2025-12-31", symbols=("600519.SH",))
+    result = AkShareFinancialProvider(allow_network=True, rate_limit_seconds=0).financial_indicator(request)
+
+    assert captured == {"symbol": "600519", "start_year": "2020"}
+    assert result.frame["report_period"].tolist() == ["2024-12-31"]
+    assert {"ann_date", "available_at", "roe"}.issubset(result.frame.columns)
+
+
+def test_financial_cache_accepts_akshare_dividend_statement(tmp_path):
+    from quantagent.data.providers.financial_cache import FinancialCacheConfig, FinancialStatementCache
+
+    cache = FinancialStatementCache(FinancialCacheConfig(root=str(tmp_path)))
+    path = cache.upsert(
+        "dividend",
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "600519.SH",
+                    "report_period": "2025-06-20",
+                    "ann_date": "2025-06-20",
+                    "available_at": "2025-06-23",
+                    "cash_dividend": 30.0,
+                }
+            ]
+        ),
+    )
+
+    assert path.exists() or path.with_suffix(".csv").exists()
+    loaded = cache.load_pit_frame("dividend", "2025-06-24", symbols=("600519.SH",))
+    assert loaded.frame["cash_dividend"].tolist() == [30.0]
+
+
 def test_factor_manifest_includes_richer_factor_metadata():
     from quantagent.factors.expr import build_factor_manifest
 

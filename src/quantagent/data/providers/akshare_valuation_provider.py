@@ -44,12 +44,17 @@ _VALUATION_RENAME = {
     "名称": "name",
     "市盈率-动态": "pe_ttm",
     "市盈率(TTM)": "pe_ttm",
+    "市盈率-TTM": "pe_ttm",
     "市净率": "pb",
+    "市净率-MRQ": "pb",
     "市销率": "ps_ttm",
+    "市销率-TTM": "ps_ttm",
     "总市值": "market_cap",
     "流通市值": "free_float_market_cap",
     "股息率": "dividend_yield",
     "换手率": "turnover_rate",
+    "PEG": "peg",
+    "EV/EBITDA-24A": "ev_ebitda",
 }
 
 
@@ -129,33 +134,45 @@ class AkShareValuationProvider:
 
     def snapshot(self, as_of_date: str, request: ProviderRequest | None = None) -> ProviderResult:
         ak = _ensure_akshare(self.allow_network)
-        raw = self._call_with_retry(getattr(ak, "stock_zh_a_spot_em", None))
+        warnings: list[str] = []
+        try:
+            raw = self._call_with_retry(getattr(ak, "stock_zh_a_spot_em", None))
+        except ProviderUnavailable as exc:
+            if request is None or not request.symbols:
+                raise
+            warnings.append(f"akshare_valuation_spot_em_failed:{exc}")
+            raw = self._fallback_symbol_snapshots(ak, request.symbols, as_of_date, warnings)
         if raw is None or raw.empty:
-            return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=("akshare_empty_valuation",))
+            return ProviderResult(pd.DataFrame(), source=self.source, quality_score=0.0, warnings=tuple(warnings or ["akshare_empty_valuation"]))
         frame = self._normalize(raw, as_of_date)
         if request is not None and request.symbols:
             symbol_set = {str(s) for s in request.symbols}
             frame = frame[frame["symbol"].astype(str).isin(symbol_set)]
         report = akshare_valuation_schema_report(frame)
-        warnings = tuple(f"akshare_schema_missing:{c}" for c in report["missing_columns"])
+        warnings.extend(f"akshare_schema_missing:{c}" for c in report["missing_columns"])
         return ProviderResult(
             frame.reset_index(drop=True),
             source=self.source,
             point_in_time=True,
             quality_score=0.75 if report["status"] == "passed" else 0.0,
-            warnings=warnings,
-            metadata={"schema_report": report, "as_of_date": as_of_date, "function_name": "stock_zh_a_spot_em"},
+            warnings=tuple(warnings),
+            metadata={
+                "schema_report": report,
+                "as_of_date": as_of_date,
+                "function_name": "stock_zh_a_spot_em|stock_individual_info_em|stock_zh_valuation_comparison_em",
+            },
         )
 
     def _normalize(self, frame: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
-        keep = [c for c in _VALUATION_RENAME if c in frame.columns]
+        keep_candidates = tuple(dict.fromkeys(tuple(_VALUATION_RENAME) + tuple(_VALUATION_RENAME.values())))
+        keep = [c for c in keep_candidates if c in frame.columns]
         data = frame[keep].rename(columns=_VALUATION_RENAME).copy()
         if "symbol_raw" in data.columns:
             data["symbol"] = data["symbol_raw"].astype(str).apply(_suffix_from_code)
             data = data.drop(columns=["symbol_raw"])
         data["trade_date"] = as_of_date
         data["available_at"] = as_of_date
-        for column in ("pe_ttm", "pb", "ps_ttm", "market_cap", "free_float_market_cap", "dividend_yield", "turnover_rate"):
+        for column in ("pe_ttm", "pb", "ps_ttm", "peg", "ev_ebitda", "market_cap", "free_float_market_cap", "dividend_yield", "turnover_rate"):
             if column in data.columns:
                 data[column] = pd.to_numeric(data[column], errors="coerce")
         data["source"] = self.source
@@ -163,6 +180,33 @@ class AkShareValuationProvider:
         data["raw_hash"] = [_row_hash(row) for row in data.to_dict("records")]
         data["point_in_time_valid"] = True
         return data
+
+    def _fallback_symbol_snapshots(
+        self,
+        ak: object,
+        symbols: tuple[str, ...],
+        as_of_date: str,
+        warnings: list[str],
+    ) -> pd.DataFrame:
+        info_api = getattr(ak, "stock_individual_info_em", None)
+        comparison_api = getattr(ak, "stock_zh_valuation_comparison_em", None)
+        if info_api is None or comparison_api is None:
+            warnings.append("akshare_valuation_symbol_fallback_unavailable")
+            return pd.DataFrame()
+        frames: list[pd.DataFrame] = []
+        for symbol in symbols:
+            try:
+                info = self._call_with_retry(lambda: info_api(symbol=_plain_code(symbol)))  # type: ignore[misc]
+                comparison = self._call_with_retry(lambda: comparison_api(symbol=_em_symbol(symbol)))  # type: ignore[misc]
+            except ProviderUnavailable as exc:
+                warnings.append(f"akshare_valuation_symbol_fallback_failed:{symbol}:{exc}")
+                continue
+            row = _valuation_row_from_symbol_frames(symbol, info, comparison, as_of_date)
+            if row:
+                frames.append(pd.DataFrame([row]))
+            if self.rate_limit_seconds > 0:
+                time.sleep(self.rate_limit_seconds)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def _call_with_retry(self, callable_api):
         if callable_api is None:
@@ -186,6 +230,63 @@ def akshare_valuation_schema_report(frame: pd.DataFrame) -> dict[str, object]:
         "required_columns": list(AKSHARE_VALUATION_REQUIRED_COLUMNS),
         "missing_columns": missing,
     }
+
+
+def _plain_code(symbol: str) -> str:
+    text = str(symbol).split(".")[0]
+    lower = text.lower()
+    for prefix in ("sh", "sz", "bj"):
+        if lower.startswith(prefix):
+            return text[len(prefix):]
+    return text.zfill(6)
+
+
+def _em_symbol(symbol: str) -> str:
+    code = _plain_code(symbol)
+    upper = str(symbol).upper()
+    if upper.endswith(".SH") or upper.startswith("SH") or code.startswith(("6", "9")):
+        return f"SH{code}"
+    if upper.endswith(".BJ") or upper.startswith("BJ") or code.startswith(("4", "8")):
+        return f"BJ{code}"
+    return f"SZ{code}"
+
+
+def _series_from_item_value(frame: pd.DataFrame) -> pd.Series:
+    if frame is None or frame.empty or not {"item", "value"}.issubset(frame.columns):
+        return pd.Series(dtype=object)
+    return frame.dropna(subset=["item"]).drop_duplicates(subset=["item"], keep="last").set_index("item")["value"]
+
+
+def _valuation_row_from_symbol_frames(
+    symbol: str,
+    info: pd.DataFrame,
+    comparison: pd.DataFrame,
+    as_of_date: str,
+) -> dict[str, object]:
+    info_values = _series_from_item_value(info)
+    code = _plain_code(symbol)
+    comparison_row = pd.Series(dtype=object)
+    if comparison is not None and not comparison.empty:
+        data = comparison.copy()
+        if "代码" in data.columns:
+            matched = data[data["代码"].astype(str).str.zfill(6) == code]
+            comparison_row = matched.iloc[0] if not matched.empty else data.iloc[0]
+        else:
+            comparison_row = data.iloc[0]
+    row = {
+        "symbol_raw": code,
+        "name": info_values.get("股票简称", comparison_row.get("简称")),
+        "trade_date": as_of_date,
+        "available_at": as_of_date,
+        "market_cap": info_values.get("总市值"),
+        "free_float_market_cap": info_values.get("流通市值"),
+        "pe_ttm": comparison_row.get("市盈率-TTM"),
+        "pb": comparison_row.get("市净率-MRQ"),
+        "ps_ttm": comparison_row.get("市销率-TTM"),
+        "peg": comparison_row.get("PEG"),
+        "ev_ebitda": comparison_row.get("EV/EBITDA-24A"),
+    }
+    return {key: value for key, value in row.items() if value is not None}
 
 
 @dataclass

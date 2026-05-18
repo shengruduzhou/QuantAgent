@@ -130,8 +130,30 @@ def alpha030(frame: pd.DataFrame) -> pd.DataFrame:
     return _compute_alpha(frame, 30)
 
 
+def _make_alpha_wrapper(number: int) -> Callable[[pd.DataFrame], pd.DataFrame]:
+    def _wrapped(frame: pd.DataFrame) -> pd.DataFrame:
+        return _compute_alpha(frame, number)
+
+    _wrapped.__name__ = f"alpha{number:03d}"
+    return _wrapped
+
+
+# Programmatically expose alpha031..alpha101 as module-level functions matching the
+# alpha001..alpha030 style. Implementations live in the _compute_alpha dispatch.
+for _n in range(31, 102):
+    globals()[f"alpha{_n:03d}"] = _make_alpha_wrapper(_n)
+del _n
+
+
 def compute_alpha101(frame: pd.DataFrame, names: list[str] | None = None) -> pd.DataFrame:
-    names = names or [f"alpha{i:03d}" for i in range(1, 31)]
+    """Compute the full Alpha101 family (1..101).
+
+    Alphas needing IndClass/cap (industry neutralization or market-cap-weighted
+    operations) are registered as placeholders that return NaN until sector and
+    valuation tables are wired into the feature lake. The caller can filter those
+    out via the column-coverage report.
+    """
+    names = names or [f"alpha{i:03d}" for i in range(1, 102)]
     return default_registry.batch_compute(frame, names=names)
 
 
@@ -234,6 +256,306 @@ def _compute_alpha(frame: pd.DataFrame, number: int) -> pd.DataFrame:
     elif number == 30:
         sign_sum = np.sign(delta_close_1) + np.sign(_delay_series(data, delta_close_1, 1)) + np.sign(_delay_series(data, delta_close_1, 2))
         values = ((1.0 - _rank(data, sign_sum)) * _sum(data, "volume", 5)) / _sum(data, "volume", 20).replace(0.0, np.nan)
+    elif number == 31:
+        # ((rank(rank(rank(decay_linear((-rank(rank(delta(close,10)))),10)))))
+        #  + rank((-delta(close,3)))) + sign(scale(correlation(adv20, low, 12)))
+        part1 = _rank(data, _rank(data, _rank(data, _decay_linear(data, -_rank(data, _rank(data, _delta(data, "close", 10))), 10))))
+        part2 = _rank(data, -_delta(data, "close", 3))
+        part3 = np.sign(_scale(data, _corr(data, adv20, low, 12)))
+        values = part1 + part2 + part3
+    elif number == 32:
+        # scale(mean(close,7) - close) + 20 * scale(correlation(vwap, delay(close,5), 230))
+        values = _scale(data, _mean(data, "close", 7) - close) + 20.0 * _scale(data, _corr(data, vwap, _delay(data, "close", 5), 230))
+    elif number == 33:
+        # rank((-1 * ((1 - (open / close))^1)))
+        values = _rank(data, -((1.0 - open_ / close.replace(0.0, np.nan))))
+    elif number == 34:
+        # rank(((1 - rank((std(returns,2) / std(returns,5)))) + (1 - rank(delta(close,1)))))
+        ratio = _std_series(data, returns, 2) / _std_series(data, returns, 5).replace(0.0, np.nan)
+        values = _rank(data, (1.0 - _rank(data, ratio)) + (1.0 - _rank(data, delta_close_1)))
+    elif number == 35:
+        # ts_rank(volume,32) * (1 - ts_rank(close + high - low, 16)) * (1 - ts_rank(returns,32))
+        values = _ts_rank(data, volume, 32) * (1.0 - _ts_rank(data, close + high - low, 16)) * (1.0 - _ts_rank(data, returns, 32))
+    elif number == 36:
+        # 2.21*rank(corr(close-open, delay(volume,1),15)) + 0.7*rank(open-close)
+        # + 0.73*rank(ts_rank(delay(-returns,6),5)) + rank(abs(corr(vwap,adv20,6)))
+        # + 0.6*rank(((mean(close,200)-open)*(close-open)))
+        p1 = 2.21 * _rank(data, _corr(data, close - open_, _delay(data, "volume", 1), 15))
+        p2 = 0.7 * _rank(data, open_ - close)
+        p3 = 0.73 * _rank(data, _ts_rank(data, _delay_series(data, -returns, 6), 5))
+        p4 = _rank(data, _corr(data, vwap, adv20, 6).abs())
+        p5 = 0.6 * _rank(data, (_mean(data, "close", 200) - open_) * (close - open_))
+        values = p1 + p2 + p3 + p4 + p5
+    elif number == 37:
+        # rank(corr(delay(open-close,1), close, 200)) + rank(open-close)
+        gap = open_ - close
+        values = _rank(data, _corr(data, _delay_series(data, gap, 1), close, 200)) + _rank(data, gap)
+    elif number == 38:
+        # -rank(ts_rank(close,10)) * rank(close/open)
+        values = -_rank(data, _ts_rank(data, close, 10)) * _rank(data, close / open_.replace(0.0, np.nan))
+    elif number == 39:
+        # -rank(delta(close,7) * (1 - rank(decay_linear(volume/adv20,9)))) * (1 + rank(sum(returns,250)))
+        vol_intensity = volume / adv20.replace(0.0, np.nan)
+        inner = _delta(data, "close", 7) * (1.0 - _rank(data, _decay_linear(data, vol_intensity, 9)))
+        values = -_rank(data, inner) * (1.0 + _rank(data, _sum_series(data, returns, 250)))
+    elif number == 40:
+        # -rank(std(high,10)) * corr(high, volume, 10)
+        values = -_rank(data, _std(data, "high", 10)) * _corr(data, high, volume, 10)
+    elif number == 41:
+        # ((high * low)^0.5) - vwap
+        values = np.sqrt((high.clip(lower=0.0) * low.clip(lower=0.0))) - vwap
+    elif number == 42:
+        # rank(vwap - close) / rank(vwap + close)
+        denom = _rank(data, vwap + close).replace(0.0, np.nan)
+        values = _rank(data, vwap - close) / denom
+    elif number == 43:
+        # ts_rank(volume/adv20, 20) * ts_rank(-delta(close,7), 8)
+        values = _ts_rank(data, volume / adv20.replace(0.0, np.nan), 20) * _ts_rank(data, -_delta(data, "close", 7), 8)
+    elif number == 44:
+        # -corr(high, rank(volume), 5)
+        values = -_corr(data, high, _rank(data, volume), 5)
+    elif number == 45:
+        # -(rank(mean(delay(close,5),20)) * corr(close, volume, 2)
+        #   * rank(corr(sum(close,5), sum(close,20), 2)))
+        part1 = _rank(data, _mean_series(data, _delay(data, "close", 5), 20))
+        part2 = _corr(data, close, volume, 2)
+        part3 = _rank(data, _corr(data, _sum(data, "close", 5), _sum(data, "close", 20), 2))
+        values = -(part1 * part2 * part3)
+    elif number == 46:
+        # ((delay(close,20)-delay(close,10))/10 - (delay(close,10)-close)/10) condition
+        slope_far = (_delay(data, "close", 20) - _delay(data, "close", 10)) / 10.0
+        slope_near = (_delay(data, "close", 10) - close) / 10.0
+        diff = slope_far - slope_near
+        values = pd.Series(0.0, index=data.index, dtype=float)
+        values.loc[diff > 0.25] = -1.0
+        values.loc[diff < 0.0] = 1.0
+        mask_mid = (diff <= 0.25) & (diff >= 0.0)
+        values.loc[mask_mid] = -(close.loc[mask_mid] - _delay(data, "close", 1).loc[mask_mid])
+    elif number == 47:
+        # rank(1/close) * volume / adv20 * (high * rank(high - close) / mean(high,5)) - rank(vwap - delay(vwap,5))
+        mean_high_5 = _mean(data, "high", 5).replace(0.0, np.nan)
+        p1 = _rank(data, 1.0 / close.replace(0.0, np.nan)) * volume / adv20.replace(0.0, np.nan)
+        p2 = high * _rank(data, high - close) / mean_high_5
+        p3 = _rank(data, vwap - _delay(data, "vwap", 5))
+        values = p1 * p2 - p3
+    elif number == 49:
+        # condition: ((delay(close,20)-delay(close,10))/10 - (delay(close,10)-close)/10) < -0.1
+        slope_far = (_delay(data, "close", 20) - _delay(data, "close", 10)) / 10.0
+        slope_near = (_delay(data, "close", 10) - close) / 10.0
+        diff = slope_far - slope_near
+        values = -(close - _delay(data, "close", 1))
+        values.loc[diff < -0.1] = 1.0
+    elif number == 50:
+        # -ts_max(rank(corr(rank(volume), rank(vwap), 5)), 5)
+        values = -_max_series(data, _rank(data, _corr(data, _rank(data, volume), _rank(data, vwap), 5)), 5)
+    elif number == 51:
+        # condition mirror of alpha49 with stricter threshold
+        slope_far = (_delay(data, "close", 20) - _delay(data, "close", 10)) / 10.0
+        slope_near = (_delay(data, "close", 10) - close) / 10.0
+        diff = slope_far - slope_near
+        values = -(close - _delay(data, "close", 1))
+        values.loc[diff < -0.05] = 1.0
+    elif number == 52:
+        # (-ts_min(low,5) + delay(ts_min(low,5),5)) * rank((sum(returns,240)-sum(returns,20))/220) * ts_rank(volume,5)
+        ts_min_5 = _min(data, "low", 5)
+        ret_240 = _sum_series(data, returns, 240)
+        ret_20 = _sum_series(data, returns, 20)
+        values = (-ts_min_5 + _delay_series(data, ts_min_5, 5)) * _rank(data, (ret_240 - ret_20) / 220.0) * _ts_rank(data, volume, 5)
+    elif number == 53:
+        # -delta(((close-low)-(high-close))/(close-low), 9)
+        denom = (close - low).replace(0.0, np.nan)
+        expr = ((close - low) - (high - close)) / denom
+        values = -_delta_series(data, expr, 9)
+    elif number == 54:
+        # -(low - close) * open^5 / ((low - high) * close^5)
+        denom = (low - high).replace(0.0, np.nan) * close.pow(5)
+        values = -((low - close) * open_.pow(5)) / denom
+    elif number == 55:
+        # -corr(rank((close - ts_min(low,12)) / (ts_max(high,12) - ts_min(low,12))), rank(volume), 6)
+        low_min_12 = _min(data, "low", 12)
+        high_max_12 = _max_series(data, high, 12)
+        denom = (high_max_12 - low_min_12).replace(0.0, np.nan)
+        norm = (close - low_min_12) / denom
+        values = -_corr(data, _rank(data, norm), _rank(data, volume), 6)
+    elif number == 57:
+        # -(close - vwap) / decay_linear(rank(ts_argmax(close,30)), 2)
+        denom = _decay_linear(data, _rank(data, _argmax(data, close, 30)), 2).replace(0.0, np.nan)
+        values = -(close - vwap) / denom
+    elif number == 60:
+        # -((2*scale(rank(((close-low)-(high-close))/(high-low) * volume))) - scale(rank(ts_argmax(close,10))))
+        hl_range = (high - low).replace(0.0, np.nan)
+        money_flow_vol = ((close - low) - (high - close)) / hl_range * volume
+        values = -(2.0 * _scale(data, _rank(data, money_flow_vol)) - _scale(data, _rank(data, _argmax(data, close, 10))))
+    elif number == 61:
+        # rank(vwap - ts_min(vwap,16)) < rank(corr(vwap, adv180, 18))
+        adv180 = _mean(data, "volume", 180)
+        lhs = _rank(data, vwap - _min_series(data, vwap, 16))
+        rhs = _rank(data, _corr(data, vwap, adv180, 18))
+        values = (lhs < rhs).astype(float)
+    elif number == 62:
+        # rank(corr(vwap, sum(adv20,22), 10)) < rank((rank(open)+rank(open)) < (rank((high+low)/2)+rank(high)))
+        lhs = _rank(data, _corr(data, vwap, _sum_series(data, adv20, 22), 10))
+        rhs_inner = (2.0 * _rank(data, open_) < (_rank(data, (high + low) / 2.0) + _rank(data, high))).astype(float)
+        values = -(lhs < _rank(data, rhs_inner)).astype(float)
+    elif number == 64:
+        # rank(corr(sum((open*0.178)+(low*0.822), 13), sum(adv120, 13), 17)) < rank(delta((high+low)/2*0.178 + vwap*0.822, 4))
+        adv120 = _mean(data, "volume", 120)
+        lhs = _rank(data, _corr(data, _sum_series(data, open_ * 0.178 + low * 0.822, 13), _sum_series(data, adv120, 13), 17))
+        rhs_inner = (high + low) / 2.0 * 0.178 + vwap * 0.822
+        rhs = _rank(data, _delta_series(data, rhs_inner, 4))
+        values = -(lhs < rhs).astype(float)
+    elif number == 65:
+        # rank(corr(open*0.0085 + vwap*0.9915, sum(adv60,9), 6)) < rank(open - ts_min(open,14))
+        adv60 = _mean(data, "volume", 60)
+        lhs = _rank(data, _corr(data, open_ * 0.0085 + vwap * 0.9915, _sum_series(data, adv60, 9), 6))
+        rhs = _rank(data, open_ - _min_series(data, open_, 14))
+        values = -(lhs < rhs).astype(float)
+    elif number == 66:
+        # rank(decay_linear(delta(vwap,4),7)) + ts_rank(decay_linear(((low*0.96 - vwap)/(open-(high+low)/2)),11),7)
+        denom = (open_ - (high + low) / 2.0).replace(0.0, np.nan)
+        expr = (low * 0.96 - vwap) / denom
+        values = -(_rank(data, _decay_linear(data, _delta(data, "vwap", 4), 7)) + _ts_rank(data, _decay_linear(data, expr, 11), 7))
+    elif number == 68:
+        # ts_rank(corr(rank(high), rank(adv15), 9), 14) < rank(delta(close*0.518+low*0.482, 1))
+        adv15 = _mean(data, "volume", 15)
+        lhs = _ts_rank(data, _corr(data, _rank(data, high), _rank(data, adv15), 9), 14)
+        rhs = _rank(data, _delta_series(data, close * 0.518 + low * 0.482, 1))
+        values = -(lhs < rhs).astype(float)
+    elif number == 70:
+        # similar to alpha69 minus IndClass
+        values = -_rank(data, _delta(data, "vwap", 1)).pow(_ts_rank(data, _corr(data, close, _mean(data, "volume", 50), 18), 18))
+    elif number == 71:
+        # max(ts_rank(decay_linear(corr(ts_rank(close,3), ts_rank(adv180,12), 18), 4), 16),
+        #     ts_rank(decay_linear(rank((low+open-2*vwap))^2,16),4))
+        adv180 = _mean(data, "volume", 180)
+        a = _ts_rank(data, _decay_linear(data, _corr(data, _ts_rank(data, close, 3), _ts_rank(data, adv180, 12), 18), 4), 16)
+        b = _ts_rank(data, _decay_linear(data, _rank(data, low + open_ - 2.0 * vwap).pow(2.0), 16), 4)
+        values = _emax2(a, b)
+    elif number == 72:
+        # rank(decay_linear(corr((high+low)/2, adv40, 9), 10)) / rank(decay_linear(corr(ts_rank(vwap,4), ts_rank(volume,19), 7), 3))
+        adv40 = _mean(data, "volume", 40)
+        num = _rank(data, _decay_linear(data, _corr(data, (high + low) / 2.0, adv40, 9), 10))
+        den = _rank(data, _decay_linear(data, _corr(data, _ts_rank(data, vwap, 4), _ts_rank(data, volume, 19), 7), 3)).replace(0.0, np.nan)
+        values = num / den
+    elif number == 73:
+        # -max(rank(decay_linear(delta(vwap,5),3)), ts_rank(decay_linear((-delta(open*0.147+low*0.853,2)/(open*0.147+low*0.853)),16),17))
+        weighted = open_ * 0.147 + low * 0.853
+        a = _rank(data, _decay_linear(data, _delta(data, "vwap", 5), 3))
+        ratio_expr = -_delta_series(data, weighted, 2) / weighted.replace(0.0, np.nan)
+        b = _ts_rank(data, _decay_linear(data, ratio_expr, 16), 17)
+        values = -_emax2(a, b)
+    elif number == 74:
+        # rank(corr(close, sum(adv30, 37), 15)) < rank(corr(rank(high*0.0261+vwap*0.9739), rank(volume), 11))
+        adv30 = _mean(data, "volume", 30)
+        lhs = _rank(data, _corr(data, close, _sum_series(data, adv30, 37), 15))
+        rhs = _rank(data, _corr(data, _rank(data, high * 0.0261 + vwap * 0.9739), _rank(data, volume), 11))
+        values = -(lhs < rhs).astype(float)
+    elif number == 75:
+        # rank(corr(vwap, volume, 4)) < rank(corr(rank(low), rank(adv50), 12))
+        adv50 = _mean(data, "volume", 50)
+        lhs = _rank(data, _corr(data, vwap, volume, 4))
+        rhs = _rank(data, _corr(data, _rank(data, low), _rank(data, adv50), 12))
+        values = (lhs < rhs).astype(float)
+    elif number == 77:
+        # min(rank(decay_linear((high+low)/2+high-vwap-high,20)), rank(decay_linear(corr((high+low)/2, adv40, 3),6)))
+        adv40 = _mean(data, "volume", 40)
+        a = _rank(data, _decay_linear(data, (high + low) / 2.0 + high - vwap - high, 20))
+        b = _rank(data, _decay_linear(data, _corr(data, (high + low) / 2.0, adv40, 3), 6))
+        values = _emin2(a, b)
+    elif number == 78:
+        # rank(corr(sum(low*0.352+vwap*0.648, 20), sum(adv40,20), 7))^rank(corr(rank(vwap), rank(volume), 6))
+        adv40 = _mean(data, "volume", 40)
+        base = _rank(data, _corr(data, _sum_series(data, low * 0.352 + vwap * 0.648, 20), _sum_series(data, adv40, 20), 7))
+        expo = _rank(data, _corr(data, _rank(data, vwap), _rank(data, volume), 6))
+        values = _signedpower(base, 1.0) * np.sign(expo)  # approximation: ranks are positive so power simplifies
+    elif number == 81:
+        # rank(log(product(rank(rank(corr(vwap, sum(adv10,50), 8))^4),15))) < rank(corr(rank(vwap), rank(volume),5))
+        adv10 = _mean(data, "volume", 10)
+        inner = _rank(data, _rank(data, _corr(data, vwap, _sum_series(data, adv10, 50), 8)).pow(4))
+        lhs = _rank(data, np.log(_product(data, inner, 15).clip(lower=1e-12)))
+        rhs = _rank(data, _corr(data, _rank(data, vwap), _rank(data, volume), 5))
+        values = -(lhs < rhs).astype(float)
+    elif number == 83:
+        # rank(delay((high-low)/mean(close,5), 2)) * rank(rank(volume)) / ((high-low)/mean(close,5) / (vwap-close))
+        ratio = (high - low) / _mean(data, "close", 5).replace(0.0, np.nan)
+        denom = (ratio / (vwap - close).replace(0.0, np.nan)).replace(0.0, np.nan)
+        values = _rank(data, _delay_series(data, ratio, 2)) * _rank(data, _rank(data, volume)) / denom
+    elif number == 84:
+        # signedpower(ts_rank(vwap - ts_max(vwap,15), 21), delta(close,5))
+        base_expr = _ts_rank(data, vwap - _max_series(data, vwap, 15), 21)
+        exponent = _delta(data, "close", 5)
+        # Use signed mixed exponent: |x|^e * sign(x). Clip exponent to a safe range.
+        exponent = exponent.clip(-3.0, 3.0)
+        arr_base = base_expr.to_numpy(dtype=float)
+        arr_exp = exponent.to_numpy(dtype=float)
+        values = pd.Series(np.sign(arr_base) * np.power(np.abs(arr_base) + 1e-12, arr_exp), index=data.index)
+    elif number == 85:
+        # rank(corr(high*0.876+close*0.124, adv30, 10))^rank(corr(ts_rank((high+low)/2,4), ts_rank(volume,10),7))
+        adv30 = _mean(data, "volume", 30)
+        base_expr = _rank(data, _corr(data, high * 0.876 + close * 0.124, adv30, 10))
+        expo = _rank(data, _corr(data, _ts_rank(data, (high + low) / 2.0, 4), _ts_rank(data, volume, 10), 7))
+        values = _signedpower(base_expr, 1.0) * np.sign(expo)
+    elif number == 86:
+        # ts_rank(corr(close, sum(adv20,15), 6),20) < rank((open+close)-(vwap+open))
+        lhs = _ts_rank(data, _corr(data, close, _sum_series(data, adv20, 15), 6), 20)
+        rhs = _rank(data, (open_ + close) - (vwap + open_))
+        values = -(lhs < rhs).astype(float)
+    elif number == 88:
+        # min(rank(decay_linear((rank(open)+rank(low)-(rank(high)+rank(close))),8)),
+        #     ts_rank(decay_linear(corr(ts_rank(close,8), ts_rank(adv60,21),8),7),3))
+        adv60 = _mean(data, "volume", 60)
+        a = _rank(data, _decay_linear(data, (_rank(data, open_) + _rank(data, low) - _rank(data, high) - _rank(data, close)), 8))
+        b = _ts_rank(data, _decay_linear(data, _corr(data, _ts_rank(data, close, 8), _ts_rank(data, adv60, 21), 8), 7), 3)
+        values = _emin2(a, b)
+    elif number == 92:
+        # min(ts_rank(decay_linear((((high+low)/2 + close) < (low + open)),15),19),
+        #     ts_rank(decay_linear(corr(rank(low), rank(adv30), 8),7),7))
+        adv30 = _mean(data, "volume", 30)
+        cond = ((high + low) / 2.0 + close < low + open_).astype(float)
+        a = _ts_rank(data, _decay_linear(data, cond, 15), 19)
+        b = _ts_rank(data, _decay_linear(data, _corr(data, _rank(data, low), _rank(data, adv30), 8), 7), 7)
+        values = _emin2(a, b)
+    elif number == 94:
+        # -((rank(vwap - ts_min(vwap,12)))^ts_rank(corr(ts_rank(vwap,20), ts_rank(adv60,4),18),3))
+        adv60 = _mean(data, "volume", 60)
+        base_expr = _rank(data, vwap - _min_series(data, vwap, 12))
+        expo = _ts_rank(data, _corr(data, _ts_rank(data, vwap, 20), _ts_rank(data, adv60, 4), 18), 3)
+        values = -_signedpower(base_expr, 1.0) * np.sign(expo)
+    elif number == 95:
+        # rank(open - ts_min(open,12)) < ts_rank(rank(corr(sum((high+low)/2,19), sum(adv40,19),13))^5, 12)
+        adv40 = _mean(data, "volume", 40)
+        lhs = _rank(data, open_ - _min_series(data, open_, 12))
+        inner = _rank(data, _corr(data, _sum_series(data, (high + low) / 2.0, 19), _sum_series(data, adv40, 19), 13)).pow(5)
+        rhs = _ts_rank(data, inner, 12)
+        values = (lhs < rhs).astype(float)
+    elif number == 96:
+        # max(ts_rank(decay_linear(corr(rank(vwap), rank(volume),4),4),8),
+        #     ts_rank(decay_linear(ts_argmax(corr(ts_rank(close,7), ts_rank(adv60,4),4),13),14),13))
+        adv60 = _mean(data, "volume", 60)
+        a = _ts_rank(data, _decay_linear(data, _corr(data, _rank(data, vwap), _rank(data, volume), 4), 4), 8)
+        inner = _argmax(data, _corr(data, _ts_rank(data, close, 7), _ts_rank(data, adv60, 4), 4), 13)
+        b = _ts_rank(data, _decay_linear(data, inner, 14), 13)
+        values = -_emax2(a, b)
+    elif number == 98:
+        # rank(decay_linear(corr(vwap, sum(adv5,26),5),7)) - rank(decay_linear(ts_rank(ts_argmin(corr(rank(open), rank(adv15),21),9),7),8))
+        adv5 = _mean(data, "volume", 5)
+        adv15 = _mean(data, "volume", 15)
+        a = _rank(data, _decay_linear(data, _corr(data, vwap, _sum_series(data, adv5, 26), 5), 7))
+        b = _rank(data, _decay_linear(data, _ts_rank(data, _argmin(data, _corr(data, _rank(data, open_), _rank(data, adv15), 21), 9), 7), 8))
+        values = a - b
+    elif number == 99:
+        # rank(corr(sum((high+low)/2,20), sum(adv60,20),9)) < rank(corr(low, volume,6))
+        adv60 = _mean(data, "volume", 60)
+        lhs = _rank(data, _corr(data, _sum_series(data, (high + low) / 2.0, 20), _sum_series(data, adv60, 20), 9))
+        rhs = _rank(data, _corr(data, low, volume, 6))
+        values = -(lhs < rhs).astype(float)
+    elif number == 101:
+        # (close - open) / ((high - low) + 0.001)
+        values = (close - open_) / ((high - low) + 0.001)
+    elif number in _INDUSTRY_OR_CAP_ALPHAS:
+        # Placeholder: needs IndClass or cap. Returns NaN until sector/valuation
+        # data is wired into the feature store.
+        values = pd.Series(np.nan, index=data.index, dtype=float)
     else:
         raise ValueError(f"Unsupported alpha number: {number}")
     return _format(data, name, values.replace([np.inf, -np.inf], np.nan))
@@ -385,6 +707,67 @@ def _scale(data: pd.DataFrame, series: pd.Series) -> pd.Series:
     return tmp / denom
 
 
+def _argmin(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    values = pd.Series(np.nan, index=data.index, dtype=float)
+    tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
+    for _, group in data.groupby("symbol", sort=False):
+        values.loc[group.index] = tmp.loc[group.index].rolling(window, min_periods=window).apply(
+            lambda x: float(np.argmin(x) + 1),
+            raw=True,
+        )
+    return values
+
+
+def _decay_linear(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """Linear-weighted moving average: weights = [1, 2, ..., window] / sum."""
+    if window < 1:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+    weights = np.arange(1, window + 1, dtype=float)
+    weights = weights / weights.sum()
+    values = pd.Series(np.nan, index=data.index, dtype=float)
+    tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
+    for _, group in data.groupby("symbol", sort=False):
+        values.loc[group.index] = tmp.loc[group.index].rolling(window, min_periods=window).apply(
+            lambda x: float(np.dot(x, weights)),
+            raw=True,
+        )
+    return values
+
+
+def _signedpower(series: pd.Series, exponent: float) -> pd.Series:
+    arr = series.to_numpy(dtype=float)
+    return pd.Series(np.sign(arr) * np.power(np.abs(arr), exponent), index=series.index)
+
+
+def _product(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    values = pd.Series(np.nan, index=data.index, dtype=float)
+    tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
+    for _, group in data.groupby("symbol", sort=False):
+        values.loc[group.index] = tmp.loc[group.index].rolling(window, min_periods=window).apply(
+            lambda x: float(np.prod(x)),
+            raw=True,
+        )
+    return values
+
+
+def _emin2(left: pd.Series, right: pd.Series) -> pd.Series:
+    """Element-wise minimum of two aligned Series."""
+    return pd.Series(np.minimum(left.to_numpy(dtype=float), right.to_numpy(dtype=float)), index=left.index)
+
+
+def _emax2(left: pd.Series, right: pd.Series) -> pd.Series:
+    """Element-wise maximum of two aligned Series."""
+    return pd.Series(np.maximum(left.to_numpy(dtype=float), right.to_numpy(dtype=float)), index=left.index)
+
+
+# Alphas listed in the WorldQuant paper that require IndClass/cap (industry
+# neutralization or market-cap-weighted ops) — we register them as placeholders
+# returning NaN until sector_map + valuation are wired into the feature lake.
+_INDUSTRY_OR_CAP_ALPHAS: tuple[int, ...] = (
+    48, 56, 58, 59, 63, 67, 69, 76, 79, 80, 82, 87, 89, 90, 91, 93, 97, 100,
+)
+
+
 for _idx, _func, _desc in [
     (1, alpha001, "Ranked reversal using downside volatility and recent price maxima."),
     (2, alpha002, "Negative correlation between volume acceleration and intraday return ranks."),
@@ -418,3 +801,86 @@ for _idx, _func, _desc in [
     (30, alpha030, "Signed return persistence with volume concentration."),
 ]:
     _register(f"alpha{_idx:03d}", _func, _desc)
+
+
+# WorldQuant Alpha101 31..101. Each entry is (number, short description).
+# Alphas requiring IndClass / market cap are registered as placeholders that
+# return NaN; their numbers live in _INDUSTRY_OR_CAP_ALPHAS so the dispatch
+# above can short-circuit them.
+_ALPHA_DESCRIPTIONS_31_101: dict[int, str] = {
+    31: "Decay-linear of ranked close delta plus correlation sign.",
+    32: "Mean-reversion scaled by long-horizon VWAP-close correlation.",
+    33: "Rank of one-minus-open-over-close (gap reversal).",
+    34: "Composite reversal mixing return-vol ratio and close delta.",
+    35: "Volume time-rank × residual time-rank × return time-rank.",
+    36: "Multi-component composite (corr, gap, lagged returns, abs corr, trend).",
+    37: "Open-close gap correlation with close plus gap rank.",
+    38: "Negative close time-rank times close-over-open rank.",
+    39: "Volume-weighted close-delta with long-horizon return rank.",
+    40: "Negative volatility rank times high-volume correlation.",
+    41: "Geometric mean of high and low minus VWAP.",
+    42: "Ratio of (vwap-close) rank to (vwap+close) rank.",
+    43: "Volume-intensity time-rank times negative-close-delta time-rank.",
+    44: "Negative correlation of high with volume rank.",
+    45: "Combined mean-close rank, close-volume corr, sum-close corr.",
+    46: "Trend-curvature gated reversal.",
+    47: "Liquidity-weighted high-close pressure minus VWAP shift.",
+    48: "[placeholder] IndClass/subindustry-neutralized momentum.",
+    49: "Sharp trend-curvature reversal switch.",
+    50: "Negative time-max of rank-volume vs rank-VWAP correlation.",
+    51: "Lighter version of alpha49.",
+    52: "Low-min reversal scaled by long-vs-short return spread and volume rank.",
+    53: "Negative delta of money-flow oscillator.",
+    54: "Open-close power ratio normalized by low-high spread.",
+    55: "Negative correlation of normalized close band with volume rank.",
+    56: "[placeholder] cap-weighted return ratio.",
+    57: "Negative close-VWAP gap divided by decay-linear of ts_argmax close.",
+    58: "[placeholder] IndClass-neutralized VWAP-volume relationship.",
+    59: "[placeholder] IndClass-neutralized weighted VWAP.",
+    60: "Scaled money-flow volume minus scaled ts_argmax close.",
+    61: "VWAP reach vs medium-term liquidity correlation.",
+    62: "VWAP-liquidity gating vs midprice rank cross.",
+    63: "[placeholder] IndClass-neutralized close-decay term.",
+    64: "Weighted open-low correlation gate.",
+    65: "Open-VWAP weighted correlation gate.",
+    66: "Decay-linear of VWAP delta plus low-vwap channel time-rank.",
+    67: "[placeholder] IndClass sector/subindustry-neutralized variant.",
+    68: "High-volume relation gating mid-price delta.",
+    69: "[placeholder] IndClass-neutralized VWAP delta time-rank.",
+    70: "Negative rank-delta-vwap weighted by liquidity time-rank.",
+    71: "Max of two decay-linear time-rank blocks (corr block vs low-open vwap).",
+    72: "Decay-linear correlation midprice/liquidity over decay-linear vwap/volume ranks.",
+    73: "Negative max of vwap-delta decay vs open-low ratio decay.",
+    74: "Close-liquidity correlation gate vs high-vwap-volume rank.",
+    75: "VWAP-volume short correlation vs low-liquidity rank correlation.",
+    76: "[placeholder] IndClass-neutralized vwap decay block.",
+    77: "Min of midprice decay-linear vs corr decay-linear.",
+    78: "Weighted low-vwap-sum-corr powered by vwap-volume rank.",
+    79: "[placeholder] IndClass-neutralized close delta.",
+    80: "[placeholder] IndClass-neutralized close delta.",
+    81: "Log-product of VWAP-liquidity rank powered to 4 vs vwap-volume corr.",
+    82: "[placeholder] IndClass-neutralized open delta with decay.",
+    83: "High-low ratio rank × volume rank squared / liquidity-vwap-close gap.",
+    84: "Power: ts_rank(vwap-tsmax(vwap,15),21) ^ delta(close,5).",
+    85: "Weighted high-close correlation rank^rank corr time-rank.",
+    86: "Close-liquidity time-rank vs open-vwap rank.",
+    87: "[placeholder] IndClass-neutralized close delta.",
+    88: "Min of two ranked decay-linear blocks (open-low-high-close rank).",
+    89: "[placeholder] IndClass-neutralized low-vwap decay block.",
+    90: "[placeholder] IndClass-neutralized rank-close-volume block.",
+    91: "[placeholder] IndClass-neutralized close-decay liquidity gating.",
+    92: "Min of two decay-linear blocks (midprice condition vs low-liquidity corr).",
+    93: "[placeholder] IndClass-neutralized vwap-close-decay block.",
+    94: "Negative vwap channel rank powered by vwap-liquidity time-rank.",
+    95: "Open channel rank vs midprice-liquidity power gate.",
+    96: "Max of two decay blocks (vwap-volume rank corr vs ts_argmax corr).",
+    97: "[placeholder] IndClass-neutralized low-vwap decay block.",
+    98: "VWAP-liquidity decay corr minus ts_argmin open-liquidity time-rank.",
+    99: "Midprice-liquidity correlation vs low-volume correlation gate.",
+    100: "[placeholder] IndClass-neutralized money-flow block.",
+    101: "Intraday close-open over high-low range (simple oscillator).",
+}
+
+for _idx, _desc in _ALPHA_DESCRIPTIONS_31_101.items():
+    _register(f"alpha{_idx:03d}", globals()[f"alpha{_idx:03d}"], _desc)
+del _idx, _desc

@@ -193,6 +193,11 @@ def test_cli_train_alpha_v7_writes_experiment_manifest(tmp_path):
             "2",
             "--min-dates",
             "10",
+            # Pin to basic features so this small-fixture test does not
+            # exercise alpha181's 60-day rolling factors, which would
+            # NaN-out everything on a 30-day synthetic panel.
+            "--factor-library",
+            "basic",
         ],
     )
     assert build.exit_code == 0, build.output

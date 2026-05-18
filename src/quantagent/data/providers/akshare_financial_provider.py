@@ -22,6 +22,7 @@ from quantagent.data.trading_calendar import TradingCalendar
 
 
 _COMMON_RENAME = {
+    "日期": "report_period",
     "报告日期": "report_period",
     "报告日": "report_period",
     "报表日期": "report_period",
@@ -152,7 +153,12 @@ class AkShareFinancialProvider:
             api_name="stock_financial_analysis_indicator",
             rename=_INDICATOR_RENAME,
             request=request,
-            call_builder=lambda api, symbol: api(symbol=_plain_code(symbol)),
+            call_builder=lambda api, symbol: self._call_financial_analysis_indicator(
+                api,
+                symbol,
+                request.start_date,
+            ),
+            params={"start_year": _year_from_date(request.start_date)},
         )
 
     def dividend(self, request: ProviderRequest) -> ProviderResult:
@@ -246,7 +252,7 @@ class AkShareFinancialProvider:
             if raw is None or raw.empty:
                 warnings.append(f"akshare_empty_{statement_name}:{symbol}")
             else:
-                frames.append(self._normalize(raw, rename, symbol, statement_name))
+                frames.append(self._filter_by_request(self._normalize(raw, rename, symbol, statement_name), request))
             if self.rate_limit_seconds > 0:
                 time.sleep(self.rate_limit_seconds)
 
@@ -317,6 +323,30 @@ class AkShareFinancialProvider:
         except TypeError:
             return callable_api(stock=to_akshare_symbol(symbol))  # type: ignore[misc]
 
+    def _call_financial_analysis_indicator(
+        self,
+        callable_api: object,
+        symbol: str,
+        start_date: str,
+    ) -> pd.DataFrame:
+        try:
+            return callable_api(symbol=_plain_code(symbol), start_year=_year_from_date(start_date))  # type: ignore[misc]
+        except TypeError:
+            return callable_api(symbol=_plain_code(symbol))  # type: ignore[misc]
+
+    @staticmethod
+    def _filter_by_request(frame: pd.DataFrame, request: ProviderRequest) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        date_column = "report_period" if "report_period" in frame.columns else "ann_date" if "ann_date" in frame.columns else ""
+        if not date_column:
+            return frame
+        parsed = pd.to_datetime(frame[date_column], errors="coerce")
+        start = pd.Timestamp(request.start_date)
+        end = pd.Timestamp(request.end_date)
+        keep = parsed.isna() | ((parsed >= start) & (parsed <= end))
+        return frame.loc[keep].reset_index(drop=True)
+
     def _call_with_retry(
         self,
         call_builder: Callable[[object, str], pd.DataFrame],
@@ -341,6 +371,13 @@ def _plain_code(symbol: str) -> str:
         if lower.startswith(prefix):
             return text[len(prefix):]
     return text
+
+
+def _year_from_date(value: str) -> str:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return "1900"
+    return str(pd.Timestamp(parsed).year)
 
 
 def to_akshare_symbol(symbol: str) -> str:

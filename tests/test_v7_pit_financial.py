@@ -125,10 +125,13 @@ def test_market_provider_schema_reports_missing_columns_and_pit_violations():
     )
     qlib_report = validate_qlib_market_schema(qlib_frame, as_of_date="2026-05-15")
     akshare_report = akshare_market_schema_report(qlib_frame.drop(columns=["amount"]))
+    missing_available_report = akshare_market_schema_report(qlib_frame.assign(available_at=pd.NaT))
 
     assert qlib_report["pit_violation_count"] == 1
     assert qlib_report["status"] == "failed"
     assert "amount" in akshare_report["missing_columns"]
+    assert missing_available_report["pit_violation_count"] == 1
+    assert missing_available_report["status"] == "failed"
 
 
 def test_qlib_provider_integration_skips_without_local_provider_uri():

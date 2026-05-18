@@ -6,9 +6,9 @@ MISSION_NAME="${MISSION_NAME:-mission_full_ai_$(date +%Y%m%d_%H%M%S)}"
 PROJECT_ROOT="${PROJECT_ROOT:-/home/shanhefu/QuantAgent}"
 QUANTAGENT_HOME="${QUANTAGENT_HOME:-$PROJECT_ROOT/runtime}"
 PROVIDER_URI="${PROVIDER_URI:-$QUANTAGENT_HOME/data/raw/qlib/cn_data}"
-AS_OF_DATE="${AS_OF_DATE:-2026-05-15}"
-START_DATE="${START_DATE:-2020-01-01}"
-END_DATE="${END_DATE:-2026-05-15}"
+AS_OF_DATE="${AS_OF_DATE:-2026-05-18}"
+START_DATE="${START_DATE:-1999-01-01}"
+END_DATE="${END_DATE:-2026-05-18}"
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if [[ -x "$PROJECT_ROOT/AI_quant_venv/bin/python" ]]; then
     PYTHON_BIN="$PROJECT_ROOT/AI_quant_venv/bin/python"
@@ -29,11 +29,23 @@ CONFIDENCE_FLOOR="${CONFIDENCE_FLOOR:-0.55}"
 SELECTION_TOP_K_MIN="${SELECTION_TOP_K_MIN:-5}"
 SELECTION_TOP_K_MAX="${SELECTION_TOP_K_MAX:-100}"
 MIN_ORDER_VALUE_YUAN="${MIN_ORDER_VALUE_YUAN:-100}"
+FACTOR_LIBRARY="${FACTOR_LIBRARY:-alpha181}"
+RUN_SYMBOLIC_GA="${RUN_SYMBOLIC_GA:-0}"
+SYMBOLIC_GA_POPULATION="${SYMBOLIC_GA_POPULATION:-80}"
+SYMBOLIC_GA_GENERATIONS="${SYMBOLIC_GA_GENERATIONS:-20}"
+SYMBOLIC_GA_TOP_K="${SYMBOLIC_GA_TOP_K:-20}"
 
 REFRESH_AKSHARE_MARKET="${REFRESH_AKSHARE_MARKET:-0}"
 REFRESH_FUNDAMENTALS="${REFRESH_FUNDAMENTALS:-0}"
 REFRESH_VALUATION="${REFRESH_VALUATION:-0}"
 REFRESH_SECTOR_MAP="${REFRESH_SECTOR_MAP:-0}"
+REFRESH_MACRO="${REFRESH_MACRO:-0}"
+REFRESH_FLOW="${REFRESH_FLOW:-0}"
+REFRESH_INDEX="${REFRESH_INDEX:-0}"
+ENABLE_MACRO="${ENABLE_MACRO:-1}"
+ENABLE_FLOW="${ENABLE_FLOW:-1}"
+ENABLE_INDEX="${ENABLE_INDEX:-1}"
+RUN_SYNTH_ABLATION="${RUN_SYNTH_ABLATION:-1}"
 ALLOW_NETWORK="${ALLOW_NETWORK:-0}"
 
 mkdir -p "$QUANTAGENT_HOME/logs"
@@ -84,11 +96,21 @@ CMD=(
   --timing-gate
   --holding-period-mode soft
   --capital-tier 1000000:0.10,10000000:0.05,100000000:0.02
+  --factor-library "$FACTOR_LIBRARY"
   --run-autopilot-search
   --n-trials "$N_TRIALS"
   --generations "$GENERATIONS"
   --rl-timesteps "$RL_TIMESTEPS"
 )
+
+if [[ "$RUN_SYMBOLIC_GA" == "1" ]]; then
+  CMD+=(
+    --run-symbolic-ga
+    --symbolic-ga-population "$SYMBOLIC_GA_POPULATION"
+    --symbolic-ga-generations "$SYMBOLIC_GA_GENERATIONS"
+    --symbolic-ga-top-k "$SYMBOLIC_GA_TOP_K"
+  )
+fi
 
 if [[ "$ALLOW_NETWORK" == "1" ]]; then
   CMD+=(--allow-network)
@@ -104,6 +126,27 @@ if [[ "$REFRESH_VALUATION" == "1" ]]; then
 fi
 if [[ "$REFRESH_SECTOR_MAP" == "1" ]]; then
   CMD+=(--refresh-sector-map)
+fi
+if [[ "$REFRESH_MACRO" == "1" ]]; then
+  CMD+=(--refresh-macro)
+fi
+if [[ "$REFRESH_FLOW" == "1" ]]; then
+  CMD+=(--refresh-flow)
+fi
+if [[ "$REFRESH_INDEX" == "1" ]]; then
+  CMD+=(--refresh-index)
+fi
+if [[ "$ENABLE_MACRO" != "1" ]]; then
+  CMD+=(--no-enable-macro)
+fi
+if [[ "$ENABLE_FLOW" != "1" ]]; then
+  CMD+=(--no-enable-flow)
+fi
+if [[ "$ENABLE_INDEX" != "1" ]]; then
+  CMD+=(--no-enable-index)
+fi
+if [[ "$RUN_SYNTH_ABLATION" != "1" ]]; then
+  CMD+=(--no-run-synth-ablation)
 fi
 
 printf 'Launching %s in tmux session %s\n' "$MISSION_NAME" "$SESSION_NAME"

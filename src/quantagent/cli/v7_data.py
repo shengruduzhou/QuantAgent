@@ -227,6 +227,7 @@ def smoke_akshare_v7(
         "balance_sheet": provider.balance_sheet,
         "cashflow": provider.cashflow,
         "financial_indicator": provider.financial_indicator,
+        "dividend": provider.dividend,
     }.items():
         try:
             result = fetch(request)
@@ -382,6 +383,15 @@ def build_training_dataset_v7(
     enforce_quality_gates: bool = typer.Option(True, "--enforce-quality-gates/--no-enforce-quality-gates"),
     manifest_path: Path | None = typer.Option(None, "--manifest"),
     source_name: str = typer.Option("realdata", "--source-name"),
+    factor_library: str = typer.Option("alpha181", "--factor-library", help="basic | alpha101 | alpha181 | cicc_ashare80"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
+    factor_min_finite_ratio: float = typer.Option(0.30, "--factor-min-finite-ratio"),
+    macro_root: Path | None = typer.Option(None, "--macro-root", help="Path to akshare macro PIT cache (e.g. v7/raw/akshare/macro)."),
+    flow_root: Path | None = typer.Option(None, "--flow-root", help="Path to akshare flow PIT cache."),
+    index_root: Path | None = typer.Option(None, "--index-root", help="Path to akshare index PIT cache."),
+    enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
+    enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
+    enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
 ) -> None:
     """Build the V7 gold-tier training dataset via PIT as-of joins and forward labels."""
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
@@ -408,6 +418,15 @@ def build_training_dataset_v7(
         min_dates=min_dates,
         enforce_quality_gates=enforce_quality_gates,
         source_name=source_name,
+        factor_library=factor_library,
+        synthesized_factors_path=str(synthesized_factors_path) if synthesized_factors_path else None,
+        factor_min_finite_ratio=factor_min_finite_ratio,
+        macro_root=str(macro_root) if macro_root else None,
+        flow_root=str(flow_root) if flow_root else None,
+        index_root=str(index_root) if index_root else None,
+        enable_macro=enable_macro,
+        enable_flow=enable_flow,
+        enable_index=enable_index,
     )
     result = build_v7_training_dataset_artifact(config)
     typer.echo(json_dump(result.summary))
@@ -417,10 +436,12 @@ def build_training_dataset_v7(
 def materialize_factors_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     output_path: Path = typer.Option(None, "--output"),
+    library: str = typer.Option("expr", "--library", help="expr | alpha101 | alpha181 | cicc_ashare80"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
     backend: str = typer.Option("pandas", "--backend", help="pandas or polars"),
     long_format: bool = typer.Option(False, "--long-format"),
 ) -> None:
-    """Materialize default Alpha101-style factors into the V7 lake."""
+    """Materialize factor libraries into the V7 lake."""
     from quantagent.data.manifest import utc_now_iso
     from quantagent.factors.expr import build_factor_frame, build_factor_manifest
 
@@ -429,19 +450,56 @@ def materialize_factors_v7(
         if output_path is not None
         else default_v7_lake_root() / "silver" / "factors" / "factors.parquet"
     )
-    factors = build_factor_frame(read_frame(market_panel_path), backend=backend, long_format=long_format)
+    market = read_frame(market_panel_path)
+    if library == "expr":
+        factors = build_factor_frame(market, backend=backend, long_format=long_format)
+        factor_manifest = build_factor_manifest(backend=backend)
+    elif library == "alpha101":
+        from quantagent.factors.alpha101 import compute_alpha101
+
+        factors = compute_alpha101(market)
+        factor_manifest = [{"factor_name": name, "source": "alpha101"} for name in sorted(factors["factor_name"].unique())]
+    elif library == "alpha181":
+        from quantagent.factors.alpha181 import alpha181_source_map, compute_alpha181
+
+        factors = compute_alpha181(market, synthesized_definitions_path=synthesized_factors_path)
+        source_map = alpha181_source_map()
+        factor_manifest = [
+            {"factor_name": name, "source": source_map.get(name, "synthesized_ga")}
+            for name in sorted(factors["factor_name"].unique())
+        ]
+    elif library in {"cicc80", "cicc_ashare80"}:
+        from quantagent.factors.cicc_ashare80 import cicc_ashare80_specs, compute_cicc_ashare80_factors
+
+        factors = compute_cicc_ashare80_factors(market)
+        specs = cicc_ashare80_specs()
+        factor_manifest = [
+            {"factor_name": name, "category": specs[name].category, "source": "cicc_ashare80_proxy"}
+            for name in sorted(factors["factor_name"].unique())
+        ]
+    else:
+        raise typer.BadParameter("library must be expr, alpha101, alpha181, or cicc_ashare80")
+    if not long_format and {"factor_name", "factor_value"}.issubset(factors.columns):
+        factors = factors.pivot_table(
+            index=["trade_date", "symbol"],
+            columns="factor_name",
+            values="factor_value",
+            aggfunc="last",
+        ).reset_index()
+        factors.columns = [str(column) for column in factors.columns]
     written = write_frame(factors, resolved_output)
     manifest = {
         "dataset_name": "factors",
         "created_at": utc_now_iso(),
         "backend": backend,
+        "library": library,
         "row_count": int(len(factors)),
         "column_count": int(len(factors.columns)),
         "output_path": str(written),
-        "factors": build_factor_manifest(backend=backend),
+        "factors": factor_manifest,
         "warnings": [
             entry["fallback"]
-            for entry in build_factor_manifest(backend=backend)
+            for entry in factor_manifest
             if entry.get("fallback")
         ],
     }
@@ -459,3 +517,132 @@ def materialize_factors_v7(
             }
         )
     )
+
+
+# --------------------------------------------------------------------- #
+# Macro / flow / index pulls (国家队资金流向)                            #
+# --------------------------------------------------------------------- #
+
+
+@app.command("build-akshare-macro-v7")
+def build_akshare_macro_v7(
+    start_date: str = typer.Option(None, "--start-date"),
+    end_date: str = typer.Option(None, "--end-date"),
+    root: Path | None = typer.Option(None, "--root", help="Override the macro PIT-cache root."),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Pull bonds + macro + Shibor / repo / OMO into the PIT cache."""
+    from quantagent.data.providers.akshare_macro_provider import AkShareMacroProvider
+
+    provider = AkShareMacroProvider(allow_network=allow_network, root=str(root) if root else None)
+    results = provider.fetch_all(start_date=start_date, end_date=end_date)
+    summary = {
+        "status": "passed" if any(r.frame.shape[0] > 0 for r in results.values()) else "failed",
+        "tables": {
+            name: {
+                "rows": int(len(res.frame)),
+                "warnings": list(res.warnings),
+                "path": res.metadata.get("path", ""),
+            }
+            for name, res in results.items()
+        },
+    }
+    typer.echo(json_dump(summary))
+    if summary["status"] != "passed":
+        raise typer.Exit(code=1)
+
+
+@app.command("build-akshare-flow-v7")
+def build_akshare_flow_v7(
+    root: Path | None = typer.Option(None, "--root", help="Override the flow PIT-cache root."),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Pull 北向资金 / 两融 / ETF / 行业资金 into the PIT cache."""
+    from quantagent.data.providers.akshare_flow_provider import AkShareFlowProvider
+
+    provider = AkShareFlowProvider(allow_network=allow_network, root=str(root) if root else None)
+    results = provider.fetch_all()
+    summary = {
+        "status": "passed" if any(r.frame.shape[0] > 0 for r in results.values()) else "failed",
+        "tables": {
+            name: {
+                "rows": int(len(res.frame)),
+                "warnings": list(res.warnings),
+                "path": res.metadata.get("path", ""),
+            }
+            for name, res in results.items()
+        },
+    }
+    typer.echo(json_dump(summary))
+    if summary["status"] != "passed":
+        raise typer.Exit(code=1)
+
+
+@app.command("build-akshare-index-v7")
+def build_akshare_index_v7(
+    start_date: str = typer.Option(None, "--start-date"),
+    end_date: str = typer.Option(None, "--end-date"),
+    root: Path | None = typer.Option(None, "--root", help="Override the index PIT-cache root."),
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Pull major equity indices, commodity main-continuous, treasury futures."""
+    from quantagent.data.providers.akshare_index_provider import AkShareIndexProvider
+
+    provider = AkShareIndexProvider(allow_network=allow_network, root=str(root) if root else None)
+    results = provider.fetch_all(start_date=start_date, end_date=end_date)
+    summary = {
+        "status": "passed" if any(r.frame.shape[0] > 0 for r in results.values()) else "failed",
+        "tables": {
+            name: {
+                "rows": int(len(res.frame)),
+                "warnings": list(res.warnings),
+                "path": res.metadata.get("path", ""),
+            }
+            for name, res in results.items()
+        },
+    }
+    typer.echo(json_dump(summary))
+    if summary["status"] != "passed":
+        raise typer.Exit(code=1)
+
+
+@app.command("smoke-akshare-macro-v7")
+def smoke_akshare_macro_v7(
+    allow_network: bool = typer.Option(False, "--allow-network"),
+) -> None:
+    """Probe akshare macro/flow/index endpoints; per-table pass/fail report."""
+    from quantagent.data.providers.akshare_flow_provider import AkShareFlowProvider
+    from quantagent.data.providers.akshare_index_provider import AkShareIndexProvider
+    from quantagent.data.providers.akshare_macro_provider import AkShareMacroProvider
+
+    probes: dict[str, object] = {}
+    warnings: list[str] = []
+
+    def _probe(prefix: str, name: str, fetch) -> None:
+        try:
+            res = fetch()
+            ok = isinstance(res, dict) and any(r.frame.shape[0] > 0 for r in res.values())
+            probes[f"{prefix}:{name}"] = {
+                "status": "passed" if ok else "empty",
+                "tables": {k: int(len(v.frame)) for k, v in res.items()} if isinstance(res, dict) else None,
+                "warnings": [w for v in (res.values() if isinstance(res, dict) else []) for w in v.warnings],
+            }
+        except Exception as exc:
+            msg = f"{prefix}_{name}_failed:{type(exc).__name__}:{exc}"
+            probes[f"{prefix}:{name}"] = {"status": "failed", "warning": msg}
+            warnings.append(msg)
+
+    _probe("macro", "all", lambda: AkShareMacroProvider(allow_network=allow_network).fetch_all())
+    _probe("flow", "all", lambda: AkShareFlowProvider(allow_network=allow_network).fetch_all())
+    _probe("index", "all", lambda: AkShareIndexProvider(allow_network=allow_network).fetch_all())
+
+    passed = any(isinstance(item, dict) and item.get("status") == "passed" for item in probes.values())
+    payload = {
+        "status": "passed" if passed else "failed",
+        "allow_network": allow_network,
+        "probes": probes,
+        "warnings": warnings,
+    }
+    typer.echo(json_dump(payload))
+    if not passed:
+        raise typer.Exit(code=1)

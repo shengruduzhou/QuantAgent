@@ -32,14 +32,15 @@ def test_alpha101_registers_first_thirty_factors():
     names = default_registry.names("alpha101")
     assert "alpha001" in names
     assert "alpha030" in names
-    assert len([name for name in names if name.startswith("alpha")]) >= 30
+    assert "alpha101" in names
+    assert len([name for name in names if name.startswith("alpha")]) >= 101
 
 
 def test_compute_alpha101_outputs_long_form():
     frame = _ohlcv()
     factors = compute_alpha101(frame)
     assert {"trade_date", "symbol", "factor_name", "factor_value"}.issubset(factors.columns)
-    assert factors["factor_name"].nunique() == 30
+    assert factors["factor_name"].nunique() == 101
 
 
 def test_alpha001_has_no_lookahead_from_future_change():
@@ -55,4 +56,3 @@ def test_alpha001_has_no_lookahead_from_future_change():
         changed.loc[before_last, "factor_value"].reset_index(drop=True),
         check_names=False,
     )
-

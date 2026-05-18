@@ -28,6 +28,7 @@ _STATEMENT_FILES = {
     "balance_sheet": "balance_sheet.parquet",
     "cashflow": "cashflow.parquet",
     "financial_indicator": "financial_indicator.parquet",
+    "dividend": "dividend.parquet",
     "disclosure_dates": "disclosure_dates.parquet",
 }
 

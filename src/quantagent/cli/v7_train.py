@@ -122,6 +122,70 @@ def evaluate_alpha_v7(
     typer.echo(json_dump(payload))
 
 
+@app.command("synthesize-factors-v7")
+def synthesize_factors_v7(
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    labels_path: Path | None = typer.Option(None, "--labels"),
+    output_dir: Path = typer.Option(None, "--output-dir"),
+    label_column: str = typer.Option("forward_return_5d", "--label-column"),
+    population: int = typer.Option(80, "--population"),
+    generations: int = typer.Option(20, "--generations"),
+    top_k: int = typer.Option(20, "--top-k"),
+    max_depth: int = typer.Option(4, "--max-depth"),
+    validation_fraction: float = typer.Option(0.25, "--validation-fraction"),
+    min_validation_rank_ic: float = typer.Option(0.0, "--min-validation-rank-ic"),
+    seed: int = typer.Option(1729, "--seed"),
+) -> None:
+    """Discover GA symbolic factors in the safe expression DSL.
+
+    The command writes definitions that can be fed back into
+    ``build-training-dataset-v7 --factor-library alpha181 --synthesized-factors``.
+    """
+    from quantagent.factors.factor_synthesis import SymbolicGAConfig, save_result, synthesize_factors
+
+    resolved_output = Path(output_dir) if output_dir is not None else default_reports_root() / "v7" / "factor_synthesis"
+    panel = read_frame(market_panel_path)
+    labels = read_frame(labels_path) if labels_path else None
+    result = synthesize_factors(
+        panel,
+        labels=labels,
+        config=SymbolicGAConfig(
+            population=population,
+            generations=generations,
+            max_depth=max_depth,
+            top_k=top_k,
+            label_column=label_column,
+            validation_fraction=validation_fraction,
+            min_validation_rank_ic=min_validation_rank_ic,
+            seed=seed,
+        ),
+    )
+    paths = save_result(result, resolved_output)
+    typer.echo(
+        json_dump(
+            {
+                "status": "passed",
+                "definitions": paths["definitions"],
+                "leaderboard": paths["leaderboard"],
+                "history": paths["history"],
+                "selected": int(len(result.definitions)),
+                "config": asdict(
+                    SymbolicGAConfig(
+                        population=population,
+                        generations=generations,
+                        max_depth=max_depth,
+                        top_k=top_k,
+                        label_column=label_column,
+                        validation_fraction=validation_fraction,
+                        min_validation_rank_ic=min_validation_rank_ic,
+                        seed=seed,
+                    )
+                ),
+            }
+        )
+    )
+
+
 @app.command("auto-train-v7")
 def auto_train_v7(
     symbols: str = typer.Option(
@@ -381,6 +445,15 @@ def run_real_training_v7(
     min_dates: int = typer.Option(5, "--min-dates"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
+    factor_library: str = typer.Option("alpha181", "--factor-library", help="basic | alpha101 | alpha181 | cicc_ashare80"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
+    factor_min_finite_ratio: float = typer.Option(0.30, "--factor-min-finite-ratio"),
+    macro_root: Path | None = typer.Option(None, "--macro-root"),
+    flow_root: Path | None = typer.Option(None, "--flow-root"),
+    index_root: Path | None = typer.Option(None, "--index-root"),
+    enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
+    enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
+    enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
 ) -> None:
     """Compose build-training-dataset-v7 + train-alpha-v7 into one auditable real-data run."""
     from quantagent.cli._utils import parse_csv_tuple
@@ -406,6 +479,15 @@ def run_real_training_v7(
             min_rows=min_rows,
             min_symbols=min_symbols,
             min_dates=min_dates,
+            factor_library=factor_library,
+            synthesized_factors_path=str(synthesized_factors_path) if synthesized_factors_path else None,
+            factor_min_finite_ratio=factor_min_finite_ratio,
+            macro_root=str(macro_root) if macro_root else None,
+            flow_root=str(flow_root) if flow_root else None,
+            index_root=str(index_root) if index_root else None,
+            enable_macro=enable_macro,
+            enable_flow=enable_flow,
+            enable_index=enable_index,
         )
     )
     training_result = run_v7_training_experiment(
@@ -649,6 +731,15 @@ def run_full_real_training_v7(
         "--capital-tier",
         help="Capital-tier ladder, e.g. '1e6:0.10,1e7:0.05,1e8:0.02'. Empty disables tiering.",
     ),
+    factor_library: str = typer.Option("alpha181", "--factor-library", help="basic | alpha101 | alpha181 | cicc_ashare80"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
+    factor_min_finite_ratio: float = typer.Option(0.30, "--factor-min-finite-ratio"),
+    macro_root: Path | None = typer.Option(None, "--macro-root"),
+    flow_root: Path | None = typer.Option(None, "--flow-root"),
+    index_root: Path | None = typer.Option(None, "--index-root"),
+    enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
+    enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
+    enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
 ) -> None:
     """End-to-end real-data pipeline: dataset -> train -> predict -> target weights -> paper report.
 
@@ -689,6 +780,15 @@ def run_full_real_training_v7(
             min_rows=min_rows,
             min_symbols=min_symbols,
             min_dates=min_dates,
+            factor_library=factor_library,
+            synthesized_factors_path=str(synthesized_factors_path) if synthesized_factors_path else None,
+            factor_min_finite_ratio=factor_min_finite_ratio,
+            macro_root=str(macro_root) if macro_root else None,
+            flow_root=str(flow_root) if flow_root else None,
+            index_root=str(index_root) if index_root else None,
+            enable_macro=enable_macro,
+            enable_flow=enable_flow,
+            enable_index=enable_index,
         )
     )
 
@@ -1201,6 +1301,22 @@ def run_full_ai_quant_v7(
     generations: int = typer.Option(30, "--generations"),
     rl_timesteps: int = typer.Option(5_000_000, "--rl-timesteps"),
     allow_model_downgrade: bool = typer.Option(False, "--allow-model-downgrade"),
+    factor_library: str = typer.Option("alpha181", "--factor-library", help="basic | alpha101 | alpha181 | cicc_ashare80"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
+    run_symbolic_ga: bool = typer.Option(False, "--run-symbolic-ga/--skip-symbolic-ga"),
+    symbolic_ga_population: int = typer.Option(80, "--symbolic-ga-population"),
+    symbolic_ga_generations: int = typer.Option(20, "--symbolic-ga-generations"),
+    symbolic_ga_top_k: int = typer.Option(50, "--symbolic-ga-top-k"),
+    macro_root: Path | None = typer.Option(None, "--macro-root"),
+    flow_root: Path | None = typer.Option(None, "--flow-root"),
+    index_root: Path | None = typer.Option(None, "--index-root"),
+    enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
+    enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
+    enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
+    refresh_macro: bool = typer.Option(False, "--refresh-macro/--no-refresh-macro"),
+    refresh_flow: bool = typer.Option(False, "--refresh-flow/--no-refresh-flow"),
+    refresh_index: bool = typer.Option(False, "--refresh-index/--no-refresh-index"),
+    run_synth_ablation: bool = typer.Option(True, "--run-synth-ablation/--no-run-synth-ablation"),
 ) -> None:
     """Full V7 AI quant research autopilot.
 
@@ -1224,11 +1340,40 @@ def run_full_ai_quant_v7(
         refresh_fundamentals=refresh_fundamentals,
         refresh_valuation=refresh_valuation,
         refresh_sector_map=refresh_sector_map,
+        refresh_macro=refresh_macro,
+        refresh_flow=refresh_flow,
+        refresh_index=refresh_index,
         start_date=start_date,
         end_date=end_date,
         as_of_date=as_of_date,
         horizons=horizons,
     )
+
+    resolved_synthesized_factors = synthesized_factors_path
+    symbolic_ga_status: dict[str, object] = {"status": "skipped"}
+    if run_symbolic_ga:
+        from quantagent.factors.factor_synthesis import SymbolicGAConfig, save_result, synthesize_factors
+
+        ga_output = quant_paths().reports / "v7" / "factor_synthesis"
+        ga_result = synthesize_factors(
+            read_frame(Path(str(stages["market_panel_path"]))),
+            labels=read_frame(Path(str(stages["labels_path"]))),
+            config=SymbolicGAConfig(
+                population=symbolic_ga_population,
+                generations=symbolic_ga_generations,
+                top_k=symbolic_ga_top_k,
+                label_column="forward_return_5d",
+            ),
+        )
+        ga_paths = save_result(ga_result, ga_output)
+        resolved_synthesized_factors = Path(ga_paths["definitions"])
+        symbolic_ga_status = {
+            "status": "passed",
+            "selected": int(len(ga_result.definitions)),
+            "definitions": ga_paths["definitions"],
+            "leaderboard": ga_paths["leaderboard"],
+            "history": ga_paths["history"],
+        }
 
     run_full_real_training_v7(
         market_panel_path=Path(str(stages["market_panel_path"])),
@@ -1239,6 +1384,12 @@ def run_full_ai_quant_v7(
         disclosures_path=None,
         sector_map_path=Path(str(stages["sector_map_path"])) if stages.get("sector_map_path") else None,
         training_dataset_path=Path(str(stages["training_dataset_path"])),
+        macro_root=Path(str(stages["macro_root"])) if stages.get("macro_root") else macro_root,
+        flow_root=Path(str(stages["flow_root"])) if stages.get("flow_root") else flow_root,
+        index_root=Path(str(stages["index_root"])) if stages.get("index_root") else index_root,
+        enable_macro=enable_macro,
+        enable_flow=enable_flow,
+        enable_index=enable_index,
         symbols=",".join(stages["symbols"]),
         symbols_file=None,
         model=model,
@@ -1289,6 +1440,8 @@ def run_full_ai_quant_v7(
         holding_period_mode=holding_period_mode,
         holding_period_max_delta=0.02,
         capital_tier=capital_tier,
+        factor_library=factor_library,
+        synthesized_factors_path=resolved_synthesized_factors,
     )
 
     autopilot_status: dict[str, object]
@@ -1320,6 +1473,7 @@ def run_full_ai_quant_v7(
                     "suspension_and_st_blocks": True,
                 },
                 "stages": stages,
+                "symbolic_ga": symbolic_ga_status,
                 "autopilot": autopilot_status,
             }
         )
@@ -1407,6 +1561,9 @@ def _prepare_full_ai_quant_inputs(
     end_date: str | None,
     as_of_date: str | None,
     horizons: str,
+    refresh_macro: bool = False,
+    refresh_flow: bool = False,
+    refresh_index: bool = False,
 ) -> dict[str, object]:
     from quantagent.data.bootstrap.akshare_bootstrap import AkShareBootstrapConfig, build_akshare_financial_cache
     from quantagent.data.bootstrap.akshare_market_bootstrap import AkShareMarketPanelConfig, build_akshare_market_panel
@@ -1448,10 +1605,14 @@ def _prepare_full_ai_quant_inputs(
         )
 
     if refresh_akshare_market:
+        # Let auto-range bridge from the qlib calendar's last date so AkShare only
+        # fetches the gap (e.g. 2020-09-26 → end_date) rather than trying to refetch
+        # 20+ years that qlib already covers. The user's --start-date governs the
+        # training window, not the AkShare fetch window.
         market_result = build_akshare_market_panel(
             AkShareMarketPanelConfig(
                 symbols=resolved_symbols,
-                start_date=start_date,
+                start_date=None,
                 end_date=end_date,
                 output_root=str(lake.root),
                 allow_network=allow_network,
@@ -1499,6 +1660,34 @@ def _prepare_full_ai_quant_inputs(
         valuation_path = Path(str(valuation_result["output_path"]))
         stages["valuation_refresh"] = valuation_result
 
+    macro_root = lake.root / "raw" / "akshare" / "macro"
+    flow_root = lake.root / "raw" / "akshare" / "flow"
+    index_root = lake.root / "raw" / "akshare" / "index"
+    if refresh_macro:
+        from quantagent.data.providers.akshare_macro_provider import AkShareMacroProvider
+        provider = AkShareMacroProvider(allow_network=allow_network, root=str(macro_root))
+        macro_result = provider.fetch_all(start_date=start_date, end_date=end_date)
+        stages["macro_refresh"] = {
+            name: {"rows": int(len(res.frame)), "warnings": list(res.warnings)}
+            for name, res in macro_result.items()
+        }
+    if refresh_flow:
+        from quantagent.data.providers.akshare_flow_provider import AkShareFlowProvider
+        provider = AkShareFlowProvider(allow_network=allow_network, root=str(flow_root))
+        flow_result = provider.fetch_all()
+        stages["flow_refresh"] = {
+            name: {"rows": int(len(res.frame)), "warnings": list(res.warnings)}
+            for name, res in flow_result.items()
+        }
+    if refresh_index:
+        from quantagent.data.providers.akshare_index_provider import AkShareIndexProvider
+        provider = AkShareIndexProvider(allow_network=allow_network, root=str(index_root))
+        index_result = provider.fetch_all(start_date=start_date, end_date=end_date)
+        stages["index_refresh"] = {
+            name: {"rows": int(len(res.frame)), "warnings": list(res.warnings)}
+            for name, res in index_result.items()
+        }
+
     sector_map_path = _existing_table_path(lake.root / "silver" / "sector_map" / "sector_map.parquet")
     if refresh_sector_map:
         sector_map_path = _build_akshare_sector_map(
@@ -1520,6 +1709,9 @@ def _prepare_full_ai_quant_inputs(
             "fundamentals_root": str(fundamentals_root) if has_fundamentals or refresh_fundamentals else None,
             "valuation_path": str(valuation_path) if valuation_path.exists() else None,
             "sector_map_path": str(sector_map_path) if sector_map_path.exists() else None,
+            "macro_root": str(macro_root) if macro_root.exists() else None,
+            "flow_root": str(flow_root) if flow_root.exists() else None,
+            "index_root": str(index_root) if index_root.exists() else None,
             "labels": {
                 "rows": int(len(label_result.frame)),
                 "horizons": list(parse_csv_tuple(horizons)),

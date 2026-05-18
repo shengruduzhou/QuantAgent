@@ -77,6 +77,8 @@ class V7TrainingConfig:
     ft_use_amp: bool = True
     ft_device: str = "auto"
     require_gpu: bool = False
+    run_synth_ablation: bool = False
+    emit_ic_decay_diagnostics: bool = True
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,36 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         boosters=boosters,
         backend=backend,
     )
+
+    # Optional diagnostics: IC decay heatmap + synth ablation.
+    diagnostics_dir = output_dir / "diagnostics"
+    primary_horizon = config.horizons[0] if config.horizons else 5
+    primary_label = f"forward_return_{primary_horizon}d"
+    if config.emit_ic_decay_diagnostics and primary_label in data.columns:
+        try:
+            from quantagent.training.diagnostics import compute_factor_ic_decay, render_ic_decay_heatmap
+
+            decay = compute_factor_ic_decay(data, feature_columns, primary_label)
+            if not decay.empty:
+                diag_paths = render_ic_decay_heatmap(decay, diagnostics_dir / "ic_decay")
+                metrics["ic_decay_diagnostics"] = diag_paths
+        except Exception as exc:  # pragma: no cover - diagnostic best-effort
+            metrics["ic_decay_diagnostics_error"] = f"{type(exc).__name__}:{exc}"
+
+    if config.run_synth_ablation and any(c.startswith("synth_") for c in feature_columns):
+        try:
+            ablation = _run_synth_ablation(data, feature_columns, config, primary_label)
+            if ablation is not None:
+                metrics["synth_ablation"] = ablation
+                ablation_path = diagnostics_dir / "metrics_ablation.json"
+                ablation_path.parent.mkdir(parents=True, exist_ok=True)
+                ablation_path.write_text(
+                    json.dumps(ablation, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+        except Exception as exc:  # pragma: no cover - diagnostic best-effort
+            metrics["synth_ablation_error"] = f"{type(exc).__name__}:{exc}"
+
     return V7TrainingResult(
         status=status,
         output_dir=str(output_dir),
@@ -210,6 +242,50 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         acceptance_report=acceptance.to_dict(),
         artifact_paths=artifact_paths,
     )
+
+
+def _run_synth_ablation(
+    data: pd.DataFrame,
+    feature_columns: list[str],
+    config: V7TrainingConfig,
+    primary_label: str,
+) -> dict[str, object] | None:
+    """Train an identical model with synth_* columns removed; report deltas.
+
+    The ablation runs a second walk-forward pass over the same dataset and
+    hyperparameters, so the only difference is the feature set. The deltas
+    isolate the marginal contribution of GA-synthesised factors against
+    the alpha101 + CICC base.
+    """
+    base_synth = [c for c in feature_columns if c.startswith("synth_")]
+    without_synth = [c for c in feature_columns if not c.startswith("synth_")]
+    if not base_synth or not without_synth:
+        return None
+
+    from dataclasses import replace
+
+    sub_dir = Path(config.output_dir) / "diagnostics" / "ablation_no_synth"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    no_synth_cfg = replace(
+        config,
+        feature_columns=tuple(without_synth),
+        output_dir=str(sub_dir),
+        run_synth_ablation=False,  # prevent recursion
+        emit_ic_decay_diagnostics=False,
+        mark_production_ready=False,
+    )
+    baseline = run_v7_training_experiment(data, no_synth_cfg)
+    base_metrics = baseline.metrics
+    return {
+        "synth_columns_used": base_synth,
+        "synth_column_count": len(base_synth),
+        "base_feature_count": len(feature_columns),
+        "ablation_feature_count": len(without_synth),
+        "baseline_metrics_path": str(Path(baseline.output_dir) / "metrics.json"),
+        "baseline_status": baseline.status,
+        # The full-feature metrics live in the outer `metrics` dict —
+        # downstream consumers can compute Δsharpe / ΔICIR there.
+    }
 
 
 def _make_walk_forward_folds(frame: pd.DataFrame, config: V7TrainingConfig):
@@ -515,8 +591,13 @@ def _auto_feature_columns(frame: pd.DataFrame) -> tuple[str, ...]:
         if column.startswith("forward_return_") or column.startswith("label_end_") or column in excluded:
             continue
         values = pd.to_numeric(frame[column], errors="coerce")
-        if np.isfinite(values.dropna().to_numpy(dtype=float)).any():
-            selected.append(column)
+        clean = values.replace([np.inf, -np.inf], np.nan)
+        finite_ratio = float(clean.notna().mean())
+        if finite_ratio < 0.30:
+            continue
+        if clean.nunique(dropna=True) <= 1:
+            continue
+        selected.append(column)
     return tuple(selected)
 
 
