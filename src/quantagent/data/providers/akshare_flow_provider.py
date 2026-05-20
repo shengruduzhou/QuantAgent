@@ -49,7 +49,7 @@ class AkShareFlowProvider:
         results: dict[str, ProviderResult] = {}
         results["northbound_flow"] = self._fetch_and_upsert(
             "northbound_flow",
-            lambda: _normalize_northbound(_safe_call(ak, "stock_hsgt_fund_flow_summary_em")),
+            lambda: _normalize_northbound_history(_collect_northbound_history(ak)),
         )
         results["margin_balance"] = self._fetch_and_upsert(
             "margin_balance",
@@ -176,6 +176,50 @@ def _normalize_margin_balance(combined: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _collect_northbound_history(ak_mod) -> pd.DataFrame:
+    """Pull daily Stock-Connect northbound history for the three channels.
+
+    akshare ``stock_hsgt_hist_em`` returns one DataFrame per symbol; we stack
+    them under a ``channel`` column.
+    """
+    pieces: list[pd.DataFrame] = []
+    for channel, symbol in (
+        ("north_total", "北向资金"),
+        ("north_hgt", "沪股通"),
+        ("north_sgt", "深股通"),
+    ):
+        try:
+            raw = _safe_call(ak_mod, "stock_hsgt_hist_em", symbol=symbol)
+            if raw is None or raw.empty:
+                continue
+            df = raw.copy()
+            df.columns = [str(c).strip() for c in df.columns]
+            date_col = _first_match(df.columns, ("日期", "trade_date", "date"))
+            net_col = _first_match(df.columns, ("当日成交净买额", "成交净买额"))
+            if date_col is None or net_col is None:
+                continue
+            piece = pd.DataFrame({
+                "observation_date": pd.to_datetime(df[date_col], errors="coerce"),
+                "channel": channel,
+                # The endpoint reports values in 亿元 (100M CNY); multiply for consistency.
+                "net_inflow_cny": pd.to_numeric(df[net_col], errors="coerce") * 1e8,
+            }).dropna(subset=["observation_date", "net_inflow_cny"])
+            pieces.append(piece)
+        except Exception:
+            continue
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+
+def _normalize_northbound_history(combined: pd.DataFrame) -> pd.DataFrame:
+    """Tag historical northbound rows with PIT available_at."""
+    if combined is None or combined.empty:
+        return pd.DataFrame()
+    out = combined.copy()
+    out["available_at"] = out["observation_date"] + pd.Timedelta(days=FLOW_AVAILABLE_AT_LAG_DAYS)
+    out["source"] = "akshare:stock_hsgt_hist_em"
+    return out
+
+
 def _collect_margin(ak_mod, *, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
     """Pull SH (and best-effort SZ) margin-financing balance history.
 
@@ -234,5 +278,6 @@ __all__ = [
     "AkShareFlowProvider",
     "FLOW_AVAILABLE_AT_LAG_DAYS",
     "_normalize_northbound",
+    "_normalize_northbound_history",
     "_normalize_margin_balance",
 ]

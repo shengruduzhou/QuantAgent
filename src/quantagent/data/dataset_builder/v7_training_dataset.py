@@ -64,6 +64,7 @@ class V7TrainingDatasetConfig:
     factor_library: str = "basic"
     synthesized_factors_path: str | None = None
     factor_min_finite_ratio: float = 0.30
+    cached_factors_path: str | None = None  # if set, skip compute and load wide parquet
     macro_root: str | None = None
     flow_root: str | None = None
     index_root: str | None = None
@@ -99,13 +100,20 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     market = _restrict_window(market, config.start_date, config.end_date, config.symbols)
     labels = _restrict_window(labels, config.start_date, config.end_date, config.symbols)
     features = build_market_features(market)
-    features, factor_report = _append_factor_library(
-        features,
-        market,
-        library=config.factor_library,
-        synthesized_factors_path=config.synthesized_factors_path,
-        min_finite_ratio=config.factor_min_finite_ratio,
-    )
+    if config.cached_factors_path:
+        features, factor_report = _append_cached_factors(
+            features,
+            config.cached_factors_path,
+            min_finite_ratio=config.factor_min_finite_ratio,
+        )
+    else:
+        features, factor_report = _append_factor_library(
+            features,
+            market,
+            library=config.factor_library,
+            synthesized_factors_path=config.synthesized_factors_path,
+            min_finite_ratio=config.factor_min_finite_ratio,
+        )
 
     fundamentals = load_fundamentals_root(config.fundamentals_root) if config.fundamentals_root else pd.DataFrame()
     valuation = load_table(config.valuation_path) if config.valuation_path else pd.DataFrame()
@@ -385,6 +393,54 @@ def _feature_columns(frame: pd.DataFrame, horizons: Iterable[int]) -> list[str]:
             continue
         selected.append(column)
     return selected
+
+
+def _append_cached_factors(
+    features: pd.DataFrame,
+    cached_factors_path: str,
+    *,
+    min_finite_ratio: float,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Load a pre-materialised wide factor parquet and merge it onto features.
+
+    Companion to ``qa materialize-alpha181-v7``. Replaces the in-process
+    factor compute → long → pivot → merge chain that peaks at 40 GB on
+    1500-symbol panels. The streaming-read here keeps peak RAM bounded
+    by the factor parquet's row-group size (~1-2 GB typical).
+    """
+    factor_path = Path(cached_factors_path)
+    if not factor_path.exists():
+        return features, {"status": "missing", "cached_factors_path": str(factor_path),
+                          "columns_added": 0}
+    wide = load_table(factor_path)
+    if wide.empty:
+        return features, {"status": "empty", "cached_factors_path": str(factor_path),
+                          "columns_added": 0}
+    if "trade_date" not in wide.columns or "symbol" not in wide.columns:
+        return features, {"status": "schema_mismatch", "cached_factors_path": str(factor_path),
+                          "columns_added": 0,
+                          "warnings": ["wide factor parquet missing trade_date or symbol"]}
+    wide["trade_date"] = pd.to_datetime(wide["trade_date"], errors="coerce")
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for column in [c for c in wide.columns if c not in {"trade_date", "symbol"}]:
+        values = pd.to_numeric(wide[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        finite_ratio = float(values.notna().mean())
+        if finite_ratio >= min_finite_ratio and values.nunique(dropna=True) > 1:
+            wide[column] = values
+            kept.append(column)
+        else:
+            dropped.append(column)
+    wide = wide[["trade_date", "symbol", *kept]]
+    merged = features.merge(wide, on=["trade_date", "symbol"], how="left")
+    return merged, {
+        "status": "passed",
+        "cached_factors_path": str(factor_path),
+        "columns_added": len(kept),
+        "columns_dropped": len(dropped),
+        "min_finite_ratio": min_finite_ratio,
+    }
 
 
 def _append_factor_library(

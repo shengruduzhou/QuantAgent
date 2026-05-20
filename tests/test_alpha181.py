@@ -78,3 +78,32 @@ def test_compute_alpha181_handles_missing_synth_path(tmp_path):
     factors = compute_alpha181(frame, synthesized_definitions_path=missing)
     # 181 base factors still produced even with absent synth definitions file.
     assert set(factors["factor_name"].unique()) == set(ALPHA181_NAMES)
+
+
+def test_compute_alpha181_wide_matches_long():
+    """wide=True must produce bit-exact values vs the pivoted long output."""
+    import numpy as np
+    frame = _ohlcv()
+    subset = ["alpha001", "alpha050", "alpha101", "alpha102", "alpha150", "alpha181"]
+    long_df = compute_alpha181(frame, names=subset)
+    wide_df = compute_alpha181(frame, names=subset, wide=True)
+
+    # wide path: rows = (date × symbol) cells, columns include each factor
+    assert set(wide_df.columns) >= {"trade_date", "symbol", *subset}
+    assert len(wide_df) == frame[["trade_date", "symbol"]].drop_duplicates().shape[0]
+
+    # Long → wide pivot for comparison
+    long_wide = long_df.pivot_table(
+        index=["trade_date", "symbol"], columns="factor_name",
+        values="factor_value", aggfunc="last",
+    ).reset_index()
+    long_wide.columns = [str(c) for c in long_wide.columns]
+
+    merged = wide_df.merge(long_wide, on=["trade_date", "symbol"], suffixes=("_w", "_l"))
+    for col in subset:
+        w = pd.to_numeric(merged[f"{col}_w"], errors="coerce").to_numpy()
+        l = pd.to_numeric(merged[f"{col}_l"], errors="coerce").to_numpy()
+        # NaN-safe equality
+        assert np.allclose(w, l, equal_nan=True, atol=0.0), (
+            f"wide vs long mismatch on {col}: max diff={np.nanmax(np.abs(w-l))}"
+        )

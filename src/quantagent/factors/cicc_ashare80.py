@@ -32,16 +32,43 @@ class CICCAshareFactorSpec:
     direction: int = 1
 
 
-def compute_cicc_ashare80_factors(frame: pd.DataFrame, names: list[str] | None = None) -> pd.DataFrame:
+def compute_cicc_ashare80_factors(
+    frame: pd.DataFrame,
+    names: list[str] | None = None,
+    *,
+    wide: bool = False,
+) -> pd.DataFrame:
     """Compute the 80 daily-compatible CICC-style factor templates.
 
-    Output is long-form: ``trade_date, symbol, factor_name, factor_value``.
+    Output formats
+    --------------
+    * ``wide=False`` (default, backward-compatible): long-form
+      ``trade_date, symbol, factor_name, factor_value``.
+    * ``wide=True``: wide-form ``trade_date, symbol, cicc_*`` columns.
+      Skips the long-form intermediate; preferred for large panels.
+
     All rolling operations are per-symbol trailing windows; cross-sectional
     transforms use same-day data only.
     """
     data = _base(frame)
     values = _factor_values(data)
     selected = names or list(values)
+
+    if wide:
+        cols: dict[str, np.ndarray] = {}
+        for name in selected:
+            if name not in values:
+                raise KeyError(f"unknown CICC A-share factor: {name}")
+            series = pd.to_numeric(values[name], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            cols[name] = series.to_numpy(dtype=float)
+        if not cols:
+            return pd.DataFrame(columns=["trade_date", "symbol"])
+        return pd.DataFrame(
+            {"trade_date": data["trade_date"].to_numpy(),
+             "symbol": data["symbol"].to_numpy(),
+             **cols},
+        )
+
     rows: list[pd.DataFrame] = []
     for name in selected:
         if name not in values:

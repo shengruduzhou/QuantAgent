@@ -615,11 +615,23 @@ def _fold_metrics(frame: pd.DataFrame, label_column: str, fold: int, horizon: in
     net_returns = returns - turnover_cost
     nav = (1.0 + net_returns).cumprod()
     drawdown = nav / nav.cummax() - 1.0 if not nav.empty else pd.Series(dtype=float)
+    n_days = max(int(len(net_returns)), 1)
+    avg_daily_return = float(net_returns.mean()) if not net_returns.empty else 0.0
+    annualised_return = (
+        float((1.0 + avg_daily_return) ** 252 - 1.0) if avg_daily_return > -1 else float("nan")
+    )
+    annualised_vol = float(net_returns.std(ddof=1) * (252 ** 0.5)) if n_days > 1 else 0.0
+    sharpe = float(avg_daily_return / (net_returns.std(ddof=1) + 1e-12) * (252 ** 0.5)) if n_days > 1 else 0.0
     return {
         "fold": fold,
         "horizon": horizon,
         "rank_ic_mean": float(by_date_ic.mean()) if not by_date_ic.empty else 0.0,
         "net_return": float(net_returns.sum()) if not net_returns.empty else 0.0,
+        "avg_daily_return": avg_daily_return,
+        "annualised_return": annualised_return,
+        "annualised_vol": annualised_vol,
+        "sharpe": sharpe,
+        "n_days": n_days,
         "max_drawdown": float(drawdown.min()) if not drawdown.empty else 0.0,
     }
 
@@ -660,14 +672,24 @@ def _aggregate_metrics(
 ) -> dict[str, object]:
     rank_ics = [float(item["rank_ic_mean"]) for item in fold_metrics]
     net_returns = [float(item["net_return"]) for item in fold_metrics]
+    avg_daily_returns = [float(item.get("avg_daily_return", 0.0)) for item in fold_metrics]
+    annualised_returns = [float(item.get("annualised_return", 0.0)) for item in fold_metrics
+                          if not (isinstance(item.get("annualised_return"), float) and item["annualised_return"] != item["annualised_return"])]
+    sharpes = [float(item.get("sharpe", 0.0)) for item in fold_metrics]
     drawdowns = [float(item["max_drawdown"]) for item in fold_metrics]
+    n_days_total = int(sum(item.get("n_days", 0) for item in fold_metrics))
     dominance = _single_factor_dominance(coefficients) if coefficients else _booster_dominance(feature_importance or {})
+    avg_daily = float(np.mean(avg_daily_returns)) if avg_daily_returns else 0.0
     return {
         "rank_ic_mean": float(np.mean(rank_ics)) if rank_ics else 0.0,
         "rank_ic_stability": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-12)) if rank_ics else 0.0,
         "ICIR": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-12)) if rank_ics else 0.0,
         "turnover_adjusted_net_return": float(np.sum(net_returns)) if net_returns else 0.0,
+        "avg_daily_return": avg_daily,
+        "annualised_return": float(np.mean(annualised_returns)) if annualised_returns else 0.0,
+        "annualised_sharpe": float(np.mean(sharpes)) if sharpes else 0.0,
         "max_drawdown": float(min(drawdowns)) if drawdowns else 0.0,
+        "evaluated_days": n_days_total,
         "single_factor_dominance": dominance,
         "uses_mock_or_synthetic": False,
         "prediction_rows": int(len(predictions)),

@@ -36,8 +36,20 @@ def compute_alpha181(
     frame: pd.DataFrame,
     names: list[str] | None = None,
     synthesized_definitions_path: str | Path | None = None,
+    *,
+    wide: bool = False,
 ) -> pd.DataFrame:
-    """Compute fixed Alpha181 plus optional GA-synthesised factor extensions."""
+    """Compute fixed Alpha181 plus optional GA-synthesised factor extensions.
+
+    Output formats
+    --------------
+    * ``wide=False`` (default): long-form rows
+      ``trade_date, symbol, factor_name, factor_value`` (backwards-compatible).
+    * ``wide=True``: wide-form columns ``trade_date, symbol, alpha001 ...
+      alpha181, synth_*``. This path is the recommended one for streaming
+      builds on large universes — it skips the 9.8 GB long-form
+      intermediate that the downstream pivot needs to allocate.
+    """
     if len(ALPHA181_CICC_NAME_MAP) != ALPHA181_CICC_COUNT:
         raise RuntimeError(
             f"alpha181 expects {ALPHA181_CICC_COUNT} CICC factors, "
@@ -49,15 +61,45 @@ def compute_alpha181(
         name for name in requested
         if name.startswith("alpha") and int(name.removeprefix("alpha")) <= 101
     ]
-    frames: list[pd.DataFrame] = []
-    if alpha101_names:
-        frames.append(compute_alpha101(frame, names=sorted(alpha101_names)))
-
     cicc_source_names = [
         source
         for source, alpha_name in ALPHA181_CICC_NAME_MAP.items()
         if alpha_name in requested
     ]
+
+    if wide:
+        wide_frames: list[pd.DataFrame] = []
+        if alpha101_names:
+            wide_frames.append(compute_alpha101(frame, names=sorted(alpha101_names), wide=True))
+        if cicc_source_names:
+            cicc_wide = compute_cicc_ashare80_factors(frame, names=cicc_source_names, wide=True)
+            rename_map = {src: ALPHA181_CICC_NAME_MAP[src] for src in cicc_source_names
+                          if src in cicc_wide.columns}
+            cicc_wide = cicc_wide.rename(columns=rename_map)
+            wide_frames.append(cicc_wide)
+        if synthesized_definitions_path is not None:
+            synthesized = compute_synthesized_factors(frame, synthesized_definitions_path)
+            if names:
+                synthesized = synthesized[synthesized["factor_name"].isin(requested)]
+            if not synthesized.empty:
+                synth_wide = synthesized.pivot_table(
+                    index=["trade_date", "symbol"],
+                    columns="factor_name",
+                    values="factor_value",
+                    aggfunc="last",
+                ).reset_index()
+                synth_wide.columns = [str(c) for c in synth_wide.columns]
+                wide_frames.append(synth_wide)
+        if not wide_frames:
+            return pd.DataFrame(columns=["trade_date", "symbol"])
+        out = wide_frames[0]
+        for piece in wide_frames[1:]:
+            out = out.merge(piece, on=["trade_date", "symbol"], how="outer")
+        return out
+
+    frames: list[pd.DataFrame] = []
+    if alpha101_names:
+        frames.append(compute_alpha101(frame, names=sorted(alpha101_names)))
     if cicc_source_names:
         cicc = compute_cicc_ashare80_factors(frame, names=cicc_source_names)
         cicc = cicc.copy()

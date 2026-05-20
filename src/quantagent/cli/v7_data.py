@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import typer
 
 from quantagent.cli._utils import (
@@ -392,6 +393,10 @@ def build_training_dataset_v7(
     enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
     enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
     enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
+    cached_factors_path: Path | None = typer.Option(None, "--cached-factors-path",
+        help="If set, load a pre-materialised wide factor parquet "
+             "(from `qa materialize-alpha181-v7`) instead of computing factors "
+             "in-process. Required for OOM-free large-universe builds."),
 ) -> None:
     """Build the V7 gold-tier training dataset via PIT as-of joins and forward labels."""
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
@@ -427,6 +432,7 @@ def build_training_dataset_v7(
         enable_macro=enable_macro,
         enable_flow=enable_flow,
         enable_index=enable_index,
+        cached_factors_path=str(cached_factors_path) if cached_factors_path else None,
     )
     result = build_v7_training_dataset_artifact(config)
     typer.echo(json_dump(result.summary))
@@ -646,3 +652,95 @@ def smoke_akshare_macro_v7(
     typer.echo(json_dump(payload))
     if not passed:
         raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------- #
+# Streaming factor materialisation (low-RAM large-universe path)        #
+# --------------------------------------------------------------------- #
+
+
+@app.command("materialize-alpha181-v7")
+def materialize_alpha181_v7(
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    output_path: Path = typer.Option(None, "--output"),
+    synthesized_factors_path: Path | None = typer.Option(None, "--synthesized-factors"),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
+    symbols: str = typer.Option("", "--symbols"),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file"),
+    batch_symbols: int = typer.Option(0, "--batch-symbols",
+        help="If > 0, compute factors in batches of N symbols and append to parquet, "
+             "bounding peak RAM linearly in batch size. Use for 1500+ symbol universes."),
+) -> None:
+    """Compute alpha181 (wide) and write a single Parquet on disk.
+
+    This is the streaming-build "Phase 1" path. After this command exits, the
+    OS reclaims all RAM. ``build-training-dataset-v7 --cached-factors-path``
+    then loads the parquet in a fresh process for the as-of merge step, so the
+    factor-compute peak and the merge-time peak no longer collide.
+    """
+    import gc
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quantagent.factors.alpha181 import compute_alpha181
+
+    resolved_output = (
+        Path(output_path)
+        if output_path is not None
+        else default_v7_lake_root() / "silver" / "factors" / "alpha181.parquet"
+    )
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+
+    market = read_frame(market_panel_path)
+    market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce")
+    if start_date:
+        market = market[market["trade_date"] >= pd.Timestamp(start_date)]
+    if end_date:
+        market = market[market["trade_date"] <= pd.Timestamp(end_date)]
+    universe = merge_symbols(symbols, symbols_file)
+    if universe:
+        market = market[market["symbol"].astype(str).isin(set(universe))]
+    if market.empty:
+        raise typer.BadParameter("market panel empty after window/symbol filtering")
+
+    all_symbols = sorted(market["symbol"].astype(str).unique().tolist())
+    typer.echo(json_dump({"status": "starting", "rows": int(len(market)),
+                          "symbols": len(all_symbols),
+                          "batch_symbols": batch_symbols, "output": str(resolved_output)}))
+
+    synth_path = str(synthesized_factors_path) if synthesized_factors_path else None
+    writer: "pq.ParquetWriter | None" = None
+    try:
+        if batch_symbols and batch_symbols > 0:
+            for i in range(0, len(all_symbols), batch_symbols):
+                batch = all_symbols[i:i + batch_symbols]
+                batch_market = market[market["symbol"].astype(str).isin(set(batch))]
+                wide = compute_alpha181(batch_market, synthesized_definitions_path=synth_path, wide=True)
+                if wide.empty:
+                    typer.echo(json_dump({"batch": i, "rows": 0, "warning": "empty"}))
+                    continue
+                table = pa.Table.from_pandas(wide, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(resolved_output, table.schema)
+                else:
+                    table = table.cast(writer.schema)
+                writer.write_table(table)
+                typer.echo(json_dump({"batch_index": i // batch_symbols,
+                                      "symbols_in_batch": len(batch),
+                                      "rows_written": int(len(wide))}))
+                del batch_market, wide, table
+                gc.collect()
+        else:
+            wide = compute_alpha181(market, synthesized_definitions_path=synth_path, wide=True)
+            wide.to_parquet(resolved_output, index=False)
+            typer.echo(json_dump({"status": "passed", "rows_written": int(len(wide)),
+                                  "columns": int(len(wide.columns)),
+                                  "output": str(resolved_output)}))
+            return
+    finally:
+        if writer is not None:
+            writer.close()
+
+    typer.echo(json_dump({"status": "passed", "output": str(resolved_output),
+                          "batches": (len(all_symbols) + batch_symbols - 1) // batch_symbols}))

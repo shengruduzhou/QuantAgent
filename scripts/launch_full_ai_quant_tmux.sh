@@ -97,11 +97,17 @@ CMD=(
   --holding-period-mode soft
   --capital-tier 1000000:0.10,10000000:0.05,100000000:0.02
   --factor-library "$FACTOR_LIBRARY"
-  --run-autopilot-search
   --n-trials "$N_TRIALS"
   --generations "$GENERATIONS"
   --rl-timesteps "$RL_TIMESTEPS"
 )
+
+RUN_AUTOPILOT="${RUN_AUTOPILOT:-1}"
+if [[ "$RUN_AUTOPILOT" == "1" ]]; then
+  CMD+=(--run-autopilot-search)
+else
+  CMD+=(--skip-autopilot-search)
+fi
 
 if [[ "$RUN_SYMBOLIC_GA" == "1" ]]; then
   CMD+=(

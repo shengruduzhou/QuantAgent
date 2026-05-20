@@ -82,10 +82,17 @@ class AkShareMacroProvider:
         """Fetch every macro table and persist into the PIT cache."""
         ak = self._akshare()
         results: dict[str, ProviderResult] = {}
-        results["yield_curve"] = self._fetch_and_upsert(
-            "yield_curve", lambda: _normalize_yield_curve(_safe_call(ak, "bond_china_yield",
-                start_date=_compact(start_date), end_date=_compact(end_date))),
-        )
+        # Yield-curve API limits each call to a roughly 1-year window, so chunk.
+        yield_frames: list[pd.DataFrame] = []
+        for chunk_start, chunk_end in _year_chunks(start_date, end_date):
+            try:
+                raw = _safe_call(ak, "bond_china_yield",
+                                 start_date=_compact(chunk_start),
+                                 end_date=_compact(chunk_end))
+                yield_frames.append(_normalize_yield_curve(raw))
+            except Exception:
+                continue
+        results["yield_curve"] = self._upsert_combined("yield_curve", yield_frames)
         # Shibor: one row per (date, tenor); fetch each tenor sequentially.
         shibor_frames: list[pd.DataFrame] = []
         for tenor in _SHIBOR_TENORS:
@@ -99,10 +106,10 @@ class AkShareMacroProvider:
                 continue
         results["shibor"] = self._upsert_combined("shibor", shibor_frames)
 
+        # repo_rate_hist breaks if only start_date is passed (KeyError 'frValueMap'
+        # in akshare 1.18); call with no args to get the recent window safely.
         results["repo"] = self._fetch_and_upsert(
-            "repo", lambda: _normalize_repo(_safe_call(ak, "repo_rate_hist",
-                                                      start_date=_dashed(start_date),
-                                                      end_date=_dashed(end_date))),
+            "repo", lambda: _normalize_repo(_safe_call(ak, "repo_rate_hist")),
         )
         results["central_bank_balance"] = self._fetch_and_upsert(
             "central_bank_balance",
@@ -343,7 +350,11 @@ def _normalize_central_bank_balance(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_aggregate_financing(raw: pd.DataFrame) -> pd.DataFrame:
-    """Normalise akshare ``macro_china_shrzgm`` (社会融资规模存量)."""
+    """Normalise akshare ``macro_china_shrzgm`` (社会融资规模存量).
+
+    Real ``月份`` is a compact ``YYYYMM`` string (e.g. ``"201501"``);
+    parse via :func:`_parse_yearmonth`.
+    """
     if raw is None or raw.empty:
         return pd.DataFrame()
     df = raw.copy()
@@ -352,7 +363,7 @@ def _normalize_aggregate_financing(raw: pd.DataFrame) -> pd.DataFrame:
     total_col = _first_match(df.columns, ("社会融资规模增量", "社融规模", "社融", "value"))
     if date_col is None or total_col is None:
         return pd.DataFrame()
-    obs = pd.to_datetime(df[date_col], errors="coerce")
+    obs = df[date_col].apply(_parse_yearmonth)
     total = pd.to_numeric(df[total_col], errors="coerce")
     out = pd.DataFrame({"observation_date": obs, "aggregate_financing_cny": total}).dropna()
     if out.empty:
@@ -470,22 +481,26 @@ def _shibor_tenor_label(tenor: str) -> str:
     return mapping.get(tenor, tenor)
 
 
-def _parse_yearmonth(value: str) -> pd.Timestamp:
+def _parse_yearmonth(value: object) -> pd.Timestamp:
     """Parse akshare's mixed Chinese yearmonth strings into a Timestamp.
 
-    Accepts ``'2026年04月份'``, ``'2026.4'``, ``'2026-04'``, ``'2026/04'``.
-    Returns NaT on failure. The day is normalised to the month end so PIT
-    available_at calculations behave consistently for monthly aggregates.
+    Accepts ``'2026年04月份'``, ``'2026.4'``, ``'2026-04'``, ``'2026/04'``,
+    or the bare ``'201501'`` form used by ``macro_china_shrzgm``. Returns
+    NaT on failure. The day is normalised to the month end so PIT
+    ``available_at`` calculations behave consistently for monthly aggregates.
     """
     if value is None:
         return pd.NaT
     text = str(value).strip()
     if not text:
         return pd.NaT
-    # Try Chinese form "2026年04月份"
+    # YYYYMM compact form ("201501")
+    if text.isdigit() and len(text) == 6:
+        text = f"{text[:4]}-{text[4:]}"
+    # Chinese form "2026年04月份"
     if "年" in text:
         text = text.replace("年", "-").replace("月份", "").replace("月", "")
-    # Try dot form "2026.4"
+    # Dot form "2026.4"
     if "." in text and "-" not in text:
         text = text.replace(".", "-")
     try:
@@ -495,6 +510,29 @@ def _parse_yearmonth(value: str) -> pd.Timestamp:
         return (ts + pd.offsets.MonthEnd(0)).normalize()
     except Exception:
         return pd.NaT
+
+
+def _year_chunks(start_date: str | None, end_date: str | None) -> list[tuple[str, str]]:
+    """Yield (chunk_start, chunk_end) pairs of at most ~1 calendar year.
+
+    Used for endpoints (e.g. bond_china_yield) that silently return 0 rows
+    when the requested window spans more than a year. Empty input → a
+    single (None, None) call so the caller still attempts at least once.
+    """
+    if not start_date and not end_date:
+        return [(None, None)]
+    try:
+        sd = pd.Timestamp(start_date) if start_date else pd.Timestamp("2010-01-01")
+        ed = pd.Timestamp(end_date) if end_date else pd.Timestamp.today()
+    except Exception:
+        return [(start_date, end_date)]
+    chunks: list[tuple[str, str]] = []
+    cursor = sd
+    while cursor <= ed:
+        next_end = min(cursor + pd.DateOffset(years=1) - pd.Timedelta(days=1), ed)
+        chunks.append((cursor.strftime("%Y-%m-%d"), next_end.strftime("%Y-%m-%d")))
+        cursor = next_end + pd.Timedelta(days=1)
+    return chunks
 
 
 __all__ = [

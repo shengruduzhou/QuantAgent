@@ -145,21 +145,94 @@ for _n in range(31, 102):
 del _n
 
 
-def compute_alpha101(frame: pd.DataFrame, names: list[str] | None = None) -> pd.DataFrame:
-    """Compute the full Alpha101 family (1..101).
+def compute_alpha101(
+    frame: pd.DataFrame,
+    names: list[str] | None = None,
+    *,
+    wide: bool = False,
+) -> pd.DataFrame:
+    """Compute the full Alpha101 family (1..101) in a single pass.
+
+    Performance contract: the base frame (returns, vwap, log_volume) plus the
+    two shared intermediates ``adv20 = mean(volume,20)`` and
+    ``delta_close_1 = delta(close,1)`` are computed ONCE for the whole call.
+    Previously, ``default_registry.batch_compute`` invoked each factor
+    independently which re-ran ``_base`` 101 times on the full panel — that
+    was the root cause of the multi-hour CPU bottleneck and pivot-time OOM
+    on production-scale inputs.
+
+    Output formats
+    --------------
+    * ``wide=False`` (default, backward-compatible): long form ``[trade_date,
+      symbol, factor_name, factor_value]``.
+    * ``wide=True``: wide form ``[trade_date, symbol, alpha001, ..., alpha101]``.
+      Skips the long-form intermediate (~10 GB on 3M-row panels) and the
+      downstream pivot in the dataset builder, materially lowering peak RAM.
 
     Alphas needing IndClass/cap (industry neutralization or market-cap-weighted
     operations) are registered as placeholders that return NaN until sector and
     valuation tables are wired into the feature lake. The caller can filter those
     out via the column-coverage report.
     """
-    names = names or [f"alpha{i:03d}" for i in range(1, 102)]
-    return default_registry.batch_compute(frame, names=names)
+    selected: list[int]
+    if names is None:
+        selected = list(range(1, 102))
+    else:
+        selected = sorted({int(str(n).removeprefix("alpha")) for n in names})
+    data, adv20, delta_close_1 = _prepare_alpha_context(frame)
+
+    if wide:
+        wide_cols: dict[str, np.ndarray] = {}
+        for number in selected:
+            try:
+                values = _alpha_value(data, number, adv20, delta_close_1)
+            except ValueError:
+                continue
+            values = values.replace([np.inf, -np.inf], np.nan)
+            wide_cols[f"alpha{number:03d}"] = values.to_numpy(dtype=float)
+        if not wide_cols:
+            return pd.DataFrame(columns=["trade_date", "symbol"])
+        out = pd.DataFrame(
+            {"trade_date": data["trade_date"].to_numpy(),
+             "symbol": data["symbol"].to_numpy(),
+             **wide_cols},
+        )
+        return out
+
+    frames: list[pd.DataFrame] = []
+    for number in selected:
+        try:
+            values = _alpha_value(data, number, adv20, delta_close_1)
+        except ValueError:
+            continue
+        frames.append(_format(data, f"alpha{number:03d}", values.replace([np.inf, -np.inf], np.nan)))
+    if not frames:
+        return pd.DataFrame(columns=["trade_date", "symbol", "factor_name", "factor_value"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _prepare_alpha_context(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """One-shot setup shared across every selected alpha factor."""
+    data = _base(frame)
+    adv20 = _mean(data, "volume", 20)
+    delta_close_1 = _delta(data, "close", 1)
+    return data, adv20, delta_close_1
 
 
 def _compute_alpha(frame: pd.DataFrame, number: int) -> pd.DataFrame:
-    data = _base(frame)
-    name = f"alpha{number:03d}"
+    """Single-factor entrypoint kept for backwards-compatibility (per-factor public API)."""
+    data, adv20, delta_close_1 = _prepare_alpha_context(frame)
+    values = _alpha_value(data, number, adv20, delta_close_1)
+    return _format(data, f"alpha{number:03d}", values.replace([np.inf, -np.inf], np.nan))
+
+
+def _alpha_value(
+    data: pd.DataFrame,
+    number: int,
+    adv20: pd.Series,
+    delta_close_1: pd.Series,
+) -> pd.Series:
+    """Compute one alpha factor's value series against an already-prepared frame."""
     close = data["close"]
     open_ = data["open"]
     high = data["high"]
@@ -167,8 +240,6 @@ def _compute_alpha(frame: pd.DataFrame, number: int) -> pd.DataFrame:
     volume = data["volume"]
     vwap = data["vwap"]
     returns = data["returns"]
-    adv20 = _mean(data, "volume", 20)
-    delta_close_1 = _delta(data, "close", 1)
 
     if number == 1:
         candidate = close.where(returns >= 0.0, _std(data, "returns", 20))
@@ -558,7 +629,7 @@ def _compute_alpha(frame: pd.DataFrame, number: int) -> pd.DataFrame:
         values = pd.Series(np.nan, index=data.index, dtype=float)
     else:
         raise ValueError(f"Unsupported alpha number: {number}")
-    return _format(data, name, values.replace([np.inf, -np.inf], np.nan))
+    return values
 
 
 def _base(frame: pd.DataFrame) -> pd.DataFrame:
