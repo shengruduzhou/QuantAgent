@@ -30,10 +30,10 @@ SELECTION_TOP_K_MIN="${SELECTION_TOP_K_MIN:-5}"
 SELECTION_TOP_K_MAX="${SELECTION_TOP_K_MAX:-100}"
 MIN_ORDER_VALUE_YUAN="${MIN_ORDER_VALUE_YUAN:-100}"
 FACTOR_LIBRARY="${FACTOR_LIBRARY:-alpha181}"
-RUN_SYMBOLIC_GA="${RUN_SYMBOLIC_GA:-0}"
+RUN_SYMBOLIC_GA="${RUN_SYMBOLIC_GA:-1}"
 SYMBOLIC_GA_POPULATION="${SYMBOLIC_GA_POPULATION:-80}"
 SYMBOLIC_GA_GENERATIONS="${SYMBOLIC_GA_GENERATIONS:-20}"
-SYMBOLIC_GA_TOP_K="${SYMBOLIC_GA_TOP_K:-20}"
+SYMBOLIC_GA_TOP_K="${SYMBOLIC_GA_TOP_K:-50}"
 
 REFRESH_AKSHARE_MARKET="${REFRESH_AKSHARE_MARKET:-0}"
 REFRESH_FUNDAMENTALS="${REFRESH_FUNDAMENTALS:-0}"
@@ -87,9 +87,10 @@ CMD=(
   --confidence-floor "$CONFIDENCE_FLOOR"
   --selection-top-k-min "$SELECTION_TOP_K_MIN"
   --selection-top-k-max "$SELECTION_TOP_K_MAX"
-  --max-weight 0.10
-  --max-sector 0.30
-  --max-turnover 0.40
+  --max-weight 0.02
+  --max-sector 0.15
+  --max-turnover 0.25
+  --weighting rank
   --initial-cash 1000000
   --min-order-value-yuan "$MIN_ORDER_VALUE_YUAN"
   --dynamic-top-k
@@ -102,7 +103,7 @@ CMD=(
   --rl-timesteps "$RL_TIMESTEPS"
 )
 
-RUN_AUTOPILOT="${RUN_AUTOPILOT:-1}"
+RUN_AUTOPILOT="${RUN_AUTOPILOT:-0}"
 if [[ "$RUN_AUTOPILOT" == "1" ]]; then
   CMD+=(--run-autopilot-search)
 else

@@ -586,6 +586,7 @@ def build_target_weights_v7(
     optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
     objective: str = typer.Option("max_expected_alpha", "--objective"),
     cash_floor: float = typer.Option(0.0, "--cash-floor"),
+    weighting: str = typer.Option("rank", "--weighting", help="equal | rank | softmax"),
 ) -> None:
     """Convert per-symbol predictions into a constrained target-weights panel.
 
@@ -620,6 +621,7 @@ def build_target_weights_v7(
         optimizer_backend=optimizer_backend,
         objective=objective,
         cash_floor=cash_floor,
+        weighting=weighting,
     )
     result = build_v7_target_weights(
         read_frame(predictions_path),
@@ -695,6 +697,7 @@ def run_full_real_training_v7(
     optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
     objective: str = typer.Option("max_expected_alpha", "--objective"),
     cash_floor: float = typer.Option(0.0, "--cash-floor"),
+    weighting: str = typer.Option("rank", "--weighting", help="equal | rank | softmax"),
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
     benchmark_symbol: str | None = typer.Option(None, "--benchmark-symbol"),
@@ -887,6 +890,7 @@ def run_full_real_training_v7(
             optimizer_backend=optimizer_backend,
             objective=objective,
             cash_floor=cash_floor,
+            weighting=weighting,
             capital_yuan=initial_cash,
             dynamic_top_k_enabled=dynamic_top_k,
             top_k_min=top_k_min,
@@ -1290,6 +1294,7 @@ def run_full_ai_quant_v7(
     max_weight_per_name: float = typer.Option(0.10, "--max-weight"),
     max_sector_weight: float = typer.Option(0.30, "--max-sector"),
     max_turnover: float = typer.Option(0.40, "--max-turnover"),
+    weighting: str = typer.Option("rank", "--weighting", help="equal | rank | softmax"),
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
     dynamic_top_k: bool = typer.Option(True, "--dynamic-top-k/--no-dynamic-top-k"),
@@ -1422,6 +1427,7 @@ def run_full_ai_quant_v7(
         max_weight_per_name=max_weight_per_name,
         max_sector_weight=max_sector_weight,
         max_turnover=max_turnover,
+        weighting=weighting,
         optimizer_backend="auto",
         objective="max_expected_alpha",
         cash_floor=0.0,

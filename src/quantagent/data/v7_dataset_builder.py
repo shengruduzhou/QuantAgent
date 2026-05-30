@@ -86,10 +86,39 @@ def build_v7_training_dataset(
     )
 
 
-def build_market_features(market_panel: pd.DataFrame) -> pd.DataFrame:
+def build_market_features(
+    market_panel: pd.DataFrame,
+    *,
+    st_flags: pd.DataFrame | None = None,
+    limit_up_pct: float = 0.099,
+    limit_down_pct: float = -0.099,
+) -> pd.DataFrame:
+    """Compute per-(date, symbol) market features.
+
+    Stage 2.1 rebuild
+    -----------------
+    Previously ``is_suspended`` / ``is_limit_up`` / ``is_limit_down`` /
+    ``is_st`` were hardcoded to ``False`` if missing from the input.
+    They are now derived properly:
+
+    * ``is_suspended``, ``is_limit_up``, ``is_limit_down`` come from
+      :func:`quantagent.universe.filters.derive_market_flags` so the
+      derivation has a single source of truth shared with the
+      universe filter (Stage 1).
+    * ``is_st`` comes from the optional ``st_flags`` parameter
+      (long frame: ``trade_date, symbol, is_st``). Without it the
+      column stays ``False`` and downstream callers should treat ST
+      checks as "unknown" until Stage 2.2 wires an akshare source.
+
+    All derived values use only data available up to and including
+    ``trade_date`` (no look-ahead). ``available_at`` is set to the
+    next observation date per symbol, falling back to
+    ``trade_date + 1 calendar day`` for the last row.
+    """
     data = market_panel.copy()
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    data["symbol"] = data["symbol"].astype(str)
     group = data.groupby("symbol", sort=False)
     data["return_1d"] = group["close"].pct_change()
     data["momentum_5d"] = group["close"].pct_change(5)
@@ -100,9 +129,39 @@ def build_market_features(market_panel: pd.DataFrame) -> pd.DataFrame:
     data["intraday_return"] = data["close"] / data["open"].replace(0, np.nan) - 1.0
     data["available_at"] = group["trade_date"].shift(-1)
     data["available_at"] = data["available_at"].fillna(data["trade_date"] + pd.Timedelta(days=1))
-    for column in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if column not in data.columns:
-            data[column] = False
+
+    # Derive tradability flags from OHLCV (single source of truth lives
+    # in quantagent.universe.filters; importing here keeps the schema in
+    # sync between feature build and runtime filter).
+    from quantagent.universe.filters import derive_market_flags
+    flags = derive_market_flags(
+        data[["trade_date", "symbol", "volume", "amount", "close"]],
+        limit_up_pct=limit_up_pct,
+        limit_down_pct=limit_down_pct,
+    )
+    flags = flags.drop_duplicates(["trade_date", "symbol"], keep="last")
+    data = data.drop(columns=["is_suspended", "is_limit_up", "is_limit_down"], errors="ignore").merge(
+        flags, on=["trade_date", "symbol"], how="left"
+    )
+    for column in ("is_suspended", "is_limit_up", "is_limit_down"):
+        data[column] = data[column].fillna(False).astype(bool)
+
+    # ST flag: take from caller-provided table; otherwise default False
+    # with the understanding that ST checks are "unknown" until Stage 2.2
+    # wires the akshare ST source.
+    if st_flags is not None and not st_flags.empty and "is_st" in st_flags.columns:
+        st = st_flags[["trade_date", "symbol", "is_st"]].copy()
+        st["trade_date"] = pd.to_datetime(st["trade_date"], errors="coerce")
+        st["symbol"] = st["symbol"].astype(str)
+        st["is_st"] = st["is_st"].fillna(False).astype(bool)
+        st = st.drop_duplicates(["trade_date", "symbol"], keep="last")
+        data = data.drop(columns=["is_st"], errors="ignore").merge(st, on=["trade_date", "symbol"], how="left")
+        data["is_st"] = data["is_st"].fillna(False).astype(bool)
+    elif "is_st" not in data.columns:
+        data["is_st"] = False
+    else:
+        data["is_st"] = data["is_st"].fillna(False).astype(bool)
+
     return data.reset_index(drop=True)
 
 

@@ -98,7 +98,8 @@ class OrderManager:
         self.last_skipped_orders = []
         for symbol, weight in target_weights.reindex(prices.index).fillna(0.0).items():
             price = float(prices.loc[symbol])
-            if price <= 0 or nav <= 0:
+            if pd.isna(price) or price <= 0 or nav <= 0:
+                self._skip(str(symbol), OrderSide.BUY, 0, float(weight), 0.0 if pd.isna(price) else price, "skipped_invalid_price", now, 0.0)
                 continue
             current = positions.get(str(symbol))
             current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0

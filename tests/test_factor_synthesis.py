@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quantagent.factors.factor_synthesis import SymbolicGAConfig, synthesize_factors
+from quantagent.factors import expr as E
+from quantagent.factors.factor_synthesis import SymbolicGAConfig, _evaluate_fitness, synthesize_factors
 
 
 def _make_panel_with_momentum_signal(
@@ -149,3 +150,22 @@ def test_synthesize_factors_rejects_pure_noise():
         result.leaderboard.empty
         or result.leaderboard["validation_rank_ic"].abs().max() < 0.25
     )
+
+
+def test_synthesize_factors_rejects_constant_only_expression():
+    panel = _make_panel_with_momentum_signal(n_symbols=4, n_days=80)
+    labels = panel["forward_return_5d"]
+    dates = panel["trade_date"]
+    cfg = SymbolicGAConfig(label_column="forward_return_5d")
+
+    fitness, raw_ic, finite_ratio = _evaluate_fitness(
+        E.TsStd(E.Rank(E.Constant(2.0)), 5),
+        panel,
+        labels,
+        dates,
+        cfg,
+    )
+
+    assert fitness == -1.0
+    assert raw_ic == 0.0
+    assert finite_ratio == 0.0

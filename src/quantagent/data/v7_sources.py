@@ -93,8 +93,14 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     "sector": (
         "symbol",
-        "industry",
+        "sector_level_1",
+        "sector_level_2",
+        "source",
+        "source_version",
+        "effective_date",
+        "fetched_at",
         "available_at",
+        "coverage_status",
     ),
     "tradability": (
         "symbol",

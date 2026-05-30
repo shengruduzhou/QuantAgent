@@ -26,7 +26,12 @@ from quantagent.cli import v7_research  # noqa: F401
 from quantagent.cli import v7_storage  # noqa: F401
 from quantagent.cli import v7_optimize  # noqa: F401
 from quantagent.cli import v7_evidence  # noqa: F401
+from quantagent.cli import v7_sector  # noqa: F401
+from quantagent.cli import v7_liveness  # noqa: F401
+from quantagent.cli import v7_policy  # noqa: F401
+from quantagent.cli import v7_bond  # noqa: F401
 from quantagent.cli import paper  # noqa: F401
+from quantagent.cli import v8  # noqa: F401
 from quantagent.cli.v7_research import (  # re-exports for legacy entry points
     build_factors_entry,
     build_flow_features_entry,

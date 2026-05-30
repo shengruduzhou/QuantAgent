@@ -5,8 +5,10 @@ description = "Production-oriented AI quant research, backtesting, and live-trad
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "numpy>=1.26",
-  "pandas>=2.2",
+  "numpy>=1.26,<2.3",
+  "pandas>=2.2,<3",
+  "polars>=1.0",
+  "pyarrow>=16.0",
   "scipy>=1.13",
   "pydantic>=2.7",
   "pyyaml>=6.0",
@@ -17,13 +19,11 @@ dependencies = [
 data = [
   "akshare",
   "tushare",
-  "pyarrow>=16.0",
 ]
 training = [
   "torch>=2.3",
   "transformers>=4.43",
   "scikit-learn>=1.5",
-  "pyarrow>=16.0",
 ]
 research = [
   "pyqlib>=0.9.6",

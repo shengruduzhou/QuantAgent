@@ -52,8 +52,10 @@ class FTTransformerTrainerConfig:
     early_stopping_patience: int = 10
     huber_delta: float = 1.0
     rank_loss_weight: float = 0.5
+    rank_loss_temperature: float = 0.5  # softmax temperature for top-K listwise loss
     dates_per_step: int = 8
     train_micro_batch: int | None = None
+    gradient_clip_norm: float = 1.0
     log_gpu_memory: bool = True
     device: str = "auto"
     require_gpu: bool = False
@@ -236,14 +238,22 @@ class FTTransformerTrainer:
                             preds_s = model(xs)
                             loss_s = huber(preds_s, ys)
                             if self.config.rank_loss_weight > 0 and xs.shape[0] >= 2:
-                                rp = preds_s.argsort(dim=0).argsort(dim=0).float()
-                                rt = ys.argsort(dim=0).argsort(dim=0).float()
-                                rank_loss_s = ((rp - rt) ** 2).mean() / max(1, int(xs.shape[0]))
+                                rank_loss_s = _softmax_listwise_loss(
+                                    preds_s, ys, temperature=self.config.rank_loss_temperature
+                                )
                                 loss_s = loss_s + self.config.rank_loss_weight * rank_loss_s
                             loss_s = loss_s / max(1, len(chunk))
+                        if not torch.isfinite(loss_s.detach()):
+                            raise RuntimeError(
+                                f"FT-Transformer non-finite training loss at epoch={epoch}; "
+                                "lower learning_rate or disable AMP"
+                            )
                         scaler.scale(loss_s).backward()
                         step_loss_value += float(loss_s.detach().cpu()) * int(xs.shape[0])
                         step_rows += int(xs.shape[0])
+                    scaler.unscale_(optimizer)
+                    if self.config.gradient_clip_norm and float(self.config.gradient_clip_norm) > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.config.gradient_clip_norm))
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -257,19 +267,27 @@ class FTTransformerTrainer:
                                 for d in chunk:
                                     m = chunk_codes == d
                                     if int(m.sum()) >= 2:
-                                        rp = preds[m].argsort(dim=0).argsort(dim=0).float()
-                                        rt = yb[m].argsort(dim=0).argsort(dim=0).float()
-                                        rank_loss_acc = rank_loss_acc + ((rp - rt) ** 2).mean() / max(1, int(m.sum()))
+                                        rank_loss_acc = rank_loss_acc + _softmax_listwise_loss(
+                                            preds[m], yb[m], temperature=self.config.rank_loss_temperature
+                                        )
                                         n_groups += 1
                                 if n_groups > 0:
                                     rank_loss = rank_loss_acc / float(n_groups)
                                     loss = loss + self.config.rank_loss_weight * rank_loss
                             else:
-                                rank_pred = preds.argsort(dim=0).argsort(dim=0).float()
-                                rank_target = yb.argsort(dim=0).argsort(dim=0).float()
-                                rank_loss = ((rank_pred - rank_target) ** 2).mean() / max(1, xb.shape[0])
+                                rank_loss = _softmax_listwise_loss(
+                                    preds, yb, temperature=self.config.rank_loss_temperature
+                                )
                                 loss = loss + self.config.rank_loss_weight * rank_loss
+                    if not torch.isfinite(loss.detach()):
+                        raise RuntimeError(
+                            f"FT-Transformer non-finite training loss at epoch={epoch}; "
+                            "lower learning_rate or disable AMP"
+                        )
                     scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    if self.config.gradient_clip_norm and float(self.config.gradient_clip_norm) > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.config.gradient_clip_norm))
                     scaler.step(optimizer)
                     scaler.update()
                     step_loss_value = float(loss.detach().cpu()) * int(xb.shape[0])
@@ -287,6 +305,11 @@ class FTTransformerTrainer:
                         val_target,
                         huber,
                         batch_size=self.config.batch_size,
+                    )
+                if not np.isfinite(val_loss):
+                    raise RuntimeError(
+                        f"FT-Transformer non-finite validation loss at epoch={epoch}; "
+                        "training stopped before saving a polluted checkpoint"
                     )
                 entry["val_loss"] = val_loss
                 if val_loss < best_val - 1e-6:
@@ -500,6 +523,37 @@ def predict_ft_transformer_artifact(
         feature_columns=feature_columns,
         artifact_dir=str(artifact),
     )
+
+
+def _softmax_listwise_loss(
+    preds: "torch.Tensor",
+    targets: "torch.Tensor",
+    *,
+    temperature: float = 0.5,
+) -> "torch.Tensor":
+    """Differentiable per-date listwise loss aligned with long-only top-K deployment.
+
+    For each horizon column independently, treat preds[:, h] as scores, build a
+    softmax-weighted portfolio over the N tickers in the batch, and return the
+    NEGATIVE realized return (so minimising the loss maximises the portfolio).
+
+    Unlike ``argsort``-based rank loss (gradient = 0), this is fully
+    differentiable and directly trains the model to put mass on top-return
+    names — the same objective the executable backtest uses.
+    """
+    import torch
+
+    if preds.dim() == 1:
+        preds = preds.unsqueeze(-1)
+        targets = targets.unsqueeze(-1)
+    n, h = preds.shape
+    if n < 2:
+        return preds.sum() * 0.0
+    temp = max(float(temperature), 1e-6)
+    # softmax over the batch (N tickers) — each horizon gets its own portfolio
+    weights = torch.softmax(preds / temp, dim=0)  # [N, H]
+    portfolio_return = (weights * targets).sum(dim=0)  # [H]
+    return -portfolio_return.mean()
 
 
 def _batched_loss(

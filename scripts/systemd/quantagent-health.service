@@ -1,0 +1,26 @@
+[Unit]
+Description=QuantAgent V7 daily data-layer health check
+# OnFailure fires when the service exits with non-zero status (WARN=1, FAIL=2)
+OnFailure=quantagent-health-alert@%n.service
+# Don't start if the repo root doesn't exist
+ConditionPathExists=/home/shanhefu/QuantAgent
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanhefu/QuantAgent
+
+# Inherit the conda environment from the shell that installed it.
+# Override CONDA_PREFIX here if your environment differs.
+Environment=CONDA_PREFIX=/home/shanhefu/anaconda3/envs/quant
+Environment=LAKE_ROOT=/home/shanhefu/QuantAgent/runtime/data/v7
+Environment=OUTPUT_ROOT=/home/shanhefu/QuantAgent/runtime/reports/daily_health
+
+ExecStart=/home/shanhefu/QuantAgent/scripts/daily_health_check.sh
+
+# Capture stdout/stderr via journald (journalctl -u quantagent-health)
+StandardOutput=journal
+StandardError=journal
+
+# On FAIL (exit 2), systemd marks the unit as failed and triggers OnFailure.
+# On WARN (exit 1), mark as failed as well so ops see it in `systemctl status`.
+SuccessExitStatus=0

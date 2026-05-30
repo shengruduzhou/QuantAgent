@@ -21,6 +21,16 @@ def walk_forward_backtest_v7(
         None, "--predictions", help="If provided, run the V7 target-weights optimiser before backtest."
     ),
     sector_map_path: Path | None = typer.Option(None, "--sector-map"),
+    sector_manifest_path: Path | None = typer.Option(
+        None,
+        "--sector-manifest",
+        help=(
+            "Stage 2.3 sector_map manifest. When provided, the sector_map is "
+            "routed through sector_map_for_optimization so a closed gate "
+            "(low coverage, stale availability, etc.) disables sector caps "
+            "rather than silently feeding stale labels into the optimiser."
+        ),
+    ),
     top_k: int = typer.Option(30, "--top-k"),
     top_k_ratio: float | None = typer.Option(0.10, "--top-k-ratio"),
     min_selection_pressure: float = typer.Option(3.0, "--min-selection-pressure"),
@@ -36,6 +46,7 @@ def walk_forward_backtest_v7(
     optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
     objective: str = typer.Option("max_expected_alpha", "--objective"),
     cash_floor: float = typer.Option(0.0, "--cash-floor"),
+    weighting: str = typer.Option("rank", "--weighting", help="equal | rank | softmax"),
 ) -> None:
     """Replay weights through the A-share OrderManager dry-run execution simulator.
 
@@ -49,15 +60,19 @@ def walk_forward_backtest_v7(
         raise typer.BadParameter("provide exactly one of --target-weights or --predictions")
 
     if predictions_path is not None:
+        from quantagent.diagnostics.sector_audit import sector_map_for_optimization
         from quantagent.portfolio.v7_target_weights import (
             V7TargetWeightsConfig,
             build_v7_target_weights,
         )
 
+        sector_map_frame = read_frame(sector_map_path) if sector_map_path else None
+        if sector_map_frame is not None and sector_manifest_path is not None:
+            sector_map_frame = sector_map_for_optimization(sector_map_frame, sector_manifest_path)
         weights_result = build_v7_target_weights(
             read_frame(predictions_path),
             read_frame(market_panel_path),
-            sector_map=read_frame(sector_map_path) if sector_map_path else None,
+            sector_map=sector_map_frame,
             config=V7TargetWeightsConfig(
                 long_short=long_short,
                 top_k=top_k,
@@ -71,6 +86,7 @@ def walk_forward_backtest_v7(
                 optimizer_backend=optimizer_backend,
                 objective=objective,
                 cash_floor=cash_floor,
+                weighting=weighting,
             ),
         )
         weights = weights_result.target_weights
@@ -89,7 +105,7 @@ def walk_forward_backtest_v7(
     )
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
     payload: dict = {
-        "nav": result.nav.to_dict(),
+        "nav": {str(k): float(v) for k, v in result.nav.to_dict().items()},
         "orders": result.order_audit.to_dict("records"),
         "failed_orders": result.failed_order_audit.to_dict("records"),
         "skipped_orders": result.skipped_order_audit.to_dict("records"),

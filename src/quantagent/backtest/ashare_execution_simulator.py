@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -32,7 +34,22 @@ class AShareExecutionSimulationResult:
     position_history: pd.DataFrame
     failed_order_audit: pd.DataFrame
     skipped_order_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
+    risk_events: list[dict] = field(default_factory=list)
     config: dict[str, object] = field(default_factory=dict)
+
+    def write_risk_events(self, path: str | Path) -> Path:
+        """Write the per-day risk_events list to a JSON file.
+
+        Spec section 9 requires ``risk_events.json`` alongside the
+        other backtest outputs. The file is rewritten on every call;
+        callers wanting append semantics should merge externally.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(self.risk_events, indent=2, default=str), encoding="utf-8"
+        )
+        return target
 
 
 def simulate_ashare_target_weights(
@@ -74,6 +91,7 @@ def simulate_ashare_target_weights(
     order_rows: list[dict[str, object]] = []
     skipped_rows: list[dict[str, object]] = []
     position_rows: list[dict[str, object]] = []
+    risk_events: list[dict[str, object]] = []
 
     for date, weights in target.iterrows():
         day_market = market[market["trade_date"] == date]
@@ -81,7 +99,28 @@ def simulate_ashare_target_weights(
             continue
         broker.advance_trading_day()
         broker.set_market_state(day_market.to_dict("records"))
-        prices = day_market.set_index("symbol")["close"].astype(float)
+        prices = pd.to_numeric(day_market.set_index("symbol")["close"], errors="coerce")
+        invalid_price_symbols = set(prices[prices.isna() | (prices <= 0)].index.astype(str))
+        if invalid_price_symbols:
+            active_invalid_symbols = invalid_price_symbols & set(weights[weights.astype(float).abs() > 0].index.astype(str))
+            for symbol in sorted(active_invalid_symbols):
+                skipped_rows.append(
+                    {
+                        "trade_date": date,
+                        "symbol": symbol,
+                        "side": "buy",
+                        "quantity": 0,
+                        "target_weight": float(weights.get(symbol, 0.0)),
+                        "reference_price": 0.0,
+                        "reason": "skipped_invalid_price",
+                        "delta_value": 0.0,
+                        "timestamp": str(date),
+                    }
+                )
+        prices = prices.dropna()
+        prices = prices[prices > 0]
+        if prices.empty:
+            continue
         current_weights = _current_weights(broker, prices)
         adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
         nav = _mark_to_market_nav(broker, prices)
@@ -106,10 +145,34 @@ def simulate_ashare_target_weights(
                     "reference_price": order.price,
                 }
             order_rows.append(row)
+            # Spec section 9 — surface any non-OK status as a risk_event
+            if state.status.value in ("rejected", "cancelled", "partial"):
+                risk_events.append(
+                    {
+                        "trade_date": str(date),
+                        "event_type": f"order_{state.status.value}",
+                        "client_order_id": state.client_order_id,
+                        "symbol": getattr(order, "symbol", None) if order else None,
+                        "reason": state.last_message,
+                        "filled_quantity": state.filled_quantity,
+                    }
+                )
+        # Skipped orders are also risk-relevant events
+        for skipped in manager.last_skipped_orders:
+            risk_events.append(
+                {
+                    "trade_date": str(date),
+                    "event_type": "order_skipped",
+                    "symbol": skipped.get("symbol"),
+                    "side": skipped.get("side"),
+                    "reason": skipped.get("reason"),
+                    "target_weight": skipped.get("target_weight"),
+                }
+            )
         nav_after = _mark_to_market_nav(broker, prices)
         nav_rows.append((date, nav_after))
         for position in broker.query_positions():
-            price = float(prices.get(position.symbol, position.avg_cost))
+            price = _position_price(position, prices)
             position_rows.append(
                 {
                     "trade_date": date,
@@ -128,6 +191,7 @@ def simulate_ashare_target_weights(
         position_history=pd.DataFrame(position_rows),
         failed_order_audit=failed.reset_index(drop=True),
         skipped_order_audit=pd.DataFrame(skipped_rows),
+        risk_events=risk_events,
         config=asdict(config),
     )
 
@@ -136,7 +200,7 @@ def _current_weights(broker: VirtualBroker, prices: pd.Series) -> pd.Series:
     positions = broker.query_positions()
     nav = _mark_to_market_nav(broker, prices)
     values = {
-        position.symbol: (position.available_shares + position.frozen_shares) * float(prices.get(position.symbol, position.avg_cost))
+        position.symbol: (position.available_shares + position.frozen_shares) * _position_price(position, prices)
         for position in positions
     }
     return pd.Series(values, dtype=float).div(nav).fillna(0.0) if nav > 0 else pd.Series(dtype=float)
@@ -147,8 +211,14 @@ def _mark_to_market_nav(broker: VirtualBroker, prices: pd.Series) -> float:
     value = 0.0
     for position in broker.query_positions():
         shares = position.available_shares + position.frozen_shares
-        value += shares * float(prices.get(position.symbol, position.avg_cost))
+        value += shares * _position_price(position, prices)
     return cash + value
+
+
+def _position_price(position: object, prices: pd.Series) -> float:
+    fallback = float(getattr(position, "avg_cost", 0.0))
+    price_value = prices.get(getattr(position, "symbol", ""), fallback)
+    return fallback if pd.isna(price_value) else float(price_value)
 
 
 def _apply_st_policy(

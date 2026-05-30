@@ -1,0 +1,17 @@
+[Unit]
+Description=QuantAgent V7 health-check failure notifier (instance %i)
+
+[Service]
+Type=oneshot
+# Write a plaintext failure notice to the reports directory.
+# Replace this ExecStart with a curl/smtp/slack webhook command for real alerting.
+ExecStart=/bin/bash -c '\
+    REPORT=/home/shanhefu/QuantAgent/runtime/reports/daily_health/health_report.md; \
+    OUT=/home/shanhefu/QuantAgent/runtime/reports/daily_health/ALERT_$(date +%%Y%%m%%d_%%H%%M%%S).txt; \
+    { echo "=== QuantAgent health-check FAILED at $(date) ==="; \
+      echo "Unit: %i"; \
+      [ -f "$REPORT" ] && cat "$REPORT" || echo "(no report written)"; \
+    } > "$OUT"; \
+    echo "Alert written to $OUT" >&2'
+StandardOutput=journal
+StandardError=journal

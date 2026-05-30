@@ -62,6 +62,7 @@ class V7TargetWeightsConfig:
     min_amount_yuan: float = 0.0
     min_universe: int = 1
     cash_floor: float = 0.0
+    weighting: str = "rank"  # equal | rank | softmax
     alpha_temperature: float = 1.0
     capital_yuan: float = 1_000_000.0
     horizon_column: str | None = None
@@ -256,8 +257,30 @@ def build_v7_target_weights(
             continue
         # Liquidity cap (max weight by participation in amount), with capital tiering.
         if "amount" in eligible.columns and config.capital_yuan > 0:
-            cap = (eligible["amount"].fillna(0.0) * effective_participation) / max(1.0, config.capital_yuan)
-            eligible["liquidity_cap"] = cap.clip(upper=config.max_weight_per_name)
+            amount = pd.to_numeric(eligible["amount"], errors="coerce")
+            if amount.notna().sum() == 0:
+                eligible["liquidity_cap"] = config.max_weight_per_name
+                diagnostics["warnings"].append(
+                    {
+                        "trade_date": str(date),
+                        "warning": "liquidity_amount_all_missing_cap_disabled",
+                        "eligible_count": int(len(eligible)),
+                    }
+                )
+            else:
+                cap = (amount.fillna(np.nan) * effective_participation) / max(1.0, config.capital_yuan)
+                cap = cap.where(amount.notna(), config.max_weight_per_name)
+                missing_amount_count = int(amount.isna().sum())
+                if missing_amount_count:
+                    diagnostics["warnings"].append(
+                        {
+                            "trade_date": str(date),
+                            "warning": "liquidity_amount_partial_missing_default_name_cap",
+                            "missing_amount_count": missing_amount_count,
+                            "eligible_count": int(len(eligible)),
+                        }
+                    )
+                eligible["liquidity_cap"] = cap.clip(lower=0.0, upper=config.max_weight_per_name)
         else:
             eligible["liquidity_cap"] = config.max_weight_per_name
 
@@ -310,7 +333,7 @@ def build_v7_target_weights(
             shorts = pd.DataFrame(columns=eligible.columns)
             selected_count = int(len(longs))
             effective_top_k = selected_count
-            scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+            scaled = _selection_weights(longs["prediction"].to_numpy(dtype=float), config.weighting, config.alpha_temperature)
             weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
             diagnostics.setdefault("optimizer_backend", []).append({
                 "trade_date": str(date),
@@ -351,8 +374,8 @@ def build_v7_target_weights(
                 longs = eligible.nlargest(top_k, "prediction")
                 shorts = eligible.nsmallest(top_k, "prediction")
                 selected_count = int(pd.concat([longs[["symbol"]], shorts[["symbol"]]]).drop_duplicates("symbol").shape[0])
-                longs_w = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
-                shorts_w = -_softmax_weights(-shorts["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                longs_w = _selection_weights(longs["prediction"].to_numpy(dtype=float), config.weighting, config.alpha_temperature)
+                shorts_w = -_selection_weights(-shorts["prediction"].to_numpy(dtype=float), config.weighting, config.alpha_temperature)
                 weights = pd.Series(
                     np.concatenate([longs_w, shorts_w]),
                     index=pd.Index(np.concatenate([longs["symbol"].to_numpy(), shorts["symbol"].to_numpy()]), name="symbol"),
@@ -367,7 +390,7 @@ def build_v7_target_weights(
                     weights = cvx_weights
                     diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "cvxpy", "note": cvx_note})
                 else:
-                    scaled = _softmax_weights(longs["prediction"].to_numpy(dtype=float), config.alpha_temperature)
+                    scaled = _selection_weights(longs["prediction"].to_numpy(dtype=float), config.weighting, config.alpha_temperature)
                     weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
                     diagnostics.setdefault("optimizer_backend", []).append({"trade_date": str(date), "backend": "deterministic", "note": cvx_note})
         selection_pressure = float(len(eligible) / max(selected_count, 1))
@@ -555,6 +578,7 @@ def build_v7_target_weights(
             "cash_floor": config.cash_floor,
             "long_short": config.long_short,
             "max_turnover": config.max_turnover,
+            "weighting": config.weighting,
         },
         "config": asdict(config),
         **diagnostics,
@@ -584,6 +608,22 @@ def _softmax_weights(values: np.ndarray, temperature: float) -> np.ndarray:
     if total <= 0:
         return np.ones_like(safe) / len(safe)
     return expo / total
+
+
+def _selection_weights(values: np.ndarray, weighting: str, temperature: float) -> np.ndarray:
+    safe = np.nan_to_num(values.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+    if safe.size == 0:
+        return safe
+    mode = str(weighting).lower()
+    if mode == "equal":
+        return np.ones_like(safe) / len(safe)
+    if mode == "softmax":
+        return _softmax_weights(safe, temperature)
+    ranks = pd.Series(safe).rank(method="average").to_numpy(dtype=float)
+    total = float(ranks.sum())
+    if total <= 0:
+        return np.ones_like(safe) / len(safe)
+    return ranks / total
 
 
 def _effective_top_k(eligible_count: int, config: V7TargetWeightsConfig) -> int:

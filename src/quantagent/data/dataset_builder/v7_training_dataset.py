@@ -283,7 +283,13 @@ def load_table(path: str | Path | None) -> pd.DataFrame:
                     f"failed to read parquet table {file_path}; install pyarrow/fastparquet "
                     "or provide a sibling CSV fallback"
                 ) from exc
-            return pl.read_parquet(str(file_path)).to_pandas()
+            try:
+                return pl.read_parquet(str(file_path)).to_pandas()
+            except Exception as polars_exc:
+                raise RuntimeError(
+                    f"failed to read parquet table {file_path}; install pyarrow/fastparquet "
+                    "or provide a sibling CSV fallback; file may also be corrupt or not a parquet file"
+                ) from polars_exc
     return pd.read_csv(file_path)
 
 
@@ -354,27 +360,32 @@ def _asof_merge(
     left_columns = set(left.columns)
     overlap = [c for c in right.columns if c in left_columns and c not in REQUIRED_ENTITY_COLUMNS]
     right = right.rename(columns={column: f"{column}{suffix}" for column in overlap})
-    joined_columns = [c for c in right.columns if c not in ("symbol",)]
-    merged_parts: list[pd.DataFrame] = []
-    for symbol, symbol_frame in left.sort_values(["symbol", "available_at"]).groupby("symbol", sort=False):
-        symbol_extra = right[right["symbol"].astype(str) == str(symbol)]
-        if symbol_extra.empty:
-            if add_flag:
-                symbol_frame = symbol_frame.copy()
-                symbol_frame[flag_name] = True
-            merged_parts.append(symbol_frame)
-            continue
-        merged = pd.merge_asof(
-            symbol_frame.sort_values("available_at"),
-            symbol_extra.drop(columns=["symbol"]).sort_values("available_at"),
-            on="available_at",
-            direction="backward",
+
+    # Both sides must align on the same key types for pandas merge_asof(by=).
+    left["symbol"] = left["symbol"].astype("string")
+    right["symbol"] = right["symbol"].astype("string")
+
+    # Vectorised path: single C-level merge_asof with by="symbol" replaces the
+    # 3872-iteration Python loop + concat that used to peak at ~30 GB on the
+    # full A-share universe. Both frames must be sorted on the `on` key only;
+    # the `by` parameter handles per-symbol grouping internally.
+    left_sorted = left.sort_values("available_at").reset_index(drop=True)
+    right_sorted = right.sort_values("available_at").reset_index(drop=True)
+    joined_columns = [c for c in right_sorted.columns if c not in ("symbol",)]
+    merged = pd.merge_asof(
+        left_sorted,
+        right_sorted,
+        on="available_at",
+        by="symbol",
+        direction="backward",
+    )
+    if add_flag:
+        joined_present = [c for c in joined_columns
+                          if c in merged.columns and c != "available_at"]
+        merged[flag_name] = (
+            merged[joined_present].isna().all(axis=1) if joined_present else True
         )
-        if add_flag:
-            joined_present = [c for c in joined_columns if c in merged.columns and c != "available_at"]
-            merged[flag_name] = merged[joined_present].isna().all(axis=1) if joined_present else True
-        merged_parts.append(merged)
-    return pd.concat(merged_parts, ignore_index=True, sort=False) if merged_parts else left
+    return merged
 
 
 def _feature_columns(frame: pd.DataFrame, horizons: Iterable[int]) -> list[str]:

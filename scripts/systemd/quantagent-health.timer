@@ -1,0 +1,14 @@
+[Unit]
+Description=Run QuantAgent V7 data-layer health check daily at 00:00 CST
+Requires=quantagent-health.service
+
+[Timer]
+# Fire every day at 00:00 local time (set TZ in the .service if needed)
+OnCalendar=*-*-* 00:00:00
+# Run immediately on boot if the last run was missed (e.g. machine was off)
+Persistent=true
+# Jitter up to 5 minutes to avoid thundering-herd if multiple timers fire together
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

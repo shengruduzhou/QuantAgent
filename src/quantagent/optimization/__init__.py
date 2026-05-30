@@ -11,6 +11,12 @@ from quantagent.optimization.factor_evolution import (
     FactorEvolutionResult,
     run_factor_evolution,
 )
+from quantagent.optimization.multi_objective_loss import (
+    LossWeights,
+    LossComponents,
+    compute_multi_objective_loss,
+    score_backtest,
+)
 
 __all__ = [
     "OptunaSearchConfig",
@@ -20,4 +26,8 @@ __all__ = [
     "FactorEvolutionConfig",
     "FactorEvolutionResult",
     "run_factor_evolution",
+    "LossWeights",
+    "LossComponents",
+    "compute_multi_objective_loss",
+    "score_backtest",
 ]

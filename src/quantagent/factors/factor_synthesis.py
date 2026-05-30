@@ -148,6 +148,13 @@ def _children(node: E.Expr) -> list[E.Expr]:
     return []
 
 
+def _uses_market_terminal(node: E.Expr) -> bool:
+    """Return True when an expression depends on real market input columns."""
+    if isinstance(node, E.Column):
+        return node.name in {"open", "high", "low", "close", "volume", "amount"}
+    return any(_uses_market_terminal(child) for child in _children(node))
+
+
 def _replace_subtree(node: E.Expr, target_id: int, replacement: E.Expr, counter: list[int]) -> E.Expr:
     """Return a copy of ``node`` with the ``target_id``-th visited subtree swapped out."""
     counter[0] += 1
@@ -285,6 +292,8 @@ def _evaluate_fitness(
     cfg: SymbolicGAConfig,
 ) -> tuple[float, float, float]:
     """Return (fitness, raw_rank_ic, finite_ratio) for one tree."""
+    if not _uses_market_terminal(tree):
+        return -1.0, 0.0, 0.0
     ic, finite_ratio = _evaluate_ic(tree, panel, labels, trade_date)
     if finite_ratio < cfg.min_finite_ratio:
         return -1.0, ic, finite_ratio

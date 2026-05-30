@@ -23,7 +23,7 @@ class V7ModelAcceptanceGateConfig:
     min_rank_ic_mean: float = 0.0
     min_rank_ic_stability: float = 0.0
     min_turnover_adjusted_return: float = 0.0
-    max_drawdown: float = 0.25
+    max_drawdown: float = 0.10
     max_single_factor_dominance: float = 0.60
     require_adverse_regime: bool = True
     require_paper_report: bool = True

@@ -744,3 +744,147 @@ def materialize_alpha181_v7(
 
     typer.echo(json_dump({"status": "passed", "output": str(resolved_output),
                           "batches": (len(all_symbols) + batch_symbols - 1) // batch_symbols}))
+
+
+# --------------------------------------------------------------------- #
+# Chunked streaming dataset build (full-universe OOM-free path)         #
+# --------------------------------------------------------------------- #
+
+
+@app.command("stream-build-training-dataset-v7")
+def stream_build_training_dataset_v7(
+    market_panel_path: Path = typer.Option(..., "--market-panel"),
+    labels_path: Path = typer.Option(..., "--labels"),
+    cached_factors_path: Path = typer.Option(..., "--cached-factors-path",
+        help="Wide alpha181 parquet from `qa materialize-alpha181-v7`."),
+    output_path: Path = typer.Option(..., "--output"),
+    fundamentals_root: Path | None = typer.Option(None, "--fundamentals-root"),
+    valuation_path: Path | None = typer.Option(None, "--valuation"),
+    macro_root: Path | None = typer.Option(None, "--macro-root"),
+    flow_root: Path | None = typer.Option(None, "--flow-root"),
+    index_root: Path | None = typer.Option(None, "--index-root"),
+    start_date: str | None = typer.Option(None, "--start-date"),
+    end_date: str | None = typer.Option(None, "--end-date"),
+    horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
+    batch_symbols: int = typer.Option(500, "--batch-symbols",
+        help="Number of symbols processed per chunk. Each chunk is built independently "
+             "and appended to the output parquet, so peak RAM stays bounded "
+             "by ~batch_symbols / total_symbols × full-dataset peak."),
+    factor_min_finite_ratio: float = typer.Option(0.30, "--factor-min-finite-ratio"),
+) -> None:
+    """OOM-free chunked dataset build for the full A-share universe.
+
+    Splits the symbol universe into batches; for each batch loads only that
+    slice from market/factors/fundamentals, runs the standard build pipeline,
+    and appends the resulting wide rows to the output parquet via a streaming
+    writer. macro/flow/idx are loaded once (they're symbol-agnostic time
+    series) and reused across batches.
+
+    Use this for 1500+ symbol universes; for smaller runs the original
+    ``build-training-dataset-v7`` is fine and simpler.
+    """
+    import gc
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
+
+    # Discover symbol universe from market_panel (cheap scan)
+    universe_df = pd.read_parquet(market_panel_path, columns=["symbol"])
+    all_symbols = sorted(universe_df["symbol"].astype(str).unique().tolist())
+    del universe_df; gc.collect()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()  # avoid stale parquet
+
+    typer.echo(json_dump({
+        "status": "starting",
+        "total_symbols": len(all_symbols),
+        "batch_symbols": batch_symbols,
+        "n_batches": (len(all_symbols) + batch_symbols - 1) // batch_symbols,
+        "output": str(output_path),
+    }))
+
+    writer: "pq.ParquetWriter | None" = None
+    rows_total = 0
+    skipped_batches = 0
+    horizons_tuple = tuple(int(item) for item in parse_csv_tuple(horizons))
+
+    try:
+        for i in range(0, len(all_symbols), batch_symbols):
+            batch = all_symbols[i:i + batch_symbols]
+            batch_id = i // batch_symbols
+            tmp_out = output_path.with_suffix(f".batch_{batch_id:03d}.parquet")
+            config = V7TrainingDatasetConfig(
+                market_panel_path=str(market_panel_path),
+                labels_path=str(labels_path),
+                output_path=str(tmp_out),
+                fundamentals_root=str(fundamentals_root) if fundamentals_root else None,
+                valuation_path=str(valuation_path) if valuation_path else None,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=tuple(batch),
+                horizons=horizons_tuple,
+                factor_library="alpha181",
+                cached_factors_path=str(cached_factors_path),
+                macro_root=str(macro_root) if macro_root else None,
+                flow_root=str(flow_root) if flow_root else None,
+                index_root=str(index_root) if index_root else None,
+                enable_macro=macro_root is not None,
+                enable_flow=flow_root is not None,
+                enable_index=index_root is not None,
+                factor_min_finite_ratio=factor_min_finite_ratio,
+                # Loosen gates per-batch; final aggregate is validated separately.
+                min_rows=100, min_symbols=2, min_dates=10,
+                enforce_quality_gates=False,
+            )
+            try:
+                result = build_v7_training_dataset_artifact(config)
+            except Exception as exc:
+                skipped_batches += 1
+                typer.echo(json_dump({
+                    "batch_id": batch_id, "symbols_in_batch": len(batch),
+                    "status": "failed", "error": f"{type(exc).__name__}:{exc}",
+                }))
+                gc.collect()
+                continue
+            batch_df = result.dataset
+            if batch_df.empty:
+                tmp_out.unlink(missing_ok=True)
+                tmp_out.with_suffix(".feature_schema.json").unlink(missing_ok=True)
+                typer.echo(json_dump({"batch_id": batch_id, "symbols_in_batch": len(batch),
+                                      "rows_written": 0, "status": "empty"}))
+                continue
+            table = pa.Table.from_pandas(batch_df, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(output_path, table.schema)
+            else:
+                table = table.cast(writer.schema)
+            writer.write_table(table)
+            rows_total += len(batch_df)
+            typer.echo(json_dump({
+                "batch_id": batch_id, "symbols_in_batch": len(batch),
+                "rows_written": int(len(batch_df)),
+                "cumulative_rows": int(rows_total),
+                "feature_cols": int(len(result.feature_schema["feature_columns"])),
+                "status": "passed",
+            }))
+            # Clean up per-batch sidecar files
+            tmp_out.unlink(missing_ok=True)
+            tmp_out.with_suffix(".feature_schema.json").unlink(missing_ok=True)
+            tmp_out.with_suffix(".manifest.json").unlink(missing_ok=True)
+            del batch_df, table, result
+            gc.collect()
+    finally:
+        if writer is not None:
+            writer.close()
+
+    typer.echo(json_dump({
+        "status": "passed" if rows_total > 0 else "failed",
+        "total_rows": rows_total,
+        "skipped_batches": skipped_batches,
+        "output": str(output_path),
+    }))
+    if rows_total == 0:
+        raise typer.Exit(code=1)
