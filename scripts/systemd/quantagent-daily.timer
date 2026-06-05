@@ -1,0 +1,12 @@
+[Unit]
+Description=Run QuantAgent daily pipeline pre-open (09:00 CST, Mon-Fri)
+Requires=quantagent-daily.service
+
+[Timer]
+# Pre-open refresh on trading weekdays. Use 00:00:00 instead for 0点 refresh.
+OnCalendar=Mon-Fri *-*-* 09:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

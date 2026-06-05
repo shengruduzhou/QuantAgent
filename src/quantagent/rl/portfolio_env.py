@@ -27,6 +27,7 @@ class PortfolioEnvConfig:
     max_gross: float = 1.0
     max_turnover: float = 0.40
     cost_bps: float = 12.0
+    benchmark_excess_weight: float = 1.0
     drawdown_lambda: float = 2.0
     drawdown_limit: float = 0.20
     kill_switch_drawdown: float = 0.30
@@ -60,6 +61,11 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         self.n = len(self.symbols)
         if self.n <= 0:
             raise ValueError("PortfolioEnv resolved an empty symbol universe")
+        self._forward_return_matrix, self._benchmark_return_vector = _precompute_return_cache(
+            self.market,
+            self.dates,
+            self.symbols,
+        )
         obs_size = self.n * 4 + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
         self.action_space = spaces.Box(
@@ -101,6 +107,7 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         date = self.dates[self._index]
         next_date = self.dates[self._index + 1]
         returns = self._forward_returns(date, next_date)
+        benchmark = self._benchmark_return(date, next_date)
         turnover = float(np.abs(target - prev_weights).sum())
         cost = turnover * float(self.config.cost_bps) / 10_000.0
         pnl = float(np.dot(target, returns))
@@ -109,7 +116,7 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         drawdown = 1.0 - self._nav / max(self._peak_nav, 1e-12)
         dd_penalty = float(self.config.drawdown_lambda) * max(0.0, drawdown - float(self.config.drawdown_limit))
         kill_penalty = 1.0 if drawdown > float(self.config.kill_switch_drawdown) else 0.0
-        reward = pnl - cost - dd_penalty - kill_penalty
+        reward = pnl - float(self.config.benchmark_excess_weight) * benchmark - cost - dd_penalty - kill_penalty
         self._weights = target.astype(np.float32)
         self._age = np.where(np.abs(self._weights) > 1e-6, self._age + 1.0, 0.0).astype(np.float32)
         self._index += 1
@@ -117,6 +124,8 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         info = {
             "trade_date": str(next_date.date()),
             "pnl": pnl,
+            "benchmark_return": benchmark,
+            "excess_pnl": pnl - benchmark,
             "cost": cost,
             "turnover": turnover,
             "drawdown": drawdown,
@@ -140,10 +149,10 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         return np.nan_to_num(values).astype(np.float32)
 
     def _forward_returns(self, date: pd.Timestamp, next_date: pd.Timestamp) -> np.ndarray:
-        today = self.market[self.market["trade_date"] == date].set_index("symbol")["close"].reindex(self.symbols)
-        nxt = self.market[self.market["trade_date"] == next_date].set_index("symbol")["close"].reindex(self.symbols)
-        returns = (nxt.astype(float) / today.astype(float) - 1.0).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-        return returns.to_numpy(dtype=np.float32)
+        return self._forward_return_matrix[self._index].astype(np.float32, copy=False)
+
+    def _benchmark_return(self, date: pd.Timestamp, next_date: pd.Timestamp) -> float:
+        return float(self._benchmark_return_vector[self._index])
 
 
 def _prepare_predictions(frame: pd.DataFrame) -> pd.DataFrame:
@@ -170,6 +179,37 @@ def _prepare_market(frame: pd.DataFrame) -> pd.DataFrame:
 def _select_symbols(predictions: pd.DataFrame, top_n: int) -> list[str]:
     score = predictions.groupby("symbol")["prediction"].apply(lambda s: float(s.abs().mean()))
     return score.sort_values(ascending=False).head(int(top_n)).index.astype(str).tolist()
+
+
+def _precompute_return_cache(
+    market: pd.DataFrame,
+    dates: list[pd.Timestamp],
+    symbols: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute env step returns so PPO does not scan DataFrames per step."""
+    date_index = pd.DatetimeIndex(dates)
+    scoped = market[market["trade_date"].isin(date_index)].copy()
+    if scoped.empty:
+        n_steps = max(1, len(dates))
+        return np.zeros((n_steps, len(symbols)), dtype=np.float32), np.zeros(n_steps, dtype=np.float32)
+    selected = scoped[scoped["symbol"].isin(symbols)]
+    close_selected = (
+        selected.pivot_table(index="trade_date", columns="symbol", values="close", aggfunc="last")
+        .reindex(index=date_index, columns=symbols)
+        .ffill()
+    )
+    forward = (
+        close_selected.shift(-1) / close_selected - 1.0
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    close_all = (
+        scoped.pivot_table(index="trade_date", columns="symbol", values="close", aggfunc="last")
+        .reindex(index=date_index)
+        .ffill()
+    )
+    benchmark = (
+        close_all.shift(-1) / close_all - 1.0
+    ).replace([np.inf, -np.inf], np.nan).mean(axis=1).fillna(0.0)
+    return forward.to_numpy(dtype=np.float32), benchmark.to_numpy(dtype=np.float32)
 
 
 def _project_weights(

@@ -75,6 +75,20 @@ def test_metrics_has_all_nine_spec_fields():
         assert k in d, f"metric {k} missing"
 
 
+def test_sparse_nav_annualization_uses_elapsed_calendar_time():
+    from quantagent.backtest.strict_v8 import _compute_metrics
+
+    nav = pd.Series(
+        [1_000_000.0, 2_000_000.0],
+        index=[pd.Timestamp("2023-01-03"), pd.Timestamp("2024-01-03")],
+        name="nav",
+    )
+
+    metrics = _compute_metrics(nav, pd.DataFrame())
+
+    assert 0.95 < metrics.annualized_return < 1.05
+
+
 def test_write_emits_every_spec_file(tmp_path):
     sector_map = pd.DataFrame([
         {"symbol": "600000.SH", "sector_level_1": "Bank"},
@@ -120,8 +134,75 @@ def test_profit_by_stock_top_lists_symbols():
         config=AShareExecutionSimulationConfig(slippage_bps=0),
     )
     if not result.profit_by_stock.empty:
-        for col in ("symbol", "n_fills", "gross_value", "pnl_proxy"):
+        for col in ("symbol", "n_trades", "n_fills", "gross_pnl", "cost", "net_pnl", "pnl_proxy"):
             assert col in result.profit_by_stock.columns
+
+
+def test_profit_by_stock_uses_realized_trade_net_pnl():
+    from quantagent.backtest.strict_v8 import _profit_by_stock
+
+    realized = pd.DataFrame([
+        {"symbol": "A", "quantity": 100, "gross_pnl": 50.0, "cost": 3.0, "net_pnl": 47.0},
+        {"symbol": "A", "quantity": 100, "gross_pnl": -10.0, "cost": 3.0, "net_pnl": -13.0},
+        {"symbol": "B", "quantity": 100, "gross_pnl": 20.0, "cost": 2.0, "net_pnl": 18.0},
+    ])
+    audit = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2024-03-01"), "symbol": "A", "side": "buy",
+         "filled_quantity": 100, "avg_price": 10.0},
+        {"trade_date": pd.Timestamp("2024-03-02"), "symbol": "A", "side": "sell",
+         "filled_quantity": 100, "avg_price": 10.5},
+        {"trade_date": pd.Timestamp("2024-03-01"), "symbol": "B", "side": "buy",
+         "filled_quantity": 100, "avg_price": 20.0},
+    ])
+    out = _profit_by_stock(realized, audit)
+    row_a = out[out["symbol"] == "A"].iloc[0]
+    assert row_a["net_pnl"] == 34.0
+    assert row_a["pnl_proxy"] == 34.0
+    assert row_a["win_rate"] == 0.5
+
+
+def test_realized_round_trip_pnl_matches_known_trade():
+    """A clean buy-low / sell-high round trip yields the expected net PnL."""
+    from quantagent.backtest.strict_v8 import _realized_round_trip_pnl
+    from quantagent.execution.cost_model import AShareCostModel
+
+    audit = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2024-03-01"), "symbol": "600000.SH",
+         "side": "buy", "filled_quantity": 1000, "avg_price": 10.0},
+        {"trade_date": pd.Timestamp("2024-03-05"), "symbol": "600000.SH",
+         "side": "sell", "filled_quantity": 1000, "avg_price": 11.0},
+    ])
+    rt = _realized_round_trip_pnl(audit)
+    assert len(rt) == 1
+    row = rt.iloc[0]
+    assert row["quantity"] == 1000
+    # gross = 1000 * (11 - 10) = 1000
+    assert abs(row["gross_pnl"] - 1000.0) < 1e-6
+    # cost = buy fees + sell fees from the engine's own model (>0, includes stamp)
+    cm = AShareCostModel()
+    from quantagent.execution.broker_base import OrderSide
+    expected_cost = (cm.calculate(OrderSide("buy"), 1000, 10.0)["total"]
+                     + cm.calculate(OrderSide("sell"), 1000, 11.0)["total"])
+    assert abs(row["cost"] - expected_cost) < 1e-6
+    assert abs(row["net_pnl"] - (1000.0 - expected_cost)) < 1e-6
+
+
+def test_realized_pnl_win_rate_partial_fifo():
+    """FIFO matching across multiple buy lots and a losing trade."""
+    from quantagent.backtest.strict_v8 import _realized_round_trip_pnl
+    audit = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2024-03-01"), "symbol": "X", "side": "buy",
+         "filled_quantity": 500, "avg_price": 10.0},
+        {"trade_date": pd.Timestamp("2024-03-02"), "symbol": "X", "side": "buy",
+         "filled_quantity": 500, "avg_price": 20.0},
+        {"trade_date": pd.Timestamp("2024-03-03"), "symbol": "X", "side": "sell",
+         "filled_quantity": 1000, "avg_price": 15.0},
+    ])
+    rt = _realized_round_trip_pnl(audit)
+    # two closed trades: 500@10→15 (win) and 500@20→15 (loss)
+    assert len(rt) == 2
+    assert (rt["gross_pnl"] > 0).sum() == 1
+    assert (rt["gross_pnl"] < 0).sum() == 1
 
 
 def test_empty_inputs_produce_empty_but_well_shaped_bundle(tmp_path):

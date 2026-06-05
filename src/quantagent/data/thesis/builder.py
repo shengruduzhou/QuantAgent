@@ -206,12 +206,20 @@ def _explode_directions(
         )
     rows: list[dict[str, Any]] = []
     for _, ev in canonical.iterrows():
-        entities = ev.get("entities") or []
-        if not isinstance(entities, (list, tuple)):
+        entities = ev.get("entities")
+        # numpy arrays (parquet round-trip of a list column) raise on ``or``;
+        # normalise to a python list before the truthiness/iteration checks.
+        if hasattr(entities, "tolist") and not isinstance(entities, (list, tuple)):
+            entities = entities.tolist()
+        if not isinstance(entities, (list, tuple)) or len(entities) == 0:
             continue
         direction = _direction_score_for_row(ev)
         conf = float(ev.get("confidence") or 0.0)
-        lag_cands = ev.get("lag_window_candidates") or [1, 5, 20, 60, 120]
+        lag_cands = ev.get("lag_window_candidates")
+        if hasattr(lag_cands, "tolist") and not isinstance(lag_cands, (list, tuple)):
+            lag_cands = lag_cands.tolist()
+        if not lag_cands:
+            lag_cands = [1, 5, 20, 60, 120]
         for entity in entities:
             entity_s = str(entity).strip()
             if not entity_s:
@@ -234,12 +242,28 @@ def _explode_directions(
     return pd.DataFrame(rows)
 
 
+# 申万一级 (Shenwan Level-1) industry names. Bare entities matching this set
+# are classified as ``sector`` so policy ``sectors_hint`` joins directly onto
+# the ``silver/sector_map`` ``sector_level_1`` column without a ``sector:``
+# prefix (which the policy adapter intentionally omits to keep entities bare).
+SHENWAN_L1_SECTORS: frozenset[str] = frozenset(
+    {
+        "交通运输", "传媒", "公用事业", "农林牧渔", "医药生物", "商贸零售",
+        "国防军工", "基础化工", "家用电器", "建筑材料", "建筑装饰", "房地产",
+        "有色金属", "机械设备", "汽车", "煤炭", "环保", "电力设备", "电子",
+        "石油石化", "社会服务", "纺织服饰", "综合", "美容护理", "计算机",
+        "轻工制造", "通信", "钢铁", "银行", "非银金融", "食品饮料",
+    }
+)
+
+
 def _classify_entity(entity: str) -> tuple[str, str]:
     """Map a raw entity string to ``(direction_kind, normalised_value)``.
 
     Prefixed values like ``sector:Semi`` or ``index:510300.SH`` are
     interpreted verbatim. Bare alphanumeric strings are heuristically
-    sorted into ``symbol`` (Chinese ticker pattern) vs ``theme``.
+    sorted into ``symbol`` (Chinese ticker pattern), ``sector`` (申万一级
+    industry name) vs ``theme``.
     """
     s = entity.strip()
     if ":" in s:
@@ -258,6 +282,8 @@ def _classify_entity(entity: str) -> tuple[str, str]:
     # bare. Heuristics.
     if len(s) == 9 and s[6] == "." and s[:6].isdigit():
         return "symbol", s
+    if s in SHENWAN_L1_SECTORS:
+        return "sector", s
     return "theme", s
 
 

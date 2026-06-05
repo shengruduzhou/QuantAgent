@@ -1,0 +1,14 @@
+[Unit]
+Description=QuantAgent daily pre-open pipeline (舆情/国家队/债市 + 每日舆情研判)
+ConditionPathExists=/home/shanhefu/QuantAgent
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanhefu/QuantAgent
+# Gemma LLM env (daily brief uses LLM short-term inference)
+Environment=QUANTAGENT_LLM_PROVIDER=gemini
+Environment=QUANTAGENT_LLM_ENABLED=1
+Environment=QUANTAGENT_LLM_ALLOW_NETWORK=1
+Environment=QUANTAGENT_LLM_TIMEOUT_SECONDS=180
+ExecStart=/usr/bin/env bash /home/shanhefu/QuantAgent/scripts/run_daily_pipeline.sh
+TimeoutStartSec=3600

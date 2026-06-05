@@ -31,7 +31,7 @@ def test_monetary_keyword_triggers_monetary_theme():
 def test_real_estate_keywords_tag_both_theme_and_sector():
     tags = tag_policy_event("关于优化个人住房贷款政策的通知", "首付比例下调")
     assert "real_estate" in tags["themes"]
-    assert "RealEstate" in tags["sectors_hint"]
+    assert "房地产" in tags["sectors_hint"]
 
 
 def test_multiple_themes_can_fire_together():
@@ -41,7 +41,7 @@ def test_multiple_themes_can_fire_together():
     )
     assert "tech_innovation" in tags["themes"]
     assert "fiscal" in tags["themes"]
-    assert "Semiconductor" in tags["sectors_hint"]
+    assert "电子" in tags["sectors_hint"]
 
 
 def test_strength_band_hard_regulation():

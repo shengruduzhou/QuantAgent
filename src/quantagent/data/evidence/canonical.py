@@ -161,8 +161,15 @@ def _coerce_ts(value: Any) -> pd.Timestamp | None:
 def _ensure_list(value: Any) -> list[str]:
     if value is None:
         return []
+    # numpy arrays / pandas extension arrays survive a parquet round-trip as
+    # ndarray, which is not a list/tuple/set — convert before stringifying so
+    # a list column does not collapse into a single stringified-array entity.
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        value = value.tolist()
     if isinstance(value, (list, tuple, set)):
-        return [str(v) for v in value if v is not None]
+        return [str(v) for v in value if v is not None and str(v).strip()]
+    if isinstance(value, float) and value != value:  # NaN
+        return []
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return [str(value)]

@@ -28,6 +28,10 @@ EXPECTED_V8_COMMANDS = {
     "run-paper-trading-v8",
     "generate-daily-decision-report-v8",
     "generate-risk-report-v8",
+    "summarize-v8-results",
+    "optimize-regime-aware-ensemble-v8",
+    "search-regime-factor-experts-v8",
+    "build-llm-hybrid-stock-pool-v8",
 }
 
 
@@ -163,6 +167,143 @@ def test_build_target_weights_v8_smoke(tmp_path):
     wide = pd.read_parquet(out_target)
     # Top-2 of 3 each day, equal weight 0.5 each
     assert (wide.sum(axis=1) <= 1.0 + 1e-9).all()
+
+
+def test_llm_stock_selection_fallback_keeps_full_ranking_pool():
+    from quantagent.cli.v8 import _agent_scores_from_analysis, _fallback_stock_selection_analysis
+    from quantagent.factors.core_policy import CORE_FACTOR_PRIOR_WEIGHTS
+
+    rows = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2024-03-01"),
+                "symbol": f"S{i:03d}",
+                "prediction": float(100 - i),
+                "model_rank": i + 1,
+                "old_dealer_risk_score": 0.0,
+                "old_dealer_block": False,
+                "dip_buy_flow_score": 0.0,
+            }
+            for i in range(50)
+        ]
+    )
+
+    analysis = _fallback_stock_selection_analysis(rows, CORE_FACTOR_PRIOR_WEIGHTS)
+    scores = _agent_scores_from_analysis(rows, analysis)
+
+    assert len(analysis["candidates"]) == 50
+    assert len(scores) == 50
+    assert "model_rank" in scores.columns
+    assert scores["model_rank"].max() == 50
+    assert "agent_rank" in scores.columns
+
+
+def test_build_llm_hybrid_stock_pool_v8_smoke(tmp_path, monkeypatch):
+    monkeypatch.delenv("QUANTAGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_ENABLED", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_ALLOW_NETWORK", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    date = pd.Timestamp("2024-03-01")
+    symbols = [f"00000{i}.SZ" for i in range(1, 7)]
+    preds = pd.DataFrame(
+        [{"trade_date": date, "symbol": sym, "prediction": 1.0 - i * 0.1} for i, sym in enumerate(symbols)]
+    )
+    pred_path = tmp_path / "preds.parquet"
+    preds.to_parquet(pred_path, index=False)
+    core = pd.DataFrame(
+        [
+            {
+                "trade_date": date,
+                "symbol": sym,
+                "core_policy_score": 0.2,
+                "core_sentiment_score": 0.1,
+                "fundamental_quality_score": 0.3 - i * 0.02,
+                "cicc_stock_selection_score": 0.2,
+                "sector_resonance_score": 0.15,
+                "dip_buy_flow_score": 0.1,
+                "trend_strength_score": 0.2,
+                "old_dealer_risk_score": 0.05 if i < 5 else 0.8,
+                "old_dealer_block": 0 if i < 5 else 1,
+            }
+            for i, sym in enumerate(symbols)
+        ]
+    )
+    core_path = tmp_path / "core.parquet"
+    core.to_parquet(core_path, index=False)
+    sector = pd.DataFrame(
+        [{"symbol": sym, "sector_level_1": "Semi" if i < 4 else "Bank"} for i, sym in enumerate(symbols)]
+    )
+    sector_path = tmp_path / "sector.parquet"
+    sector.to_parquet(sector_path, index=False)
+    policy = pd.DataFrame(
+        [
+            {
+                "event_id": "p0",
+                "source": "gov",
+                "url": "https://example.gov/p0",
+                "announced_at": pd.Timestamp("2024-02-29"),
+                "available_at": pd.Timestamp("2024-02-29 10:00"),
+                "fetched_at": pd.Timestamp("2024-02-29 10:01"),
+                "title": "support semi",
+                "body_summary": "support semi",
+                "themes": ["theme:chip"],
+                "sectors_hint": ["sector:Semi"],
+                "policy_strength": 0.8,
+            }
+        ]
+    )
+    policy_path = tmp_path / "policy.parquet"
+    policy.to_parquet(policy_path, index=False)
+    out_dir = tmp_path / "out"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "build-llm-hybrid-stock-pool-v8",
+            "--predictions-path", str(pred_path),
+            "--core-dataset-path", str(core_path),
+            "--sector-map-path", str(sector_path),
+            "--policy-events", str(policy_path),
+            "--as-of-date", "2024-03-01",
+            "--candidate-pool-size", "30",
+            "--stock-top-n", "10",
+            "--output-dir", str(out_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    hybrid = pd.read_parquet(out_dir / "hybrid_stock_pool.parquet")
+    scores = pd.read_parquet(out_dir / "agent_scores.parquet")
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["used_fallback"] is True
+    assert not hybrid.empty
+    assert not scores.empty
+    assert "hybrid_score" in hybrid.columns
+    assert "agent_stock_score" in scores.columns
+
+
+def test_build_llm_hybrid_stock_pool_v8_require_llm_fails_without_provider(tmp_path, monkeypatch):
+    monkeypatch.delenv("QUANTAGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_ENABLED", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    date = pd.Timestamp("2024-03-01")
+    pred_path = tmp_path / "preds.parquet"
+    pd.DataFrame([{"trade_date": date, "symbol": "000001.SZ", "prediction": 1.0}]).to_parquet(pred_path, index=False)
+    core_path = tmp_path / "core.parquet"
+    pd.DataFrame([{"trade_date": date, "symbol": "000001.SZ", "fundamental_quality_score": 0.1}]).to_parquet(core_path, index=False)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "build-llm-hybrid-stock-pool-v8",
+            "--predictions-path", str(pred_path),
+            "--core-dataset-path", str(core_path),
+            "--as-of-date", "2024-03-01",
+            "--candidate-pool-size", "30",
+            "--require-llm",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "llm_required_but_fallback_used" in result.stderr
 
 
 def test_generate_daily_decision_report_v8_smoke(tmp_path):

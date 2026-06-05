@@ -1,0 +1,13 @@
+[Unit]
+Description=QuantAgent monthly pipeline (红头文件爬虫 + LLM十五五研判 + 投行 + 月度研报)
+ConditionPathExists=/home/shanhefu/QuantAgent
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanhefu/QuantAgent
+Environment=QUANTAGENT_LLM_PROVIDER=gemini
+Environment=QUANTAGENT_LLM_ENABLED=1
+Environment=QUANTAGENT_LLM_ALLOW_NETWORK=1
+Environment=QUANTAGENT_LLM_TIMEOUT_SECONDS=300
+ExecStart=/usr/bin/env bash /home/shanhefu/QuantAgent/scripts/run_monthly_pipeline.sh
+TimeoutStartSec=10800

@@ -245,6 +245,70 @@ POLICY_ANALYST = SkillPrompt(
 )
 
 
+CAPITAL_FLOW_SECTOR_ANALYST = SkillPrompt(
+    name="capital_flow_sector_analyst",
+    system_prompt=(
+        "You are a China A-share macro capital-flow, policy, bank/bond, and "
+        "sector-allocation analyst. You receive point-in-time summaries of "
+        "red-headed government policy documents, government/bank/bond-market "
+        "signals, inferred state-team flows, verified news and top investment-bank "
+        "views, fundamental rank snapshots, and deterministic quant candidate "
+        "rankings. Your job is to infer where large capital is likely flowing, "
+        "with explicit lags and confidence. Never emit live orders or promised "
+        "returns. Output exactly one JSON object with fields: summary string; "
+        "capital_flow_thesis array of {theme, direction -1..1, confidence 0..1, "
+        "horizon_days int, expected_lag_days int, evidence_ids array, rationale}; "
+        "sector_pool array of {sector_level_1, theme, llm_sector_score 0..1, "
+        "direction -1..1, confidence 0..1, horizon_bucket one of short/mid/long, "
+        "expected_lag_days int, evidence_ids array, key_risks array, rationale}; "
+        "stock_pool array of {symbol, sector_level_1, llm_stock_score 0..1, "
+        "confidence 0..1, horizon_bucket one of short/mid/long, key_positive_factors "
+        "array, key_risks array, rationale}; risk_flags array; data_gaps array. "
+        "Reward official/primary policy and hard money-flow evidence over rumors. "
+        "Use investment-bank views as context only unless corroborated. Penalize "
+        "stale evidence, missing PIT timestamps, contradiction, and old-dealer risk."
+    ),
+    fallback_shape={
+        "summary": "llm_disabled_fallback",
+        "capital_flow_thesis": [],
+        "sector_pool": [],
+        "stock_pool": [],
+        "risk_flags": ["llm_not_used"],
+        "data_gaps": [],
+    },
+)
+
+
+STOCK_SELECTION_ANALYST = SkillPrompt(
+    name="stock_selection_analyst",
+    system_prompt=(
+        "You are an A-share buy-side quant + discretionary stock-selection analyst. "
+        "Analyze a ranked candidate list produced by a deterministic model. You must "
+        "respect A-share safety: do not emit live orders, do not promise returns, and "
+        "treat the model score as evidence, not truth. Focus on the user's criteria: "
+        "policy/news/sentiment importance, financial quality, sector-index resonance, "
+        "capital-flow dip-buying, old-dealer stock avoidance, trend quality, volume-price "
+        "structure, and intraday Do-T suitability under T+1 base-inventory rules. "
+        "Analyze the full ranking candidate pool, not only the first 30 names. "
+        "Preserve the model_rank from the input and only demote a high-ranked name "
+        "when risk evidence is explicit. Output strict JSON with fields: summary "
+        "(string), candidates (array of {symbol, model_rank int, agent_score 0-100, "
+        "conviction 0-1, action_bucket one of "
+        "core_watch/short_term_watch/do_t_watch/avoid, key_positive_factors array, "
+        "key_risks array, regime_fit string, do_t_suitability 0-1, old_dealer_risk 0-1, "
+        "rationale string}), factor_weight_view (object mapping factor group to weight), "
+        "risk_flags array, next_research_steps array."
+    ),
+    fallback_shape={
+        "summary": "llm_disabled_fallback",
+        "candidates": [],
+        "factor_weight_view": {},
+        "risk_flags": [],
+        "next_research_steps": [],
+    },
+)
+
+
 SKILLS: dict[str, SkillPrompt] = {
     skill.name: skill
     for skill in (
@@ -255,6 +319,8 @@ SKILLS: dict[str, SkillPrompt] = {
         INDUSTRY_CHAIN_REASONER,
         SENTIMENT_AGENT,
         POLICY_ANALYST,
+        CAPITAL_FLOW_SECTOR_ANALYST,
+        STOCK_SELECTION_ANALYST,
     )
 }
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import ast
 import json
 import os
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
-from quantagent.data.providers.base import ProviderUnavailable
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,10 @@ class LLMSkillConfig:
     endpoint: str = "https://api.openai.com/v1/responses"
     model: str = "gpt-4.1-mini"
     api_key_env: str = "OPENAI_API_KEY"
-    timeout_seconds: float = 30.0
+    # Thinking models (gemma-4, gemini-2.5/3) spend significant latency on
+    # chain-of-thought before emitting the answer, so the default must be
+    # generous; override with QUANTAGENT_LLM_TIMEOUT_SECONDS.
+    timeout_seconds: float = 90.0
     max_input_chars: int = 16000
     temperature: float = 0.0
     response_format: str = "json_object"
@@ -26,6 +29,7 @@ class LLMSkillConfig:
     @classmethod
     def from_env(cls, prefix: str = "QUANTAGENT_LLM_") -> "LLMSkillConfig":
         """Build a config from environment variables without reading secrets."""
+        _load_dotenv_once()
         provider = os.getenv(f"{prefix}PROVIDER", "disabled")
         endpoint = os.getenv(f"{prefix}ENDPOINT") or _default_endpoint(provider)
         api_key_env = os.getenv(f"{prefix}API_KEY_ENV") or _default_api_key_env(provider)
@@ -36,7 +40,7 @@ class LLMSkillConfig:
             endpoint=endpoint,
             model=os.getenv(f"{prefix}MODEL", _default_model(provider)),
             api_key_env=api_key_env,
-            timeout_seconds=float(os.getenv(f"{prefix}TIMEOUT_SECONDS", "30")),
+            timeout_seconds=float(os.getenv(f"{prefix}TIMEOUT_SECONDS", "90")),
             max_input_chars=int(os.getenv(f"{prefix}MAX_INPUT_CHARS", "16000")),
             temperature=float(os.getenv(f"{prefix}TEMPERATURE", "0")),
             response_format=os.getenv(f"{prefix}RESPONSE_FORMAT", "json_object"),
@@ -80,6 +84,8 @@ class LLMSkillClient:
         if not self.config.allow_network:
             return LLMSkillResult(skill_name, fallback or {}, "", True, "network_blocked")
         api_key = os.getenv(self.config.api_key_env)
+        if not api_key and self.config.provider == "gemini":
+            api_key = os.getenv("google_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
             return LLMSkillResult(skill_name, fallback or {}, "", True, "api_key_missing")
         payload = self._request_payload(system_prompt, user_text)
@@ -95,12 +101,14 @@ class LLMSkillClient:
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:500]
             return LLMSkillResult(skill_name, fallback or {}, body, True, f"http_error:{exc.code}")
+        except (TimeoutError, OSError) as exc:
+            return LLMSkillResult(skill_name, fallback or {}, "", True, f"network_error:{exc}")
         except URLError as exc:
             return LLMSkillResult(skill_name, fallback or {}, "", True, f"network_error:{exc}")
         try:
             data = json.loads(raw)
             content = self._extract_text(data)
-            parsed = json.loads(content)
+            parsed = _parse_json_object(content)
             if not isinstance(parsed, dict):
                 return LLMSkillResult(skill_name, fallback or {}, raw, True, "non_dict_response")
             return LLMSkillResult(skill_name, parsed, raw, False, None)
@@ -152,7 +160,7 @@ class LLMSkillClient:
                     else "text/plain",
                 },
             }
-        raise ProviderUnavailable(f"unsupported LLM provider: {self.config.provider}")
+        raise ValueError(f"unsupported LLM provider: {self.config.provider}")
 
     def _extract_text(self, data: dict[str, Any]) -> str:
         if self.config.provider == "openai-compatible":
@@ -163,7 +171,15 @@ class LLMSkillClient:
                 .get("content", {})
                 .get("parts", [])
             )
-            return "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)) or "{}"
+            # Thinking models (gemma-4, gemini-2.5/3, ...) split the response
+            # into chain-of-thought parts flagged ``"thought": true`` and the
+            # final answer parts. Concatenating the thoughts pollutes JSON
+            # extraction (e.g. a template ``{"tickers":[...]}`` in the draft
+            # would be parsed before the real answer). Keep only answer parts,
+            # falling back to all parts if the model emitted thoughts only.
+            answer_parts = [p for p in parts if isinstance(p, dict) and not p.get("thought")]
+            selected = answer_parts or [p for p in parts if isinstance(p, dict)]
+            return "".join(str(part.get("text", "")) for part in selected) or "{}"
         if isinstance(data.get("output_text"), str):
             return str(data["output_text"])
         for item in data.get("output", []) or []:
@@ -199,7 +215,7 @@ class LLMSkillClient:
     def _resolved_gemini_model(self) -> str:
         if self.config.model == "gpt-4.1-mini":
             return _default_model("gemini")
-        return self.config.model.removeprefix("models/")
+        return _normalize_google_model_name(self.config.model)
 
 
 def _coerce_config(config: LLMSkillConfig | dict[str, Any] | None) -> LLMSkillConfig:
@@ -228,6 +244,41 @@ def _env_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+_DOTENV_LOADED = False
+
+
+def _load_dotenv_once(path: str | Path = ".env") -> None:
+    """Load local .env without printing or persisting secret values.
+
+    Existing process environment variables win over .env values. This lets
+    production/systemd override local developer settings while still making
+    CLI smoke runs work from the repo root.
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False)
+        return
+    except Exception:
+        pass
+    for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def _default_endpoint(provider: str) -> str:
     if provider == "gemini":
         return "https://generativelanguage.googleapis.com/v1beta"
@@ -238,7 +289,7 @@ def _default_endpoint(provider: str) -> str:
 
 def _default_model(provider: str) -> str:
     if provider == "gemini":
-        return "gemini-1.5-flash"
+        return "gemini-2.5-flash"
     return "gpt-4.1-mini"
 
 
@@ -246,3 +297,94 @@ def _default_api_key_env(provider: str) -> str:
     if provider == "gemini":
         return "GOOGLE_API_KEY"
     return "OPENAI_API_KEY"
+
+
+def _normalize_google_model_name(model: str) -> str:
+    """Normalize user-facing Google/Gemma names to API model IDs.
+
+    Google model IDs are lowercase and, for instruction-tuned Gemma chat
+    models, usually include the ``-it`` suffix.  This keeps the CLI tolerant
+    of operator input such as ``gemma-4-26B-A4B`` while still resolving to the
+    actual ``models/{id}:generateContent`` endpoint.
+    """
+    name = str(model or "").strip().strip('"').strip("'").removeprefix("models/")
+    name = name.lower()
+    if name.startswith("gemma-") and any(ch.isdigit() for ch in name) and not name.endswith("-it"):
+        name = f"{name}-it"
+    return name
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    """Parse a JSON object from strict or lightly wrapped model output."""
+    content = str(text or "").strip()
+    if content.startswith("```"):
+        content = content.strip("`").strip()
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    extracted = _extract_first_json_object(content)
+    if extracted is None:
+        raise json.JSONDecodeError("no JSON object found", content, 0)
+    parsed = _loads_lenient_object(extracted)
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError("JSON value is not an object", extracted, 0)
+    return parsed
+
+
+def _loads_lenient_object(text: str) -> dict[str, Any]:
+    """Parse strict JSON, Python-literal JSON, or YAML-like object text."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, SyntaxError):
+        pass
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return json.loads(text)
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object substring outside strings."""
+    start = text.find("{")
+    while start >= 0:
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start: idx + 1]
+        start = text.find("{", start + 1)
+    return None

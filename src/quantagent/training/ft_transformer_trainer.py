@@ -206,6 +206,8 @@ class FTTransformerTrainer:
                 date_order = torch.tensor([0], device=device)
             epoch_loss = 0.0
             total_rows = 0
+            finite_steps = 0
+            nonfinite_steps = 0
             chunks = torch.split(date_order, dates_per_step)
             for chunk in chunks:
                 if date_codes is not None:
@@ -244,18 +246,22 @@ class FTTransformerTrainer:
                                 loss_s = loss_s + self.config.rank_loss_weight * rank_loss_s
                             loss_s = loss_s / max(1, len(chunk))
                         if not torch.isfinite(loss_s.detach()):
-                            raise RuntimeError(
-                                f"FT-Transformer non-finite training loss at epoch={epoch}; "
-                                "lower learning_rate or disable AMP"
-                            )
+                            # Graceful skip of this sub-batch (see normal path).
+                            nonfinite_steps += 1
+                            continue
                         scaler.scale(loss_s).backward()
                         step_loss_value += float(loss_s.detach().cpu()) * int(xs.shape[0])
                         step_rows += int(xs.shape[0])
+                    if step_rows == 0:
+                        # whole chunk was non-finite — drop grads, skip the step
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                     scaler.unscale_(optimizer)
                     if self.config.gradient_clip_norm and float(self.config.gradient_clip_norm) > 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.config.gradient_clip_norm))
                     scaler.step(optimizer)
                     scaler.update()
+                    finite_steps += 1
                 else:
                     with torch.cuda.amp.autocast(enabled=(self.config.use_amp and device == "cuda")):
                         preds = model(xb)
@@ -280,10 +286,14 @@ class FTTransformerTrainer:
                                 )
                                 loss = loss + self.config.rank_loss_weight * rank_loss
                     if not torch.isfinite(loss.detach()):
-                        raise RuntimeError(
-                            f"FT-Transformer non-finite training loss at epoch={epoch}; "
-                            "lower learning_rate or disable AMP"
-                        )
+                        # Graceful skip: an AMP fp16 overflow on one step must
+                        # not throw away an otherwise-healthy multi-hour run.
+                        # Drop this step's grads and move on; the per-epoch
+                        # guard below stops training only if an ENTIRE epoch
+                        # produced no finite step.
+                        optimizer.zero_grad(set_to_none=True)
+                        nonfinite_steps += 1
+                        continue
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     if self.config.gradient_clip_norm and float(self.config.gradient_clip_norm) > 0:
@@ -292,10 +302,20 @@ class FTTransformerTrainer:
                     scaler.update()
                     step_loss_value = float(loss.detach().cpu()) * int(xb.shape[0])
                     step_rows = int(xb.shape[0])
+                    finite_steps += 1
                 epoch_loss += step_loss_value
                 total_rows += step_rows
             epoch_loss /= max(1, total_rows)
-            entry = {"epoch": epoch, "loss": epoch_loss}
+            entry = {"epoch": epoch, "loss": epoch_loss,
+                     "finite_steps": int(finite_steps),
+                     "nonfinite_steps": int(nonfinite_steps)}
+            # Graceful divergence stop: if an entire epoch produced no finite
+            # step the model has diverged (typically AMP fp16 overflow). Stop
+            # and keep the best checkpoint seen so far rather than crashing.
+            if finite_steps == 0:
+                entry["diverged"] = True
+                history.append(entry)
+                break
             if val_tensor is not None:
                 model.eval()
                 with torch.no_grad():
@@ -312,15 +332,35 @@ class FTTransformerTrainer:
                         "training stopped before saving a polluted checkpoint"
                     )
                 entry["val_loss"] = val_loss
-                if val_loss < best_val - 1e-6:
+                improved = val_loss < best_val - 1e-6
+                if improved:
                     best_val = val_loss
                     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     patience = 0
                 else:
                     patience += 1
-                    if patience >= self.config.early_stopping_patience:
-                        history.append(entry)
-                        break
+                # Live per-epoch overfit monitor (visible in the tmux log).
+                # OVERFIT = val rising above best while train keeps falling.
+                if improved:
+                    flag = "improved"
+                elif epoch_loss < val_loss:
+                    flag = "OVERFIT"
+                else:
+                    flag = "plateau"
+                print(
+                    f"[ft] epoch {epoch:>3d}  train={epoch_loss:.6f}  val={val_loss:.6f}  "
+                    f"best={best_val:.6f}  patience={patience}/{self.config.early_stopping_patience}  "
+                    f"nonfinite_steps={nonfinite_steps}  [{flag}]",
+                    flush=True,
+                )
+                if (not improved) and patience >= self.config.early_stopping_patience:
+                    print(
+                        f"[ft] EARLY STOP at epoch {epoch}: val plateaued {patience} epochs; "
+                        f"restoring best checkpoint (val={best_val:.6f})",
+                        flush=True,
+                    )
+                    history.append(entry)
+                    break
             history.append(entry)
 
         if best_state is not None:

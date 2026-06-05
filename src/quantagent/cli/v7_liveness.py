@@ -1,4 +1,4 @@
-"""Step 2.5 liveness and training-status commands."""
+"""Live-readiness and target-weights health commands."""
 
 from __future__ import annotations
 
@@ -7,57 +7,6 @@ from pathlib import Path
 import typer
 
 from quantagent.cli._utils import app, json_dump, read_frame
-
-
-@app.command("scan-v10-training-status-v7")
-def scan_v10_training_status_v7(
-    output_dir: Path = typer.Option(Path("runtime/reports/v10_training_status"), "--output-dir"),
-    base_output: Path = typer.Option(Path("runtime/models/v7_alpha_full_universe_nosynth_v10"), "--base-output"),
-    log_dir: Path = typer.Option(Path("runtime/logs"), "--log-dir"),
-    expected_folds: int = typer.Option(12, "--expected-folds"),
-) -> None:
-    """Write v10 fold/process reconciliation report."""
-
-    from quantagent.diagnostics.training_status import V10StatusConfig, scan_v10_training_status, write_training_status
-
-    status = scan_v10_training_status(
-        V10StatusConfig(base_output=base_output, log_dir=log_dir, expected_folds=expected_folds)
-    )
-    paths = write_training_status(status, output_dir)
-    typer.echo(json_dump({"status": "passed", "aggregate_ready": status["aggregate_ready"], "paths": paths}))
-
-
-@app.command("resume-v10-seed-v7")
-def resume_v10_seed_v7(
-    seed: int = typer.Option(..., "--seed"),
-    dry_run: bool = typer.Option(True, "--dry-run/--run"),
-    output_dir: Path = typer.Option(Path("runtime/reports/v10_training_status"), "--output-dir"),
-) -> None:
-    """Print the safe resume command for an interrupted v10 seed.
-
-    The trainer now skips fully completed fold directories, so rerunning a
-    seed resumes from the first missing fold instead of overwriting
-    complete folds. This command stays dry-run by default.
-    """
-
-    from quantagent.diagnostics.training_status import build_resume_command, scan_v10_training_status, write_training_status
-
-    status = scan_v10_training_status()
-    write_training_status(status, output_dir)
-    seed_status = status["seeds"].get(str(seed), {})
-    command = " ".join(build_resume_command(seed))
-    payload = {
-        "status": "dry_run" if dry_run else "not_executed",
-        "seed": int(seed),
-        "completed_folds": seed_status.get("completed_folds", []),
-        "missing_folds": seed_status.get("missing_folds", []),
-        "resume_from": seed_status.get("resume_from"),
-        "completed_fold_overwrite_policy": "skip_completed_folds",
-        "command": command,
-    }
-    if not dry_run:
-        raise typer.BadParameter("resume execution is intentionally not launched from this CLI; run the printed command explicitly")
-    typer.echo(json_dump(payload))
 
 
 @app.command("target-weights-liveness-v7")

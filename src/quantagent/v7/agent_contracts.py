@@ -70,7 +70,6 @@ V7_AGENT_SPECS: tuple[AgentSpec, ...] = (
         outputs=("EvidenceRecord", "ThemePolicyScore"),
         existing_extension_points=("src/quantagent/agents/policy_agent.py", "src/quantagent/data/event_store.py"),
         new_modules=(
-            "src/quantagent/data/providers/official_policy_provider.py",
             "src/quantagent/themes/policy_crawler.py",
             "src/quantagent/themes/policy_parser.py",
         ),

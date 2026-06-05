@@ -167,6 +167,85 @@ def test_llm_skill_client_builds_gemini_payload_without_printing_key(monkeypatch
     assert result.fallback_reason == "network_blocked"
 
 
+def test_llm_skill_client_normalizes_google_gemma_model_id(monkeypatch):
+    from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
+
+    monkeypatch.setenv("QUANTAGENT_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("QUANTAGENT_LLM_MODEL", "gemma-4-26B-A4B")
+    config = LLMSkillConfig.from_env()
+    client = LLMSkillClient(config)
+
+    assert client._resolved_endpoint().endswith("/models/gemma-4-26b-a4b-it:generateContent")
+
+
+def test_llm_skill_client_extracts_wrapped_json_object():
+    from quantagent.agents.llm_skill_client import _parse_json_object
+
+    parsed = _parse_json_object('analysis:\n{"ok": true, "note": "connected"}\n')
+
+    assert parsed == {"ok": True, "note": "connected"}
+
+
+def test_llm_skill_client_extracts_yaml_like_object():
+    from quantagent.agents.llm_skill_client import _parse_json_object
+
+    parsed = _parse_json_object("{ok: true, note: connected}")
+
+    assert parsed == {"ok": True, "note": "connected"}
+
+
+def test_llm_skill_client_accepts_lowercase_google_key_env(monkeypatch):
+    from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
+
+    monkeypatch.setenv("google_API_KEY", "secret-value")
+    config = LLMSkillConfig(
+        provider="gemini",
+        enabled=True,
+        allow_network=False,
+        model="gemma-test-model",
+    )
+    result = LLMSkillClient(config).invoke(
+        "schema",
+        system_prompt="system",
+        user_text="user",
+        fallback={"ok": True},
+    )
+
+    assert result.used_fallback is True
+    assert result.raw_text == ""
+    assert result.fallback_reason == "network_blocked"
+
+
+def test_llm_skill_config_loads_local_dotenv_without_exposing_secret(tmp_path, monkeypatch):
+    from quantagent.agents import llm_skill_client
+    from quantagent.agents.llm_skill_client import LLMSkillConfig
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTAGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_ENABLED", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_ALLOW_NETWORK", raising=False)
+    monkeypatch.delenv("QUANTAGENT_LLM_MODEL", raising=False)
+    monkeypatch.delenv("google_API_KEY", raising=False)
+    monkeypatch.setattr(llm_skill_client, "_DOTENV_LOADED", False)
+    (tmp_path / ".env").write_text(
+        "\n".join([
+            "google_API_KEY=secret-value",
+            "QUANTAGENT_LLM_PROVIDER=gemini",
+            "QUANTAGENT_LLM_ENABLED=1",
+            "QUANTAGENT_LLM_ALLOW_NETWORK=0",
+            "QUANTAGENT_LLM_MODEL=gemma-test-model",
+        ]),
+        encoding="utf-8",
+    )
+
+    config = LLMSkillConfig.from_env()
+
+    assert config.provider == "gemini"
+    assert config.model == "gemma-test-model"
+    assert config.api_key_env == "GOOGLE_API_KEY"
+    assert "secret-value" not in repr(config)
+
+
 def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
     from quantagent.data.providers.base import ProviderResult

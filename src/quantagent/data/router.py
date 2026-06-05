@@ -62,8 +62,8 @@ class RoutedProvider:
 
 @dataclass(frozen=True)
 class RouterConfig:
-    daily_priority: tuple[str, ...] = ("qlib", "akshare", "baostock", "tushare")
-    minute_priority: tuple[str, ...] = ("akshare", "baostock", "qlib")
+    daily_priority: tuple[str, ...] = ("tickflow", "qlib", "akshare", "baostock", "tushare")
+    minute_priority: tuple[str, ...] = ("tickflow", "akshare", "baostock", "qlib")
     allow_mock_fallback: bool = False
     merge_partial_results: bool = True
     fail_when_all_unavailable: bool = True
@@ -235,19 +235,28 @@ def _attribute_source(frame: pd.DataFrame, source_name: str) -> pd.DataFrame:
 
 def build_default_router(
     *,
+    tickflow_provider=None,
     qlib_provider=None,
     akshare_provider=None,
     baostock_provider=None,
     tushare_provider=None,
     config: RouterConfig | None = None,
 ) -> MultiSourceDataRouter:
-    """Wire up the canonical Qlib / AkShare / BaoStock / TuShare router.
+    """Wire up the canonical Tickflow / Qlib / AkShare / BaoStock / TuShare router.
 
     Any source can be passed as ``None`` to omit. Callers should
     construct providers with their own credentials / endpoints and
     pass them in — the router never instantiates providers itself.
+    Tickflow is the v8 primary daily source.
     """
     router = MultiSourceDataRouter(config=config)
+    if tickflow_provider is not None:
+        router.register(RoutedProvider(
+            name="tickflow", provider=tickflow_provider,
+            is_paid=True, quality_baseline=0.95,
+            capabilities=("daily_ohlcv", "adjusted_prices", "tradability",
+                          "minute_ohlcv_5", "financials"),
+        ))
     if qlib_provider is not None:
         router.register(RoutedProvider(
             name="qlib", provider=qlib_provider,

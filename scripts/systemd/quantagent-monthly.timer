@@ -1,0 +1,12 @@
+[Unit]
+Description=Run QuantAgent monthly research pipeline (1st of month, 00:00 CST)
+Requires=quantagent-monthly.service
+
+[Timer]
+# 0点 on the 1st of each month (月度研报 + 红头文件刷新)
+OnCalendar=*-*-01 00:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
