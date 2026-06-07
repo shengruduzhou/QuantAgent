@@ -30,10 +30,12 @@ PIT contract: every frame written here is tagged
 window. Symbols use QuantAgent canonical format (``600519.SH``), which is
 already tickflow's native format — no remapping needed.
 
-Network access is gated by ``allow_network=True`` *and* a non-empty
-``TICKFLOW_API_KEY`` env var (configurable via ``token_env``). Mock data
-is never returned; every failure surfaces as ``ProviderUnavailable`` so
-the router's fail-loud contract holds.
+Network access is gated by ``allow_network=True``.  Historical daily K-lines
+can use TickFlow's free client when no token is configured; full-service
+endpoints (minute bars, financials, universes, real-time quotes) still require
+a non-empty ``TICKFLOW_API_KEY`` env var (configurable via ``token_env``).
+Mock data is never returned; every failure surfaces as ``ProviderUnavailable``
+so the router's fail-loud contract holds.
 """
 
 from __future__ import annotations
@@ -96,6 +98,10 @@ class TickflowProvider(MarketDataProvider):
     allow_network:
         Defaults False to match the rest of the providers. Must be flipped
         explicitly by the operator before any real call.
+    allow_free_daily:
+        Permit ``daily_ohlcv`` to use ``TickFlow.free()`` when no API key is
+        present. This follows the official SDK contract: free daily K-lines are
+        available without registration, while minute/realtime/financials are not.
     """
 
     api_endpoint: str | None = None
@@ -103,6 +109,7 @@ class TickflowProvider(MarketDataProvider):
     source: str = "tickflow"
     source_reliability: float = 0.95
     allow_network: bool = False
+    allow_free_daily: bool = True
     # In-memory caches for things we only need to fetch once per provider
     # lifetime. Marked private + non-init so dataclass equality stays
     # well-defined.
@@ -173,25 +180,25 @@ class TickflowProvider(MarketDataProvider):
     def financials_metrics(self, symbol: str) -> pd.DataFrame:
         """Pass-through to ``tf.financials.metrics(symbol)``."""
         self._require_ready(method="financials_metrics")
-        return self._sdk().financials.metrics(symbol, as_dataframe=True)
+        return self._sdk(require_token=True).financials.metrics(symbol, as_dataframe=True)
 
     def financials_income(self, symbol: str) -> pd.DataFrame:
         self._require_ready(method="financials_income")
-        return self._sdk().financials.income(symbol, as_dataframe=True)
+        return self._sdk(require_token=True).financials.income(symbol, as_dataframe=True)
 
     def financials_balance_sheet(self, symbol: str) -> pd.DataFrame:
         self._require_ready(method="financials_balance_sheet")
-        return self._sdk().financials.balance_sheet(symbol, as_dataframe=True)
+        return self._sdk(require_token=True).financials.balance_sheet(symbol, as_dataframe=True)
 
     def financials_cash_flow(self, symbol: str) -> pd.DataFrame:
         self._require_ready(method="financials_cash_flow")
-        return self._sdk().financials.cash_flow(symbol, as_dataframe=True)
+        return self._sdk(require_token=True).financials.cash_flow(symbol, as_dataframe=True)
 
     # ------------------------------------------------------------------
     # SDK lazy client + caches
     # ------------------------------------------------------------------
 
-    def _sdk(self):
+    def _sdk(self, *, require_token: bool = True):
         """Return the lazy ``tickflow.TickFlow`` client, creating it once."""
         if self._client is None:
             try:
@@ -203,21 +210,25 @@ class TickflowProvider(MarketDataProvider):
                 ) from exc
             token = os.environ.get(self.token_env)
             if not token:
-                # _require_ready already enforces this; defensive guard.
+                if not require_token and self.allow_free_daily and hasattr(TickFlow, "free"):
+                    self._client = TickFlow.free()
+                    return self._client
+                # _require_ready already enforces this for full endpoints; defensive guard.
                 raise ProviderUnavailable(
                     f"TickflowProvider client init blocked: {self.token_env} not set."
                 )
-            kwargs: dict[str, Any] = {"api_key": token}
-            if self.api_endpoint:
-                kwargs["base_url"] = self.api_endpoint
-            self._client = TickFlow(**kwargs)
+            else:
+                kwargs: dict[str, Any] = {"api_key": token}
+                if self.api_endpoint:
+                    kwargs["base_url"] = self.api_endpoint
+                self._client = TickFlow(**kwargs)
         return self._client
 
     def _ensure_all_instruments(self) -> list[dict]:
         """Cache ``tf.exchanges.get_instruments`` for SH/SZ/BJ, stocks only."""
         if self._all_instruments is not None:
             return self._all_instruments
-        tf = self._sdk()
+        tf = self._sdk(require_token=True)
         rows: list[dict] = []
         for ex in ("SH", "SZ", "BJ"):
             try:
@@ -235,7 +246,7 @@ class TickflowProvider(MarketDataProvider):
         """Walk SW1/SW2 universes once, invert to ``symbol → (sw1, sw2)``."""
         if self._industry_map is not None:
             return self._industry_map
-        tf = self._sdk()
+        tf = self._sdk(require_token=True)
         all_universes = tf.universes.list() or []
         mapping: dict[str, list[str | None]] = {}
         for uni in all_universes:
@@ -291,7 +302,7 @@ class TickflowProvider(MarketDataProvider):
         symbols = tuple(request.symbols or ())
         if not symbols:
             return pd.DataFrame()
-        tf = self._sdk()
+        tf = self._sdk(require_token=False)
         # tickflow returns the most recent `count` bars. Pull a generous
         # buffer then filter to the requested window.
         count = _DEFAULT_BAR_BUFFER
@@ -317,7 +328,7 @@ class TickflowProvider(MarketDataProvider):
         raw = self._call_tickflow_daily(request)
         if raw.empty:
             return raw
-        tf = self._sdk()
+        tf = self._sdk(require_token=True)
         adj_frames: list[pd.DataFrame] = []
         for sym, group in raw.groupby("symbol", sort=False):
             try:
@@ -412,6 +423,8 @@ class TickflowProvider(MarketDataProvider):
             raise ProviderUnavailable(
                 f"TickflowProvider.{method} blocked: allow_network=False."
             )
+        if method == "daily_ohlcv" and self.allow_free_daily:
+            return
         token = os.environ.get(self.token_env)
         if not token:
             raise ProviderUnavailable(

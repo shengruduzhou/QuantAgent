@@ -67,6 +67,12 @@ DEFAULT_MID_FEATURE_PATTERNS: tuple[str, ...] = (
     "momentum_20d", "momentum_60d", "ic_ir", "regime_state",
     "rsi", "macd", "alpha_10", "alpha_15", "alpha_20",
     "alpha_30", "alpha_50", "north_cumulative",
+    # v8.5 augmentation (2026-06-08): core30 evidence with real cross-section 2018-2026.
+    # Mid-horizon by nature (policy/质量/板块共振/老庄/趋势); financials go to LONG (roe/...
+    # already matched). The ensemble (short price-alpha + mid evidence + long financials)
+    # then learns the regime-conditional value the flat overlay only approximated.
+    "core_policy_score", "fundamental_quality_score", "sector_resonance_score",
+    "old_dealer_risk_score", "trend_strength_score",
 )
 
 DEFAULT_LONG_FEATURE_PATTERNS: tuple[str, ...] = (

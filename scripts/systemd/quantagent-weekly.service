@@ -1,0 +1,13 @@
+[Unit]
+Description=QuantAgent weekly research pipeline (产业链深度研报: 舆情全景 + 多产业链 + 因子∪产业链股池)
+ConditionPathExists=/home/shanhefu/QuantAgent
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanhefu/QuantAgent
+Environment=QUANTAGENT_LLM_PROVIDER=gemini
+Environment=QUANTAGENT_LLM_ENABLED=1
+Environment=QUANTAGENT_LLM_ALLOW_NETWORK=1
+Environment=QUANTAGENT_LLM_TIMEOUT_SECONDS=540
+ExecStart=/usr/bin/env bash /home/shanhefu/QuantAgent/scripts/run_weekly_pipeline.sh
+TimeoutStartSec=5400

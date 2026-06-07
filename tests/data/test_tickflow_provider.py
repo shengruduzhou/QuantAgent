@@ -128,11 +128,22 @@ def test_fail_loud_without_network():
         p.daily_ohlcv(ProviderRequest("2024-01-02", "2024-06-30", ("600519.SH",)))
 
 
-def test_fail_loud_without_token(monkeypatch):
+def test_daily_ohlcv_allows_free_client_without_token(monkeypatch):
+    monkeypatch.delenv("TICKFLOW_API_KEY", raising=False)
+    p = tp.TickflowProvider(allow_network=True)
+    p._client = _FakeTickFlow(api_key="")
+
+    result = p.daily_ohlcv(ProviderRequest("2024-01-02", "2024-01-31", ("600519.SH",)))
+
+    assert not result.frame.empty
+    assert result.source == "tickflow"
+
+
+def test_full_service_still_fails_without_token(monkeypatch):
     monkeypatch.delenv("TICKFLOW_API_KEY", raising=False)
     p = tp.TickflowProvider(allow_network=True)
     with pytest.raises(ProviderUnavailable, match="TICKFLOW_API_KEY"):
-        p.daily_ohlcv(ProviderRequest("2024-01-02", "2024-06-30", ("600519.SH",)))
+        p.stock_basic()
 
 
 def test_daily_ohlcv_canonical_columns(fake_provider):

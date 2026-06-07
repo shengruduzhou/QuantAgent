@@ -1,0 +1,12 @@
+[Unit]
+Description=Run QuantAgent weekly research pipeline (Sat 08:00 CST, after the trading week)
+Requires=quantagent-weekly.service
+
+[Timer]
+# 周六早 8 点出本周研报 (因子买卖周期偏中短, 周频再平衡; 产业链做事件性增配)
+OnCalendar=Sat *-*-* 08:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

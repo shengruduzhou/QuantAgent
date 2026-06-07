@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, Optional
 
 import pandas as pd
@@ -1144,7 +1146,11 @@ def _add_hybrid_pre_llm_scores(candidates: pd.DataFrame, weights: dict[str, floa
         values = pd.to_numeric(out[col], errors="coerce").fillna(0.0) if col in out.columns else 0.0
         out["factor_prior_score"] = out["factor_prior_score"] + float(weight) * values
     out["factor_prior_score"] = out["factor_prior_score"].clip(-1.0, 1.0)
-    out["factor_rank_score"] = (0.65 * out["model_rank_score"] + 0.35 * (out["factor_prior_score"] + 1.0) / 2.0).clip(0, 1)
+    # Factor-DOMINANT: the trained model alpha is the proven edge, so raw
+    # model_rank leads (validation: forcing evidence/policy demoted high-alpha
+    # winners out of the pool and roughly halved excess). The factor prior is
+    # only a light blend; sector/fundamental/do_t are tilts, old_dealer a gate.
+    out["factor_rank_score"] = (0.90 * out["model_rank_score"] + 0.10 * (out["factor_prior_score"] + 1.0) / 2.0).clip(0, 1)
     out["fundamental_rank_score"] = _fundamental_rank_for_hybrid(out)
     out["do_t_suitability_score"] = _do_t_score_for_hybrid(out)
     if "old_dealer_risk_score" in out.columns:
@@ -1152,12 +1158,12 @@ def _add_hybrid_pre_llm_scores(candidates: pd.DataFrame, weights: dict[str, floa
     else:
         out["old_dealer_risk_score"] = 0.0
     out["pre_llm_score"] = (
-        0.42 * out["factor_rank_score"]
-        + 0.20 * out["sector_pool_score"].clip(0, 1)
-        + 0.18 * out["fundamental_rank_score"]
-        + 0.10 * out["do_t_suitability_score"]
-        + 0.10 * (0.5 + out["sector_pool_signed_score"].clip(-0.5, 0.5))
-        - 0.20 * out["old_dealer_risk_score"]
+        0.72 * out["factor_rank_score"]
+        + 0.08 * out["sector_pool_score"].clip(0, 1)
+        + 0.08 * out["fundamental_rank_score"]
+        + 0.06 * out["do_t_suitability_score"]
+        + 0.06 * (0.5 + out["sector_pool_signed_score"].clip(-0.5, 0.5))
+        - 0.25 * out["old_dealer_risk_score"]
     ).clip(0, 1)
     return out
 
@@ -1410,13 +1416,18 @@ def _final_hybrid_stock_pool(
     merged["llm_stock_score"] = pd.to_numeric(merged["llm_stock_score"], errors="coerce").fillna(merged["pre_llm_score"]).clip(0, 1)
     merged["llm_confidence"] = pd.to_numeric(merged["llm_confidence"], errors="coerce").fillna(0.5).clip(0, 1)
     merged["sector_pool_signed_score"] = pd.to_numeric(merged["sector_pool_signed_score"], errors="coerce").fillna(0.0).clip(-1, 1)
+    # Factor-DOMINANT final blend: the trained-model alpha must lead so a
+    # high-conviction factor winner is never demoted out of the pool by a
+    # policy/sector tilt (validated: the old 0.34 factor weight halved excess).
+    # llm_stock_score adds the LLM's conviction; sector/fundamental/do_t are
+    # light tilts; old_dealer is a hard risk gate.
     merged["hybrid_score"] = (
-        0.34 * merged["factor_rank_score"]
-        + 0.25 * merged["llm_stock_score"]
-        + 0.18 * merged["sector_pool_score"].clip(0, 1)
-        + 0.14 * merged["fundamental_rank_score"]
-        + 0.09 * merged["do_t_suitability_score"]
-        - 0.20 * merged["old_dealer_risk_score"]
+        0.55 * merged["factor_rank_score"]
+        + 0.20 * merged["llm_stock_score"]
+        + 0.07 * merged["sector_pool_score"].clip(0, 1)
+        + 0.07 * merged["fundamental_rank_score"]
+        + 0.06 * merged["do_t_suitability_score"]
+        - 0.25 * merged["old_dealer_risk_score"]
         + 0.05 * merged["sector_pool_signed_score"].clip(-0.5, 0.5)
     ).clip(0, 1)
     merged["action_bucket"] = "core_watch"
@@ -1615,6 +1626,156 @@ def generate_risk_report_v8(
     Path(target).write_text(md, encoding="utf-8")
     typer.echo(f"wrote {target}")
     return target
+
+
+@app.command("generate-forward-research-report-v8")
+def generate_forward_research_report_v8(
+    as_of_date: Optional[str] = typer.Option(None, help="default: today"),
+    cadence: str = typer.Option("weekly", help="weekly | monthly"),
+    priorities_path: Path = typer.Option(Path("runtime/data/v7/raw/policy/llm_policy_priorities.parquet")),
+    hybrid_pool_path: Path = typer.Option(Path("runtime/reports/v8/llm_hybrid_combined/hybrid_stock_pool.parquet")),
+    sector_pool_path: Path = typer.Option(Path("runtime/reports/v8/llm_hybrid_combined/sector_pool.parquet")),
+    bond_path: Path = typer.Option(Path("runtime/data/v7/silver/bond_flows/bond_flows.parquet")),
+    top_picks: int = typer.Option(40, help="candidate stock rows retained in the forward report"),
+    output_dir: Path = typer.Option(Path("runtime/reports/monthly")),
+    no_llm: bool = typer.Option(False, "--no-llm/--with-llm"),
+):
+    """Generate a PIT forward-looking weekly/monthly research report.
+
+    The report declares its prediction window and writes a companion contract
+    JSON so later OOS review can match realised returns to the exact as-of run.
+    """
+    if cadence not in {"weekly", "monthly"}:
+        raise typer.BadParameter("cadence must be weekly or monthly")
+    cmd = [
+        sys.executable,
+        "scripts/monthly_research_report.py",
+        "--as-of",
+        as_of_date or pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "--cadence",
+        cadence,
+        "--priorities",
+        str(priorities_path),
+        "--hybrid-pool",
+        str(hybrid_pool_path),
+        "--sector-pool",
+        str(sector_pool_path),
+        "--bond",
+        str(bond_path),
+        "--top-picks",
+        str(top_picks),
+        "--out-dir",
+        str(output_dir),
+    ]
+    if no_llm:
+        cmd.append("--no-llm")
+    _run_script_command(cmd)
+    return output_dir
+
+
+@app.command("validate-chain-oos-v8")
+def validate_chain_oos_v8(
+    dates: str = typer.Option(
+        "2026-01-30,2026-02-27,2026-03-31,2026-04-30",
+        help="comma-separated month-end as-of dates",
+    ),
+    modes: str = typer.Option("real,nonews,scrambled"),
+    fwd_td: int = typer.Option(10),
+    n_factor: int = typer.Option(12),
+    n_chain: int = typer.Option(8),
+    regen: bool = typer.Option(False, "--regen/--no-regen"),
+):
+    """Run PIT chain-pool OOS validation with real/nonews/scrambled ablations."""
+    cmd = [
+        sys.executable,
+        "scripts/chain_oos_validation.py",
+        "--dates",
+        *_csv_arg(dates),
+        "--modes",
+        *_csv_arg(modes),
+        "--fwd-td",
+        str(fwd_td),
+        "--n-factor",
+        str(n_factor),
+        "--n-chain",
+        str(n_chain),
+    ]
+    if regen:
+        cmd.append("--regen")
+    _run_script_command(cmd)
+    return Path("runtime/reports/v8/chain_oos_validation.json")
+
+
+@app.command("run-mix-weight-experiment-v8")
+def run_mix_weight_experiment_v8(
+    dates: str = typer.Option("2026-01-30,2026-02-27,2026-03-31,2026-04-30"),
+    fwd_td: int = typer.Option(10),
+    n_factor: str = typer.Option("12,16,20,25"),
+    n_chain: str = typer.Option("0,6,8,10,12"),
+    weighting: str = typer.Option("equal,factor_tilt,mix"),
+    suffix: str = typer.Option(""),
+):
+    """Sweep factor/chain union sizes and weighting methods on PIT forward returns."""
+    cmd = [
+        sys.executable,
+        "scripts/mix_weight_experiment.py",
+        "--dates",
+        *_csv_arg(dates),
+        "--fwd-td",
+        str(fwd_td),
+        "--n-factor",
+        *_csv_arg(n_factor),
+        "--n-chain",
+        *_csv_arg(n_chain),
+        "--weighting",
+        *_csv_arg(weighting),
+    ]
+    if suffix:
+        cmd += ["--suffix", suffix]
+    _run_script_command(cmd)
+    return Path("runtime/reports/v8/mix_weight_experiment.json")
+
+
+@app.command("run-factor-regime-backtest-v8")
+def run_factor_regime_backtest_v8(
+    n: int = typer.Option(30, help="factor-core daily top-N"),
+    n_factor: int = typer.Option(12),
+    n_chain: int = typer.Option(8),
+    dates: str = typer.Option("2026-01-30,2026-02-27,2026-03-31,2026-04-30"),
+    skip_bear: bool = typer.Option(False, "--skip-bear/--with-bear"),
+    skip_union: bool = typer.Option(False, "--skip-union/--with-union"),
+):
+    """Run strict factor-core and factor∪LLM-chain overlay backtests by regime."""
+    cmd = [
+        sys.executable,
+        "scripts/factor_regime_backtest.py",
+        "--n",
+        str(n),
+        "--n-factor",
+        str(n_factor),
+        "--n-chain",
+        str(n_chain),
+        "--dates",
+        *_csv_arg(dates),
+    ]
+    if skip_bear:
+        cmd.append("--skip-bear")
+    if skip_union:
+        cmd.append("--skip-union")
+    _run_script_command(cmd)
+    return Path("runtime/reports/v8/factor_regime_backtest.json")
+
+
+def _csv_arg(value: str) -> list[str]:
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def _run_script_command(cmd: list[str]) -> None:
+    typer.echo("[run] " + " ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise typer.Exit(code=exc.returncode) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2028,14 +2189,18 @@ __all__ = [
     "build_target_weights_v8",
     "build_technical_factors_v8",
     "generate_daily_decision_report_v8",
+    "generate_forward_research_report_v8",
     "generate_risk_report_v8",
     "ingest_bank_financials_v8",
     "ingest_bond_flow_v8",
     "ingest_policy_evidence_v8",
     "optimize_ga_weights_v8",
+    "run_factor_regime_backtest_v8",
+    "run_mix_weight_experiment_v8",
     "run_paper_trading_v8",
     "run_strict_a_share_backtest_v8",
     "train_horizon_models_v8",
     "train_v8_pipeline",
     "validate_capital_flow_thesis_v8",
+    "validate_chain_oos_v8",
 ]
