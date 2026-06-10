@@ -58,11 +58,12 @@ def _run(name: str, tw: pd.DataFrame, panel: pd.DataFrame, sector: pd.DataFrame)
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--predictions", default=PRED, help="Prediction parquet with trade_date, symbol, alpha_score")
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--start", default="2024-08-01")
     args = ap.parse_args()
 
-    preds = pd.read_parquet(PRED)
+    preds = pd.read_parquet(args.predictions)
     preds["trade_date"] = pd.to_datetime(preds["trade_date"])
     preds = preds[preds["trade_date"] >= pd.Timestamp(args.start)]
     core = pd.read_parquet(CORE, columns=["trade_date", "symbol", *EVID])
@@ -78,8 +79,11 @@ def main() -> int:
         overlay = overlay + W.get(c, 0.0) * z
     df["overlay_score"] = overlay
 
-    panel = pd.read_parquet(PANEL, columns=["symbol", "trade_date", "open", "high", "low",
-                                            "close", "volume", "amount", "available_at"])
+    panel_columns = [
+        "symbol", "trade_date", "open", "high", "low", "close", "volume", "amount", "available_at",
+        "is_suspended", "is_st", "is_limit_up", "is_limit_down",
+    ]
+    panel = pd.read_parquet(PANEL, columns=panel_columns)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     panel = panel[panel["trade_date"] >= pd.Timestamp(args.start) - pd.Timedelta(days=5)]
     sector = pd.read_parquet(SECTOR)
@@ -91,7 +95,7 @@ def main() -> int:
     # equal-weight all-A benchmark on the same trade dates
     dates = sorted(df["trade_date"].unique())
     px = panel[panel["trade_date"].isin(dates)].pivot_table(index="trade_date", columns="symbol", values="close")
-    daily_ret = px.pct_change().mean(axis=1).dropna()
+    daily_ret = px.pct_change(fill_method=None).mean(axis=1).dropna()
     bench_total = float((1 + daily_ret).prod() - 1)
     yrs = max(1e-9, (px.index.max() - px.index.min()).days / 365.25)
     bench_ann = float((1 + bench_total) ** (1 / yrs) - 1)

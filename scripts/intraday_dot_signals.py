@@ -87,9 +87,15 @@ def main() -> int:
         raise SystemExit("no features computed")
     guarded = microstructure_guard(feats)
 
+    # executable 做T action per stock (CAUSAL FSM on bars-so-far; held pool → in_position=True)
+    from quantagent.execution.intraday_dot_strategy import live_dot_action
+    act = {s: live_dot_action(b, symbol=s, in_position=True) for s, b in bars_by_symbol.items()}
+    guarded["dot_exec"] = guarded["symbol"].map(lambda s: act.get(s, {}).get("action", "观望"))
+    guarded["dot_level"] = guarded["symbol"].map(lambda s: act.get(s, {}).get("level"))
+
     cols = ["symbol", "trade_date", "last", "vwap", "intraday_range_pos", "net_buy_pressure",
-            "open_auction_gap", "spike_minutes", "dot_bias", "buy_below", "sell_above",
-            "guard_action", "sweep_dump_risk", "pressure_sell_risk"]
+            "open_auction_gap", "dot_exec", "dot_level", "dot_bias", "buy_below", "sell_above",
+            "guard_action", "sweep_dump_risk"]
     out = guarded[[c for c in cols if c in guarded.columns]].sort_values(
         ["guard_action", "dot_bias"], ascending=[True, True])
 

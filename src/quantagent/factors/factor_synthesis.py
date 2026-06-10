@@ -373,10 +373,24 @@ def synthesize_factors(
     """
     cfg = config or SymbolicGAConfig()
     rng = random.Random(cfg.seed)
+    panel = panel.copy()
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
     if labels is not None and not labels.empty:
+        labels = labels.copy()
+        labels["trade_date"] = pd.to_datetime(labels["trade_date"], errors="coerce")
+        if cfg.label_column in labels.columns:
+            labels = labels[labels[cfg.label_column].notna()]
+        if cfg.fitness_sample_dates and labels["trade_date"].nunique() > cfg.fitness_sample_dates:
+            sampled_dates = set(rng.sample(list(labels["trade_date"].dropna().unique()), cfg.fitness_sample_dates))
+            labels = labels[labels["trade_date"].isin(sampled_dates)]
+            panel = panel[panel["trade_date"].isin(sampled_dates)]
+        if cfg.fitness_sample_symbols and labels["symbol"].nunique() > cfg.fitness_sample_symbols:
+            sampled_symbols = set(rng.sample(list(labels["symbol"].dropna().astype(str).unique()), cfg.fitness_sample_symbols))
+            labels = labels[labels["symbol"].astype(str).isin(sampled_symbols)]
+            panel = panel[panel["symbol"].astype(str).isin(sampled_symbols)]
         merged = panel.merge(labels, on=["symbol", "trade_date"], how="inner")
     else:
-        merged = panel.copy()
+        merged = panel
     if cfg.label_column not in merged.columns:
         raise KeyError(
             f"synthesize_factors needs label column '{cfg.label_column}' in panel or labels"

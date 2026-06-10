@@ -134,6 +134,8 @@ def synthesize_factors_v7(
     max_depth: int = typer.Option(4, "--max-depth"),
     validation_fraction: float = typer.Option(0.25, "--validation-fraction"),
     min_validation_rank_ic: float = typer.Option(0.0, "--min-validation-rank-ic"),
+    fitness_sample_dates: int = typer.Option(400, "--fitness-sample-dates", help="0 disables date subsampling."),
+    fitness_sample_symbols: int = typer.Option(500, "--fitness-sample-symbols", help="0 disables symbol subsampling."),
     seed: int = typer.Option(1729, "--seed"),
 ) -> None:
     """Discover GA symbolic factors in the safe expression DSL.
@@ -157,6 +159,8 @@ def synthesize_factors_v7(
             label_column=label_column,
             validation_fraction=validation_fraction,
             min_validation_rank_ic=min_validation_rank_ic,
+            fitness_sample_dates=fitness_sample_dates,
+            fitness_sample_symbols=fitness_sample_symbols,
             seed=seed,
         ),
     )
@@ -178,6 +182,8 @@ def synthesize_factors_v7(
                         label_column=label_column,
                         validation_fraction=validation_fraction,
                         min_validation_rank_ic=min_validation_rank_ic,
+                        fitness_sample_dates=fitness_sample_dates,
+                        fitness_sample_symbols=fitness_sample_symbols,
                         seed=seed,
                     )
                 ),

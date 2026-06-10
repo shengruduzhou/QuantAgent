@@ -169,3 +169,23 @@ def test_synthesize_factors_rejects_constant_only_expression():
     assert fitness == -1.0
     assert raw_ic == 0.0
     assert finite_ratio == 0.0
+
+
+def test_synthesize_factors_normalizes_trade_date_before_label_merge():
+    panel = _make_panel_with_momentum_signal(n_symbols=4, n_days=80)
+    labels = panel[["symbol", "trade_date", "forward_return_5d"]].copy()
+    panel = panel.drop(columns=["forward_return_5d"])
+    panel["trade_date"] = panel["trade_date"].dt.strftime("%Y-%m-%d")
+    cfg = SymbolicGAConfig(
+        population=8,
+        generations=1,
+        top_k=2,
+        label_column="forward_return_5d",
+        fitness_sample_dates=30,
+        fitness_sample_symbols=4,
+        seed=99,
+    )
+
+    result = synthesize_factors(panel, labels=labels, config=cfg)
+
+    assert result.history is not None
