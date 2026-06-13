@@ -76,3 +76,25 @@ Notes:
 - For a **0点 (midnight)** daily refresh instead of pre-open, set `OnCalendar=*-*-* 00:00:00` in `quantagent-daily.timer`.
 - LLM env (`QUANTAGENT_LLM_*`, `google_API_KEY`) is read from the repo `.env`; the units also set the LLM vars explicitly.
 - Pipelines are research-only and never emit live orders.
+
+## Forward daily loop (post-close inference + A/B/C books + 反T watchlist)
+
+```bash
+cp quantagent-forward.service quantagent-forward.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now quantagent-forward.timer
+# verify
+systemctl --user list-timers | grep forward
+# logs land in runtime/logs/forward/forward_<date>.log
+```
+
+Before first enable, run the one-time pipeline validation:
+
+```bash
+AI_quant_venv/bin/python3 scripts/forward_daily_inference.py --validate
+# 2026-06-12 measured state: mean spearman ≈ 0.71 vs the training-run
+# composite (NOT ≥0.95). Known cause: 11 alpha101 columns drifted in the
+# v8.2 factor refactor after the dataset build — see the docstring of
+# forward_daily_inference.py. Books keep rolling under this caveat; full
+# fidelity needs the factor fix or a v8.9 retrain on rebuilt features.
+```

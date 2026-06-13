@@ -5,7 +5,7 @@ Pins the behaviour:
 * ``dates_per_step`` config controls how many trade dates are grouped
   into a single forward/backward step
 * rank-loss inside a multi-date chunk is computed per-date (no cross-date
-  argsort, which would leak future cross-sectional ranking info)
+  pooling, which would leak cross-date cross-sectional comparisons)
 
 These tests run on CPU to keep CI environments unburdened. They use a
 small synthetic dataset and a single epoch.
@@ -111,28 +111,29 @@ def test_dates_per_step_one_matches_legacy_per_date_loop(tmp_path):
 def test_per_date_rank_loss_does_not_pool_across_dates(monkeypatch, tmp_path):
     """Verify the multi-date branch computes rank loss separately per date.
 
-    Strategy: monkeypatch ``torch.Tensor.argsort`` to count how many times
-    it is invoked during the multi-date training step. If rank loss were
-    pooled across dates we'd see two ``argsort`` calls per step (preds /
-    labels); if it is per-date, we should see ``2 * dates_per_step``
-    calls per step.
+    Strategy: monkeypatch ``_softmax_listwise_loss`` (the rank-loss op) to
+    record how many times it is invoked and with how many rows per call. If
+    rank loss were pooled across dates we'd see ONE call per step covering
+    the whole chunk (``dates_per_step * n_symbols`` rows); the per-date
+    branch instead makes ``dates_per_step`` calls of ``n_symbols`` rows each.
     """
-    import torch
+    import quantagent.training.ft_transformer_trainer as ft_mod
     from quantagent.training.ft_transformer_trainer import (
         FTTransformerTrainer,
         FTTransformerTrainerConfig,
     )
 
-    data = _synthetic_dataset(n_dates=4, n_symbols=20)
+    n_symbols = 20
+    data = _synthetic_dataset(n_dates=4, n_symbols=n_symbols)
     dates_per_step = 4
-    call_count = {"argsort": 0}
-    real_argsort = torch.Tensor.argsort
+    call_sizes: list[int] = []
+    real_loss = ft_mod._softmax_listwise_loss
 
-    def counting_argsort(self, *args, **kwargs):  # type: ignore[no-redef]
-        call_count["argsort"] += 1
-        return real_argsort(self, *args, **kwargs)
+    def recording_loss(preds, targets, **kwargs):  # type: ignore[no-redef]
+        call_sizes.append(int(preds.shape[0]))
+        return real_loss(preds, targets, **kwargs)
 
-    monkeypatch.setattr(torch.Tensor, "argsort", counting_argsort)
+    monkeypatch.setattr(ft_mod, "_softmax_listwise_loss", recording_loss)
 
     cfg = FTTransformerTrainerConfig(
         horizons=(1,),
@@ -152,8 +153,13 @@ def test_per_date_rank_loss_does_not_pool_across_dates(monkeypatch, tmp_path):
     )
     FTTransformerTrainer(cfg).fit_and_save(data)
     # 4 dates, dates_per_step=4 → 1 chunk per epoch.
-    # Per-date branch invokes argsort twice per date (preds + targets) = 2*4 = 8 calls minimum.
-    # Pooled branch would only invoke argsort twice total.
-    assert call_count["argsort"] >= 2 * dates_per_step, (
-        f"expected ≥{2 * dates_per_step} per-date argsort calls, got {call_count['argsort']}"
+    # Per-date branch invokes the rank loss once per date = 4 calls minimum,
+    # each over exactly one date's cross-section (n_symbols rows).
+    # Pooled branch would invoke it once with the whole 80-row chunk.
+    assert len(call_sizes) >= dates_per_step, (
+        f"expected ≥{dates_per_step} per-date rank-loss calls, got {len(call_sizes)}"
+    )
+    assert all(size == n_symbols for size in call_sizes), (
+        f"rank loss pooled rows across dates: call sizes {call_sizes} "
+        f"(each call must cover exactly one date's {n_symbols}-row cross-section)"
     )

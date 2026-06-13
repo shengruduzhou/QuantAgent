@@ -114,6 +114,8 @@ def main() -> int:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--early-stopping-patience", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--feature-policy", default="auto",
+                        help="auto | core30 | judgment (measured best-horizon routing from factor_full_judgment)")
     args = parser.parse_args()
 
     common = [
@@ -137,6 +139,7 @@ def main() -> int:
         "--weight-decay", str(args.weight_decay),
         "--early-stopping-patience", str(args.early_stopping_patience),
         "--learning-rate", str(args.learning_rate),
+        "--feature-policy", str(args.feature_policy),
         "--require-gpu",
     ]
     common += ["--label-norm" if str(args.label_norm) == "1" else "--no-label-norm"]

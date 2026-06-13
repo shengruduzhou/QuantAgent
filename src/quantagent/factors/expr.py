@@ -222,14 +222,22 @@ class TsRank(Expr):
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         values = self.expr.evaluate(frame)
         sorted_frame = _ensure_sorted(frame)
-        ordered_values = values.reindex(sorted_frame.index)
-        grouped = ordered_values.groupby(sorted_frame["symbol"].to_numpy(), sort=False)
-        ranked = grouped.rolling(window=self.window, min_periods=self.window).apply(
-            lambda block: pd.Series(block).rank(method="average").iloc[-1] / len(block),
-            raw=True,
-        )
-        ranked = ranked.reset_index(level=0, drop=True)
-        return ranked.reindex(values.index)
+        ordered = values.reindex(sorted_frame.index).to_numpy(dtype=float)
+        out = np.full(len(ordered), np.nan)
+        window = int(self.window)
+        for start, stop in _symbol_blocks(sorted_frame["symbol"].to_numpy()):
+            block = ordered[start:stop]
+            if len(block) < window:
+                continue
+            views = np.lib.stride_tricks.sliding_window_view(block, window)
+            last = views[:, -1]
+            with np.errstate(invalid="ignore"):
+                less = (views < last[:, None]).sum(axis=1)
+                equal = (views == last[:, None]).sum(axis=1)
+            ranks = (less + (equal + 1.0) / 2.0) / window
+            ranks[np.isnan(views).any(axis=1)] = np.nan
+            out[start + window - 1 : stop] = ranks
+        return pd.Series(out, index=sorted_frame.index).reindex(values.index)
 
 
 @dataclass(frozen=True)
@@ -257,6 +265,101 @@ class Returns(Expr):
         current = self.expr.evaluate(frame)
         delayed = Delay(self.expr, self.periods).evaluate(frame)
         return (current / delayed.replace(0.0, np.nan)) - 1.0
+
+
+@dataclass(frozen=True)
+class TsCorr(Expr):
+    """Rolling Pearson correlation of two expressions per symbol."""
+
+    left: Expr
+    right: Expr
+    window: int
+
+    def evaluate(self, frame: pd.DataFrame) -> pd.Series:
+        left_values = self.left.evaluate(frame)
+        right_values = self.right.evaluate(frame)
+        sorted_frame = _ensure_sorted(frame)
+        data = pd.DataFrame(
+            {
+                "l": left_values.reindex(sorted_frame.index).to_numpy(dtype=float),
+                "r": right_values.reindex(sorted_frame.index).to_numpy(dtype=float),
+            },
+            index=sorted_frame.index,
+        )
+        out = pd.Series(np.nan, index=sorted_frame.index, dtype=float)
+        for _, group in data.groupby(sorted_frame["symbol"].to_numpy(), sort=False):
+            out.loc[group.index] = (
+                group["l"].rolling(self.window, min_periods=self.window).corr(group["r"])
+            )
+        return out.replace([np.inf, -np.inf], np.nan).reindex(left_values.index)
+
+
+@dataclass(frozen=True)
+class TsCov(Expr):
+    """Rolling covariance of two expressions per symbol."""
+
+    left: Expr
+    right: Expr
+    window: int
+
+    def evaluate(self, frame: pd.DataFrame) -> pd.Series:
+        left_values = self.left.evaluate(frame)
+        right_values = self.right.evaluate(frame)
+        sorted_frame = _ensure_sorted(frame)
+        data = pd.DataFrame(
+            {
+                "l": left_values.reindex(sorted_frame.index).to_numpy(dtype=float),
+                "r": right_values.reindex(sorted_frame.index).to_numpy(dtype=float),
+            },
+            index=sorted_frame.index,
+        )
+        out = pd.Series(np.nan, index=sorted_frame.index, dtype=float)
+        for _, group in data.groupby(sorted_frame["symbol"].to_numpy(), sort=False):
+            out.loc[group.index] = (
+                group["l"].rolling(self.window, min_periods=self.window).cov(group["r"])
+            )
+        return out.replace([np.inf, -np.inf], np.nan).reindex(left_values.index)
+
+
+@dataclass(frozen=True)
+class DecayLinear(Expr):
+    """Linear-decay weighted rolling mean (largest weight on the newest bar)."""
+
+    expr: Expr
+    window: int
+
+    def evaluate(self, frame: pd.DataFrame) -> pd.Series:
+        values = self.expr.evaluate(frame)
+        sorted_frame = _ensure_sorted(frame)
+        ordered = values.reindex(sorted_frame.index).to_numpy(dtype=float)
+        window = int(self.window)
+        weights = np.arange(1.0, window + 1.0)
+        weights = weights / weights.sum()
+        kernel = weights[::-1]
+        out = np.full(len(ordered), np.nan)
+        for start, stop in _symbol_blocks(sorted_frame["symbol"].to_numpy()):
+            block = ordered[start:stop]
+            if len(block) < window:
+                continue
+            conv = np.convolve(np.nan_to_num(block), kernel, mode="valid")
+            has_nan = np.convolve(np.isnan(block).astype(float), np.ones(window), mode="valid") > 0
+            conv[has_nan] = np.nan
+            out[start + window - 1 : stop] = conv
+        return pd.Series(out, index=sorted_frame.index).reindex(values.index)
+
+
+@dataclass(frozen=True)
+class CsZscore(Expr):
+    """Cross-sectional z-score per trade_date."""
+
+    expr: Expr
+
+    def evaluate(self, frame: pd.DataFrame) -> pd.Series:
+        values = self.expr.evaluate(frame)
+        grouped = values.groupby(frame["trade_date"], sort=False)
+        mean = grouped.transform("mean")
+        std = grouped.transform("std").replace(0.0, np.nan)
+        return (values - mean) / std
 
 
 @dataclass(frozen=True)
@@ -298,6 +401,18 @@ def _ensure_sorted(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.assign(
         trade_date=pd.to_datetime(frame["trade_date"], errors="coerce")
     ).sort_values(["symbol", "trade_date"], kind="mergesort")
+
+
+def _symbol_blocks(symbols: np.ndarray):
+    """Yield (start, stop) index ranges of contiguous equal-symbol runs."""
+    n = len(symbols)
+    if n == 0:
+        return
+    start = 0
+    for i in range(1, n + 1):
+        if i == n or symbols[i] != symbols[start]:
+            yield start, i
+            start = i
 
 
 # Conventional column aliases for ergonomic factor authoring.
@@ -420,45 +535,42 @@ def build_factor_manifest(registry: FactorRegistry | None = None, backend: str =
     return entries
 
 
+def expr_children(expr: Expr) -> list[Expr]:
+    """Return the direct Expr-valued children of a node (generic over the DSL)."""
+    from dataclasses import fields, is_dataclass
+
+    if not is_dataclass(expr):
+        return []
+    return [
+        value
+        for f in fields(expr)
+        if isinstance((value := getattr(expr, f.name)), Expr)
+    ]
+
+
 def _expr_required_columns(expr: Expr) -> set[str]:
     if isinstance(expr, (Column, OptionalColumn)):
         return {expr.name}
-    if isinstance(expr, (Constant,)):
-        return set()
-    if isinstance(expr, (Add, Sub, Mul)):
-        return _expr_required_columns(expr.left) | _expr_required_columns(expr.right)
-    if isinstance(expr, Div):
-        return _expr_required_columns(expr.numerator) | _expr_required_columns(expr.denominator)
-    if isinstance(expr, (Delay, Delta, Returns, Abs, Sign, Log, Rank, TsRank, _RollingReduction)):
-        return _expr_required_columns(expr.expr)
-    return set()
+    out: set[str] = set()
+    for child in expr_children(expr):
+        out |= _expr_required_columns(child)
+    return out
 
 
 def _expr_lookback(expr: Expr) -> int:
+    own = 0
     if isinstance(expr, (Delay, Delta, Returns)):
-        return int(expr.periods) + _expr_lookback(expr.expr)
-    if isinstance(expr, (TsRank, _RollingReduction)):
-        return int(expr.window) + _expr_lookback(expr.expr)
-    if isinstance(expr, (Add, Sub, Mul)):
-        return max(_expr_lookback(expr.left), _expr_lookback(expr.right))
-    if isinstance(expr, Div):
-        return max(_expr_lookback(expr.numerator), _expr_lookback(expr.denominator))
-    if isinstance(expr, (Abs, Sign, Log, Rank)):
-        return _expr_lookback(expr.expr)
-    return 0
+        own = int(expr.periods)
+    elif isinstance(expr, (TsRank, _RollingReduction, TsCorr, TsCov, DecayLinear)):
+        own = int(expr.window)
+    child_max = max((_expr_lookback(child) for child in expr_children(expr)), default=0)
+    return own + child_max
 
 
 def _expr_uses(expr: Expr, cls: type[Expr]) -> bool:
     if isinstance(expr, cls):
         return True
-    children: list[Expr] = []
-    if isinstance(expr, (Add, Sub, Mul)):
-        children = [expr.left, expr.right]
-    elif isinstance(expr, Div):
-        children = [expr.numerator, expr.denominator]
-    elif isinstance(expr, (Delay, Delta, Returns, Abs, Sign, Log, Rank, TsRank, _RollingReduction)):
-        children = [expr.expr]
-    return any(_expr_uses(child, cls) for child in children)
+    return any(_expr_uses(child, cls) for child in expr_children(expr))
 
 
 def evaluate_expr(expr: Expr, frame: pd.DataFrame, backend: str = "pandas") -> pd.Series:
@@ -525,10 +637,10 @@ def _polars_value_frame(expr: Expr, pl_frame, pl):
             "min": pl.col("factor_value").rolling_min(window_size=expr.window, min_periods=expr.window),
         }[expr.op]
         return _polars_grouped(expr.expr, pl_frame, pl, rolling_expr)
-    if isinstance(expr, TsRank):
+    if isinstance(expr, (TsRank, TsCorr, TsCov, DecayLinear, CsZscore)):
         # Keep the backend surface deterministic across Polars versions;
-        # TsRank is evaluated with the pandas reference while other core
-        # rolling reductions use native Polars expressions.
+        # these nodes are evaluated with the pandas reference while other
+        # core rolling reductions use native Polars expressions.
         values = expr.evaluate(pl_frame.to_pandas())
         return pl.DataFrame({"__row_id": pl_frame["__row_id"], "factor_value": values.to_numpy(dtype=float)})
     if isinstance(expr, Rank):
@@ -691,11 +803,16 @@ __all__ = [
     "TsMax",
     "TsMin",
     "TsRank",
+    "TsCorr",
+    "TsCov",
+    "DecayLinear",
+    "CsZscore",
     "Rank",
     "Returns",
     "Abs",
     "Sign",
     "Log",
+    "expr_children",
     "Open",
     "High",
     "Low",

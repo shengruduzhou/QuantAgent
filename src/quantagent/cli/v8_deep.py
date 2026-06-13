@@ -26,6 +26,7 @@ under test.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -98,6 +99,45 @@ def _is_selection_feature(name: str) -> bool:
     )
 
 
+_JUDGMENT_ASSIGNMENT_PATH = os.getenv(
+    "QUANTAGENT_HORIZON_ASSIGNMENT",
+    "runtime/reports/v8/factor_full_judgment/horizon_factor_assignment.json",
+)
+_JUDGMENT_HORIZON_KEY = {
+    "short_5d": "short_5d",
+    "mid_5d_30d": "mid_20d",
+    "long_30d_120d": "long_60d",
+}
+
+
+def _judgment_factors(horizon_class: str) -> list[str] | None:
+    """Measured-best-horizon factor routing from the unified factor judgment.
+
+    Unlike the ``auto`` policy (which buckets by alpha NUMBER and silently
+    ignores gtja*/synth_*/llm_* columns), this reads
+    ``horizon_factor_assignment.json`` produced by
+    ``scripts/factor_full_judgment.py`` and routes every accepted factor to
+    the horizon where its |ICIR| is actually strongest.
+    """
+    path = Path(_JUDGMENT_ASSIGNMENT_PATH)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    key = _JUDGMENT_HORIZON_KEY.get(horizon_class)
+    items = payload.get(key, []) if key else []
+    names = [str(item.get("factor")) for item in items if item.get("factor")]
+    # The assignment lists are sorted by |ICIR| desc; an optional cap keeps
+    # the strongest head when the full list blows GPU memory (long_60d has
+    # 150+ factors, many redundant size proxies).
+    max_factors = int(os.getenv("QUANTAGENT_JUDGMENT_MAX_FACTORS", "0") or 0)
+    if max_factors > 0:
+        names = names[:max_factors]
+    return names or None
+
+
 def _candidate_feature_names(
     all_columns: list[str],
     horizon_class: str,
@@ -114,6 +154,27 @@ def _candidate_feature_names(
         return core_feature_columns(all_columns)
     candidate = [c for c in all_columns
                  if c not in _FEATURE_COMMON_DROP and c not in _FEATURE_LABEL_DROP]
+    if feature_policy == "judgment":
+        judged = _judgment_factors(horizon_class)
+        if judged is None:
+            raise RuntimeError(
+                "--feature-policy judgment needs the factor judgment assignment at "
+                f"{_JUDGMENT_ASSIGNMENT_PATH} (run scripts/factor_full_judgment.py first)"
+            )
+        judged_set = set(judged)
+        base = {
+            "short_5d": ("return_1d", "momentum_5d", "intraday_return",
+                         "volatility_20d", "volume_mean_20d", "amount_mean_20d"),
+            "mid_5d_30d": ("momentum_20d", "volatility_20d", "amount_mean_20d", "volume_mean_20d"),
+            "long_30d_120d": ("momentum_20d", "amount_mean_20d"),
+        }[horizon_class]
+        return [c for c in candidate if (
+            c in judged_set
+            or c in base
+            or (horizon_class == "long_30d_120d" and c.startswith("idx_"))
+            or c in _INTRADAY_FEATURES
+            or _is_selection_feature(c)
+        )]
     if horizon_class == "short_5d":
         return [c for c in candidate if (
             c.startswith("alpha") and c <= "alpha060"

@@ -189,3 +189,79 @@ def test_synthesize_factors_normalizes_trade_date_before_label_merge():
     result = synthesize_factors(panel, labels=labels, config=cfg)
 
     assert result.history is not None
+
+
+def test_labels_with_overlapping_ohlcv_columns_do_not_kill_population():
+    """Regression: full training datasets carry their own OHLCV columns; the
+    merge must not suffix the panel's market columns (which made every tree
+    raise KeyError and every fitness -1.0)."""
+    panel = _make_panel_with_momentum_signal(n_symbols=5, n_days=120)
+    labels = panel[["symbol", "trade_date", "forward_return_5d"]].copy()
+    # Simulate a training-dataset labels file that also contains OHLCV.
+    labels["close"] = 1.0
+    labels["volume"] = 2.0
+    labels["open"] = 3.0
+    panel_no_label = panel.drop(columns=["forward_return_5d"])
+    cfg = SymbolicGAConfig(
+        population=12,
+        generations=1,
+        max_depth=3,
+        fitness_sample_dates=0,
+        fitness_sample_symbols=0,
+        seed=3,
+    )
+    result = synthesize_factors(panel_no_label, labels=labels, config=cfg)
+    assert (result.history["best_fitness"] > -1.0).any()
+
+
+def test_new_dsl_operators_evaluate_and_roundtrip():
+    from quantagent.factors.factor_synthesis import parse_expression
+
+    panel = _make_panel_with_momentum_signal(n_symbols=4, n_days=80)
+    candidates = [
+        E.TsCorr(E.Rank(E.Close), E.Rank(E.Volume), 10),
+        E.TsCov(E.Returns(E.Close, 1), E.Returns(E.Volume, 1), 10),
+        E.DecayLinear(E.Delta(E.Close, 3), 10),
+        E.CsZscore(E.Div(E.Close, E.TsMean(E.Close, 20))),
+    ]
+    for tree in candidates:
+        values = tree.evaluate(panel)
+        assert values.notna().sum() > 0, repr(tree)
+        rebuilt = parse_expression(repr(tree))
+        pd.testing.assert_series_equal(
+            rebuilt.evaluate(panel), values, check_names=False
+        )
+
+
+def test_decay_linear_weights_recent_bars_most():
+    rows = []
+    for i, d in enumerate(pd.date_range("2024-01-01", periods=10, freq="B")):
+        rows.append({"symbol": "S", "trade_date": d, "open": 1.0, "high": 1.0,
+                     "low": 1.0, "close": float(i), "volume": 1.0, "amount": 1.0})
+    frame = pd.DataFrame(rows)
+    out = E.DecayLinear(E.Close, 3).evaluate(frame)
+    # window [1,2,3] with ascending weights 1/6,2/6,3/6 over closes 1,2,3 -> (1*1+2*2+3*3)/6
+    expected = (1 * 1 + 2 * 2 + 3 * 3) / 6.0
+    assert abs(out.iloc[3] - expected) < 1e-9
+
+
+def test_ts_rank_matches_pandas_reference():
+    rng = np.random.default_rng(0)
+    rows = []
+    for sym in ("A", "B"):
+        for i, d in enumerate(pd.date_range("2024-01-01", periods=40, freq="B")):
+            rows.append({"symbol": sym, "trade_date": d, "open": 1.0, "high": 1.0,
+                         "low": 1.0, "close": float(rng.normal()), "volume": 1.0, "amount": 1.0})
+    frame = pd.DataFrame(rows).sample(frac=1.0, random_state=1).reset_index(drop=True)
+    fast = E.TsRank(E.Close, 10).evaluate(frame)
+    ref = (
+        frame.assign(trade_date=pd.to_datetime(frame["trade_date"]))
+        .sort_values(["symbol", "trade_date"])
+        .groupby("symbol")["close"]
+        .rolling(10, min_periods=10)
+        .apply(lambda b: pd.Series(b).rank(method="average").iloc[-1] / len(b), raw=True)
+        .reset_index(level=0, drop=True)
+    )
+    aligned = fast.reindex(ref.index)
+    mask = ref.notna()
+    assert np.allclose(aligned[mask], ref[mask])

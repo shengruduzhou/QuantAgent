@@ -74,6 +74,19 @@ def main() -> int:
     df = pd.read_parquet(AUG)
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     df = df[(df["trade_date"] >= pd.Timestamp(args.start)) & (df["trade_date"] <= pd.Timestamp(args.end))].copy()
+    # Tradability flags must always come from the silver panel: gold inputs
+    # have carried stale all-False flags before (2026-06-11), and passing
+    # them through silently re-contaminates every downstream dataset.
+    flags = pd.read_parquet(
+        "runtime/data/v7/silver/market_panel/market_panel.parquet",
+        columns=["symbol", "trade_date", "is_st", "is_suspended", "is_limit_up", "is_limit_down"],
+    )
+    flags["trade_date"] = pd.to_datetime(flags["trade_date"])
+    df = df.drop(columns=[c for c in ("is_st", "is_suspended", "is_limit_up", "is_limit_down") if c in df.columns])
+    df = df.merge(flags, on=["symbol", "trade_date"], how="left")
+    for c in ("is_st", "is_suspended", "is_limit_up", "is_limit_down"):
+        df[c] = df[c].astype("boolean").fillna(False).astype(bool)
+    del flags
     factors = _factor_cols(df)
 
     redundant: set[str] = set()

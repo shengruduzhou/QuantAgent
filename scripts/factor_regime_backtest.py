@@ -38,7 +38,10 @@ def _code6(s):
 
 
 def _load_panel(start):
-    p = pd.read_parquet(PANEL, columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount", "available_at"])
+    # Tradability flags MUST be loaded: without them the simulator silently
+    # fills limit-up buys / suspended trades and reports phantom alpha.
+    p = pd.read_parquet(PANEL, columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
+                                        "available_at", "is_suspended", "is_st", "is_limit_up", "is_limit_down"])
     p["trade_date"] = pd.to_datetime(p["trade_date"])
     return p[p["trade_date"] >= pd.Timestamp(start) - pd.Timedelta(days=10)].reset_index(drop=True)
 

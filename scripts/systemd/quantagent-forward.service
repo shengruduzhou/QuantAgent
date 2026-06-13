@@ -1,0 +1,9 @@
+[Unit]
+Description=QuantAgent forward daily loop (panel append + v8.8 inference + hold-band A/B books + 反T watchlist + ledger)
+ConditionPathExists=/home/shanhefu/QuantAgent
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanhefu/QuantAgent
+ExecStart=/usr/bin/env bash /home/shanhefu/QuantAgent/scripts/run_forward_daily.sh
+TimeoutStartSec=7200

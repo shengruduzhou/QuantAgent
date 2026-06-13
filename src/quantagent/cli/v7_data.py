@@ -669,8 +669,10 @@ def materialize_alpha181_v7(
     symbols: str = typer.Option("", "--symbols"),
     symbols_file: Path | None = typer.Option(None, "--symbols-file"),
     batch_symbols: int = typer.Option(0, "--batch-symbols",
-        help="If > 0, compute factors in batches of N symbols and append to parquet, "
-             "bounding peak RAM linearly in batch size. Use for 1500+ symbol universes."),
+        help="REMOVED — symbol-batched factor computation corrupts cross-sectional "
+             "rank() operators (each batch ranks only against its own ~N symbols). "
+             "Any value > 0 is rejected. Use the full-universe wide path; v8.2's "
+             "single-pass compute keeps peak RAM manageable."),
 ) -> None:
     """Compute alpha181 (wide) and write a single Parquet on disk.
 
@@ -678,12 +680,24 @@ def materialize_alpha181_v7(
     OS reclaims all RAM. ``build-training-dataset-v7 --cached-factors-path``
     then loads the parquet in a fresh process for the as-of merge step, so the
     factor-compute peak and the merge-time peak no longer collide.
-    """
-    import gc
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
+    Cross-sectional contract: every rank()/cross-sectional operator inside the
+    alpha101/gtja191 families ranks against ALL symbols of the same trade date.
+    The historical ``--batch-symbols`` mode violated this (the 2026-05-21 v88
+    build with ``--batch-symbols 300`` produced batch-local ranks and 22
+    non-reproducible alpha columns), so it now fails fast instead of silently
+    writing corrupted factors.
+    """
     from quantagent.factors.alpha181 import compute_alpha181
+
+    if batch_symbols and batch_symbols > 0:
+        raise typer.BadParameter(
+            "--batch-symbols is no longer supported: computing factors per "
+            "symbol batch makes every cross-sectional rank() batch-local "
+            "(ranked against ~N alphabetical neighbours instead of the full "
+            "universe), which corrupted 22 alpha columns in the 2026-05-21 "
+            "v88 build. Re-run without --batch-symbols."
+        )
 
     resolved_output = (
         Path(output_path)
@@ -710,40 +724,11 @@ def materialize_alpha181_v7(
                           "batch_symbols": batch_symbols, "output": str(resolved_output)}))
 
     synth_path = str(synthesized_factors_path) if synthesized_factors_path else None
-    writer: "pq.ParquetWriter | None" = None
-    try:
-        if batch_symbols and batch_symbols > 0:
-            for i in range(0, len(all_symbols), batch_symbols):
-                batch = all_symbols[i:i + batch_symbols]
-                batch_market = market[market["symbol"].astype(str).isin(set(batch))]
-                wide = compute_alpha181(batch_market, synthesized_definitions_path=synth_path, wide=True)
-                if wide.empty:
-                    typer.echo(json_dump({"batch": i, "rows": 0, "warning": "empty"}))
-                    continue
-                table = pa.Table.from_pandas(wide, preserve_index=False)
-                if writer is None:
-                    writer = pq.ParquetWriter(resolved_output, table.schema)
-                else:
-                    table = table.cast(writer.schema)
-                writer.write_table(table)
-                typer.echo(json_dump({"batch_index": i // batch_symbols,
-                                      "symbols_in_batch": len(batch),
-                                      "rows_written": int(len(wide))}))
-                del batch_market, wide, table
-                gc.collect()
-        else:
-            wide = compute_alpha181(market, synthesized_definitions_path=synth_path, wide=True)
-            wide.to_parquet(resolved_output, index=False)
-            typer.echo(json_dump({"status": "passed", "rows_written": int(len(wide)),
-                                  "columns": int(len(wide.columns)),
-                                  "output": str(resolved_output)}))
-            return
-    finally:
-        if writer is not None:
-            writer.close()
-
-    typer.echo(json_dump({"status": "passed", "output": str(resolved_output),
-                          "batches": (len(all_symbols) + batch_symbols - 1) // batch_symbols}))
+    wide = compute_alpha181(market, synthesized_definitions_path=synth_path, wide=True)
+    wide.to_parquet(resolved_output, index=False)
+    typer.echo(json_dump({"status": "passed", "rows_written": int(len(wide)),
+                          "columns": int(len(wide.columns)),
+                          "output": str(resolved_output)}))
 
 
 # --------------------------------------------------------------------- #

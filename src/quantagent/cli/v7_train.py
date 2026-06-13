@@ -137,6 +137,10 @@ def synthesize_factors_v7(
     fitness_sample_dates: int = typer.Option(400, "--fitness-sample-dates", help="0 disables date subsampling."),
     fitness_sample_symbols: int = typer.Option(500, "--fitness-sample-symbols", help="0 disables symbol subsampling."),
     seed: int = typer.Option(1729, "--seed"),
+    warm_start_fraction: float = typer.Option(0.4, "--warm-start-fraction", help="Initial population fraction seeded from Alpha101-style templates."),
+    icir_weight: float = typer.Option(0.05, "--icir-weight", help="Weight of |daily ICIR| in fitness."),
+    reference_columns: str = typer.Option("", "--reference-columns", help="Comma-separated existing factor columns (from --labels) to decorrelate against."),
+    max_reference_correlation: float = typer.Option(0.7, "--max-reference-correlation"),
 ) -> None:
     """Discover GA symbolic factors in the safe expression DSL.
 
@@ -148,22 +152,23 @@ def synthesize_factors_v7(
     resolved_output = Path(output_dir) if output_dir is not None else default_reports_root() / "v7" / "factor_synthesis"
     panel = read_frame(market_panel_path)
     labels = read_frame(labels_path) if labels_path else None
-    result = synthesize_factors(
-        panel,
-        labels=labels,
-        config=SymbolicGAConfig(
-            population=population,
-            generations=generations,
-            max_depth=max_depth,
-            top_k=top_k,
-            label_column=label_column,
-            validation_fraction=validation_fraction,
-            min_validation_rank_ic=min_validation_rank_ic,
-            fitness_sample_dates=fitness_sample_dates,
-            fitness_sample_symbols=fitness_sample_symbols,
-            seed=seed,
-        ),
+    config = SymbolicGAConfig(
+        population=population,
+        generations=generations,
+        max_depth=max_depth,
+        top_k=top_k,
+        label_column=label_column,
+        validation_fraction=validation_fraction,
+        min_validation_rank_ic=min_validation_rank_ic,
+        fitness_sample_dates=fitness_sample_dates,
+        fitness_sample_symbols=fitness_sample_symbols,
+        seed=seed,
+        warm_start_fraction=warm_start_fraction,
+        icir_weight=icir_weight,
+        reference_columns=tuple(c.strip() for c in reference_columns.split(",") if c.strip()),
+        max_reference_correlation=max_reference_correlation,
     )
+    result = synthesize_factors(panel, labels=labels, config=config)
     paths = save_result(result, resolved_output)
     typer.echo(
         json_dump(
@@ -173,20 +178,7 @@ def synthesize_factors_v7(
                 "leaderboard": paths["leaderboard"],
                 "history": paths["history"],
                 "selected": int(len(result.definitions)),
-                "config": asdict(
-                    SymbolicGAConfig(
-                        population=population,
-                        generations=generations,
-                        max_depth=max_depth,
-                        top_k=top_k,
-                        label_column=label_column,
-                        validation_fraction=validation_fraction,
-                        min_validation_rank_ic=min_validation_rank_ic,
-                        fitness_sample_dates=fitness_sample_dates,
-                        fitness_sample_symbols=fitness_sample_symbols,
-                        seed=seed,
-                    )
-                ),
+                "config": asdict(config),
             }
         )
     )

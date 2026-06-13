@@ -1,0 +1,12 @@
+[Unit]
+Description=Run QuantAgent forward daily loop post-close (16:30 CST, Mon-Fri)
+Requires=quantagent-forward.service
+
+[Timer]
+# Post-close: panel data is final after ~16:00 CST; inference takes minutes.
+OnCalendar=Mon-Fri *-*-* 16:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
