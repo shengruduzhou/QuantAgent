@@ -36,6 +36,7 @@ $PY scripts/forward_paper_log.py freeze --as-of "$TODAY" \
 $PY scripts/forward_paper_log.py settle || echo "WARN ledger settle"
 
 # 5) refresh minute bars for both books' held names (做T replay/eval data)
+rm -f /tmp/fwd_held_syms.txt
 for book in A_default B_loose; do
   f="runtime/paper/forward/$book/targets_latest.csv"
   [ -f "$f" ] && tail -n +2 "$f" | cut -d, -f1 >> /tmp/fwd_held_syms.txt
@@ -44,7 +45,16 @@ if [ -s /tmp/fwd_held_syms.txt ]; then
   sort -u /tmp/fwd_held_syms.txt > /tmp/fwd_held_syms_u.txt
   $PY scripts/fetch_tickflow_minute_history.py --symbols-file /tmp/fwd_held_syms_u.txt \
       --start "$(date -d '7 days ago' +%F)" --sleep 0.2 || echo "WARN minute refresh"
+
+  # 6) 东财 per-minute fund-flow snapshot for held names (free order-flow; one
+  #    request/name returns the full day; forward accumulation for L2 do-T).
+  $PY scripts/collect_eastmoney_fundflow_minute.py --symbols-file /tmp/fwd_held_syms_u.txt \
+      --sleep 0.3 || echo "WARN fundflow collect"
   rm -f /tmp/fwd_held_syms.txt /tmp/fwd_held_syms_u.txt
 fi
+
+# 7) fund-flow do-T monitor: once enough forward days accumulate, auto-retrain
+#    the EV edge-frontier WITH order-flow features and record the verdict.
+$PY scripts/intraday_dot_ev_fundflow_monitor.py || echo "WARN fundflow monitor"
 
 echo "===== forward daily done $(date +%T) ====="

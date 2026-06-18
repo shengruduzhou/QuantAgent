@@ -35,6 +35,10 @@ def enrich_market_valuation(frame: pd.DataFrame) -> pd.DataFrame:
     if "margin_of_safety" not in data.columns:
         percentile = data["industry_valuation_percentile"].fillna(data["history_valuation_percentile"]).fillna(50.0)
         data["margin_of_safety"] = (100.0 - percentile) / 100.0 - 0.35
+    if _has_peg_overlay_inputs(data):
+        from quantagent.fundamental.peg import enrich_peg_valuation
+
+        data = enrich_peg_valuation(data)
     return data
 
 
@@ -82,3 +86,21 @@ def _numeric(data: pd.DataFrame, column: str, default: float | None = None, fall
 def _ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denominator = denominator.replace(0, np.nan)
     return numerator / denominator
+
+
+def _has_peg_overlay_inputs(data: pd.DataFrame) -> bool:
+    columns = {
+        "eps_forward",
+        "consensus_eps",
+        "eps_consensus",
+        "predict_this_year_eps",
+        "eps_current_year",
+        "eps_next_year",
+        "predict_next_year_eps",
+        "net_income_cagr",
+        "profit_cagr",
+        "analyst_count",
+        "forecast_analyst_count",
+        "coverage_count",
+    }
+    return bool(columns.intersection(data.columns))

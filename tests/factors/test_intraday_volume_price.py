@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -98,3 +100,19 @@ def test_empty_panel_returns_empty_well_shaped():
     f = compute_intraday_factors(pd.DataFrame())
     assert list(f.columns) == ["symbol", "trade_date", *FACTOR_COLUMNS]
     assert f.empty
+
+
+def test_all_nan_high_low_amount_returns_nan_factors_without_runtime_warning():
+    panel = _one_day("A.SH", "2021-01-04", [10, 10.1, 10.2, 10.3], [100, 120, 150, 180])
+    panel["high"] = np.nan
+    panel["low"] = np.nan
+    panel["amount"] = np.nan
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        f = compute_intraday_factors(panel).iloc[0]
+
+    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert runtime_warnings == []
+    assert pd.isna(f["liq_amihud_1min"])
+    assert f["intraday_range_pos"] == 0.5

@@ -93,10 +93,20 @@ def main() -> int:
     args = ap.parse_args()
 
     references = [c.strip() for c in args.reference_columns.split(",") if c.strip()]
+    import pyarrow.parquet as _pq
+
+    _base_cols = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
+                  "is_st", "is_suspended", "is_limit_up"]
+    # Include any PIT fundamental columns the panel carries so valuation/quality
+    # factors (OptionalColumn pb/roe/gross_margin/debt_to_asset/...) can be scored
+    # instead of silently evaluating to NaN on a price-volume-only panel.
+    _panel_cols = set(_pq.read_schema(args.market_panel).names)
+    _fund_cols = [c for c in ("pb", "roe", "gross_margin", "debt_to_asset", "pe_ttm",
+                              "turnover_rate", "revenue", "operating_cash_flow")
+                  if c in _panel_cols]
     panel = pd.read_parquet(
         args.market_panel,
-        columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
-                 "is_st", "is_suspended", "is_limit_up"],
+        columns=[*_base_cols, *_fund_cols],
     )
     labels = pd.read_parquet(
         args.labels, columns=["symbol", "trade_date", args.label_column, *references]

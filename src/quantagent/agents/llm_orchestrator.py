@@ -123,6 +123,10 @@ class ValuationOverlay:
     key_assumptions: dict[str, float]
     rationale: str
     used_llm: bool
+    forward_pe: float | None = None
+    peg: float | None = None
+    pe_digestion_years: float | None = None
+    peg_rating: str = "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -320,6 +324,10 @@ class LLMOrchestrator:
             key_assumptions={str(key): _to_float(value, 0.0) for key, value in (out.get("key_assumptions") or {}).items()},
             rationale=str(out.get("rationale", "")),
             used_llm=True,
+            forward_pe=_to_optional_float(out.get("forward_pe")),
+            peg=_to_optional_float(out.get("peg")),
+            pe_digestion_years=_to_optional_float(out.get("pe_digestion_years")),
+            peg_rating=str(out.get("peg_rating", "not_applicable") or "not_applicable"),
         )
 
     # ------------------------------------------------------------------

@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from baseline_protocol import _bench_daily, _regime_excess, _target_weights  # noqa: E402
+from baseline_protocol import _bench_daily, _regime_excess, _regime_label, _target_weights  # noqa: E402
 
 from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig  # noqa: E402
 from quantagent.backtest.strict_v8 import run_strict_backtest_v8  # noqa: E402
@@ -44,11 +44,14 @@ def _zscore_by_date(values: pd.Series, dates: pd.Series) -> pd.Series:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--definitions", required=True, help="accepted_definitions.json")
+    ap.add_argument("--panel", default=PANEL, help="market panel; use the fundamental-enriched panel so pb/roe factors resolve.")
     ap.add_argument("--predictions", default="runtime/reports/v8/deep/v8_full_v3_20260602_051048/short_5d/predictions.parquet")
     ap.add_argument("--start", default="2024-08-28")
     ap.add_argument("--end", default=None)
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--lambdas", default="0.25,0.5,1.0")
+    ap.add_argument("--gate-lambda", type=float, default=0.25, help="composite weight applied only inside the gate regime(s).")
+    ap.add_argument("--gate-regimes", default="bull", help="comma regimes (bull/sideways/bear) where the composite is switched ON; model-only elsewhere.")
     ap.add_argument("--slippage-bps", type=float, default=8.0)
     ap.add_argument("--lookback-days", type=int, default=180, help="extra history loaded for rolling windows")
     ap.add_argument("--output", default="runtime/reports/v8/discovery/composite_test.json")
@@ -57,7 +60,10 @@ def main() -> int:
     start = pd.Timestamp(args.start)
     panel_cols = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
                   "available_at", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]
-    panel = pd.read_parquet(PANEL, columns=panel_cols)
+    import pyarrow.parquet as _pq
+    _have = set(_pq.read_schema(args.panel).names)
+    panel_cols += [c for c in ("pb", "roe", "gross_margin", "debt_to_asset") if c in _have]
+    panel = pd.read_parquet(args.panel, columns=[c for c in panel_cols if c in _have])
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     if args.end:
         panel = panel[panel["trade_date"] <= pd.Timestamp(args.end)]
@@ -123,6 +129,24 @@ def main() -> int:
     for lam in [float(x) for x in args.lambdas.split(",") if x.strip()]:
         df[f"blend_{lam}"] = df["z_alpha"].fillna(0.0) + lam * df["z_comp"].fillna(0.0)
         out["runs"][f"blend_lambda_{lam}"] = _run(f"blend λ={lam}", f"blend_{lam}")
+
+    # --- Regime-conditional overlay -------------------------------------- #
+    # Switch the (defensive) composite ON only inside the regime(s) where the
+    # per-regime breakdown showed it ADDS excess; run pure model elsewhere.
+    # _regime_label is PIT-safe (trailing 60d benchmark return through t-1).
+    regime = _regime_label(bench)
+    df["regime"] = df["trade_date"].map(regime).fillna("sideways")
+    gate_regimes = {r.strip() for r in args.gate_regimes.split(",") if r.strip()}
+    glam = float(args.gate_lambda)
+    in_gate = df["regime"].isin(gate_regimes).astype(float)
+    df["regime_gated"] = df["z_alpha"].fillna(0.0) + glam * in_gate * df["z_comp"].fillna(0.0)
+    df["regime_gated_inverse"] = df["z_alpha"].fillna(0.0) + glam * (1.0 - in_gate) * df["z_comp"].fillna(0.0)
+    out["gate_regimes"] = sorted(gate_regimes)
+    out["gate_lambda"] = glam
+    out["regime_day_counts"] = {k: int(v) for k, v in df.drop_duplicates("trade_date")["regime"].value_counts().items()}
+    out["runs"][f"regime_gated[{'+'.join(sorted(gate_regimes))}]"] = _run(
+        f"gated[{'+'.join(sorted(gate_regimes))}] λ={glam}", "regime_gated")
+    out["runs"]["regime_gated_inverse"] = _run("gated_inverse (control)", "regime_gated_inverse")
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")

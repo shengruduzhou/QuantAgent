@@ -1,0 +1,170 @@
+NEW1:=IF(ISNULL(NEW[1]) OR FORMATTIME(1)<2,PRE,NEW[1]);
+最新:IF(ISNULL(NEW),NEW1,NEW);
+IF (ISNULL(RANGE_AVG_PRICE) OR RANGE_AVG_PRICE <= 0)
+{  
+	IF((MARKETTYPE==16 OR MARKETTYPE==32) AND CODETYPE==0)
+	{
+		领先:(INDEXLEAD/10000 + 1)*PRE;
+	}
+	ELSE IF (MARKETTYPE == 232 OR MARKETTYPE == 56 OR MARKETTYPE==64 OR MARKETTYPE==128 OR MARKETTYPE == 80 OR MARKETTYPE==88 OR (VOL > 1 AND VOL<100))
+	{
+		b=SUBSAMEDAY(&VOL);
+		m=SUM(b*最新,0);
+		均价:IF(m>0,m/VOL,PRE);
+	}
+	ELSE IF(CODETYPE!=0 AND MONEY>0 AND MARKETTYPE != 48 AND MARKETTYPE != 104)
+	{
+		IF(ISNULL(MONEY) OR ISNULL(VOL) OR VOL==0 OR MONEY==0)
+			均价:IF(ISNULL(均价[1]),PRE,均价[1]);
+   		ELSE IF(VOL==VOL[1] OR MONEY==MONEY[1])
+      		均价:均价[1];
+   		ELSE
+      		均价:MONEY/VOL;
+	}
+	ELSE IF (MARKETTYPE == 176)
+	{
+		b=SUBSAMEDAY(&MONEY);
+		m=SUM(b*最新,0);
+		IF(m>0)
+			均价:m/MONEY;
+	}
+}
+ELSE
+{
+	均价:RANGE_AVG_PRICE;
+}
+
+单量:=SUBSAMEDAY(&VOL);
+单量修:=IF(ISNULL(单量) OR 单量<0,0,单量);
+量均:=MA(单量修,20);
+
+收益1:=(最新/REF(最新,1)-1)*100;
+偏离:=(最新-均价)/(均价+0.0001)*100;
+波动:=MA(ABS(最新-均价)/(均价+0.0001),30);
+带宽:=MAX(0.006,MIN(0.028,波动*2.60+0.003));
+
+高线:=均价*(1+带宽);
+低线:=均价*(1-带宽);
+
+高抛线:高线,COLOR00FF00,POINTDOT;
+低吸线:低线,COLOR0000FF,POINTDOT;
+昨收线:PRE,COLOR808080,POINTDOT;
+
+短均:=EMA(最新,5);
+慢均:=EMA(最新,13);
+中均:=EMA(最新,34);
+涨速:=(最新/REF(最新,3)-1)*100;
+
+LC:=REF(最新,1);
+RSI值:=SMA(MAX(最新-LC,0),6,1)/SMA(ABS(最新-LC),6,1)*100;
+
+涨跌量:=IF(最新>=REF(最新,1),单量修,-单量修);
+资金线:=EMA(涨跌量,5);
+买量:=SUM(IF(最新>=REF(最新,1),单量修,0),20);
+卖量:=SUM(IF(最新<REF(最新,1),单量修,0),20);
+主动买比:=买量/(买量+卖量+1)*100;
+主动卖比:=卖量/(买量+卖量+1)*100;
+
+资金回流:=资金线>0 AND 资金线>REF(资金线,1);
+资金转弱:=资金线<0 AND 资金线<REF(资金线,1);
+
+趋势强:=最新>均价 AND 均价>REF(均价,3) AND 最新>PRE AND 短均>=慢均;
+趋势弱:=最新<均价 AND 均价<REF(均价,3) AND 最新<PRE AND 短均<=慢均;
+
+强趋势延续:=趋势强 AND 最新>HHV(最新,20)*0.995 AND 短均>慢均 AND 慢均>中均 AND 主动买比>58 AND 资金线>REF(资金线,1);
+弱趋势延续:=趋势弱 AND 最新<LLV(最新,20)*1.005 AND 短均<慢均 AND 慢均<中均 AND 主动卖比>58 AND 资金线<REF(资金线,1);
+
+动量转强:=CROSS(短均,慢均) OR (短均>慢均 AND 短均>REF(短均,1));
+动量转弱:=CROSS(慢均,短均) OR (短均<慢均 AND 短均<REF(短均,1));
+
+冲高背离:=最新>=HHV(最新,20)*0.998 AND 单量修<HHV(单量修,20)*0.75;
+探底背离:=最新<=LLV(最新,20)*1.002 AND RSI值>REF(RSI值,1) AND 资金回流;
+
+量增:=单量修-REF(单量修,1);
+价增:=最新-REF(最新,1);
+价量同向率:=COUNT(价增*量增>0,20)/20*100;
+量先价上:=REF(单量修,1)>MA(单量修,20)*1.30 AND 最新>REF(最新,1) AND 最新<=均价*1.003;
+量先价下:=REF(单量修,1)>MA(单量修,20)*1.30 AND 最新<REF(最新,1) AND 最新>=均价*0.997;
+
+冲击成本:=ABS(收益1)/(单量修/(量均+1)+0.01);
+流动性好:=冲击成本<MA(冲击成本,20)*1.60 OR 量均=0;
+异常冲击:=单量修>量均*4.00 AND ABS(偏离)>带宽*130;
+
+波动压缩:=波动<MA(波动,20)*0.90;
+波动放大:=波动>REF(波动,1) AND ABS(偏离)>带宽*80;
+
+反转环境:=ABS(偏离)>带宽*90 AND 流动性好 AND 异常冲击=0;
+
+跌停风险:=最新<=PRE*0.905 OR (最新<PRE*0.94 AND 弱趋势延续);
+涨停逼空:=最新>=PRE*1.095 OR (最新>PRE*1.07 AND 强趋势延续);
+
+低因子:=IF(最新<=低线,1,0)+IF(RSI值<38,1,0)+IF(资金回流,1,0)+IF(主动买比>55,1,0)+IF(动量转强,1,0)+IF(探底背离,1,0)+IF(量先价上,1,0)+IF(流动性好,1,0);
+高因子:=IF(最新>=高线,1,0)+IF(RSI值>68,1,0)+IF(资金转弱,1,0)+IF(主动卖比>55,1,0)+IF(动量转弱,1,0)+IF(冲高背离,1,0)+IF(量先价下,1,0)+IF(流动性好,1,0);
+
+低原分:=IF(最新<=低线,24,0)+IF(RSI值<35,14,0)+IF(探底背离,14,0)+IF(资金回流,12,0)+IF(主动买比>55,10,0)+IF(动量转强,10,0)+IF(量先价上,8,0)+IF(流动性好,8,0)+IF(反转环境,8,0)-IF(异常冲击,25,0)-IF(弱趋势延续,20,0)-IF(跌停风险,35,0);
+高原分:=IF(最新>=高线,24,0)+IF(RSI值>70,14,0)+IF(冲高背离,14,0)+IF(资金转弱,12,0)+IF(主动卖比>55,10,0)+IF(动量转弱,10,0)+IF(量先价下,8,0)+IF(流动性好,8,0)+IF(反转环境,8,0)-IF(异常冲击,25,0)-IF(强趋势延续,20,0)-IF(涨停逼空,35,0);
+
+低分:=MAX(0,MIN(100,低原分));
+高分:=MAX(0,MIN(100,高原分));
+
+低可信:=IF(流动性好,18,0)+IF(反转环境,18,0)+IF(低因子>=5,28,0)+IF(低分>高分+15,18,0)+IF(主动买比>主动卖比,10,0)+IF(波动放大 OR 波动压缩,8,0)-IF(弱趋势延续,25,0)-IF(跌停风险,30,0);
+高可信:=IF(流动性好,18,0)+IF(反转环境,18,0)+IF(高因子>=5,28,0)+IF(高分>低分+15,18,0)+IF(主动卖比>主动买比,10,0)+IF(波动放大 OR 波动压缩,8,0)-IF(强趋势延续,25,0)-IF(涨停逼空,30,0);
+
+低可信修:=MAX(0,低可信);
+高可信修:=MAX(0,高可信);
+
+低候选:=低分>=80 AND 低可信修>=68 AND 弱趋势延续=0 AND 跌停风险=0;
+高候选:=高分>=80 AND 高可信修>=68 AND 强趋势延续=0 AND 涨停逼空=0;
+
+低S候选:=低分>=88 AND 低可信修>=78 AND 弱趋势延续=0 AND 跌停风险=0;
+高S候选:=高分>=88 AND 高可信修>=78 AND 强趋势延续=0 AND 涨停逼空=0;
+
+距低:=BARSLAST(REF(低候选 OR 低S候选,1));
+距高:=BARSLAST(REF(高候选 OR 高S候选,1));
+前低信号价:=REF(最新,距低+1);
+前高信号价:=REF(最新,距高+1);
+
+低后破位:=距低>=0 AND 距低<=20 AND 最新<前低信号价*(1-带宽*0.65) AND 最新<均价;
+高后新高:=距高>=0 AND 距高<=20 AND 最新>前高信号价*(1+带宽*0.65) AND 最新>均价;
+
+低禁:=COUNT(低后破位,20)>0 AND CROSS(最新,均价)=0;
+高禁:=COUNT(高后新高,20)>0 AND CROSS(均价,最新)=0;
+
+低S:=低S候选 AND 低禁=0 AND COUNT(低S候选 AND 低禁=0,12)=1;
+高S:=高S候选 AND 高禁=0 AND COUNT(高S候选 AND 高禁=0,12)=1;
+
+低A:=低候选 AND 低S=0 AND 低禁=0 AND COUNT(低候选 AND 低禁=0,10)=1;
+高A:=高候选 AND 高S=0 AND 高禁=0 AND COUNT(高候选 AND 高禁=0,10)=1;
+
+DRAWICON(低A OR 低S,LOW*0.998,1);
+DRAWICON(高A OR 高S,HIGH*1.002,2);
+DRAWICON(低后破位,LOW*0.995,2);
+DRAWICON(高后新高,HIGH*1.005,1);
+
+DRAWTEXT(低S,LOW*0.995,'低S');
+DRAWTEXT(高S,HIGH*1.005,'高S');
+DRAWTEXT(低A AND 低S=0,LOW*0.996,'低A');
+DRAWTEXT(高A AND 高S=0,HIGH*1.004,'高A');
+DRAWTEXT(低后破位,LOW*0.992,'低失');
+DRAWTEXT(高后新高,HIGH*1.008,'高失');
+
+低吸分:低分,NODRAW;
+高抛分:高分,NODRAW;
+低吸可信:低可信修,NODRAW;
+高抛可信:高可信修,NODRAW;
+主动买:主动买比,NODRAW;
+主动卖:主动卖比,NODRAW;
+冲击值:冲击成本,NODRAW;
+同向率:价量同向率,NODRAW;
+低禁值:IF(低禁,1,0),NODRAW;
+高禁值:IF(高禁,1,0),NODRAW;
+强趋势:IF(强趋势延续,1,0),NODRAW;
+弱趋势:IF(弱趋势延续,1,0),NODRAW;
+分时偏离:偏离,NODRAW;
+带宽值:带宽*100,NODRAW;
+信号方向:IF(低S OR 低A,1,IF(高S OR 高A,-1,0)),NODRAW;
+
+RETURN;
+
+hx_star;
+hx_star_p;

@@ -120,7 +120,7 @@ def prepare_day_arrays(bars: pd.DataFrame) -> dict | None:
     if b is None or len(b) == 0 or "close" not in b.columns:
         return None
     cols = {}
-    for c in ("open", "high", "low", "close", "volume"):
+    for c in ("open", "high", "low", "close", "volume", "amount"):
         cols[c] = pd.to_numeric(b[c], errors="coerce").to_numpy(dtype="float64") \
             if c in b.columns else None
     if cols["close"] is None or cols["high"] is None or cols["low"] is None:
@@ -138,6 +138,9 @@ def prepare_day_arrays(bars: pd.DataFrame) -> dict | None:
     if out["volume"] is None:
         out["volume"] = np.zeros_like(out["close"])
     out["volume"] = np.nan_to_num(out["volume"], nan=0.0)
+    if out["amount"] is None:
+        out["amount"] = out["close"] * out["volume"]
+    out["amount"] = np.nan_to_num(out["amount"], nan=0.0)
     out["time"] = times[idx]
     cum_v = np.cumsum(out["volume"])
     cum_pv = np.cumsum(out["close"] * out["volume"])
@@ -297,7 +300,8 @@ def build_day_contexts(panel: pd.DataFrame, *, atr_window: int = 14) -> pd.DataF
     """Compute PIT-safe DayContext columns from the daily market panel.
 
     Returns a frame keyed (symbol, trade_date) with atr_pct / mom_5d /
-    gap_open / regime. atr_pct and mom_5d only use data up to t−1.
+    gap_open / prev_close / regime. atr_pct and mom_5d only use data up to
+    t-1.
     """
     df = panel[["symbol", "trade_date", "open", "high", "low", "close"]].copy()
     df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -320,7 +324,8 @@ def build_day_contexts(panel: pd.DataFrame, *, atr_window: int = 14) -> pd.DataF
                                 np.where(trail < -0.05, "bear", "sideways")),
                        index=px.index)
     df["regime"] = df["trade_date"].map(regime).fillna("sideways")
-    return df[["symbol", "trade_date", "atr_pct", "mom_5d", "gap_open", "regime"]]
+    df["prev_close"] = prev_close
+    return df[["symbol", "trade_date", "atr_pct", "mom_5d", "gap_open", "prev_close", "regime"]]
 
 
 __all__ = [

@@ -104,7 +104,10 @@ VALUATION_AGENT = SkillPrompt(
         "asset_value_per_share (float or null), margin_of_safety_pct (float, "
         "fair_value / current_price - 1), valuation_score (0-100, higher = cheaper), "
         "industry_valuation_percentile (0-1), history_valuation_percentile (0-1), "
-        "bubble_risk_score (0-1), method_weights (object mapping method to weight), "
+        "bubble_risk_score (0-1), forward_pe (float or null), peg (float or null), "
+        "pe_digestion_years (float or null, years for PE to digest to 30x through "
+        "earnings growth), peg_rating (deep_undervalued / undervalued / fair / "
+        "expensive / overvalued / not_applicable), method_weights (object mapping method to weight), "
         "key_assumptions (object with growth_rate, wacc, terminal_growth, margin), "
         "investment_horizon_days (int, 60-126 for fundamental thesis), "
         "rationale (one short paragraph)."
@@ -120,6 +123,10 @@ VALUATION_AGENT = SkillPrompt(
         "industry_valuation_percentile": 0.5,
         "history_valuation_percentile": 0.5,
         "bubble_risk_score": 0.3,
+        "forward_pe": None,
+        "peg": None,
+        "pe_digestion_years": None,
+        "peg_rating": "not_applicable",
         "method_weights": {"dcf": 0.4, "relative": 0.4, "asset": 0.2},
         "key_assumptions": {},
         "investment_horizon_days": 120,

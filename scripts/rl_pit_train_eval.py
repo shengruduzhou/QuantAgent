@@ -124,6 +124,11 @@ def main() -> int:
     print("=== deterministic test rollout ===", flush=True)
     model = PPO.load(policy_path, device="cpu")
     env = PITPortfolioEnv(test_book, preds, panel, env_cfg)
+    # Env-flat guard: if within-book alpha dispersion is ~0 the policy cannot
+    # express stock selection, so a positive value-add would be a gross/cash
+    # bet, not alpha. Surfaced in the verdict and required for ENABLE.
+    dispersion = env.book_dispersion_report()
+    print(f"env dispersion: {json.dumps(dispersion)}", flush=True)
     obs, _ = env.reset(seed=7)
     rows: dict[pd.Timestamp, pd.Series] = {}
     value_add = []
@@ -170,7 +175,10 @@ def main() -> int:
         "verdict": ("ENABLE" if strict_policy["ann"] > strict_passive["ann"]
                     and strict_policy["maxDD"] <= strict_passive["maxDD"] + 0.05
                     and env_va > 0 and beats_null
+                    and dispersion["env_can_select"]
                     else "DO_NOT_ENABLE"),
+        "env_dispersion": dispersion,
+        "selection_driven": bool(dispersion["env_can_select"]),
         "null_strict_anns_untrained": [round(a, 4) for a in null_anns],
         "beats_all_null": bool(beats_null),
         "window": f"{tw_policy.index.min().date()}..{tw_policy.index.max().date()}",

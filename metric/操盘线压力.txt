@@ -1,0 +1,336 @@
+/* 操盘线压力主图 V3：趋势线 + VWAP支撑 + 压力位 + 多因子K线状态 */
+/* 设计原则：K线单状态，避免多颜色重叠 */
+
+N1:=5;
+N2:=10;
+N3:=20;
+N4:=30;
+N5:=60;
+N6:=120;
+
+M5:=MA(CLOSE,N1);
+M10:=MA(CLOSE,N2);
+M20:=MA(CLOSE,N3);
+M30:=MA(CLOSE,N4);
+M60:=MA(CLOSE,N5);
+M120:=MA(CLOSE,N6);
+
+快线:=EMA(CLOSE,8);
+慢线:=EMA(CLOSE,21);
+操盘:=((快线*2+慢线)/3);
+生命:=MA(CLOSE,30);
+
+MB:=MA(CLOSE,20);
+BOLL上:=MB+2*STD(CLOSE,20);
+BOLL下:=MB-2*STD(CLOSE,20);
+BOLL宽:=(BOLL上-BOLL下)/(MB+0.0001)*100;
+
+昨收:=REF(CLOSE,1);
+涨幅:=(CLOSE-昨收)/昨收*100;
+五日涨幅:=(CLOSE/REF(CLOSE,5)-1)*100;
+十日涨幅:=(CLOSE/REF(CLOSE,10)-1)*100;
+
+V5:=MA(VOL,5);
+V10:=MA(VOL,10);
+V20:=MA(VOL,20);
+V60:=MA(VOL,60);
+A5:=MA(AMOUNT,5);
+A20:=MA(AMOUNT,20);
+
+日VWAP:=IF(VOL>0,AMOUNT/VOL/100,CLOSE);
+VWAP5:=IF(SUM(VOL,5)>0,SUM(AMOUNT,5)/SUM(VOL,5)/100,CLOSE);
+VWAP10:=IF(SUM(VOL,10)>0,SUM(AMOUNT,10)/SUM(VOL,10)/100,CLOSE);
+VWAP20:=IF(SUM(VOL,20)>0,SUM(AMOUNT,20)/SUM(VOL,20)/100,CLOSE);
+
+HSL:=IF(CAPITAL>0,VOL/CAPITAL*100,0);
+HSL20:=MA(HSL,20);
+
+TR1:=MAX(HIGH-LOW,MAX(ABS(HIGH-昨收),ABS(LOW-昨收)));
+ATR14:=MA(TR1,14);
+波动率:=ATR14/CLOSE*100;
+
+DIF:=EMA(CLOSE,12)-EMA(CLOSE,26);
+DEA:=EMA(DIF,9);
+MACD柱:=2*(DIF-DEA);
+
+MACD绿柱收敛:=MACD柱<0 AND MACD柱>REF(MACD柱,1) AND COUNT(MACD柱>REF(MACD柱,1),3)>=2;
+MACD绿转红:=CROSS(MACD柱,0);
+MACD红柱扩大:=MACD柱>0 AND MACD柱>REF(MACD柱,1) AND DIF>DEA;
+MACD主升:=MACD柱>0 AND MACD柱>REF(MACD柱,1)*1.08 AND DIF>DEA AND DIF>0;
+MACD转弱:=MACD柱<REF(MACD柱,1) AND DIF<REF(DIF,1);
+
+LC:=REF(CLOSE,1);
+RSI1:=SMA(MAX(CLOSE-LC,0),6,1)/SMA(ABS(CLOSE-LC),6,1)*100;
+RSI2:=SMA(MAX(CLOSE-LC,0),12,1)/SMA(ABS(CLOSE-LC),12,1)*100;
+RSI低位修复:=RSI1>RSI2 AND RSI1<58 AND RSI1>REF(RSI1,1);
+
+前高20:=REF(HHV(HIGH,20),1);
+前高60:=REF(HHV(HIGH,60),1);
+前低20:=REF(LLV(LOW,20),1);
+前低60:=REF(LLV(LOW,60),1);
+
+短支撑:=MAX(M5,VWAP5);
+中支撑:=MAX(M10,VWAP10);
+波段支撑:=MAX(M20,VWAP20);
+建仓保护:=REF(LLV(LOW,20),1)-ATR14*0.20;
+
+上破前高:=CLOSE>前高20+ATR14*0.10 AND CLOSE>OPEN AND VOL>V20*1.25;
+强破前高:=CLOSE>前高60+ATR14*0.10 AND VOL>V20*1.50 AND AMOUNT>A20*1.30;
+
+跌破5日:=CLOSE<短支撑-ATR14*0.10 AND VOL>V5*1.10;
+跌破10日:=CLOSE<中支撑-ATR14*0.10 AND COUNT(CLOSE<中支撑,2)>=2;
+跌破波段:=CLOSE<波段支撑-ATR14*0.15 AND VOL>V20*1.15;
+跌破前低:=CLOSE<前低20-ATR14*0.10 AND VOL>V20*1.10;
+
+量均抬升:=V5>REF(V5,1) AND REF(V5,1)>REF(V5,2);
+金额抬升:=A5>REF(A5,1) AND A5>A20*0.90;
+温和放量:=VOL>V5*1.10 AND VOL<V20*2.80;
+蓄力量:=量均抬升 AND 金额抬升 AND VOL<V20*2.50;
+主升量:=VOL>V20*1.80 AND AMOUNT>A20*1.50;
+
+价格未大涨:=五日涨幅<8 AND 十日涨幅<15;
+价格已拉开:=五日涨幅>12 OR CLOSE/M10>1.12 OR CLOSE/M20>1.18;
+
+筹码中位:=COST(50);
+筹码承接:=CLOSE>筹码中位 AND WINNER(CLOSE)>REF(WINNER(CLOSE),1);
+筹码过热:=WINNER(CLOSE)>0.88 AND 价格已拉开;
+
+相对强度:=IF(INDEXC>0,CLOSE/INDEXC,0);
+相对走强:=相对强度>REF(相对强度,5) AND SLOPE(相对强度,5)>0;
+
+换手健康:=HSL>HSL20*0.80 AND HSL<HSL20*2.80;
+换手过热:=HSL>HSL20*2.50 AND 价格已拉开;
+
+波动收敛:=波动率<MA(波动率,20)*0.95 OR BOLL宽<MA(BOLL宽,60)*0.85;
+波动扩张:=波动率>REF(波动率,1) AND BOLL宽>REF(BOLL宽,1);
+
+资金代理:=IF(CLOSE>=OPEN,
+       (CLOSE-OPEN)/(HIGH-LOW+0.01)*AMOUNT/100000000,
+      -(OPEN-CLOSE)/(HIGH-LOW+0.01)*AMOUNT/100000000);
+资金流入率:=资金代理/(AMOUNT/100000000+0.01)*100;
+资金连续流入:=COUNT(资金流入率>3,5)>=3 OR SUM(资金代理,5)>0;
+资金明显流入:=资金流入率>8 AND AMOUNT>A5*1.10;
+
+主力资金:=EMA(100*(CLOSE-LLV(LOW,34))/(HHV(HIGH,34)-LLV(LOW,34)+0.0001),3);
+大盘资金:=EMA(100*(INDEXC-LLV(INDEXL,34))/(HHV(INDEXH,34)-LLV(INDEXL,34)+0.0001),3);
+主力强:=主力资金>大盘资金 AND 主力资金>REF(主力资金,1);
+
+大盘MA20:=MA(INDEXC,20);
+大盘非弱:=INDEXC>大盘MA20 OR 大盘MA20>REF(大盘MA20,1);
+
+F动量蓄力:=IF(MACD绿柱收敛 OR MACD绿转红,1,0);
+F量能蓄力:=IF(蓄力量,1,0);
+F价格低位:=IF(价格未大涨 AND CLOSE<前高20*1.03,1,0);
+F波动收敛:=IF(波动收敛,1,0);
+F筹码承接:=IF(筹码承接,1,0);
+F相对强度:=IF(相对走强,1,0);
+F资金流入:=IF(资金连续流入 OR 主力强,1,0);
+F换手健康:=IF(换手健康,1,0);
+
+蓄力分:=F动量蓄力+F量能蓄力+F价格低位+F波动收敛+F筹码承接+F相对强度+F资金流入+F换手健康;
+
+F突破前高:=IF(上破前高 OR 强破前高,1,0);
+F主升动量:=IF(MACD红柱扩大 AND MACD柱>0,1,0);
+F主升量能:=IF(主升量 OR 温和放量,1,0);
+F站上VWAP:=IF(CLOSE>VWAP5 AND VWAP5>VWAP10,1,0);
+F站上均线:=IF(CLOSE>M5 AND M5>M10 AND M10>=M20,1,0);
+F波动扩张:=IF(波动扩张,1,0);
+F大盘环境:=IF(大盘非弱,1,0);
+
+启动分:=F突破前高+F主升动量+F主升量能+F站上VWAP+F站上均线+F波动扩张+F大盘环境+F资金流入;
+
+蓄力区:=蓄力分>=6 AND 价格未大涨 AND CLOSE>VWAP10 AND CLOSE>筹码中位 AND CLOSE<前高20*1.03 AND 大盘非弱;
+低吸条件:=蓄力区 AND (LOW<=BOLL下*1.025 OR LOW<=中支撑*1.02) AND MACD绿柱收敛 AND 资金连续流入;
+启动条件:=启动分>=6 AND 蓄力分>=4 AND (上破前高 OR 强破前高) AND 价格已拉开=0 AND 大盘非弱;
+
+主升浪:=CLOSE>M5 AND M5>M10 AND M10>M20 AND MACD主升 AND 主升量 AND CLOSE>VWAP5 AND (上破前高 OR 强破前高);
+
+五日回踩不破:=LOW<=短支撑*1.015 AND CLOSE>=短支撑 AND VOL<V5*1.50;
+十日回踩不破:=LOW<=中支撑*1.015 AND CLOSE>=中支撑 AND VOL<V10*1.50;
+波段回踩不破:=LOW<=波段支撑*1.020 AND CLOSE>=波段支撑 AND VOL<V20*1.30;
+
+短线持有:=主升浪 AND 跌破5日=0;
+波段持有:=CLOSE>中支撑 AND 跌破10日=0 AND MACD转弱=0;
+长线持有:=CLOSE>波段支撑 AND 跌破波段=0;
+动态风控:=IF(主升浪,短支撑,IF(波段持有,中支撑,波段支撑));
+
+上影率:=(HIGH-MAX(CLOSE,OPEN))/(HIGH-LOW+0.01);
+高位区:=CLOSE>前高20 OR CLOSE>BOLL上 OR 价格已拉开 OR 筹码过热;
+放量滞涨:=高位区 AND VOL>V5*1.80 AND CLOSE<OPEN AND 上影率>0.30;
+爆量长上影:=高位区 AND VOL>V20*2.50 AND 上影率>0.38;
+MACD顶背离:=HIGH>=REF(HHV(HIGH,20),1)*0.995 AND MACD柱<REF(HHV(MACD柱,20),1)*0.75;
+RSI顶背离:=HIGH>=REF(HHV(HIGH,20),1)*0.995 AND RSI1<REF(HHV(RSI1,20),1)*0.88;
+VWAP失守:=CLOSE<VWAP5 AND CLOSE<OPEN AND VOL>V5*1.10;
+高位换手派发:=高位区 AND 换手过热 AND CLOSE<OPEN AND 资金流入率<0;
+
+F顶部1:=IF(放量滞涨,1,0);
+F顶部2:=IF(爆量长上影,1,0);
+F顶部3:=IF(MACD顶背离,1,0);
+F顶部4:=IF(RSI顶背离,1,0);
+F顶部5:=IF(VWAP失守,1,0);
+F顶部6:=IF(高位换手派发,1,0);
+F顶部7:=IF(筹码过热 AND MACD转弱,1,0);
+F顶部8:=IF(CLOSE<动态风控 AND MACD转弱,1,0);
+
+顶部分:=F顶部1+F顶部2+F顶部3+F顶部4+F顶部5+F顶部6+F顶部7+F顶部8;
+
+AI趋势分:=IF(CLOSE>M5,10,0)+IF(M5>M10,10,0)+IF(M10>M20,10,0)+IF(CLOSE>操盘,10,0);
+AI量价分:=IF(量均抬升,8,0)+IF(资金连续流入 OR 主力强,12,0)+IF(换手健康,8,0)+IF(主升量,8,0);
+AI动量分:=IF(MACD绿柱收敛,8,0)+IF(MACD红柱扩大,10,0)+IF(RSI低位修复,6,0)+IF(相对走强,8,0);
+AI风控扣分:=IF(价格已拉开,8,0)+IF(筹码过热,8,0)+IF(换手过热,8,0)+IF(顶部分>=3,15,0)+IF(大盘非弱=0,12,0);
+
+AI原始分:=AI趋势分+AI量价分+AI动量分+IF(大盘非弱,10,0)-AI风控扣分;
+AI分:=MAX(0,MIN(100,AI原始分));
+
+AI预警:=AI分>=60 AND 蓄力分>=5 AND 顶部分<2;
+AI多头:=AI分>=70 AND 顶部分<3 AND 大盘非弱;
+AI强势:=AI分>=80 AND 主升浪;
+AI风控:=AI分<45 OR 顶部分>=4 OR 大盘非弱=0;
+
+低吸买点:=低吸条件 AND AI预警 AND COUNT(低吸条件,5)=1;
+启动买点:=启动条件 AND AI多头 AND COUNT(启动条件,3)=1;
+初始买入候选:=低吸买点 OR 启动买点;
+
+启动失败:=BARSLAST(启动买点)<=5 AND CLOSE<MB AND MACD柱<REF(MACD柱,1) AND VOL>V5;
+系统风险:=大盘非弱=0 AND CLOSE<中支撑 AND VOL>V20;
+硬止损:=CLOSE<建仓保护 AND VOL>V5;
+预止盈:=顶部分>=4 AND 跌破5日;
+预波段卖:=(跌破10日 OR VWAP失守 OR (CLOSE<动态风控 AND MACD转弱)) AND 跌破波段=0;
+预清仓:=启动失败 OR 跌破波段 OR 跌破前低 OR 系统风险 OR 硬止损 OR AI风控;
+
+原始卖出候选:=预止盈 OR 预波段卖 OR 预清仓;
+初始买入:=初始买入候选 AND 原始卖出候选=0;
+
+持仓状态:=COUNT(初始买入,120)>0 AND BARSLAST(初始买入)<BARSLAST(原始卖出候选);
+持仓前:=COUNT(初始买入,120)>0 AND BARSLAST(初始买入)<BARSLAST(REF(原始卖出候选,1));
+前持仓:=REF(持仓状态,1);
+
+回踩加仓点:=持仓前 AND 原始卖出候选=0 AND (五日回踩不破 OR 十日回踩不破 OR 波段回踩不破) AND 资金连续流入 AND MACD转弱=0 AND 顶部分<3 AND AI多头 AND COUNT((五日回踩不破 OR 十日回踩不破 OR 波段回踩不破),5)=1;
+
+减仓条件:=持仓前 AND 顶部分>=3 AND 跌破10日=0 AND 跌破波段=0;
+止盈条件:=持仓前 AND 预止盈;
+波段卖条件:=持仓前 AND 预波段卖;
+清仓条件:=持仓前 AND 预清仓;
+
+减仓交易点:=减仓条件 AND COUNT(减仓条件,3)=1;
+止盈卖点:=止盈条件 AND COUNT(止盈条件,2)=1;
+波段卖点:=波段卖条件 AND COUNT(波段卖条件,2)=1;
+清仓交易点:=清仓条件 AND COUNT(清仓条件,2)=1;
+
+总卖点:=止盈卖点 OR 波段卖点 OR 清仓交易点;
+回测买点:=初始买入 AND 前持仓=0;
+回测卖点:=总卖点;
+总买点:=回测买点 OR 回踩加仓点;
+
+/* K线单状态：只允许一个状态，避免颜色重叠 */
+K卖出:=回测卖点;
+K减仓:=减仓交易点 AND K卖出=0;
+K加仓:=回踩加仓点 AND K卖出=0 AND K减仓=0;
+K启动:=回测买点 AND 启动买点 AND K卖出=0 AND K减仓=0 AND K加仓=0;
+K低吸:=回测买点 AND 低吸买点 AND K卖出=0 AND K减仓=0 AND K加仓=0 AND K启动=0;
+K主升:=主升浪 OR AI强势;
+K波段:=持仓状态 AND 波段持有;
+K蓄势:=蓄力区;
+
+K状态:=IF(K卖出,8,
+       IF(K减仓,7,
+       IF(K加仓,6,
+       IF(K启动,5,
+       IF(K低吸,4,
+       IF(K主升,3,
+       IF(K波段,2,
+       IF(K蓄势,1,0))))))));
+
+K阳:=CLOSE>=OPEN;
+K阴:=CLOSE<OPEN;
+K上:=MAX(CLOSE,OPEN);
+K下:=MIN(CLOSE,OPEN);
+K实体上:=IF(CLOSE=OPEN,CLOSE+ATR14*0.02,K上);
+K实体下:=IF(CLOSE=OPEN,CLOSE-ATR14*0.02,K下);
+
+STICKLINE(K状态=0 AND K阳,HIGH,LOW,2,0),COLORRED;
+STICKLINE(K状态=0 AND K阳,K实体上,K实体下,7,0),COLORRED;
+STICKLINE(K状态=0 AND K阴,HIGH,LOW,2,0),COLOR008000;
+STICKLINE(K状态=0 AND K阴,K实体上,K实体下,7,0),COLOR008000;
+
+STICKLINE(K状态=1,HIGH,LOW,2,0),COLOR0000FF;
+STICKLINE(K状态=1,K实体上,K实体下,8,0),COLOR0000FF;
+
+STICKLINE(K状态=2,HIGH,LOW,2,0),COLOR00FFFF;
+STICKLINE(K状态=2,K实体上,K实体下,8,0),COLOR00FFFF;
+
+STICKLINE(K状态=3,HIGH,LOW,2,0),COLOR9900FF;
+STICKLINE(K状态=3,K实体上,K实体下,8,0),COLOR9900FF;
+
+STICKLINE(K状态=4,HIGH,LOW,2,0),COLORFF00FF;
+STICKLINE(K状态=4,K实体上,K实体下,9,0),COLORFF00FF;
+
+STICKLINE(K状态=5,HIGH,LOW,2,0),COLORYELLOW;
+STICKLINE(K状态=5,K实体上,K实体下,9,0),COLORYELLOW;
+
+STICKLINE(K状态=6,HIGH,LOW,2,0),COLORFF8800;
+STICKLINE(K状态=6,K实体上,K实体下,9,0),COLORFF8800;
+
+STICKLINE(K状态=7,HIGH,LOW,2,0),COLORFFFFFF;
+STICKLINE(K状态=7,K实体上,K实体下,9,0),COLORFFFFFF;
+
+STICKLINE(K状态=8,HIGH,LOW,2,0),COLOR00FF00;
+STICKLINE(K状态=8,K实体上,K实体下,10,0),COLOR00FF00;
+
+M5线:M5,COLORFFFFFF,LINETHICK1;
+M10线:M10,COLORYELLOW,LINETHICK1;
+M20线:M20,COLOR00FFFF,LINETHICK2;
+M30线:M30,COLORFF00FF,LINETHICK1;
+M60线:M60,COLOR808080,LINETHICK1;
+M120线:M120,COLOR0000FF,LINETHICK1;
+
+操盘线:操盘,COLORRED,LINETHICK2;
+生命线:生命,COLORFF00FF,LINETHICK2;
+
+布林中:MB,COLORYELLOW,LINETHICK1;
+布林上:BOLL上,COLOR00FFFF,LINETHICK1;
+布林下:BOLL下,COLOR00FFFF,LINETHICK1;
+
+VWAP5线:VWAP5,COLORFFFFFF,LINETHICK1;
+VWAP10线:VWAP10,COLORYELLOW,LINETHICK1;
+VWAP20线:VWAP20,COLOR808080,LINETHICK2;
+
+短支撑线:短支撑,COLORFFFFFF,LINETHICK2;
+中支撑线:中支撑,COLORYELLOW,LINETHICK2;
+波段支撑线:波段支撑,COLOR00FFFF,LINETHICK3;
+动态风控线:动态风控,COLORFFFFFF,LINETHICK3;
+建仓保护线:建仓保护,COLOR0000FF,LINETHICK2;
+
+前低支撑:前低20,COLOR0000FF,LINETHICK1;
+波段底线:前低60,COLOR0000FF,LINETHICK1;
+前高压力:前高20,COLOR00FF00,LINETHICK1;
+波段压力:前高60,COLOR00FF00,LINETHICK2;
+筹码中位线:筹码中位,COLORFF8800,LINETHICK1;
+
+AI量化分:AI分,NODRAW;
+蓄力评分:蓄力分,NODRAW;
+启动评分:启动分,NODRAW;
+顶部评分:顶部分,NODRAW;
+资金流入率值:资金流入率,NODRAW;
+
+买点输出:IF(回测买点,LOW*0.900,DRAWNULL),COLORRED,LINETHICK2;
+卖点输出:IF(回测卖点,HIGH*1.100,DRAWNULL),COLOR00FF00,LINETHICK2;
+
+DRAWICON(回测买点,LOW*0.900,1);
+DRAWICON(回测卖点,HIGH*1.100,2);
+DRAWICON(回踩加仓点,LOW*0.910,9);
+DRAWICON(减仓交易点,HIGH*1.035,8);
+
+DRAWTEXT(K状态=1 AND REF(K状态,1)<>1,LOW*0.985,'蓄势');
+DRAWTEXT(K状态=2 AND REF(K状态,1)<>2,LOW*0.970,'波段');
+DRAWTEXT(K状态=3 AND REF(K状态,1)<>3,LOW*0.955,'主升');
+DRAWTEXT(K状态=4,LOW*0.940,'低吸');
+DRAWTEXT(K状态=5,LOW*0.925,'启动');
+DRAWTEXT(K状态=6,LOW*0.910,'加仓');
+DRAWTEXT(K状态=7,HIGH*1.035,'减仓');
+DRAWTEXT(K状态=8,HIGH*1.055,'卖出');
+DRAWTEXT(启动失败,HIGH*1.075,'启动失败');
+DRAWTEXT(硬止损,HIGH*1.095,'硬止损');
+
+DRAWTEXT(ISLASTBAR,HIGH*1.180,'K线: 红阳/绿阴 蓝蓄势 青波段 紫主升 粉低吸 黄启动 橙加仓 白减仓 绿卖出');
+DRAWTEXT(ISLASTBAR,HIGH*1.155,'核心: 操盘线+VWAP+压力支撑+资金+筹码+大盘+顶部扣分');

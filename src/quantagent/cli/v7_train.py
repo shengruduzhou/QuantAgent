@@ -127,7 +127,10 @@ def synthesize_factors_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
     labels_path: Path | None = typer.Option(None, "--labels"),
     output_dir: Path = typer.Option(None, "--output-dir"),
+    rd_agent: bool = typer.Option(True, "--rd-agent/--legacy-ga", help="Use RD-Agent-style factor R&D loop by default; pass --legacy-ga for the old symbolic GA."),
     label_column: str = typer.Option("forward_return_5d", "--label-column"),
+    rounds: int = typer.Option(4, "--rounds", help="RD-Agent-style proposal/evaluation loop count."),
+    factors_per_round: int = typer.Option(3, "--factors-per-round", help="RD-Agent-style 1-5 factor tasks per loop."),
     population: int = typer.Option(80, "--population"),
     generations: int = typer.Option(20, "--generations"),
     top_k: int = typer.Option(20, "--top-k"),
@@ -141,42 +144,110 @@ def synthesize_factors_v7(
     icir_weight: float = typer.Option(0.05, "--icir-weight", help="Weight of |daily ICIR| in fitness."),
     reference_columns: str = typer.Option("", "--reference-columns", help="Comma-separated existing factor columns (from --labels) to decorrelate against."),
     max_reference_correlation: float = typer.Option(0.7, "--max-reference-correlation"),
+    max_sota_correlation: float = typer.Option(0.99, "--max-sota-correlation", help="RD-Agent-style duplicate gate against accepted/reference factors."),
+    use_llm: bool = typer.Option(False, "--use-llm/--no-use-llm", help="RD-Agent closed loop: after the blueprint warm-start round, let an LLM propose NEW DSL factor tasks from the accumulated trace + memory."),
+    allow_network: bool = typer.Option(False, "--allow-network", help="Permit the LLM proposer to reach the network (required for --use-llm to actually call a model)."),
+    llm_model: str = typer.Option("", "--llm-model", help="Override the proposer model id (else QUANTAGENT_LLM_MODEL / provider default)."),
+    llm_start_round: int = typer.Option(1, "--llm-start-round", help="First round (0-based) that uses LLM proposals; round 0 always warm-starts from blueprints."),
+    llm_candidates_per_round: int = typer.Option(4, "--llm-candidates-per-round", help="How many factors the LLM proposes per LLM round."),
+    rag_escalation_round: int = typer.Option(3, "--rag-escalation-round", help="Round after which the research directive escalates from easy to higher-IC factors."),
+    llm_timeout_seconds: float = typer.Option(360.0, "--llm-timeout-seconds", help="Per-call LLM timeout (thinking models need 300s+)."),
+    memory_path: Path | None = typer.Option(None, "--memory-path", help="Persistent JSONL of accept/reject knowledge digested into each LLM prompt and across runs."),
+    train_end: str = typer.Option("", "--train-end", help="Trustworthy-OOS cutoff: the search (GA/LLM) only sees trade_date <= this; later dates stay clean for evaluate-discovered-factors. Empty = no cutoff."),
+    exclude_st: bool = typer.Option(False, "--exclude-st", help="Tradability guard: also drop ST names from the validation/fitness IC (limit-up/down/suspended are always dropped when those flags are in the panel). Prevents accepting phantom edge over untradable names."),
+    min_validation_icir: float = typer.Option(0.0, "--min-validation-icir", help="Stability floor: reject factors whose tradable validation ICIR is below this (rd-agent loop only). 0 disables."),
 ) -> None:
-    """Discover GA symbolic factors in the safe expression DSL.
+    """Discover factors in the safe expression DSL.
+
+    By default this uses an RD-Agent-style loop: hypothesis -> factor tasks
+    -> implementation/value gate -> validation -> SOTA library feedback. Pass
+    ``--legacy-ga`` to run the original one-shot symbolic GA.
 
     The command writes definitions that can be fed back into
     ``build-training-dataset-v7 --factor-library alpha181 --synthesized-factors``.
     """
-    from quantagent.factors.factor_synthesis import SymbolicGAConfig, save_result, synthesize_factors
+    from quantagent.factors.factor_synthesis import (
+        RDAgentFactorLoopConfig,
+        SymbolicGAConfig,
+        save_result,
+        synthesize_factors,
+        synthesize_factors_rd_agent,
+    )
 
     resolved_output = Path(output_dir) if output_dir is not None else default_reports_root() / "v7" / "factor_synthesis"
     panel = read_frame(market_panel_path)
     labels = read_frame(labels_path) if labels_path else None
-    config = SymbolicGAConfig(
-        population=population,
-        generations=generations,
-        max_depth=max_depth,
-        top_k=top_k,
-        label_column=label_column,
-        validation_fraction=validation_fraction,
-        min_validation_rank_ic=min_validation_rank_ic,
-        fitness_sample_dates=fitness_sample_dates,
-        fitness_sample_symbols=fitness_sample_symbols,
-        seed=seed,
-        warm_start_fraction=warm_start_fraction,
-        icir_weight=icir_weight,
-        reference_columns=tuple(c.strip() for c in reference_columns.split(",") if c.strip()),
-        max_reference_correlation=max_reference_correlation,
-    )
-    result = synthesize_factors(panel, labels=labels, config=config)
+    if train_end.strip():
+        import pandas as _pd
+
+        cutoff = _pd.Timestamp(train_end.strip())
+        before = len(panel)
+        panel = panel[_pd.to_datetime(panel["trade_date"], errors="coerce") <= cutoff].reset_index(drop=True)
+        if labels is not None and "trade_date" in labels.columns:
+            labels = labels[_pd.to_datetime(labels["trade_date"], errors="coerce") <= cutoff].reset_index(drop=True)
+        typer.echo(
+            json_dump({"event": "train_end_cutoff", "train_end": train_end.strip(),
+                       "panel_rows_before": int(before), "panel_rows_after": int(len(panel))})
+        )
+    refs = tuple(c.strip() for c in reference_columns.split(",") if c.strip())
+    if rd_agent:
+        config = RDAgentFactorLoopConfig(
+            rounds=rounds,
+            factors_per_round=factors_per_round,
+            top_k=top_k,
+            label_column=label_column,
+            validation_fraction=validation_fraction,
+            min_validation_rank_ic=min_validation_rank_ic,
+            min_finite_ratio=0.3,
+            fitness_sample_dates=fitness_sample_dates,
+            fitness_sample_symbols=fitness_sample_symbols,
+            seed=seed,
+            icir_weight=icir_weight,
+            reference_columns=refs,
+            max_reference_correlation=max_reference_correlation,
+            max_sota_correlation=max_sota_correlation,
+            exclude_st=exclude_st,
+            min_validation_icir=min_validation_icir,
+            use_llm=use_llm,
+            allow_network=allow_network,
+            llm_model=(llm_model or None),
+            llm_start_round=llm_start_round,
+            llm_candidates_per_round=llm_candidates_per_round,
+            rag_escalation_round=rag_escalation_round,
+            llm_timeout_seconds=llm_timeout_seconds,
+            memory_path=(str(memory_path) if memory_path is not None else None),
+        )
+        result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
+    else:
+        config = SymbolicGAConfig(
+            population=population,
+            generations=generations,
+            max_depth=max_depth,
+            top_k=top_k,
+            label_column=label_column,
+            validation_fraction=validation_fraction,
+            min_validation_rank_ic=min_validation_rank_ic,
+            fitness_sample_dates=fitness_sample_dates,
+            fitness_sample_symbols=fitness_sample_symbols,
+            seed=seed,
+            warm_start_fraction=warm_start_fraction,
+            icir_weight=icir_weight,
+            reference_columns=refs,
+            max_reference_correlation=max_reference_correlation,
+            exclude_st=exclude_st,
+        )
+        result = synthesize_factors(panel, labels=labels, config=config)
     paths = save_result(result, resolved_output)
     typer.echo(
         json_dump(
             {
                 "status": "passed",
+                "mode": "rd-agent" if rd_agent else "legacy-ga",
                 "definitions": paths["definitions"],
                 "leaderboard": paths["leaderboard"],
                 "history": paths["history"],
+                "rd_agent_trace": paths.get("rd_agent_trace"),
+                "rd_agent_task_feedback": paths.get("rd_agent_task_feedback"),
                 "selected": int(len(result.definitions)),
                 "config": asdict(config),
             }

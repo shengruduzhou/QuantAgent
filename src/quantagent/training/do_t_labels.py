@@ -5,6 +5,11 @@ from __future__ import annotations
 import pandas as pd
 
 from quantagent.portfolio.do_t_overlay import DoTOverlayConfig, simulate_do_t_overlay
+from quantagent.training.do_t_roundtrip_labels import (
+    ROUND_TRIP_LABEL_COLUMNS,
+    RoundTripLabelConfig,
+    build_round_trip_labels,
+)
 
 
 def build_do_t_training_labels(
@@ -34,4 +39,9 @@ def build_do_t_training_labels(
     return out.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
-__all__ = ["build_do_t_training_labels"]
+__all__ = [
+    "ROUND_TRIP_LABEL_COLUMNS",
+    "RoundTripLabelConfig",
+    "build_do_t_training_labels",
+    "build_round_trip_labels",
+]

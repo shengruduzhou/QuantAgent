@@ -34,3 +34,5 @@ AI_quant_runtime/
 AI_quant_venv/
 .codex/
 .agents/
+
+.rd-agent/

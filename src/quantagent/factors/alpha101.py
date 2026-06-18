@@ -4,10 +4,53 @@ from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from quantagent.factors.registry import FactorMeta, default_registry
 
 BASE_COLUMNS = ("open", "high", "low", "close", "volume", "amount")
+
+# Test/diagnostic switch: when True the per-symbol time-series helpers route to
+# their original (slow, pandas ``rolling().apply``) reference implementations
+# instead of the vectorized fast paths. The vectorized paths are validated to be
+# numerically identical (<1e-9, see tests/factors/test_alpha101_equivalence.py);
+# this flag exists only so that equivalence test can compare the two in-process.
+_REFERENCE_HELPERS = False
+
+# Module-level handles for the fork-based factor-parallel workers. Populated in
+# the parent immediately before the worker pool is forked so children inherit
+# them via copy-on-write (no pickling of the 15M-row panel). See
+# ``_compute_factor_arrays_parallel``.
+_WK_DATA: pd.DataFrame | None = None
+_WK_ADV20: pd.Series | None = None
+_WK_DELTA: pd.Series | None = None
+
+
+def _symbol_blocks(data: pd.DataFrame) -> list[tuple[int, int]]:
+    """Return ``[(start, stop), ...]`` row ranges for each contiguous symbol run.
+
+    ``_base`` sorts the panel by ``["symbol", "trade_date"]`` so every symbol
+    occupies one contiguous block of rows; the vectorized time-series helpers
+    operate on these blocks by position (no per-group ``.loc`` alignment). The
+    result is memoized on ``data.attrs`` so it is computed once per call to
+    ``_prepare_alpha_context`` and inherited by forked workers via copy-on-write.
+    """
+    cached = data.attrs.get("_alpha_sym_blocks")
+    if cached is not None:
+        return cached
+    symbols = data["symbol"].to_numpy()
+    n = symbols.shape[0]
+    if n == 0:
+        blocks: list[tuple[int, int]] = []
+    else:
+        change = np.flatnonzero(symbols[1:] != symbols[:-1]) + 1
+        bounds = np.empty(change.shape[0] + 2, dtype=np.int64)
+        bounds[0] = 0
+        bounds[1:-1] = change
+        bounds[-1] = n
+        blocks = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+    data.attrs["_alpha_sym_blocks"] = blocks
+    return blocks
 
 
 def alpha001(frame: pd.DataFrame) -> pd.DataFrame:
@@ -150,6 +193,7 @@ def compute_alpha101(
     names: list[str] | None = None,
     *,
     wide: bool = False,
+    workers: int = 1,
 ) -> pd.DataFrame:
     """Compute the full Alpha101 family (1..101) in a single pass.
 
@@ -161,13 +205,31 @@ def compute_alpha101(
     was the root cause of the multi-hour CPU bottleneck and pivot-time OOM
     on production-scale inputs.
 
-    Output formats
-    --------------
-    * ``wide=False`` (default, backward-compatible): long form ``[trade_date,
-      symbol, factor_name, factor_value]``.
-    * ``wide=True``: wide form ``[trade_date, symbol, alpha001, ..., alpha101]``.
-      Skips the long-form intermediate (~10 GB on 3M-row panels) and the
-      downstream pivot in the dataset builder, materially lowering peak RAM.
+    The per-symbol time-series operators (``ts_rank``, ``ts_argmax/min``,
+    ``product``, ``decay_linear``, rolling ``corr/cov``) are vectorized over the
+    contiguous symbol blocks (``sliding_window_view`` / position-based slicing)
+    rather than ``groupby().rolling().apply(python_fn)``; ``ts_rank`` alone was
+    ~95% of wall time before this change. Output is numerically identical to the
+    original reference implementation (``<1e-9``; see the equivalence test).
+
+    Parameters
+    ----------
+    wide:
+        * ``False`` (default, backward-compatible): long form ``[trade_date,
+          symbol, factor_name, factor_value]``.
+        * ``True``: wide form ``[trade_date, symbol, alpha001, ..., alpha101]``.
+          Skips the long-form intermediate (~10 GB on 3M-row panels) and the
+          downstream pivot in the dataset builder, materially lowering peak RAM.
+    workers:
+        Number of worker processes for factor-level parallelism. ``1``
+        (default) preserves the exact serial behavior. ``>1`` forks a pool
+        (POSIX ``fork`` start method, so the panel is shared copy-on-write — not
+        pickled) and computes the independent alpha factors concurrently. Each
+        factor still sees the full cross-section, so cross-sectional ranks remain
+        correct; results are reassembled in deterministic factor order, so the
+        output is bit-for-bit identical to the serial path. Falls back to serial
+        when ``fork`` is unavailable. Note: each returned factor column is ~8
+        bytes/row, so peak RAM grows with both ``workers`` and panel size.
 
     Alphas needing IndClass/cap (industry neutralization or market-cap-weighted
     operations) are registered as placeholders that return NaN until sector and
@@ -181,39 +243,96 @@ def compute_alpha101(
         selected = sorted({int(str(n).removeprefix("alpha")) for n in names})
     data, adv20, delta_close_1 = _prepare_alpha_context(frame)
 
+    results = _compute_factor_arrays(data, adv20, delta_close_1, selected, workers)
+
     if wide:
-        wide_cols: dict[str, np.ndarray] = {}
-        for number in selected:
-            try:
-                values = _alpha_value(data, number, adv20, delta_close_1)
-            except ValueError:
-                continue
-            values = values.replace([np.inf, -np.inf], np.nan)
-            wide_cols[f"alpha{number:03d}"] = values.to_numpy(dtype=float)
+        wide_cols = {f"alpha{number:03d}": arr for number, arr in results.items()}
         if not wide_cols:
             return pd.DataFrame(columns=["trade_date", "symbol"])
-        out = pd.DataFrame(
+        return pd.DataFrame(
             {"trade_date": data["trade_date"].to_numpy(),
              "symbol": data["symbol"].to_numpy(),
              **wide_cols},
         )
-        return out
 
     frames: list[pd.DataFrame] = []
-    for number in selected:
-        try:
-            values = _alpha_value(data, number, adv20, delta_close_1)
-        except ValueError:
-            continue
-        frames.append(_format(data, f"alpha{number:03d}", values.replace([np.inf, -np.inf], np.nan)))
+    for number, arr in results.items():
+        frames.append(_format(data, f"alpha{number:03d}", pd.Series(arr, index=data.index)))
     if not frames:
         return pd.DataFrame(columns=["trade_date", "symbol", "factor_name", "factor_value"])
     return pd.concat(frames, ignore_index=True)
 
 
+def _compute_factor_arrays(
+    data: pd.DataFrame,
+    adv20: pd.Series,
+    delta_close_1: pd.Series,
+    selected: list[int],
+    workers: int,
+) -> dict[int, np.ndarray]:
+    """Compute each selected alpha as a cleaned float64 array, keyed by number.
+
+    Insertion order follows ``selected`` so downstream wide-column / long-form
+    assembly is deterministic regardless of the (serial or parallel) backend.
+    """
+    if workers and int(workers) > 1 and len(selected) > 1:
+        parallel = _compute_factor_arrays_parallel(data, adv20, delta_close_1, selected, int(workers))
+        if parallel is not None:
+            return parallel
+    results: dict[int, np.ndarray] = {}
+    for number in selected:
+        try:
+            values = _alpha_value(data, number, adv20, delta_close_1)
+        except ValueError:
+            continue
+        results[number] = values.replace([np.inf, -np.inf], np.nan).to_numpy(dtype=float)
+    return results
+
+
+def _factor_worker(number: int) -> tuple[int, np.ndarray | None]:
+    """Pool worker: compute one alpha against the forked-in (COW) panel."""
+    try:
+        values = _alpha_value(_WK_DATA, number, _WK_ADV20, _WK_DELTA)
+    except ValueError:
+        return number, None
+    return number, values.replace([np.inf, -np.inf], np.nan).to_numpy(dtype=float)
+
+
+def _compute_factor_arrays_parallel(
+    data: pd.DataFrame,
+    adv20: pd.Series,
+    delta_close_1: pd.Series,
+    selected: list[int],
+    workers: int,
+) -> dict[int, np.ndarray] | None:
+    """Factor-level parallelism via a forked pool; ``None`` if fork unavailable."""
+    import multiprocessing as mp
+
+    try:
+        ctx = mp.get_context("fork")
+    except ValueError:  # pragma: no cover - non-POSIX platforms
+        return None
+
+    global _WK_DATA, _WK_ADV20, _WK_DELTA
+    # Populate module globals BEFORE the pool forks so children inherit the panel
+    # via copy-on-write instead of pickling it across the process boundary.
+    _WK_DATA, _WK_ADV20, _WK_DELTA = data, adv20, delta_close_1
+    collected: dict[int, np.ndarray] = {}
+    try:
+        with ctx.Pool(processes=min(workers, len(selected))) as pool:
+            for number, arr in pool.imap_unordered(_factor_worker, selected, chunksize=1):
+                if arr is not None:
+                    collected[number] = arr
+    finally:
+        _WK_DATA = _WK_ADV20 = _WK_DELTA = None
+    # Reassemble in the canonical ``selected`` order for deterministic output.
+    return {number: collected[number] for number in selected if number in collected}
+
+
 def _prepare_alpha_context(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """One-shot setup shared across every selected alpha factor."""
     data = _base(frame)
+    _symbol_blocks(data)  # memoize block bounds once (inherited by forked workers)
     adv20 = _mean(data, "volume", 20)
     delta_close_1 = _delta(data, "close", 1)
     return data, adv20, delta_close_1
@@ -728,6 +847,41 @@ def _max_series(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series
 
 
 def _corr(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) -> pd.Series:
+    if _REFERENCE_HELPERS:
+        return _corr_ref(data, left, right, window)
+    return _rolling_pairwise(data, left, right, window, "corr")
+
+
+def _cov(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) -> pd.Series:
+    if _REFERENCE_HELPERS:
+        return _cov_ref(data, left, right, window)
+    return _rolling_pairwise(data, left, right, window, "cov")
+
+
+def _rolling_pairwise(
+    data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int, op: str
+) -> pd.Series:
+    """Per-symbol rolling pairwise ``corr``/``cov`` over contiguous blocks.
+
+    Same pandas (Cython) reduction as the reference per-group loop — therefore
+    numerically identical — but iterating symbol blocks by position into a
+    preallocated array, dropping the per-group ``.loc`` label alignment.
+    """
+    window = int(window)
+    l = np.asarray(left, dtype=float)
+    r = np.asarray(right, dtype=float)
+    out = np.full(l.shape[0], np.nan)
+    for start, stop in _symbol_blocks(data):
+        if stop - start < window:
+            continue
+        rs = pd.Series(r[start:stop])
+        rolled = pd.Series(l[start:stop]).rolling(window, min_periods=window)
+        block = rolled.corr(rs) if op == "corr" else rolled.cov(rs)
+        out[start:stop] = block.to_numpy()
+    return pd.Series(out, index=data.index)
+
+
+def _corr_ref(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     left = pd.Series(left.to_numpy(dtype=float), index=data.index)
     right = pd.Series(right.to_numpy(dtype=float), index=data.index)
@@ -736,7 +890,7 @@ def _corr(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) ->
     return values
 
 
-def _cov(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) -> pd.Series:
+def _cov_ref(data: pd.DataFrame, left: pd.Series, right: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     left = pd.Series(left.to_numpy(dtype=float), index=data.index)
     right = pd.Series(right.to_numpy(dtype=float), index=data.index)
@@ -751,6 +905,139 @@ def _rank(data: pd.DataFrame, series: pd.Series) -> pd.Series:
 
 
 def _ts_rank(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """Trailing time-series rank of the latest value within ``window`` (in (0, 1]).
+
+    Vectorized equivalent of ``rolling(window).apply(rank(...).iloc[-1] / window)``:
+    average-rank of the window's last element = ``less + (equal + 1) / 2`` where
+    ``equal`` counts the last element itself. Bit-for-bit identical to the
+    reference (integer arithmetic), and mirrors ``expr.TsRank``.
+
+    Note the ``~isfinite`` (not ``~isnan``) window mask: pandas ``rolling`` treats
+    ``±inf`` like ``NaN`` for ``min_periods``, so any window containing a
+    non-finite value yields NaN. Inputs here can be ``inf`` (e.g. a degenerate
+    rolling ``corr``), so matching that is required for parity with the reference.
+    """
+    if _REFERENCE_HELPERS:
+        return _ts_rank_ref(data, series, window)
+    window = int(window)
+    arr = np.asarray(series, dtype=float)
+    out = np.full(arr.shape[0], np.nan)
+    if window >= 1:
+        for start, stop in _symbol_blocks(data):
+            if stop - start < window:
+                continue
+            views = sliding_window_view(arr[start:stop], window)
+            last = views[:, -1]
+            with np.errstate(invalid="ignore"):
+                less = (views < last[:, None]).sum(axis=1)
+                equal = (views == last[:, None]).sum(axis=1)
+            ranks = (less + (equal + 1.0) / 2.0) / window
+            ranks[~np.isfinite(views).all(axis=1)] = np.nan
+            out[start + window - 1 : stop] = ranks
+    return pd.Series(out, index=data.index)
+
+
+def _argmax(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """1-indexed position of the max within the trailing ``window`` (first max)."""
+    if _REFERENCE_HELPERS:
+        return _argmax_ref(data, series, window)
+    window = int(window)
+    arr = np.asarray(series, dtype=float)
+    out = np.full(arr.shape[0], np.nan)
+    if window >= 1:
+        for start, stop in _symbol_blocks(data):
+            if stop - start < window:
+                continue
+            views = sliding_window_view(arr[start:stop], window)
+            res = np.argmax(views, axis=1).astype(float) + 1.0
+            res[~np.isfinite(views).all(axis=1)] = np.nan
+            out[start + window - 1 : stop] = res
+    return pd.Series(out, index=data.index)
+
+
+def _argmin(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """1-indexed position of the min within the trailing ``window`` (first min)."""
+    if _REFERENCE_HELPERS:
+        return _argmin_ref(data, series, window)
+    window = int(window)
+    arr = np.asarray(series, dtype=float)
+    out = np.full(arr.shape[0], np.nan)
+    if window >= 1:
+        for start, stop in _symbol_blocks(data):
+            if stop - start < window:
+                continue
+            views = sliding_window_view(arr[start:stop], window)
+            res = np.argmin(views, axis=1).astype(float) + 1.0
+            res[~np.isfinite(views).all(axis=1)] = np.nan
+            out[start + window - 1 : stop] = res
+    return pd.Series(out, index=data.index)
+
+
+def _scale(data: pd.DataFrame, series: pd.Series) -> pd.Series:
+    tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
+    denom = tmp.abs().groupby(data["trade_date"], sort=False).transform("sum").replace(0.0, np.nan)
+    return tmp / denom
+
+
+def _decay_linear(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """Linear-weighted moving average: weights = [1, 2, ..., window] / sum.
+
+    Unlike the other rolling helpers this keeps a per-window ``np.dot`` rather
+    than a batched ``views @ weights``: a batched dot (BLAS ``dgemv``) differs
+    from the reference's per-window dot (BLAS ``ddot``) at ~1e-14, and ~12 alphas
+    feed ``decay_linear`` into a ``rank``/``ts_rank`` where that ULP difference
+    flips discrete ranks (observed: alpha071 off by 0.125). Looping ``np.dot``
+    over the (vectorized) symbol blocks is still meaningfully faster than the
+    reference ``rolling().apply`` while remaining bit-for-bit identical; the
+    overall win comes from ``ts_rank`` and factor-level ``workers`` parallelism.
+    """
+    if _REFERENCE_HELPERS:
+        return _decay_linear_ref(data, series, window)
+    window = int(window)
+    if window < 1:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+    weights = np.arange(1, window + 1, dtype=float)
+    weights = weights / weights.sum()
+    arr = np.asarray(series, dtype=float)
+    out = np.full(arr.shape[0], np.nan)
+    for start, stop in _symbol_blocks(data):
+        if stop - start < window:
+            continue
+        views = sliding_window_view(arr[start:stop], window)
+        res = np.full(views.shape[0], np.nan)
+        # pandas rolling treats ±inf like NaN; only fully-finite windows compute.
+        for i in np.flatnonzero(np.isfinite(views).all(axis=1)):
+            res[i] = np.dot(views[i], weights)
+        out[start + window - 1 : stop] = res
+    return pd.Series(out, index=data.index)
+
+
+def _signedpower(series: pd.Series, exponent: float) -> pd.Series:
+    arr = series.to_numpy(dtype=float)
+    return pd.Series(np.sign(arr) * np.power(np.abs(arr), exponent), index=series.index)
+
+
+def _product(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+    """Rolling product over the trailing ``window`` per symbol."""
+    if _REFERENCE_HELPERS:
+        return _product_ref(data, series, window)
+    window = int(window)
+    arr = np.asarray(series, dtype=float)
+    out = np.full(arr.shape[0], np.nan)
+    if window >= 1:
+        for start, stop in _symbol_blocks(data):
+            if stop - start < window:
+                continue
+            views = sliding_window_view(arr[start:stop], window)
+            res = np.prod(views, axis=1)
+            res[~np.isfinite(views).all(axis=1)] = np.nan
+            out[start + window - 1 : stop] = res
+    return pd.Series(out, index=data.index)
+
+
+# --- reference (pandas rolling.apply) implementations, kept for the in-process
+# --- equivalence test (set ``_REFERENCE_HELPERS = True``). Not used in prod.
+def _ts_rank_ref(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
     for _, group in data.groupby("symbol", sort=False):
@@ -761,7 +1048,7 @@ def _ts_rank(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     return values
 
 
-def _argmax(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+def _argmax_ref(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
     for _, group in data.groupby("symbol", sort=False):
@@ -772,13 +1059,7 @@ def _argmax(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     return values
 
 
-def _scale(data: pd.DataFrame, series: pd.Series) -> pd.Series:
-    tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
-    denom = tmp.abs().groupby(data["trade_date"], sort=False).transform("sum").replace(0.0, np.nan)
-    return tmp / denom
-
-
-def _argmin(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+def _argmin_ref(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
     for _, group in data.groupby("symbol", sort=False):
@@ -789,8 +1070,7 @@ def _argmin(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     return values
 
 
-def _decay_linear(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
-    """Linear-weighted moving average: weights = [1, 2, ..., window] / sum."""
+def _decay_linear_ref(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     if window < 1:
         return pd.Series(np.nan, index=data.index, dtype=float)
     weights = np.arange(1, window + 1, dtype=float)
@@ -805,12 +1085,7 @@ def _decay_linear(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Seri
     return values
 
 
-def _signedpower(series: pd.Series, exponent: float) -> pd.Series:
-    arr = series.to_numpy(dtype=float)
-    return pd.Series(np.sign(arr) * np.power(np.abs(arr), exponent), index=series.index)
-
-
-def _product(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
+def _product_ref(data: pd.DataFrame, series: pd.Series, window: int) -> pd.Series:
     values = pd.Series(np.nan, index=data.index, dtype=float)
     tmp = pd.Series(series.to_numpy(dtype=float), index=data.index)
     for _, group in data.groupby("symbol", sort=False):

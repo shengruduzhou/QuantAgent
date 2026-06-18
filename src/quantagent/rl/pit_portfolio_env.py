@@ -251,6 +251,39 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         }
         return self._obs(), float(reward), bool(terminated), False, info
 
+    # ---------------------------------------------------------------- guards
+    def book_dispersion_report(self, eps: float = 1e-6) -> dict:
+        """Diagnostic: can the policy add value via *name selection* at all?
+
+        The env z-scores alpha within the held book each date. If that
+        within-book dispersion is ~0 on most dates, name tilts are inert and
+        ANY positive value-add must come from the gross/cash-exposure action —
+        i.e. a leverage/regime bet, not stock-selection skill. A high
+        ``flat_date_fraction`` means a positive value-add should be treated as
+        an artifact (the "+39pp env-flat" failure mode), not as alpha. The RL
+        enable gate consumes ``env_can_select`` so a flat-env "win" is not
+        promoted.
+        """
+        stds: list[float] = []
+        for t in range(len(self.dates)):
+            in_book = self.slot_in_book[t].astype(bool)
+            a = self.slot_alpha[t][in_book]
+            if a.size > 1:
+                stds.append(float(np.std(a)))
+        arr = np.asarray(stds, dtype=float)
+        n = int(arr.size)
+        flat = int(np.sum(arr < eps)) if n else 0
+        flat_frac = float(flat / n) if n else 1.0
+        return {
+            "n_dates": n,
+            "mean_within_book_alpha_std": float(arr.mean()) if n else 0.0,
+            "median_within_book_alpha_std": float(np.median(arr)) if n else 0.0,
+            "flat_date_fraction": flat_frac,
+            # The env can express stock selection only if most dates have
+            # within-book alpha dispersion to tilt on.
+            "env_can_select": bool(n > 0 and flat_frac < 0.5),
+        }
+
     def _obs(self) -> np.ndarray:
         cfg = self.config
         n = cfg.max_book

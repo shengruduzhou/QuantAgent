@@ -61,24 +61,24 @@ def _day_factors(g: pd.DataFrame) -> dict[str, float]:
         if "amount" in g else close * vol
     )
     n = len(close)
-    if n == 0 or close[0] <= 0:
+    if n == 0 or not np.isfinite(close[0]) or close[0] <= 0:
         return {c: np.nan for c in FACTOR_COLUMNS}
 
     day_open = openp[0]
     day_close = close[-1]
-    day_high = float(np.nanmax(high))
-    day_low = float(np.nanmin(low))
+    day_high = _finite_max(high)
+    day_low = _finite_min(low)
     total_vol = float(np.nansum(vol))
 
     first_n = min(_OPEN_MINUTES, n)
     last_n = min(_CLOSE_MINUTES, n)
-    first30 = close[first_n - 1] / day_open - 1.0 if day_open > 0 else np.nan
-    last30 = day_close / close[-last_n] - 1.0 if close[-last_n] > 0 else np.nan
+    first30 = close[first_n - 1] / day_open - 1.0 if np.isfinite(day_open) and day_open > 0 else np.nan
+    last30 = day_close / close[-last_n] - 1.0 if np.isfinite(close[-last_n]) and close[-last_n] > 0 else np.nan
 
     vwap = (close * vol).sum() / total_vol if total_vol > 0 else np.nan
     vwap_dev = day_close / vwap - 1.0 if vwap and vwap > 0 else np.nan
     rng = day_high - day_low
-    range_pos = (day_close - day_low) / rng if rng > 1e-12 else 0.5
+    range_pos = (day_close - day_low) / rng if np.isfinite(rng) and rng > 1e-12 else 0.5
 
     minute_ret = np.diff(close) / close[:-1]
     log_ret = np.diff(np.log(np.where(close > 0, close, np.nan)))
@@ -93,7 +93,8 @@ def _day_factors(g: pd.DataFrame) -> dict[str, float]:
         concentration = float(top / total_vol)
     else:
         concentration = np.nan
-    med = float(np.nanmedian(vol)) if n else 0.0
+    finite_vol = vol[np.isfinite(vol)]
+    med = float(np.median(finite_vol)) if len(finite_vol) else 0.0
     spikes = int((vol > _SPIKE_MULT * med).sum()) if med > 0 else 0
 
     half = n // 2
@@ -101,15 +102,17 @@ def _day_factors(g: pd.DataFrame) -> dict[str, float]:
     pm_vol = float(vol[half:].sum())
     am_pm = pm_vol / am_vol if am_vol > 0 else np.nan
 
-    if len(minute_ret) >= 3 and np.nanstd(minute_ret) > 1e-12:
+    if len(minute_ret) >= 3 and _finite_std(minute_ret) > 1e-12:
         skew = float(pd.Series(minute_ret).skew())
     else:
         skew = 0.0
 
     amount_tail = amount[1:] if len(amount) > 1 else amount
     amount_denom = np.where(amount_tail > 0, amount_tail / 1e6, np.nan)
-    amihud = float(np.nanmean(np.abs(log_ret) / amount_denom)) if len(log_ret) else np.nan
-    if len(log_ret) >= 3 and np.nanstd(vol[1:]) > 1e-12 and np.nanstd(log_ret) > 1e-12:
+    amihud_values = np.abs(log_ret) / amount_denom if len(log_ret) else np.array([], dtype="float64")
+    amihud_finite = amihud_values[np.isfinite(amihud_values)]
+    amihud = float(amihud_finite.mean()) if len(amihud_finite) else np.nan
+    if len(log_ret) >= 3 and _finite_std(vol[1:]) > 1e-12 and _finite_std(log_ret) > 1e-12:
         corr_prv = float(pd.Series(log_ret).corr(pd.Series(vol[1:]), method="pearson"))
     else:
         corr_prv = np.nan
@@ -136,6 +139,21 @@ def _day_factors(g: pd.DataFrame) -> dict[str, float]:
         "close30_volume_share": float(close_share),
         "close3_volume_share": float(close3_share),
     }
+
+
+def _finite_max(values: np.ndarray) -> float:
+    finite = values[np.isfinite(values)]
+    return float(finite.max()) if len(finite) else np.nan
+
+
+def _finite_min(values: np.ndarray) -> float:
+    finite = values[np.isfinite(values)]
+    return float(finite.min()) if len(finite) else np.nan
+
+
+def _finite_std(values: np.ndarray) -> float:
+    finite = values[np.isfinite(values)]
+    return float(finite.std()) if len(finite) else 0.0
 
 
 def compute_intraday_factors(minute_panel: pd.DataFrame) -> pd.DataFrame:

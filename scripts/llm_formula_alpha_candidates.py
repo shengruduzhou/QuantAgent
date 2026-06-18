@@ -32,34 +32,20 @@ import pandas as pd
 
 from quantagent.agents.llm_skill_client import LLMSkillClient, LLMSkillConfig
 from quantagent.factors import expr as E
+from quantagent.factors.factor_loop_memory import (  # single source of truth (shared with the rd-agent loop)
+    ALLOWED_NODES,
+    A_SHARE_STRUCTURES,
+    FALLBACK_MODELS,
+    append_memory as _append_memory,
+    load_memory as _load_memory,
+    memory_digest as _memory_digest,
+)
 from quantagent.factors.factor_synthesis import (
     _evaluate_ic,
     _node_count,
     parse_expression,
     save_definitions,
 )
-
-FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
-
-ALLOWED_NODES = [
-    "Column('open'|'high'|'low'|'close'|'volume'|'amount')",
-    "OptionalColumn('turnover_rate'|'pe_ttm'|'pb'|'roe'|'gross_margin')",
-    "Constant(float)",
-    "Add(left,right)", "Sub(left,right)", "Mul(left,right)", "Div(numerator,denominator)",
-    "Abs(expr)", "Sign(expr)", "Log(expr)", "Rank(expr)", "CsZscore(expr)",
-    "Returns(expr, periods)", "Delay(expr, periods)", "Delta(expr, periods)",
-    "TsRank(expr, window)", "TsMean(expr, window)", "TsStd(expr, window)",
-    "TsSum(expr, window)", "TsMax(expr, window)", "TsMin(expr, window)",
-    "TsCorr(left, right, window)", "TsCov(left, right, window)",
-    "DecayLinear(expr, window)",
-]
-
-A_SHARE_STRUCTURES = [
-    "short-term reversal", "volume-price divergence", "turnover crowding",
-    "liquidity discount", "low volatility", "decayed momentum",
-    "intraday positioning (close vs high-low range)", "overnight gap behaviour",
-    "volume shock vs trailing distribution", "price vs rolling anchor (52w-high style)",
-]
 
 
 def _sample_panel(
@@ -98,49 +84,6 @@ def _chronological_split(frame: pd.DataFrame, validation_fraction: float) -> tup
     if train.empty or valid.empty:
         raise ValueError("empty train or validation split")
     return train, valid
-
-
-def _load_memory(path: Path, max_entries: int = 60) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    entries: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return entries[-max_entries:]
-
-
-def _append_memory(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def _memory_digest(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compress past outcomes into prompt-sized feedback."""
-    rejected = [e for e in entries if e.get("status") != "selected"]
-    selected = [e for e in entries if e.get("status") == "selected"]
-    reason_counts: dict[str, int] = {}
-    for e in rejected:
-        reason_counts[str(e.get("status"))] = reason_counts.get(str(e.get("status")), 0) + 1
-    return {
-        "past_rejected_count_by_reason": reason_counts,
-        "recent_rejected_examples": [
-            {"expression": e.get("raw_expression") or e.get("expression"), "reason": e.get("status"),
-             "validation_rank_ic": e.get("validation_rank_ic")}
-            for e in rejected[-12:]
-        ],
-        "recent_accepted_examples": [
-            {"expression": e.get("expression"), "validation_rank_ic": e.get("validation_rank_ic")}
-            for e in selected[-6:]
-        ],
-    }
 
 
 def _prompt(args: argparse.Namespace, memory: list[dict[str, Any]]) -> tuple[str, str]:

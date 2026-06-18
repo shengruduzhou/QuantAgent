@@ -1,0 +1,64 @@
+/* 主力资金流副图 V2：机构线、散户线、大盘资金、资金差 */
+/* 普通日线无法真实拆机构/散户，本公式为资金代理因子 */
+
+N:=34;
+M:=20;
+
+主力资金:EMA(100*(CLOSE-LLV(LOW,N))/(HHV(HIGH,N)-LLV(LOW,N)+0.0001),3),COLORRED,LINETHICK2;
+大盘资金:EMA(100*(INDEXC-LLV(INDEXL,N))/(HHV(INDEXH,N)-LLV(INDEXL,N)+0.0001),3),COLORGREEN,LINETHICK2;
+
+20,POINTDOT,COLOR808080;
+50,POINTDOT,COLORFFFFFF;
+80,POINTDOT,COLORYELLOW;
+
+V5:=MA(VOL,5);
+V20:=MA(VOL,20);
+A5:=MA(AMOUNT,5);
+A20:=MA(AMOUNT,20);
+
+VWAP5:=IF(SUM(VOL,5)>0,SUM(AMOUNT,5)/SUM(VOL,5)/100,CLOSE);
+VWAP10:=IF(SUM(VOL,10)>0,SUM(AMOUNT,10)/SUM(VOL,10)/100,CLOSE);
+
+HSL:=IF(CAPITAL>0,VOL/CAPITAL*100,0);
+HSL20:=MA(HSL,20);
+
+资金代理:=IF(CLOSE>=OPEN,
+       (CLOSE-OPEN)/(HIGH-LOW+0.01)*AMOUNT/100000000,
+      -(OPEN-CLOSE)/(HIGH-LOW+0.01)*AMOUNT/100000000);
+
+资金流入率:=资金代理/(AMOUNT/100000000+0.01)*100;
+
+机构线:EMA(MIN(100,MAX(0,
+       主力资金
+       +资金流入率*0.60
+       +IF(CLOSE>VWAP5,6,-6)
+       +IF(VWAP5>VWAP10,4,-4)
+       +IF(VOL>V20*1.30 AND AMOUNT>A20,5,0)
+)),5),COLORFF00FF,LINETHICK2;
+
+散户线:EMA(MIN(100,MAX(0,
+       100-主力资金
+       +IF(HSL>HSL20*2.20 AND CLOSE<OPEN,10,0)
+       +IF(CLOSE<VWAP5,6,0)
+       -IF(资金流入率>5,6,0)
+)),5),COLOR00FFFF,LINETHICK2;
+
+资金差:=机构线-散户线;
+
+STICKLINE(机构线>散户线,散户线,机构线,3,0),COLORRED;
+STICKLINE(机构线<=散户线,机构线,散户线,3,0),COLOR008000;
+
+机构吸筹:=CROSS(机构线,散户线) AND 主力资金>大盘资金 AND CLOSE>VWAP5 AND 资金流入率>0;
+机构加速:=机构线>散户线 AND 机构线>REF(机构线,1) AND 主力资金>60 AND VOL>V20*1.20;
+散户主导:=散户线>机构线 AND CLOSE<VWAP5;
+资金派发:=CROSS(散户线,机构线) OR (主力资金>80 AND 资金流入率<0 AND CLOSE<VWAP5);
+
+DRAWICON(机构吸筹,机构线,1);
+DRAWICON(资金派发,机构线,2);
+
+DRAWTEXT(机构吸筹,机构线,'吸筹');
+DRAWTEXT(机构加速 AND REF(机构加速,1)=0,机构线,'加速');
+DRAWTEXT(资金派发,机构线,'派发');
+
+资金流入率值:资金流入率,NODRAW;
+资金差值:资金差,NODRAW;

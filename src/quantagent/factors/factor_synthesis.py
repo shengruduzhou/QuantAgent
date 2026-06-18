@@ -19,14 +19,25 @@ from __future__ import annotations
 import json
 import logging
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
 
 from quantagent.factors import expr as E
+from quantagent.factors.factor_loop_memory import (
+    RAG_EASY,
+    RAG_HIGH_IC,
+    append_memory,
+    classify_horizon,
+    classify_structure,
+    coverage_map,
+    load_memory,
+    memory_digest,
+    uncovered_directions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +99,12 @@ class SymbolicGAConfig:
     # Fraction of each new generation replaced by fresh random trees to
     # keep diversity (quality-diversity style anti-premature-convergence).
     random_injection_rate: float = 0.10
+    # Tradability guard: when these flag columns are present in the panel, the
+    # validation/fitness IC drops names that are untradable at signal time so a
+    # factor cannot be accepted on ranking power over positions you could never
+    # take (the phantom-edge mechanism from honest-baseline-truth).
+    tradability_columns: tuple[str, ...] = ("is_suspended", "is_limit_up", "is_limit_down")
+    exclude_st: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +112,169 @@ class SynthesisResult:
     definitions: list[E.FactorDefinition]
     leaderboard: pd.DataFrame  # name, expression, train_rank_ic, validation_rank_ic, complexity, finite_ratio
     history: pd.DataFrame      # generation, best_fitness, mean_fitness, mean_complexity
+
+
+@dataclass(frozen=True)
+class RDAgentFactorHypothesis:
+    """RD-Agent-style hypothesis record for one factor research loop."""
+
+    hypothesis: str
+    reason: str
+    concise_observation: str = ""
+    concise_justification: str = ""
+    concise_knowledge: str = ""
+
+
+@dataclass(frozen=True)
+class RDAgentFactorTask:
+    """RD-Agent-style factor task.
+
+    RD-Agent asks a coder to implement these tasks as ``factor.py``. QuantAgent
+    keeps the same task contract but maps the implementation to the safe DSL.
+    """
+
+    factor_name: str
+    factor_description: str
+    factor_formulation: str
+    variables: dict[str, str]
+    factor_implementation: bool = False
+
+    def get_task_information(self) -> str:
+        return (
+            f"factor_name: {self.factor_name}\n"
+            f"factor_description: {self.factor_description}\n"
+            f"factor_formulation: {self.factor_formulation}\n"
+            f"variables: {self.variables}"
+        )
+
+    def get_task_information_and_implementation_result(self) -> dict[str, object]:
+        return {
+            "factor_name": self.factor_name,
+            "factor_description": self.factor_description,
+            "factor_formulation": self.factor_formulation,
+            "variables": self.variables,
+            "factor_implementation": self.factor_implementation,
+        }
+
+
+@dataclass(frozen=True)
+class RDAgentFactorLoopConfig:
+    """Configuration for the RD-Agent-style factor discovery loop.
+
+    The loop mirrors RD-Agent's finance factor workflow: propose a hypothesis,
+    create one to five factor tasks, implement them in a constrained interface,
+    evaluate output/value quality, deduplicate against the SOTA factor library,
+    and feed the result into the next loop.
+    """
+
+    rounds: int = 4
+    factors_per_round: int = 3
+    top_k: int = 20
+    label_column: str = "forward_return_5d"
+    validation_fraction: float = 0.25
+    min_validation_rank_ic: float = 0.0
+    min_finite_ratio: float = 0.3
+    max_sota_correlation: float = 0.99
+    complexity_penalty: float = 5e-4
+    icir_weight: float = 0.05
+    fitness_sample_dates: int = 400
+    fitness_sample_symbols: int = 500
+    seed: int = 1729
+    reference_columns: tuple[str, ...] = ()
+    max_reference_correlation: float = 0.7
+    # Tradability guard (see SymbolicGAConfig): validation IC / fitness drop
+    # names untradable at signal time so the acceptance gate cannot be fooled
+    # by phantom edge over limit-up-sealed / limit-down / suspended / ST names.
+    tradability_columns: tuple[str, ...] = ("is_suspended", "is_limit_up", "is_limit_down")
+    exclude_st: bool = False
+    # Stability floor: reject factors whose tradable validation ICIR is below
+    # this even if the mean rank-IC clears ``min_validation_rank_ic``.
+    min_validation_icir: float = 0.0
+    # --- LLM proposal (the generative half of the closed loop) ------------- #
+    # When ``use_llm`` is set, rounds at/after ``llm_start_round`` ask an LLM
+    # to propose NEW DSL factor tasks conditioned on the accumulated trace and
+    # the persistent accept/reject memory, instead of replaying the fixed
+    # blueprint slice. Round 0 always uses blueprints as a warm start. If the
+    # model is unavailable the round transparently falls back to blueprints.
+    use_llm: bool = False
+    llm_start_round: int = 1
+    llm_candidates_per_round: int = 4
+    # After this many rounds the research directive escalates from "easy,
+    # attributable factors" to "richer, higher-IC interaction structures".
+    rag_escalation_round: int = 3
+    # Persistent JSONL of accept/reject knowledge digested into each LLM prompt.
+    memory_path: str | None = None
+    allow_network: bool = False
+    llm_model: str | None = None
+    llm_timeout_seconds: float = 360.0
+    max_llm_attempts: int = 3
+
+
+@dataclass(frozen=True)
+class RDAgentSynthesisResult(SynthesisResult):
+    """RD-Agent-style synthesis output with loop trace and task feedback."""
+
+    trace: pd.DataFrame
+    task_feedback: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class _RDAgentCandidate:
+    task: RDAgentFactorTask
+    expr: E.Expr
+    complexity_tier: int
+    structure: str = ""
+    horizon: str = ""
+
+
+@dataclass(frozen=True)
+class ProposedFactor:
+    """An LLM-proposed factor, already parsed into the safe expression DSL.
+
+    Produced by a :class:`FactorProposer`; the loop wraps it into an
+    ``_RDAgentCandidate`` and runs it through the same value/IC/novelty gates
+    that the hand-written blueprints face.
+    """
+
+    name: str
+    expr: E.Expr
+    description: str = ""
+    formulation: str = ""
+    variables: dict[str, str] = field(default_factory=dict)
+    hypothesis: str = ""
+    complexity_tier: int = 1
+    horizon: str = ""
+    structure: str = ""
+
+
+@dataclass(frozen=True)
+class LLMProposalResult:
+    """Output of one LLM proposal round: a refined hypothesis plus DSL factors."""
+
+    hypothesis: "RDAgentFactorHypothesis"
+    factors: list[ProposedFactor]
+    used_fallback: bool = False
+    fallback_reason: str | None = None
+
+
+class FactorProposer(Protocol):
+    """Contract for the generative half of the RD-Agent-style factor loop.
+
+    Implemented by ``llm_factor_proposer.LLMFactorProposer``; tests inject a
+    deterministic fake so the closed loop runs fully offline.
+    """
+
+    def propose(
+        self,
+        *,
+        round_idx: int,
+        hypothesis: "RDAgentFactorHypothesis",
+        rag_directive: str,
+        memory_digest_payload: dict[str, object],
+        n_candidates: int,
+        seen_expr_reprs: Sequence[str],
+    ) -> LLMProposalResult:
+        ...
 
 
 # --------------------------------------------------------------------------- #
@@ -191,6 +371,220 @@ def _warm_start_templates() -> list[E.Expr]:
     ]
 
 
+def _rd_agent_factor_blueprints() -> list[_RDAgentCandidate]:
+    """Hand the RD-Agent planner a broad but safe factor task space.
+
+    RD-Agent's original Qlib loop lets the LLM propose formulas and then asks
+    a coder to implement them. In QuantAgent, formulas must remain inside the
+    PIT-safe expression DSL, so the planner emits explicit task metadata plus
+    the corresponding DSL implementation.
+    """
+    O, H, L, C, V, A = E.Open, E.High, E.Low, E.Close, E.Volume, E.Amount
+    ret1 = E.Returns(C, 1)
+    ret5 = E.Returns(C, 5)
+    hl_range = E.Sub(H, L)
+    return [
+        _candidate(
+            "rd_momentum_5d",
+            "[Momentum Factor] Five-day cross-sectional price momentum.",
+            r"Rank(C_t / C_{t-5} - 1)",
+            {"C_t": "close price at trade date t"},
+            E.Rank(ret5),
+            1,
+        ),
+        _candidate(
+            "rd_reversal_5d",
+            "[Reversal Factor] Negative five-day return rank.",
+            r"-Rank(C_t / C_{t-5} - 1)",
+            {"C_t": "close price at trade date t"},
+            E.Mul(E.Constant(-1.0), E.Rank(ret5)),
+            1,
+        ),
+        _candidate(
+            "rd_reversal_1d",
+            "[Reversal Factor] Negative one-day return rank.",
+            r"-Rank(C_t / C_{t-1} - 1)",
+            {"C_t": "close price at trade date t"},
+            E.Mul(E.Constant(-1.0), E.Rank(ret1)),
+            1,
+        ),
+        _candidate(
+            "rd_volume_price_corr_10d",
+            "[Volume-Price Factor] Negative rolling correlation between price rank and volume rank.",
+            r"-Corr(Rank(C), Rank(V), 10)",
+            {"C": "close price", "V": "trading volume"},
+            E.Mul(E.Constant(-1.0), E.TsCorr(E.Rank(C), E.Rank(V), 10)),
+            1,
+        ),
+        _candidate(
+            "rd_open_volume_corr_10d",
+            "[Volume-Price Factor] Negative rolling correlation between open rank and volume rank.",
+            r"-Corr(Rank(O), Rank(V), 10)",
+            {"O": "open price", "V": "trading volume"},
+            E.Mul(E.Constant(-1.0), E.TsCorr(E.Rank(O), E.Rank(V), 10)),
+            1,
+        ),
+        _candidate(
+            "rd_volume_shock_5d",
+            "[Liquidity Factor] Five-day volume surprise standardized by recent volume volatility.",
+            r"(V_t - Mean(V, 5)) / Std(V, 5)",
+            {"V_t": "trading volume at trade date t"},
+            E.Div(E.Sub(V, E.TsMean(V, 5)), E.TsStd(V, 5)),
+            1,
+        ),
+        _candidate(
+            "rd_intraday_close_position",
+            "[Intraday Position Factor] Close location within the daily high-low range.",
+            r"(C_t - L_t) / (H_t - L_t)",
+            {"H_t": "daily high", "L_t": "daily low", "C_t": "daily close"},
+            E.Div(E.Sub(C, L), hl_range),
+            1,
+        ),
+        _candidate(
+            "rd_close_open_range",
+            "[Intraday Position Factor] Close-open move normalized by daily range.",
+            r"(C_t - O_t) / (H_t - L_t)",
+            {"O_t": "daily open", "H_t": "daily high", "L_t": "daily low", "C_t": "daily close"},
+            E.Div(E.Sub(C, O), hl_range),
+            1,
+        ),
+        _candidate(
+            "rd_close_vwap_gap",
+            "[Price-Volume Factor] Close premium over VWAP.",
+            r"Rank((C_t - VWAP_t) / VWAP_t)",
+            {"VWAP_t": "amount divided by volume"},
+            E.Rank(E.Div(E.Sub(C, E.Vwap), E.Vwap)),
+            1,
+        ),
+        _candidate(
+            "rd_range_volatility_5d",
+            "[Volatility Factor] Mean high-low range over close.",
+            r"Mean((H_t - L_t) / C_t, 5)",
+            {"H_t": "daily high", "L_t": "daily low", "C_t": "daily close"},
+            E.TsMean(E.Div(hl_range, C), 5),
+            2,
+        ),
+        _candidate(
+            "rd_low_volatility_20d",
+            "[Volatility Factor] Negative rank of 20-day return volatility.",
+            r"-Rank(Std(C_t / C_{t-1} - 1, 20))",
+            {"C_t": "daily close"},
+            E.Mul(E.Constant(-1.0), E.Rank(E.TsStd(ret1, 20))),
+            2,
+        ),
+        _candidate(
+            "rd_decayed_reversal_3d_10d",
+            "[Reversal Factor] Decayed three-day price change reversal.",
+            r"-DecayLinear(C_t - C_{t-3}, 10)",
+            {"C_t": "daily close"},
+            E.Mul(E.Constant(-1.0), E.DecayLinear(E.Delta(C, 3), 10)),
+            2,
+        ),
+        _candidate(
+            "rd_volume_momentum_divergence",
+            "[Volume-Price Factor] Price change rank minus volume change rank.",
+            r"Rank(C_t - C_{t-5}) - Rank(V_t - V_{t-5})",
+            {"C_t": "daily close", "V_t": "daily volume"},
+            E.Sub(E.Rank(E.Delta(C, 5)), E.Rank(E.Delta(V, 5))),
+            2,
+        ),
+        _candidate(
+            "rd_amount_cv_20d",
+            "[Liquidity Factor] Amount coefficient of variation.",
+            r"Std(A, 20) / Mean(A, 20)",
+            {"A": "daily traded amount"},
+            E.Div(E.TsStd(A, 20), E.TsMean(A, 20)),
+            2,
+        ),
+        _candidate(
+            "rd_liquidity_discount_20d",
+            "[Liquidity Factor] Negative rank of average traded amount.",
+            r"-Rank(log(Mean(A, 20)))",
+            {"A": "daily traded amount"},
+            E.Mul(E.Constant(-1.0), E.Rank(E.Log(E.TsMean(A, 20)))),
+            2,
+        ),
+        _candidate(
+            "rd_high_anchor_60d",
+            "[Anchor Factor] Close relative to 60-day high.",
+            r"C_t / Max(H, 60)",
+            {"C_t": "daily close", "H": "daily high"},
+            E.Div(C, E.TsMax(H, 60)),
+            2,
+        ),
+        _candidate(
+            "rd_open_gap_1d",
+            "[Gap Factor] Opening gap from the previous close.",
+            r"Rank(O_t - C_{t-1})",
+            {"O_t": "daily open", "C_{t-1}": "previous daily close"},
+            E.Rank(E.Sub(O, E.Delay(C, 1))),
+            2,
+        ),
+        _candidate(
+            "rd_turnover_pressure_20d",
+            "[Liquidity Factor] Turnover pressure relative to its 20-day mean.",
+            r"Turnover_t / Mean(Turnover, 20)",
+            {"Turnover_t": "turnover rate if available"},
+            E.Div(E.TurnoverRate, E.TsMean(E.TurnoverRate, 20)),
+            3,
+        ),
+        _candidate(
+            "rd_value_pe_discount",
+            "[Valuation Factor] Negative rank of PE TTM.",
+            r"-Rank(PE_{TTM})",
+            {"PE_TTM": "point-in-time trailing PE if available"},
+            E.Mul(E.Constant(-1.0), E.Rank(E.PeTtm)),
+            3,
+        ),
+        _candidate(
+            "rd_value_pb_discount",
+            "[Valuation Factor] Negative rank of price-to-book.",
+            r"-Rank(PB)",
+            {"PB": "point-in-time price-to-book if available"},
+            E.Mul(E.Constant(-1.0), E.Rank(E.Pb)),
+            3,
+        ),
+        _candidate(
+            "rd_quality_roe",
+            "[Quality Factor] Cross-sectional rank of ROE.",
+            r"Rank(ROE)",
+            {"ROE": "point-in-time return on equity if available"},
+            E.Rank(E.Roe),
+            3,
+        ),
+        _candidate(
+            "rd_cashflow_quality",
+            "[Quality Factor] Operating cash flow scaled by revenue.",
+            r"Rank(OperatingCashFlow / Revenue)",
+            {"OperatingCashFlow": "PIT operating cash flow", "Revenue": "PIT revenue"},
+            E.Rank(E.Div(E.OperatingCashFlow, E.Revenue)),
+            3,
+        ),
+    ]
+
+
+def _candidate(
+    name: str,
+    description: str,
+    formulation: str,
+    variables: dict[str, str],
+    expr: E.Expr,
+    complexity_tier: int,
+) -> _RDAgentCandidate:
+    return _RDAgentCandidate(
+        task=RDAgentFactorTask(
+            factor_name=name,
+            factor_description=description,
+            factor_formulation=formulation,
+            variables=variables,
+        ),
+        expr=expr,
+        complexity_tier=complexity_tier,
+        structure=classify_structure(f"{name} {description} {formulation}"),
+        horizon=_expr_horizon(expr),
+    )
+
+
 def _seed_population(rng: random.Random, cfg: SymbolicGAConfig) -> list[E.Expr]:
     """Build the initial population: warm-start templates + mutants + random."""
     population: list[E.Expr] = []
@@ -214,6 +608,25 @@ def _seed_population(rng: random.Random, cfg: SymbolicGAConfig) -> list[E.Expr]:
 def _node_count(node: E.Expr) -> int:
     """Count nodes in a frozen-dataclass tree."""
     return 1 + sum(_node_count(child) for child in _children(node))
+
+
+def _max_window(node: E.Expr) -> int:
+    """Largest lookback window/period anywhere in the expression (0 if none)."""
+    best = 0
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        for attr in ("window", "periods"):
+            val = getattr(cur, attr, None)
+            if isinstance(val, int):
+                best = max(best, val)
+        stack.extend(_children(cur))
+    return best
+
+
+def _expr_horizon(node: E.Expr) -> str:
+    """Map an expression's dominant lookback to a canonical horizon bucket."""
+    return classify_horizon(_max_window(node))
 
 
 def _children(node: E.Expr) -> list[E.Expr]:
@@ -296,15 +709,57 @@ def _mutate(tree: E.Expr, rng: random.Random, max_depth: int) -> E.Expr:
 # --------------------------------------------------------------------------- #
 
 
-def _daily_rank_ic(factor_values: pd.Series, labels: pd.Series, trade_date: pd.Series) -> pd.Series:
-    """Daily cross-sectional Spearman rank correlation series."""
-    df = pd.DataFrame(
-        {
-            "trade_date": trade_date.values,
-            "factor": factor_values.values,
-            "label": labels.values,
-        }
-    ).dropna()
+def _effective_tradability_columns(cfg: "SymbolicGAConfig | RDAgentFactorLoopConfig") -> tuple[str, ...]:
+    """Resolve the tradability flag columns a config wants the IC to honour."""
+    cols = list(getattr(cfg, "tradability_columns", ()) or ())
+    if getattr(cfg, "exclude_st", False) and "is_st" not in cols:
+        cols.append("is_st")
+    return tuple(cols)
+
+
+def _tradable_mask(frame: pd.DataFrame, columns: Sequence[str]) -> pd.Series | None:
+    """Row-aligned bool: ``True`` = investable at signal time.
+
+    A name is dropped from IC computation when any requested flag is set at
+    signal time — suspended, limit-up-sealed, limit-down (you cannot
+    establish/adjust the long position) and optionally ST. Returns ``None``
+    when none of the requested columns are present, so callers transparently
+    fall back to the all-names IC (backward compatible).
+
+    This is the production-critical guard against *phantom edge*: a factor must
+    not be accepted because it ranks names you could never actually trade.
+    """
+    cols = [c for c in columns if c in frame.columns]
+    if not cols:
+        return None
+    untradable = pd.Series(False, index=frame.index)
+    for c in cols:
+        untradable = untradable | frame[c].fillna(0).astype(bool)
+    return ~untradable
+
+
+def _daily_rank_ic(
+    factor_values: pd.Series,
+    labels: pd.Series,
+    trade_date: pd.Series,
+    tradable_mask: pd.Series | None = None,
+) -> pd.Series:
+    """Daily cross-sectional Spearman rank correlation series.
+
+    When ``tradable_mask`` (row-aligned bool) is given, untradable rows are
+    dropped before ranking so the IC reflects only investable names.
+    """
+    data = {
+        "trade_date": trade_date.values,
+        "factor": factor_values.values,
+        "label": labels.values,
+    }
+    if tradable_mask is not None:
+        data["tradable"] = np.asarray(tradable_mask, dtype=bool)
+    df = pd.DataFrame(data)
+    if tradable_mask is not None:
+        df = df[df["tradable"]].drop(columns="tradable")
+    df = df.dropna()
     if df.empty:
         return pd.Series(dtype=float)
     grouped = df.groupby("trade_date")
@@ -321,17 +776,27 @@ def _daily_rank_ic(factor_values: pd.Series, labels: pd.Series, trade_date: pd.S
     return daily
 
 
-def _rank_ic(factor_values: pd.Series, labels: pd.Series, trade_date: pd.Series) -> float:
+def _rank_ic(
+    factor_values: pd.Series,
+    labels: pd.Series,
+    trade_date: pd.Series,
+    tradable_mask: pd.Series | None = None,
+) -> float:
     """Mean of daily cross-sectional Spearman rank correlations."""
-    daily = _daily_rank_ic(factor_values, labels, trade_date)
+    daily = _daily_rank_ic(factor_values, labels, trade_date, tradable_mask)
     if daily.empty:
         return 0.0
     return float(daily.mean())
 
 
-def _ic_stats(factor_values: pd.Series, labels: pd.Series, trade_date: pd.Series) -> tuple[float, float]:
+def _ic_stats(
+    factor_values: pd.Series,
+    labels: pd.Series,
+    trade_date: pd.Series,
+    tradable_mask: pd.Series | None = None,
+) -> tuple[float, float]:
     """Return (mean rank-IC, daily ICIR)."""
-    daily = _daily_rank_ic(factor_values, labels, trade_date)
+    daily = _daily_rank_ic(factor_values, labels, trade_date, tradable_mask)
     if daily.empty:
         return 0.0, 0.0
     mean = float(daily.mean())
@@ -345,6 +810,7 @@ def _evaluate_ic(
     panel: pd.DataFrame,
     labels: pd.Series,
     trade_date: pd.Series,
+    tradable_mask: pd.Series | None = None,
 ) -> tuple[float, float]:
     """Return (rank-IC, finite_ratio) for one tree."""
     try:
@@ -353,7 +819,7 @@ def _evaluate_ic(
         return 0.0, 0.0
     values = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
     finite_ratio = float(values.notna().mean())
-    ic = _rank_ic(values, labels, trade_date)
+    ic = _rank_ic(values, labels, trade_date, tradable_mask)
     return ic, finite_ratio
 
 
@@ -363,13 +829,16 @@ def _evaluate_fitness(
     labels: pd.Series,
     trade_date: pd.Series,
     cfg: SymbolicGAConfig,
+    tradable_mask: pd.Series | None = None,
 ) -> tuple[float, float, float]:
     """Return (fitness, raw_rank_ic, finite_ratio) for one tree.
 
     Fitness rewards both the level of the rank-IC and its day-to-day
     stability (daily ICIR), and penalises formula complexity. Absolute
     values are used because a stable negative IC is recoverable by sign
-    inversion at selection time.
+    inversion at selection time. When ``tradable_mask`` is supplied the IC
+    is computed over investable names only, steering the search away from
+    factors whose apparent edge lives in untradable names.
     """
     if not _uses_market_terminal(tree):
         return -1.0, 0.0, 0.0
@@ -381,7 +850,7 @@ def _evaluate_fitness(
     finite_ratio = float(values.notna().mean())
     if finite_ratio < cfg.min_finite_ratio:
         return -1.0, 0.0, finite_ratio
-    ic_mean, icir = _ic_stats(values, labels, trade_date)
+    ic_mean, icir = _ic_stats(values, labels, trade_date, tradable_mask)
     score = abs(ic_mean) + cfg.icir_weight * abs(icir) - cfg.complexity_penalty * _node_count(tree)
     return score, ic_mean, finite_ratio
 
@@ -407,6 +876,164 @@ def _chronological_split(
     if train_panel.empty or valid_panel.empty:
         return panel, labels, trade_date, panel, labels, trade_date
     return train_panel, train_labels, train_dates, valid_panel, valid_labels, valid_dates
+
+
+def _merge_factor_panel(
+    panel: pd.DataFrame,
+    labels: pd.DataFrame | None,
+    label_column: str,
+    reference_columns: Sequence[str],
+) -> pd.DataFrame:
+    panel = panel.copy()
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
+    if labels is None or labels.empty:
+        return panel
+    labels = labels.copy()
+    labels["trade_date"] = pd.to_datetime(labels["trade_date"], errors="coerce")
+    keep = ["symbol", "trade_date"]
+    if label_column in labels.columns:
+        keep.append(label_column)
+        labels = labels[labels[label_column].notna()]
+    for ref in reference_columns:
+        if ref in labels.columns and ref not in panel.columns and ref not in keep:
+            keep.append(ref)
+    return panel.merge(labels[[c for c in keep if c in labels.columns]], on=["symbol", "trade_date"], how="inner")
+
+
+def _rd_agent_hypothesis(round_idx: int, trace_rows: list[dict[str, object]]) -> RDAgentFactorHypothesis:
+    accepted = sum(int(row.get("accepted_count", 0)) for row in trace_rows)
+    if round_idx == 0:
+        return RDAgentFactorHypothesis(
+            hypothesis=(
+                "Start with simple price, volume, and intraday-position factors before testing "
+                "more complex combinations."
+            ),
+            reason=(
+                "RD-Agent's finance factor loop prioritizes easy-to-implement factors in early "
+                "rounds so failures are attributable and the SOTA library can accumulate cleanly."
+            ),
+            concise_observation="No previous QuantAgent factor-loop feedback is available.",
+            concise_justification="Simple factors first.",
+            concise_knowledge="Use PIT OHLCV only and avoid duplicate SOTA factors.",
+        )
+    if accepted == 0:
+        return RDAgentFactorHypothesis(
+            hypothesis=(
+                "Switch to a new factor direction because earlier candidates did not survive "
+                "the output, novelty, or validation gates."
+            ),
+            reason=(
+                "RD-Agent changes direction after unsuccessful iterations instead of repeatedly "
+                "implementing near-duplicates."
+            ),
+            concise_observation="No factor has entered the SOTA library yet.",
+            concise_justification="Change direction after failures.",
+            concise_knowledge="Reject invalid output and highly correlated factors.",
+        )
+    return RDAgentFactorHypothesis(
+        hypothesis=(
+            "Extend the accumulated SOTA factor library with factors from a different economic "
+            "mechanism while preserving novelty against accepted factors."
+        ),
+        reason=(
+            "RD-Agent keeps all factors that improve the iterative library and feeds their "
+            "feedback into the next proposal."
+        ),
+        concise_observation=f"{accepted} factors have been accepted so far.",
+        concise_justification="Optimize around accepted SOTA factors without reimplementing them.",
+        concise_knowledge="New factors must pass validation IC and SOTA correlation gates.",
+    )
+
+
+def _rd_agent_task_slice(
+    candidates: Sequence[_RDAgentCandidate],
+    round_idx: int,
+    cfg: RDAgentFactorLoopConfig,
+) -> list[_RDAgentCandidate]:
+    factors_per_round = max(1, min(5, int(cfg.factors_per_round)))
+    ordered = sorted(candidates, key=lambda c: (c.complexity_tier, c.task.factor_name))
+    start = round_idx * factors_per_round
+    selected = ordered[start : start + factors_per_round]
+    if len(selected) == factors_per_round:
+        return selected
+    selected = list(selected)
+    selected.extend(ordered[: factors_per_round - len(selected)])
+    return selected
+
+
+def _daily_output_check(frame: pd.DataFrame) -> tuple[bool, str]:
+    if "trade_date" not in frame.columns or "symbol" not in frame.columns:
+        return False, "Output frame misses trade_date or symbol."
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce")
+    if dates.isna().any():
+        return False, "trade_date contains unparsable values."
+    has_intraday_time = (dates.dt.normalize() != dates).any()
+    if has_intraday_time:
+        return False, "Generated factor frame is not daily; rd-agent qlib factor loop expects daily bars."
+    return True, "Generated factor frame is daily."
+
+
+def _rd_agent_value_feedback(
+    expr: E.Expr,
+    frame: pd.DataFrame,
+    min_finite_ratio: float,
+) -> tuple[bool, str, pd.Series | None, float]:
+    daily_ok, daily_feedback = _daily_output_check(frame)
+    try:
+        values = expr.evaluate(frame)
+    except Exception as exc:
+        return False, f"Execution failed: {exc}", None, 0.0
+    if not isinstance(values, pd.Series):
+        return False, "Implementation did not return a pandas Series.", None, 0.0
+    if len(values) != len(frame):
+        return False, f"Output row count mismatch: got {len(values)} values for {len(frame)} input rows.", None, 0.0
+    values = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    finite_ratio = float(values.notna().mean())
+    feedback = [
+        "Execution succeeded without error.",
+        "The source dataframe has only one column which is correct.",
+        "The source dataframe does not have any infinite values.",
+        daily_feedback,
+        f"The finite value ratio is {finite_ratio:.4f}.",
+    ]
+    if not daily_ok:
+        return False, "\n".join(feedback), values, finite_ratio
+    if finite_ratio < min_finite_ratio:
+        feedback.append(
+            f"The finite value ratio is below the required threshold {min_finite_ratio:.4f}."
+        )
+        return False, "\n".join(feedback), values, finite_ratio
+    return True, "\n".join(feedback), values, finite_ratio
+
+
+def _safe_spearman(left: pd.Series, right: pd.Series) -> float:
+    corr = left.corr(right, method="spearman")
+    return float(corr) if np.isfinite(corr) else 0.0
+
+
+def _rd_agent_feedback_row(
+    hypothesis: RDAgentFactorHypothesis,
+    task: RDAgentFactorTask,
+    decision: bool,
+    reason: str,
+    train_ic: float = 0.0,
+    validation_ic: float = 0.0,
+    max_sota_corr: float = 0.0,
+) -> dict[str, object]:
+    return {
+        "hypothesis": hypothesis.hypothesis,
+        "reason": hypothesis.reason,
+        "factor_name": task.factor_name,
+        "factor_description": task.factor_description,
+        "factor_formulation": task.factor_formulation,
+        "variables": json.dumps(task.variables, ensure_ascii=False, sort_keys=True),
+        "factor_implementation": bool(task.factor_implementation),
+        "decision": bool(decision),
+        "feedback": reason,
+        "train_rank_ic": float(train_ic),
+        "validation_rank_ic": float(validation_ic),
+        "max_sota_corr": float(max_sota_corr),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +1074,508 @@ def _subsample_panel(
         valid = valid[valid["symbol"].isin(chosen_symbols)]
     valid = valid.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     return valid, valid[label_col], valid["trade_date"]
+
+
+def _horizon_diverse_names(leaderboard: pd.DataFrame, k: int) -> list[str]:
+    """Pick up to ``k`` factor names round-robin across horizon buckets.
+
+    ``leaderboard`` must already be sorted best-first. Within each horizon the
+    order is preserved (best IC first); buckets are visited in the order their
+    best member appears, so the global #1 is always picked first and weaker
+    horizons are only reached once stronger ones have contributed a pick.
+    """
+    if leaderboard.empty or k <= 0:
+        return []
+    if "horizon" not in leaderboard.columns:
+        return leaderboard["name"].head(k).astype(str).tolist()
+    buckets: dict[str, list[str]] = {}
+    for _, row in leaderboard.iterrows():
+        buckets.setdefault(str(row.get("horizon") or "unspecified"), []).append(str(row["name"]))
+    bucket_order = list(buckets.keys())
+    order: list[str] = []
+    depth = 0
+    while len(order) < k:
+        progressed = False
+        for b in bucket_order:
+            pool = buckets[b]
+            if depth < len(pool):
+                order.append(pool[depth])
+                progressed = True
+                if len(order) >= k:
+                    break
+        if not progressed:
+            break
+        depth += 1
+    return order[:k]
+
+
+def synthesize_factors_rd_agent(
+    panel: pd.DataFrame,
+    labels: pd.DataFrame | None = None,
+    config: RDAgentFactorLoopConfig | None = None,
+    proposer: "FactorProposer | None" = None,
+) -> RDAgentSynthesisResult:
+    """Run an RD-Agent-style factor R&D loop in QuantAgent's safe DSL.
+
+    This is intentionally not a free-form code execution system. It mirrors
+    RD-Agent's loop and artifact semantics while preserving QuantAgent's
+    production constraint that generated factors must stay inside the audited
+    PIT expression DSL.
+
+    The loop is a *closed* feedback cycle when ``cfg.use_llm`` is set: a warm
+    start round seeds the SOTA library from hand-written blueprints, then later
+    rounds ask ``proposer`` (an LLM, by default) to propose NEW DSL factor
+    tasks conditioned on the accumulated trace and the persistent accept/reject
+    memory. Every proposal — blueprint or LLM — passes the same value, finite,
+    validation-IC, and novelty gates. Inject ``proposer`` to run fully offline
+    (tests do this); otherwise an LLM proposer is built lazily when the model
+    is reachable, and any round where it is unavailable falls back to the
+    blueprint slice.
+    """
+    cfg = config or RDAgentFactorLoopConfig()
+    rng = random.Random(cfg.seed)
+    if proposer is None and cfg.use_llm and cfg.allow_network:
+        try:
+            from quantagent.factors.llm_factor_proposer import LLMFactorProposer
+
+            proposer = LLMFactorProposer(
+                model=cfg.llm_model,
+                allow_network=cfg.allow_network,
+                timeout_seconds=cfg.llm_timeout_seconds,
+                max_attempts=cfg.max_llm_attempts,
+            )
+        except Exception as exc:  # pragma: no cover - import/config guard
+            logger.warning("[rd-agent-factor] LLM proposer unavailable (%s); using blueprints only", exc)
+            proposer = None
+    use_llm = bool(cfg.use_llm and proposer is not None)
+    persisted_memory = load_memory(cfg.memory_path)
+    knowledge_rows: list[dict[str, object]] = []
+    merged = _merge_factor_panel(panel, labels, cfg.label_column, cfg.reference_columns)
+    if cfg.label_column not in merged.columns:
+        raise KeyError(
+            f"synthesize_factors_rd_agent needs label column '{cfg.label_column}' in panel or labels"
+        )
+    missing_market = [c for c in _MARKET_COLUMNS if c not in merged.columns]
+    if missing_market:
+        raise KeyError(
+            "merged RD-Agent factor panel lost market columns "
+            f"{missing_market}; available: {sorted(merged.columns)[:40]}"
+        )
+
+    valid_panel, label_series, date_series = _subsample_panel(merged, cfg.label_column, cfg, rng)
+    train_panel, train_labels, train_dates, oos_panel, oos_labels, oos_dates = _chronological_split(
+        valid_panel,
+        label_series.reset_index(drop=True),
+        date_series.reset_index(drop=True),
+        cfg,
+    )
+    logger.info("[rd-agent-factor] sample: %d rows, %d dates, %d symbols",
+                len(valid_panel), valid_panel["trade_date"].nunique(), valid_panel["symbol"].nunique())
+    logger.info("[rd-agent-factor] split: train=%d rows, validation=%d rows", len(train_panel), len(oos_panel))
+
+    # Tradability guard: when the panel carries flag columns, fitness and the
+    # validation IC honour only names investable at signal time, so a factor
+    # cannot be accepted on phantom edge over untradable names.
+    tradability_cols = _effective_tradability_columns(cfg)
+    train_tradable_mask = _tradable_mask(train_panel, tradability_cols)
+    oos_tradable_mask = _tradable_mask(oos_panel, tradability_cols)
+    if oos_tradable_mask is not None:
+        logger.info(
+            "[rd-agent-factor] tradability guard active %s: OOS tradable rows=%d/%d",
+            list(tradability_cols), int(oos_tradable_mask.sum()), len(oos_tradable_mask),
+        )
+
+    candidates = _rd_agent_factor_blueprints()
+    accepted: list[tuple[E.FactorDefinition, E.Expr, pd.Series]] = []
+    leaderboard_rows: list[dict[str, object]] = []
+    history_rows: list[dict[str, object]] = []
+    task_feedback_rows: list[dict[str, object]] = []
+    trace_rows: list[dict[str, object]] = []
+    seen_exprs: set[str] = set()
+    reference_values: dict[str, pd.Series] = {
+        ref: pd.to_numeric(oos_panel[ref], errors="coerce")
+        for ref in cfg.reference_columns
+        if ref in oos_panel.columns
+    }
+
+    for round_idx in range(max(0, int(cfg.rounds))):
+        hypothesis = _rd_agent_hypothesis(round_idx, trace_rows)
+        round_source = "blueprint"
+        if use_llm and round_idx >= cfg.llm_start_round:
+            all_knowledge = [*persisted_memory, *knowledge_rows]
+            digest = memory_digest(all_knowledge)
+            # Structured coverage feedback (lightweight RD-Agent knowledge port):
+            # steer the proposer at the orthogonal whitespace, away from crowded
+            # dead ends, instead of only showing it a flat recent-list.
+            digest["coverage_map"] = coverage_map(all_knowledge)
+            digest["uncovered_directions"] = uncovered_directions(all_knowledge)
+            rag_directive = RAG_HIGH_IC if round_idx >= cfg.rag_escalation_round else RAG_EASY
+            try:
+                proposal = proposer.propose(
+                    round_idx=round_idx,
+                    hypothesis=hypothesis,
+                    rag_directive=rag_directive,
+                    memory_digest_payload=digest,
+                    n_candidates=max(1, int(cfg.llm_candidates_per_round)),
+                    seen_expr_reprs=sorted(seen_exprs),
+                )
+            except Exception as exc:  # pragma: no cover - network/parse guard
+                logger.warning("[rd-agent-factor] round %d LLM proposal failed (%s); using blueprints", round_idx + 1, exc)
+                proposal = None
+            llm_candidates = [
+                _RDAgentCandidate(
+                    task=RDAgentFactorTask(
+                        factor_name=pf.name,
+                        factor_description=pf.description,
+                        factor_formulation=pf.formulation,
+                        variables=dict(pf.variables),
+                    ),
+                    expr=pf.expr,
+                    complexity_tier=int(pf.complexity_tier),
+                    structure=pf.structure or classify_structure(f"{pf.hypothesis} {pf.description}"),
+                    horizon=classify_horizon(pf.horizon) if pf.horizon else _expr_horizon(pf.expr),
+                )
+                for pf in (proposal.factors if proposal is not None else [])
+            ]
+            if llm_candidates:
+                hypothesis = proposal.hypothesis or hypothesis
+                round_candidates = llm_candidates
+                round_source = "llm"
+            else:
+                round_candidates = _rd_agent_task_slice(candidates, round_idx, cfg)
+                logger.info("[rd-agent-factor] round %d LLM yielded no usable factors; using blueprints", round_idx + 1)
+        else:
+            round_candidates = _rd_agent_task_slice(candidates, round_idx, cfg)
+        round_accepted = 0
+        round_best_ic = -np.inf
+        round_feedback: list[str] = []
+
+        for candidate in round_candidates:
+            task = candidate.task
+            expr_key = repr(candidate.expr)
+            if expr_key in seen_exprs:
+                task = RDAgentFactorTask(
+                    factor_name=task.factor_name,
+                    factor_description=task.factor_description,
+                    factor_formulation=task.factor_formulation,
+                    variables=task.variables,
+                    factor_implementation=False,
+                )
+                feedback = "Rejected before implementation because this expression was already attempted."
+                task_feedback_rows.append(_rd_agent_feedback_row(hypothesis, task, False, feedback))
+                round_feedback.append(f"{task.factor_name}: duplicate expression")
+                continue
+            seen_exprs.add(expr_key)
+
+            value_ok, value_feedback, _, finite_ratio = _rd_agent_value_feedback(
+                candidate.expr,
+                train_panel,
+                cfg.min_finite_ratio,
+            )
+            task = RDAgentFactorTask(
+                factor_name=task.factor_name,
+                factor_description=task.factor_description,
+                factor_formulation=task.factor_formulation,
+                variables=task.variables,
+                factor_implementation=bool(value_ok),
+            )
+            if not value_ok:
+                task_feedback_rows.append(_rd_agent_feedback_row(hypothesis, task, False, value_feedback))
+                round_feedback.append(f"{task.factor_name}: value gate failed")
+                continue
+
+            fitness, train_ic, train_finite = _evaluate_fitness(
+                candidate.expr,
+                train_panel,
+                train_labels,
+                train_dates,
+                SymbolicGAConfig(
+                    label_column=cfg.label_column,
+                    complexity_penalty=cfg.complexity_penalty,
+                    min_finite_ratio=cfg.min_finite_ratio,
+                    icir_weight=cfg.icir_weight,
+                ),
+                train_tradable_mask,
+            )
+            if fitness <= -1.0 or train_finite < cfg.min_finite_ratio:
+                feedback = (
+                    value_feedback
+                    + "\nRejected because the implementation did not produce a viable training fitness."
+                )
+                task_feedback_rows.append(_rd_agent_feedback_row(hypothesis, task, False, feedback, train_ic, 0.0))
+                round_feedback.append(f"{task.factor_name}: training fitness failed")
+                continue
+
+            oriented_expr = candidate.expr if train_ic >= 0 else E.Mul(E.Constant(-1.0), candidate.expr)
+            try:
+                oos_values = pd.to_numeric(oriented_expr.evaluate(oos_panel), errors="coerce").replace(
+                    [np.inf, -np.inf], np.nan
+                )
+            except Exception as exc:
+                feedback = value_feedback + f"\nRejected because validation execution failed: {exc}"
+                task_feedback_rows.append(_rd_agent_feedback_row(hypothesis, task, False, feedback, train_ic, 0.0))
+                round_feedback.append(f"{task.factor_name}: validation execution failed")
+                continue
+            validation_finite = float(oos_values.notna().mean())
+            # The acceptance gate uses the TRADABLE IC (untradable names dropped);
+            # the raw all-names IC is recorded so the phantom-edge gap is visible.
+            validation_ic, validation_icir = _ic_stats(oos_values, oos_labels, oos_dates, oos_tradable_mask)
+            validation_ic_raw = _rank_ic(oos_values, oos_labels, oos_dates)
+
+            max_sota_corr = 0.0
+            max_reference_corr = 0.0
+            for _, _, prev_values in accepted:
+                max_sota_corr = max(max_sota_corr, abs(_safe_spearman(oos_values, prev_values)))
+            for ref_series in reference_values.values():
+                max_reference_corr = max(max_reference_corr, abs(_safe_spearman(oos_values, ref_series)))
+            max_novelty_corr = max(max_sota_corr, max_reference_corr)
+
+            if validation_finite < cfg.min_finite_ratio:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because validation finite ratio {validation_finite:.4f} "
+                    f"is below {cfg.min_finite_ratio:.4f}."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: validation finite gate failed")
+                continue
+            if validation_ic < cfg.min_validation_rank_ic:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because validation RankIC {validation_ic:.6f} "
+                    f"is below {cfg.min_validation_rank_ic:.6f}."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: validation IC gate failed")
+                continue
+            if cfg.min_validation_icir > 0.0 and validation_icir < cfg.min_validation_icir:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because validation ICIR {validation_icir:.4f} "
+                    f"is below {cfg.min_validation_icir:.4f} (unstable day-to-day IC)."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: validation ICIR gate failed")
+                continue
+            if max_sota_corr > cfg.max_sota_correlation:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because max SOTA/reference Spearman correlation {max_sota_corr:.6f} "
+                    f"exceeds {cfg.max_sota_correlation:.6f}."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: SOTA duplicate gate failed")
+                continue
+            if max_reference_corr > cfg.max_reference_correlation:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because max reference Spearman correlation {max_reference_corr:.6f} "
+                    f"exceeds {cfg.max_reference_correlation:.6f}."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: reference duplicate gate failed")
+                continue
+
+            definition = E.FactorDefinition(
+                name=task.factor_name,
+                expr=oriented_expr,
+                description=f"RD-Agent-style factor. {task.factor_description}",
+            )
+            accepted.append((definition, oriented_expr, oos_values))
+            round_accepted += 1
+            round_best_ic = max(round_best_ic, validation_ic)
+            feedback = value_feedback + "\nAccepted into the SOTA factor library for subsequent rounds."
+            task_feedback_rows.append(
+                _rd_agent_feedback_row(hypothesis, task, True, feedback, train_ic, validation_ic, max_novelty_corr)
+            )
+            round_feedback.append(f"{task.factor_name}: accepted")
+            leaderboard_rows.append(
+                {
+                    "name": definition.name,
+                    "expression": repr(oriented_expr),
+                    "train_rank_ic": float(abs(train_ic)),
+                    "validation_rank_ic": float(validation_ic),
+                    "validation_rank_ic_raw": float(validation_ic_raw),
+                    "validation_rank_icir": float(validation_icir),
+                    "fitness": float(fitness),
+                    "complexity": int(_node_count(oriented_expr)),
+                    "finite_ratio": float(min(finite_ratio, validation_finite)),
+                    "max_reference_corr": float(max_reference_corr),
+                    "max_sota_corr": float(max_sota_corr),
+                    "round": int(round_idx + 1),
+                    "structure": candidate.structure,
+                    "horizon": candidate.horizon,
+                    "hypothesis": hypothesis.hypothesis,
+                    "factor_description": task.factor_description,
+                    "factor_formulation": task.factor_formulation,
+                    "factor_implementation": True,
+                }
+            )
+            if len(accepted) >= cfg.top_k:
+                break
+
+        # Distil this round's outcomes into accept/reject knowledge that feeds
+        # the next LLM proposal and persists across runs (RD-Agent's evolving
+        # memory). The short status strings double as machine-readable reasons.
+        round_expr_by_name = {c.task.factor_name: repr(c.expr) for c in round_candidates}
+        round_struct_by_name = {c.task.factor_name: c.structure for c in round_candidates}
+        round_horizon_by_name = {c.task.factor_name: c.horizon for c in round_candidates}
+        accepted_ic_by_name = {
+            row["name"]: row["validation_rank_ic"]
+            for row in leaderboard_rows
+            if int(row.get("round", 0)) == round_idx + 1
+        }
+        round_knowledge: list[dict[str, object]] = []
+        for entry in round_feedback:
+            name, _, status_text = entry.partition(": ")
+            status_text = status_text.strip()
+            selected = status_text == "accepted"
+            round_knowledge.append(
+                {
+                    "round": int(round_idx + 1),
+                    "source": round_source,
+                    "name": name,
+                    "expression": round_expr_by_name.get(name, ""),
+                    "raw_expression": round_expr_by_name.get(name, ""),
+                    "structure": round_struct_by_name.get(name, "other"),
+                    "horizon": round_horizon_by_name.get(name, "unspecified"),
+                    "concise_knowledge": hypothesis.concise_knowledge,
+                    "status": "selected" if selected else (status_text or "rejected"),
+                    "validation_rank_ic": (accepted_ic_by_name.get(name) if selected else None),
+                    "hypothesis": hypothesis.hypothesis,
+                }
+            )
+        knowledge_rows.extend(round_knowledge)
+        append_memory(cfg.memory_path, round_knowledge)
+
+        trace_rows.append(
+            {
+                "round": int(round_idx + 1),
+                "source": round_source,
+                "hypothesis": hypothesis.hypothesis,
+                "reason": hypothesis.reason,
+                "candidate_count": int(len(round_candidates)),
+                "accepted_count": int(round_accepted),
+                "sota_size": int(len(accepted)),
+                "best_validation_rank_ic": float(round_best_ic) if np.isfinite(round_best_ic) else 0.0,
+                "observations": "; ".join(round_feedback),
+                "decision": bool(round_accepted > 0),
+            }
+        )
+        history_rows.append(
+            {
+                "round": int(round_idx + 1),
+                "candidate_count": int(len(round_candidates)),
+                "accepted_count": int(round_accepted),
+                "sota_size": int(len(accepted)),
+                "best_validation_rank_ic": float(round_best_ic) if np.isfinite(round_best_ic) else 0.0,
+            }
+        )
+        logger.info(
+            "[rd-agent-factor] round %d accepted=%d sota_size=%d best_valid_ic=%.4f",
+            round_idx + 1,
+            round_accepted,
+            len(accepted),
+            float(round_best_ic) if np.isfinite(round_best_ic) else 0.0,
+        )
+        if len(accepted) >= cfg.top_k:
+            break
+
+    definitions = [definition for definition, _, _ in accepted[: cfg.top_k]]
+    leaderboard = pd.DataFrame(
+        leaderboard_rows,
+        columns=[
+            "name",
+            "expression",
+            "train_rank_ic",
+            "validation_rank_ic",
+            "validation_rank_ic_raw",
+            "validation_rank_icir",
+            "fitness",
+            "complexity",
+            "finite_ratio",
+            "max_reference_corr",
+            "max_sota_corr",
+            "round",
+            "structure",
+            "horizon",
+            "hypothesis",
+            "factor_description",
+            "factor_formulation",
+            "factor_implementation",
+        ],
+    )
+    if not leaderboard.empty:
+        leaderboard = leaderboard.sort_values(
+            ["validation_rank_ic", "train_rank_ic"],
+            ascending=[False, False],
+            kind="mergesort",
+        ).reset_index(drop=True)
+        definitions_by_name = {definition.name: definition for definition in definitions}
+        # Horizon-diverse top_k: round-robin across horizon buckets (best-first
+        # within each) so one horizon cannot monopolise the library while a
+        # strictly-orthogonal horizon goes unrepresented.
+        selected_names = _horizon_diverse_names(leaderboard, cfg.top_k)
+        definitions = [
+            definitions_by_name[name] for name in selected_names if name in definitions_by_name
+        ]
+    return RDAgentSynthesisResult(
+        definitions=definitions,
+        leaderboard=leaderboard,
+        history=pd.DataFrame(history_rows),
+        trace=pd.DataFrame(trace_rows),
+        task_feedback=pd.DataFrame(task_feedback_rows),
+    )
 
 
 def synthesize_factors(
@@ -520,12 +1649,18 @@ def synthesize_factors(
                 len(valid_panel), valid_panel["trade_date"].nunique(), valid_panel["symbol"].nunique())
     logger.info("[ga] split: train=%d rows, validation=%d rows", len(train_panel), len(oos_panel))
 
+    tradability_cols = _effective_tradability_columns(cfg)
+    train_tradable_mask = _tradable_mask(train_panel, tradability_cols)
+    oos_tradable_mask = _tradable_mask(oos_panel, tradability_cols)
+
     eval_cache: dict[str, tuple[float, float, float]] = {}
 
     def _cached_fitness(tree: E.Expr) -> tuple[float, float, float]:
         key = repr(tree)
         if key not in eval_cache:
-            eval_cache[key] = _evaluate_fitness(tree, train_panel, train_labels, train_dates, cfg)
+            eval_cache[key] = _evaluate_fitness(
+                tree, train_panel, train_labels, train_dates, cfg, train_tradable_mask
+            )
         return eval_cache[key]
 
     population: list[E.Expr] = _seed_population(rng, cfg)
@@ -608,13 +1743,16 @@ def synthesize_factors(
         seen_exprs.add(expr_key)
         train_ic = raw_ics[idx]
         oriented_tree = tree if train_ic >= 0 else E.Mul(E.Constant(-1.0), tree)
-        validation_ic, validation_finite = _evaluate_ic(oriented_tree, oos_panel, oos_labels, oos_dates)
+        validation_ic, validation_finite = _evaluate_ic(
+            oriented_tree, oos_panel, oos_labels, oos_dates, oos_tradable_mask
+        )
         if validation_finite < cfg.min_finite_ratio or validation_ic < cfg.min_validation_rank_ic:
             continue
         try:
             values = pd.to_numeric(oriented_tree.evaluate(oos_panel), errors="coerce")
         except Exception:
             continue
+        validation_ic_raw = _rank_ic(values, oos_labels, oos_dates)
         # Decorrelate against already-chosen survivors.
         if any(
             abs(values.corr(prev, method="spearman")) > cfg.max_correlation
@@ -637,6 +1775,7 @@ def synthesize_factors(
             "expression": repr(oriented_tree),
             "train_rank_ic": float(abs(train_ic)),
             "validation_rank_ic": float(validation_ic),
+            "validation_rank_ic_raw": float(validation_ic_raw),
             "fitness": float(fitness[idx]),
             "complexity": int(_node_count(oriented_tree)),
             "finite_ratio": float(finite_ratios[idx]),
@@ -649,7 +1788,7 @@ def synthesize_factors(
         E.FactorDefinition(name=row["name"], expr=tree, description="GA-synthesized factor")
         for row, tree in zip(rows, chosen)
     ]
-    leaderboard = pd.DataFrame(rows, columns=["name", "expression", "train_rank_ic", "validation_rank_ic", "fitness", "complexity", "finite_ratio", "max_reference_corr"])
+    leaderboard = pd.DataFrame(rows, columns=["name", "expression", "train_rank_ic", "validation_rank_ic", "validation_rank_ic_raw", "fitness", "complexity", "finite_ratio", "max_reference_corr"])
     history = pd.DataFrame(history_rows)
     return SynthesisResult(definitions=definitions, leaderboard=leaderboard, history=history)
 
@@ -698,11 +1837,25 @@ def save_result(result: SynthesisResult, output_dir: str | Path) -> dict[str, st
     except Exception:
         hist_path = hist_path.with_suffix(".csv")
         result.history.to_csv(hist_path, index=False)
-    return {
+    paths = {
         "definitions": str(defs_path),
         "leaderboard": str(lb_path),
         "history": str(hist_path),
     }
+    if isinstance(result, RDAgentSynthesisResult):
+        trace_path = out / "rd_agent_trace.json"
+        trace_path.write_text(
+            json.dumps(result.trace.to_dict(orient="records"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        feedback_path = out / "rd_agent_task_feedback.json"
+        feedback_path.write_text(
+            json.dumps(result.task_feedback.to_dict(orient="records"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        paths["rd_agent_trace"] = str(trace_path)
+        paths["rd_agent_task_feedback"] = str(feedback_path)
+    return paths
 
 
 # --------------------------------------------------------------------------- #
@@ -736,6 +1889,11 @@ _PARSE_NAMESPACE = {
     "TsMax": E.TsMax,
     "TsMin": E.TsMin,
     "_RollingReduction": E._RollingReduction,
+    # OptionalColumn(default=nan) and any nan/inf constants must round-trip:
+    # repr() emits bare ``nan``/``inf`` tokens, so they need to resolve here
+    # (builtins are stripped from the eval namespace for safety).
+    "nan": float("nan"),
+    "inf": float("inf"),
 }
 
 
@@ -789,6 +1947,14 @@ def compute_synthesized_factors(frame: pd.DataFrame, definitions_path: str | Pat
 __all__ = [
     "SymbolicGAConfig",
     "SynthesisResult",
+    "RDAgentFactorHypothesis",
+    "RDAgentFactorTask",
+    "RDAgentFactorLoopConfig",
+    "RDAgentSynthesisResult",
+    "ProposedFactor",
+    "LLMProposalResult",
+    "FactorProposer",
+    "synthesize_factors_rd_agent",
     "synthesize_factors",
     "save_definitions",
     "save_result",
