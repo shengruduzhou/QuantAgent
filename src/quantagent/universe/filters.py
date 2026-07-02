@@ -63,9 +63,12 @@ class UniverseFilterConfig:
     ``limit_up_block_new`` — when True, stocks that closed at the
     upper limit yesterday cannot be new entries today.
 
-    ``limit_up_pct`` — threshold for inferring limit-up when explicit
-    flags are missing. 0.099 is conservative for main-board ±10%;
-    set to 0.198 for ChiNext / STAR ±20% boards.
+    ``limit_up_pct`` / ``limit_down_pct`` — legacy flat thresholds. The
+    tradable ``is_limit_up`` / ``is_limit_down`` flags are now derived
+    **board-aware** by :func:`derive_market_flags` and no longer use these.
+    They are retained only for the trailing high-chase feature
+    (:func:`compute_high_chase_flags`), where a single conservative threshold
+    for counting recent limit-ups is acceptable.
     """
 
     st_min_block_rate: float = 0.90
@@ -189,8 +192,9 @@ def compute_high_chase_flags(
 def derive_market_flags(
     market_panel: pd.DataFrame,
     *,
-    limit_up_pct: float = 0.099,
-    limit_down_pct: float = -0.099,
+    is_st_column: str = "is_st",
+    tolerance: float = 1e-3,
+    limits: "ASharePriceLimit | None" = None,
 ) -> pd.DataFrame:
     """Derive is_suspended / is_limit_up / is_limit_down from OHLCV.
 
@@ -205,13 +209,19 @@ def derive_market_flags(
       few symbols are skipped (those are likely market holidays where
       the *whole* market did not trade — flagging every name as
       suspended would be misleading).
-    * **is_limit_up**: ``close / prev_close - 1 >= limit_up_pct``,
-      excluding the first day per symbol (no prev_close).
+    * **is_limit_up**: ``close / prev_close - 1 >= board_limit - tolerance``,
+      excluding the first day per symbol (no prev_close). The board limit
+      is **board-aware** via :func:`quant_math.ashare.board_price_limit_vector`
+      (main 10% / ChiNext·STAR 20% / BSE 30% / ST 5%) — a flat 10% rule
+      mislabels every ChiNext/STAR/BSE name and is no longer used. When an
+      ``is_st`` column is present it drives the ST 5% override.
     * **is_limit_down**: same with the down threshold.
     """
 
     if market_panel is None or market_panel.empty:
         return pd.DataFrame(columns=["trade_date", "symbol", "is_suspended", "is_limit_up", "is_limit_down"])
+
+    from quantagent.quant_math.ashare import board_price_limit_vector
 
     mp = market_panel.copy()
     mp["trade_date"] = pd.to_datetime(mp["trade_date"], errors="coerce")
@@ -247,11 +257,18 @@ def derive_market_flags(
     has_no_trade = (volume_nan | volume_zero) & (amount_nan | amount_zero)
     mp["is_suspended"] = has_no_trade & mp["trade_date"].isin(active_days)
 
-    # Limit-up / limit-down via close % change vs previous day per symbol
+    # Board-aware limit-up / limit-down via close % change vs previous day per
+    # symbol. The per-row limit ratio is resolved by the canonical A-share rule
+    # engine (board prefix + optional ST 5% override) — single source of truth
+    # shared with the provider/backtest/execution layers.
+    is_st = mp[is_st_column] if is_st_column in mp.columns else False
+    ratio = board_price_limit_vector(mp["symbol"], is_st, limits)
+    up_threshold = ratio - float(tolerance)
+    down_threshold = -(ratio - float(tolerance))
     mp["_prev_close"] = mp.groupby("symbol")["close"].shift(1)
     pct_change = (mp["close"] - mp["_prev_close"]) / mp["_prev_close"]
-    mp["is_limit_up"] = pct_change >= float(limit_up_pct)
-    mp["is_limit_down"] = pct_change <= float(limit_down_pct)
+    mp["is_limit_up"] = pct_change >= up_threshold
+    mp["is_limit_down"] = pct_change <= down_threshold
     # First day per symbol → no prev_close → not a limit move
     mp.loc[mp["_prev_close"].isna(), ["is_limit_up", "is_limit_down"]] = False
 
@@ -310,13 +327,9 @@ def apply_universe_filter(
 
     warnings_collected: list[str] = []
 
-    # 1) market flags (derived from OHLCV)
+    # 1) market flags (derived from OHLCV — board-aware limits, single source)
     if market_panel is not None and not market_panel.empty:
-        flags = derive_market_flags(
-            market_panel,
-            limit_up_pct=config.limit_up_pct,
-            limit_down_pct=config.limit_down_pct,
-        )
+        flags = derive_market_flags(market_panel)
         # Defensive dedup (review fix #1): market_panel from disparate
         # sources can rarely contain duplicate (date, symbol) rows; an
         # m:n merge here would explode the prediction set silently.

@@ -18,36 +18,54 @@ from quantagent.data.providers import tickflow_provider as tp
 # ---------------------------------------------------------------------------
 
 
+def _base_daily(symbol: str) -> pd.DataFrame:
+    # Return 5 deterministic days for any symbol
+    dates = pd.date_range("2024-01-02", periods=5, freq="B")
+    return pd.DataFrame({
+        "symbol":     [symbol] * 5,
+        "name":       ["FOO"] * 5,
+        "timestamp":  list(range(5)),
+        "trade_date": dates,
+        "trade_time": dates,
+        "open":  [10.0, 10.5, 11.0, 11.5, 12.0],
+        "high":  [10.6, 10.9, 11.5, 11.9, 12.5],
+        "low":   [ 9.5,  9.9, 10.5, 11.0, 11.5],
+        # close engineered: day 1 is a limit-up off prev=10.5 (=11.55), day 4 is a limit-down off 12.0 (=10.80)
+        "close": [10.5, 11.55, 11.0, 12.0, 10.80],
+        "volume": [1000, 2000, 0, 1500, 1800],  # day 3 = suspended
+        "amount": [1e6, 2e6, 0.0, 1.5e6, 1.8e6],
+    })
+
+
+# Per-row qfq factor the fake applies when adjust="forward"; engineered so a
+# 2:1 split lands on day-4 (raw close 12.0 → 24.0) while day-1 stays at 10.5.
+_FAKE_FORWARD_FACTOR = [1.0, 1.0, 1.0, 2.0, 2.0]
+
+
 @dataclass
 class _FakeKlines:
-    def get(self, symbol: str, *, period: str, count: int, as_dataframe: bool):
-        # Return 5 deterministic days for any symbol
-        dates = pd.date_range("2024-01-02", periods=5, freq="B")
-        return pd.DataFrame({
-            "symbol":     [symbol] * 5,
-            "name":       ["FOO"] * 5,
-            "timestamp":  list(range(5)),
-            "trade_date": dates,
-            "trade_time": dates,
-            "open":  [10.0, 10.5, 11.0, 11.5, 12.0],
-            "high":  [10.6, 10.9, 11.5, 11.9, 12.5],
-            "low":   [ 9.5,  9.9, 10.5, 11.0, 11.5],
-            # close engineered: day 1 is a limit-up off prev=10.5 (=11.55), day 4 is a limit-down off 12.0 (=10.80)
-            "close": [10.5, 11.55, 11.0, 12.0, 10.80],
-            "volume": [1000, 2000, 0, 1500, 1800],  # day 3 = suspended
-            "amount": [1e6, 2e6, 0.0, 1.5e6, 1.8e6],
-        })
+    def get(self, symbol: str, *, period: str, count: int, as_dataframe: bool,
+            adjust: str | None = None):
+        df = _base_daily(symbol)
+        if adjust == "forward":
+            for col in ("open", "high", "low", "close"):
+                df[col] = df[col] * pd.Series(_FAKE_FORWARD_FACTOR)
+        return df
 
-    def batch(self, symbols, *, period, count, as_dataframe, show_progress):
-        return {sym: self.get(sym, period=period, count=count, as_dataframe=as_dataframe)
+    def batch(self, symbols, *, period, count, as_dataframe, show_progress,
+              adjust: str | None = None):
+        return {sym: self.get(sym, period=period, count=count,
+                              as_dataframe=as_dataframe, adjust=adjust)
                 for sym in symbols}
 
-    def ex_factors(self, symbol: str, *, as_dataframe: bool):
-        return pd.DataFrame({
-            "symbol":     [symbol] * 5,
-            "trade_date": pd.date_range("2024-01-02", periods=5, freq="B"),
-            "ex_factor":  [1.0, 1.0, 1.0, 2.0, 2.0],
-        })
+
+@dataclass
+class _FakeKlinesBatchGated(_FakeKlines):
+    """Models the live subscription: per-symbol get works, batch is tier-gated."""
+
+    def batch(self, symbols, *, period, count, as_dataframe, show_progress,
+              adjust: str | None = None):
+        raise RuntimeError("无日/周/月K线查询批量查询权限")
 
 
 @dataclass
@@ -157,15 +175,45 @@ def test_daily_ohlcv_canonical_columns(fake_provider):
     assert (r.frame["available_at"] >= r.frame["trade_date"]).all()
 
 
-def test_adjusted_prices_multiplies_by_ex_factor(fake_provider):
+def test_adjusted_prices_uses_forward_adjust(fake_provider):
+    """adjusted_prices must request SDK-side qfq (adjust='forward'), not ex_factors.
+
+    The fake applies a 2:1 split factor on day-4 when adjust='forward'. The
+    dedicated ex_factors endpoint is permission-gated on the live tier, so the
+    provider relies on the K-line ``adjust`` argument instead.
+    """
     r = fake_provider.adjusted_prices(
         ProviderRequest("2024-01-02", "2024-01-31", ("600519.SH",)),
     )
-    # Day-1 raw close is 10.5; ex_factor 1.0 → 10.5
-    # Day-4 raw close is 12.0; ex_factor 2.0 → 24.0
     closes = r.frame["close"].tolist()
-    assert closes[0] == pytest.approx(10.5)
-    assert closes[3] == pytest.approx(24.0)
+    assert closes[0] == pytest.approx(10.5)   # raw 10.5 × 1.0
+    assert closes[3] == pytest.approx(24.0)   # raw 12.0 × 2.0 (split)
+    assert r.metadata.get("adjust_kind") == "qfq"
+
+
+def test_daily_ohlcv_is_raw_not_adjusted(fake_provider):
+    """daily_ohlcv must NOT apply the forward adjustment (raw OHLCV path)."""
+    r = fake_provider.daily_ohlcv(
+        ProviderRequest("2024-01-02", "2024-01-31", ("600519.SH",)),
+    )
+    # Day-4 raw close stays 12.0 (no split applied) — proves adjust is not passed.
+    assert r.frame["close"].iloc[3] == pytest.approx(12.0)
+
+
+def test_daily_ohlcv_batch_gated_falls_back_to_per_symbol(monkeypatch):
+    """When the batch K-line tier is denied, multi-symbol fetch loops get()."""
+    fake = _FakeTickFlow(api_key="x")
+    fake.klines = _FakeKlinesBatchGated()
+    monkeypatch.setenv("TICKFLOW_API_KEY", "fake")
+    p = tp.TickflowProvider(allow_network=True)
+    p._client = fake
+
+    r = p.daily_ohlcv(
+        ProviderRequest("2024-01-02", "2024-01-31", ("600519.SH", "000001.SZ")),
+    )
+    # Same 10 rows (5 days × 2 syms) as the batch path would have produced.
+    assert r.frame.shape[0] == 10
+    assert set(r.frame["symbol"]) == {"600519.SH", "000001.SZ"}
 
 
 def test_tradability_derives_flags(fake_provider):
@@ -181,6 +229,26 @@ def test_tradability_derives_flags(fake_provider):
     assert bool(df["is_limit_down"].iloc[4])
     # 贵州茅台 isn't ST
     assert not df["is_st"].any()
+
+
+def test_tradability_board_aware_chinext(fake_provider):
+    """A ChiNext name at +10% is NOT sealed (its limit is 20%).
+
+    The fake klines engineer day-1 close 11.55 = 10.5 × 1.10. Under the old
+    flat-10% rule this was flagged limit-up for every board; the board-aware
+    rule must leave a ChiNext (300xxx) name unflagged at +10%, while a
+    main-board name at the same +10% IS sealed.
+    """
+    main = fake_provider.tradability(
+        ProviderRequest("2024-01-02", "2024-01-31", ("600519.SH",)),
+    ).frame
+    chinext = fake_provider.tradability(
+        ProviderRequest("2024-01-02", "2024-01-31", ("300001.SZ",)),
+    ).frame
+    # Main board: +10% off 10.5 is a real seal.
+    assert bool(main["is_limit_up"].iloc[1])
+    # ChiNext: +10% is NOT a seal (limit is 20%) — the board-aware fix.
+    assert not bool(chinext["is_limit_up"].iloc[1])
 
 
 def test_tradability_detects_current_st(fake_provider):

@@ -39,6 +39,8 @@ SYMBOLS_FILE="runtime/data/v7/universe_v88_comma.txt"
 SECTOR="runtime/data/v7/silver/sector_map/sector_map.parquet"
 
 TRAIN_END="2024-07-31"          # clean-OOS cutoff for discovery + evaluation
+FACTOR_OOS_END="2025-08-31"     # survivor selection capped here (evaluate --oos-end)
+HOLDOUT_START="2025-09-01"      # final-test window start: unseen by selection+model
 RETRAIN_TRAIN_END="2024-06-30"  # transformer train window end (sweep parity)
 TEST_END="2026-05-15"
 DEVICE="cuda"
@@ -108,9 +110,9 @@ if want_step evaluate; then
   run $PY scripts/evaluate_discovered_factors.py \
     --definitions "$DISC/synthesized_definitions.json" \
     --market-panel "$PANEL" --labels "$LABELS" \
-    --train-end "$TRAIN_END" \
+    --train-end "$TRAIN_END" --oos-end "$FACTOR_OOS_END" \
     --output-dir "$EVAL"
-  echo "  survivors -> $EVAL/accepted_definitions.json"
+  echo "  survivors -> $EVAL/accepted_definitions.json (selected on OOS<=$FACTOR_OOS_END; $HOLDOUT_START+ held out)"
 fi
 
 # 3) MATERIALIZE survivors into the training dataset ------------------------
@@ -161,14 +163,21 @@ if want_step rl_eval; then
   echo "  verdict -> $RL_OUT/verdict.json (check env_dispersion.env_can_select)"
 fi
 
-# 6) Strict tradable backtest (THE trusted number: variant-C excess) --------
+# 6) Strict tradable backtest (THE trusted number: variant-C absolute CAGR) --
+# Reports absolute CAGR/Calmar (goal = max absolute return, then Calmar). Judge
+# on the HELD-OUT window (factor selection used --oos-end before it) so the
+# number is contamination-free. Exports a UI-discoverable backtest artifact.
 if want_step backtest; then
-  banner "6/6 strict tradable backtest (baseline_protocol variant-C)"
-  run $PY scripts/baseline_protocol.py \
-    --predictions "$BLEND_PRED" --top-k 50 \
-    --start 2024-08-28 --end "$TEST_END" \
-    --output "$ROOT/baseline_protocol.json"
-  echo "  trusted excess -> $ROOT/baseline_protocol.json (variant C = honest deliverable)"
+  banner "6/6 strict tradable backtest (baseline_protocol variant-C, held-out)"
+  for K in 10 20; do
+    run $PY scripts/baseline_protocol.py \
+      --predictions "$BLEND_PRED" --score-column composite_score --top-k $K \
+      --start "$HOLDOUT_START" --end "$TEST_END" \
+      --variants C_flags_eligible_delay1 \
+      --save-backtest-dir "$ROOT/realtest_holdout_top${K}" \
+      --output "$ROOT/realtest_holdout_top${K}/baseline.json"
+  done
+  echo "  trusted absolute CAGR/Calmar -> $ROOT/realtest_holdout_top{10,20}/backtest/metrics.json (UI-visible)"
 fi
 
 banner "closed loop complete — artifacts under $ROOT"

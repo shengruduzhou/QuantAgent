@@ -11,6 +11,7 @@ the alpha trainer and the live-readiness gates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 from typing import Iterable
@@ -58,6 +59,10 @@ class V7TrainingDatasetConfig:
     allow_synthetic_fallback: bool = False
     strict_mode: bool = True
     feature_groups: tuple[str, ...] = ()
+    # Feature-schema contract ("固化"): version the schema and pin it across
+    # builds/walk-forward folds so the feature column set is reproducible.
+    feature_version: str = "v1"
+    expected_feature_schema_path: str | None = None
     train_end_date: str | None = None
     validation_end_date: str | None = None
     source_name: str = "realdata"
@@ -99,7 +104,10 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
 
     market = _restrict_window(market, config.start_date, config.end_date, config.symbols)
     labels = _restrict_window(labels, config.start_date, config.end_date, config.symbols)
-    features = build_market_features(market)
+    # Force board-aware limit flags for the gold training dataset: the legacy
+    # silver panel still carries flat-10% is_limit_up/down, so re-derive them
+    # board-aware (main 10 / ChiNext·STAR 20 / BSE 30 / ST 5) here.
+    features = build_market_features(market, prefer_panel_flags=False)
     if config.cached_factors_path:
         features, factor_report = _append_cached_factors(
             features,
@@ -164,11 +172,23 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     if not feature_columns:
         raise ValueError("training dataset has no usable feature columns after as-of joins")
 
+    # Deterministic, de-duplicated column order so the contract (and its hash)
+    # is stable across builds of the same logical schema.
+    feature_columns = sorted(dict.fromkeys(feature_columns))
+    schema_drift: dict[str, list[str]] = {}
+    if config.expected_feature_schema_path:
+        dataset, feature_columns, schema_drift = _reconcile_pinned_schema(
+            dataset, feature_columns, config.expected_feature_schema_path,
+        )
+
     if config.strict_mode:
         _strict_mode_assert(dataset, feature_columns, desired_horizons, config)
 
     label_column_names = [f"forward_return_{h}d" for h in desired_horizons]
+    schema_hash = _schema_hash(feature_columns, label_column_names, desired_horizons)
     feature_schema = {
+        "feature_version": config.feature_version,
+        "schema_hash": schema_hash,
         "feature_columns": feature_columns,
         "label_columns": label_column_names,
         "entity_columns": ["symbol"],
@@ -177,6 +197,7 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         "horizons": list(desired_horizons),
         "available_at_policy": "close-derived features are available from the next trading row; financial joins use available_at <= trade_date",
         "source_name": config.source_name,
+        "schema_drift": schema_drift,
     }
 
     quality = evaluate_data_quality_gates(
@@ -215,6 +236,9 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         warnings=tuple(quality_report.get("failures", ())),
         extra={
             "feature_schema_path": str(schema_path),
+            "feature_version": config.feature_version,
+            "schema_hash": schema_hash,
+            "schema_drift": schema_drift,
             "fundamentals_rows": fundamentals_rows,
             "valuation_rows": valuation_rows,
             "disclosure_rows": disclosure_rows,
@@ -235,6 +259,9 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         "symbols": int(dataset["symbol"].nunique()) if "symbol" in dataset.columns else 0,
         "dates": int(pd.to_datetime(dataset["trade_date"], errors="coerce").nunique()),
         "feature_count": len(feature_columns),
+        "feature_version": config.feature_version,
+        "schema_hash": schema_hash,
+        "schema_drift": schema_drift,
         "horizons": list(desired_horizons),
         "output_path": str(output_path),
         "manifest_path": str(manifest_path),
@@ -386,6 +413,68 @@ def _asof_merge(
             merged[joined_present].isna().all(axis=1) if joined_present else True
         )
     return merged
+
+
+def _schema_hash(
+    feature_columns: Iterable[str],
+    label_columns: Iterable[str],
+    horizons: Iterable[int],
+) -> str:
+    """Order-independent content hash of the feature-schema contract.
+
+    Two builds of the same logical schema (same feature set, labels, horizons)
+    hash identically regardless of column discovery order, so the hash is a
+    stable identity for the dataset's feature contract.
+    """
+    payload = json.dumps(
+        {
+            "feature_columns": sorted(str(c) for c in feature_columns),
+            "label_columns": sorted(str(c) for c in label_columns),
+            "horizons": sorted(int(h) for h in horizons),
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_expected_feature_columns(schema_path: str | Path) -> list[str]:
+    """Read ``feature_columns`` from a previously written feature_schema.json."""
+    path = Path(schema_path)
+    if not path.exists():
+        raise FileNotFoundError(f"expected_feature_schema_path does not exist: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected = payload.get("feature_columns")
+    if not isinstance(expected, list) or not expected:
+        raise ValueError(f"pinned schema {path} has no usable 'feature_columns' list")
+    return [str(c) for c in expected]
+
+
+def _reconcile_pinned_schema(
+    dataset: pd.DataFrame,
+    discovered_columns: list[str],
+    expected_schema_path: str | Path,
+) -> tuple[pd.DataFrame, list[str], dict[str, list[str]]]:
+    """Pin the feature set to a saved contract so rebuilds/folds are stable.
+
+    The pinned ``feature_columns`` (exact order preserved) become the contract.
+    Columns present in the pinned schema but absent from this build are added as
+    all-NaN so ``dataset[feature_columns]`` is always safe; columns discovered
+    now but not in the contract are reported (not silently promoted). Drift is
+    returned for the manifest so a contract change is never invisible.
+    """
+    expected = _load_expected_feature_columns(expected_schema_path)
+    discovered = set(discovered_columns)
+    pinned = set(expected)
+    added_vs_pinned = sorted(discovered - pinned)
+    missing_filled_nan = sorted(pinned - discovered)
+    for column in missing_filled_nan:
+        dataset[column] = np.nan
+    drift = {
+        "added_vs_pinned": added_vs_pinned,      # new columns not in the contract
+        "missing_filled_nan": missing_filled_nan,  # contract columns absent this build
+        "pinned_schema_path": [str(expected_schema_path)],
+    }
+    return dataset, list(expected), drift
 
 
 def _feature_columns(frame: pd.DataFrame, horizons: Iterable[int]) -> list[str]:

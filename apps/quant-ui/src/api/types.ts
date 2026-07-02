@@ -1,0 +1,301 @@
+export type DataStatus = "ready" | "partial" | "empty" | "error";
+
+export interface DataIssue {
+  code: string;
+  message: string;
+  path?: string | null;
+  recoverable?: boolean;
+}
+
+export interface ApiResponse<T> {
+  status: DataStatus;
+  data: T;
+  issues: DataIssue[];
+  provenance?: Record<string, unknown>;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasNext: boolean;
+}
+
+export interface RuntimeArtifact {
+  id: string;
+  kind: string;
+  name: string;
+  path: string;
+  extension: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  status: DataStatus;
+  parser?: string | null;
+  runId?: string | null;
+  horizon?: string | null;
+  tags: string[];
+}
+
+export interface BacktestSummary {
+  id: string;
+  name?: string | null;
+  strategyVersion?: string | null;
+  modelVersion?: string | null;
+  factorVersion?: string | null;
+  horizon?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  universeSize?: number | null;
+  initialCash?: number | null;
+  totalReturn?: number | null;
+  annualReturn?: number | null;
+  maxDrawdown?: number | null;
+  sharpe?: number | null;
+  calmar?: number | null;
+  volatility?: number | null;
+  winRate?: number | null;
+  profitFactor?: number | null;
+  turnover?: number | null;
+  tradeCount?: number | null;
+  fillCount?: number | null;
+  tTradeCount?: number | null;
+  tContribution?: number | null;
+  totalCost?: number | null;
+  status: DataStatus;
+  path: string;
+  tags: string[];
+  capabilities?: Record<string, boolean | string | null>;
+}
+
+export interface EquityPoint {
+  datetime: string;
+  nav: number;
+  dailyReturn?: number | null;
+  drawdown?: number | null;
+  benchmarkNav?: number | null;
+  excessNav?: number | null;
+}
+
+export interface Trade {
+  id: string;
+  datetime: string;
+  symbol: string;
+  name?: string | null;
+  action: string;
+  price: number;
+  quantity: number;
+  amount?: number | null;
+  fee?: number | null;
+  commission?: number | null;
+  slippage?: number | null;
+  tax?: number | null;
+  transferFee?: number | null;
+  impactCost?: number | null;
+  positionAfter?: number | null;
+  positionWeightAfter?: number | null;
+  cashAfter?: number | null;
+  signalSource?: string | null;
+  modelScore?: number | null;
+  factorContributions?: Record<string, number> | null;
+  riskReason?: string | null;
+  pnl?: number | null;
+  cumulativePnl?: number | null;
+  success?: boolean | null;
+  failureReason?: string | null;
+  status?: string | null;
+  tPairId?: string | null;
+}
+
+export interface KlineBar {
+  datetime: string;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+  amount?: number | null;
+  isSt?: boolean | null;
+  isSuspended?: boolean | null;
+  isLimitUp?: boolean | null;
+  isLimitDown?: boolean | null;
+}
+
+export interface StockReplay {
+  backtestId: string;
+  symbol: string;
+  name?: string | null;
+  bars: KlineBar[];
+  trades: Trade[];
+  signals: Array<Record<string, unknown>>;
+  positions: Array<Record<string, unknown>>;
+  scoreSeries: Array<Record<string, unknown>>;
+  equity: EquityPoint[];
+  summary: Record<string, number | string | null>;
+  availability: Record<string, boolean>;
+  issues?: DataIssue[];
+}
+
+export interface Factor {
+  name: string;
+  displayName?: string | null;
+  category?: string | null;
+  description?: string | null;
+  codeLocation?: string | null;
+  formula?: string | null;
+  direction: string;
+  horizonDays?: number | null;
+  parameters: Record<string, unknown>;
+  dataSource: string[];
+  requiredColumns: string[];
+  frequency?: string | null;
+  lookback?: number | null;
+  pitSafe?: boolean | null;
+  usedInTraining?: boolean | null;
+  usedInSelection?: boolean | null;
+  usedInTiming?: boolean | null;
+  usedInRisk?: boolean | null;
+  lifecycle?: string | null;
+  sourceKind: string;
+}
+
+export interface ModelSummary {
+  id: string;
+  modelType?: string | null;
+  version?: string | null;
+  featureVersion?: string | null;
+  createdAt?: string | null;
+  trainStart?: string | null;
+  trainEnd?: string | null;
+  testEnd?: string | null;
+  horizons: number[];
+  featureCount?: number | null;
+  sampleCount?: number | null;
+  device?: string | null;
+  gpuName?: string | null;
+  productionReady?: boolean | null;
+  status: DataStatus;
+  path: string;
+  issues: DataIssue[];
+  modelFamily?: string | null;
+  sourceKind?: string | null;
+  verdict?: string | null;
+  capabilities?: Record<string, boolean>;
+}
+
+export interface ModelMetric {
+  key: string;
+  label: string;
+  value: number;
+  source: string;
+  group: "return" | "risk" | "quality" | "scale" | "other";
+  unit: "ratio" | "bps" | "count" | "number";
+}
+
+export interface ModelArtifact {
+  role: string;
+  name: string;
+  path: string;
+  extension: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  previewable: boolean;
+}
+
+export interface ModelObservability extends ModelSummary {
+  metrics: ModelMetric[];
+  artifacts: ModelArtifact[];
+  evaluations: Array<{ name: string; path: string; data: Record<string, unknown> }>;
+  config: Record<string, unknown>;
+  availability: Record<string, boolean>;
+  checkpoint: {
+    contentExposed: boolean;
+    count: number;
+    sizeBytes: number;
+  };
+}
+
+export interface CleanupCandidate {
+  id: string;
+  category: string;
+  label: string;
+  reason: string;
+  paths: string[];
+  sizeBytes: number;
+  itemCount: number;
+  modifiedAt?: string | null;
+  safeDefault: boolean;
+  requiresExplicit: boolean;
+}
+
+export interface RuntimeCleanupAnalysis {
+  runtimeSizeBytes: number;
+  candidateSizeBytes: number;
+  safeDefaultSizeBytes: number;
+  candidates: CleanupCandidate[];
+  protected: string[];
+}
+
+export interface CleanupResult {
+  generatedAt: string;
+  deleted: Array<{
+    id: string;
+    label: string;
+    items: Array<{ path: string; sizeBytes: number }>;
+    sizeBytes: number;
+  }>;
+  errors: Array<{ path: string; message: string }>;
+  freedBytes: number;
+  auditPath: string;
+}
+
+export interface SelectionRun {
+  id: string;
+  asOfDate?: string | null;
+  candidateCount?: number | null;
+  finalCount?: number | null;
+  usedFallback?: boolean | null;
+  noOrdersGenerated?: boolean | null;
+  path: string;
+  status: DataStatus;
+  modifiedAt: number;
+}
+
+export interface RiskOverview {
+  backtestId?: string | null;
+  maxDrawdown?: number | null;
+  maxSingleStockLoss?: number | null;
+  maxDailyLoss?: number | null;
+  consecutiveLossDays?: number | null;
+  concentration?: number | null;
+  sectorConcentration?: number | null;
+  volatilityExposure?: number | null;
+  liquidityRisk?: number | null;
+  limitDownRisk?: number | null;
+  suspensionRisk?: number | null;
+  doTFailureRisk?: number | null;
+  eventCounts: Record<string, number>;
+  rules: Array<Record<string, unknown>>;
+}
+
+export interface SystemOverview {
+  modelStatus: string;
+  latestModel?: ModelSummary | null;
+  latestBacktest?: BacktestSummary | null;
+  latestSelection?: SelectionRun | null;
+  stockPoolCount?: number | null;
+  candidateCount?: number | null;
+  signalCount?: number | null;
+  buySignalCount?: number | null;
+  sellSignalCount?: number | null;
+  doTSignalCount?: number | null;
+  riskStatus: string;
+  risk: RiskOverview;
+  runtime: {
+    artifactCount: number;
+    totalSizeBytes: number;
+    byKind: Record<string, number>;
+    indexedAt: string;
+  };
+}

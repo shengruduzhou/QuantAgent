@@ -46,7 +46,9 @@ def build_v7_training_dataset(
     if market_report["status"] != "passed":
         raise ValueError(f"market panel schema failed: {market_report}")
 
-    features = build_market_features(market_panel)
+    # Force board-aware limit flags: the legacy silver panel still carries
+    # flat-10% flags, so the training dataset must re-derive board-aware ones.
+    features = build_market_features(market_panel, prefer_panel_flags=False)
     features = merge_pit_features(features, fundamentals, prefix="")
     features = merge_pit_features(features, evidence_scores, prefix="")
     features = merge_pit_features(features, theme_exposure, prefix="")
@@ -90,25 +92,26 @@ def build_market_features(
     market_panel: pd.DataFrame,
     *,
     st_flags: pd.DataFrame | None = None,
-    limit_up_pct: float = 0.099,
-    limit_down_pct: float = -0.099,
+    prefer_panel_flags: bool = True,
 ) -> pd.DataFrame:
     """Compute per-(date, symbol) market features.
 
-    Stage 2.1 rebuild
+    Tradability flags
     -----------------
-    Previously ``is_suspended`` / ``is_limit_up`` / ``is_limit_down`` /
-    ``is_st`` were hardcoded to ``False`` if missing from the input.
-    They are now derived properly:
-
-    * ``is_suspended``, ``is_limit_up``, ``is_limit_down`` come from
-      :func:`quantagent.universe.filters.derive_market_flags` so the
-      derivation has a single source of truth shared with the
-      universe filter (Stage 1).
-    * ``is_st`` comes from the optional ``st_flags`` parameter
-      (long frame: ``trade_date, symbol, is_st``). Without it the
-      column stays ``False`` and downstream callers should treat ST
-      checks as "unknown" until Stage 2.2 wires an akshare source.
+    * ``is_st`` is resolved first (from the optional ``st_flags`` table, an
+      existing column, else ``False``) because it drives the ST 5% price-limit
+      override.
+    * ``is_suspended`` / ``is_limit_up`` / ``is_limit_down`` come from
+      :func:`quantagent.universe.filters.derive_market_flags`, whose limits are
+      **board-aware** (main 10% / ChiNext·STAR 20% / BSE 30% / ST 5%) via the
+      canonical ``quant_math.ashare`` rule engine — the single source of truth
+      shared with provider / backtest / execution. The flat-10% approximation
+      is no longer used anywhere in this path.
+    * ``prefer_panel_flags`` (default ``True``): when the input panel already
+      carries a flag column it is preserved, so an upstream **board-aware**
+      silver panel is never clobbered. Set ``False`` to force the board-aware
+      re-derivation to supersede the column — required for the gold training
+      dataset because the legacy silver panel still carries flat-10% flags.
 
     All derived values use only data available up to and including
     ``trade_date`` (no look-ahead). ``available_at`` is set to the
@@ -130,25 +133,9 @@ def build_market_features(
     data["available_at"] = group["trade_date"].shift(-1)
     data["available_at"] = data["available_at"].fillna(data["trade_date"] + pd.Timedelta(days=1))
 
-    # Derive tradability flags from OHLCV (single source of truth lives
-    # in quantagent.universe.filters; importing here keeps the schema in
-    # sync between feature build and runtime filter).
-    from quantagent.universe.filters import derive_market_flags
-    flags = derive_market_flags(
-        data[["trade_date", "symbol", "volume", "amount", "close"]],
-        limit_up_pct=limit_up_pct,
-        limit_down_pct=limit_down_pct,
-    )
-    flags = flags.drop_duplicates(["trade_date", "symbol"], keep="last")
-    data = data.drop(columns=["is_suspended", "is_limit_up", "is_limit_down"], errors="ignore").merge(
-        flags, on=["trade_date", "symbol"], how="left"
-    )
-    for column in ("is_suspended", "is_limit_up", "is_limit_down"):
-        data[column] = data[column].fillna(False).astype(bool)
-
-    # ST flag: take from caller-provided table; otherwise default False
-    # with the understanding that ST checks are "unknown" until Stage 2.2
-    # wires the akshare ST source.
+    # ST flag FIRST — needed so the board-aware limit derivation can apply the
+    # ST 5% override. Take from caller-provided table; else keep an existing
+    # column; else default False (ST "unknown" until an ST source is wired).
     if st_flags is not None and not st_flags.empty and "is_st" in st_flags.columns:
         st = st_flags[["trade_date", "symbol", "is_st"]].copy()
         st["trade_date"] = pd.to_datetime(st["trade_date"], errors="coerce")
@@ -161,6 +148,25 @@ def build_market_features(
         data["is_st"] = False
     else:
         data["is_st"] = data["is_st"].fillna(False).astype(bool)
+
+    # Board-aware tradability flags (single source of truth in
+    # quantagent.universe.filters). Preserve an existing board-aware panel
+    # column when prefer_panel_flags, else let the board-aware derivation win.
+    from quantagent.universe.filters import derive_market_flags
+    flags = derive_market_flags(
+        data[["trade_date", "symbol", "volume", "amount", "close", "is_st"]],
+    ).drop_duplicates(["trade_date", "symbol"], keep="last")
+    flags = flags.rename(
+        columns={c: f"{c}__derived" for c in ("is_suspended", "is_limit_up", "is_limit_down")}
+    )
+    data = data.merge(flags, on=["trade_date", "symbol"], how="left")
+    for column in ("is_suspended", "is_limit_up", "is_limit_down"):
+        derived = data[f"{column}__derived"].fillna(False).astype(bool)
+        if prefer_panel_flags and column in market_panel.columns:
+            data[column] = data[column].fillna(False).astype(bool)
+        else:
+            data[column] = derived
+        data = data.drop(columns=[f"{column}__derived"])
 
     return data.reset_index(drop=True)
 

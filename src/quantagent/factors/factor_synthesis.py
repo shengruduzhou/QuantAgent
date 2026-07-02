@@ -110,7 +110,9 @@ class SymbolicGAConfig:
 @dataclass(frozen=True)
 class SynthesisResult:
     definitions: list[E.FactorDefinition]
-    leaderboard: pd.DataFrame  # name, expression, train_rank_ic, validation_rank_ic, complexity, finite_ratio
+    leaderboard: pd.DataFrame  # name, expression, train/validation_rank_ic, icir, complexity, finite_ratio,
+                               # + OOS economic profile: oos_top_quantile_return, oos_long_short_return,
+                               #   oos_monotonicity, oos_top_quantile_turnover (RD-Agent path only)
     history: pd.DataFrame      # generation, best_fitness, mean_fitness, mean_complexity
 
 
@@ -805,6 +807,67 @@ def _ic_stats(
     return mean, icir
 
 
+def _factor_economic_profile(
+    factor_values: pd.Series,
+    panel: pd.DataFrame,
+    labels: pd.Series,
+    trade_date: pd.Series,
+    tradable_mask: pd.Series | None = None,
+    *,
+    quantiles: int = 5,
+) -> dict[str, float]:
+    """OOS economic profile *beyond* IC for an accepted factor.
+
+    Records top-quantile mean return, long-short (Q_top − Q_bottom) spread,
+    cross-sectional monotonicity, and top-quantile turnover, computed on the
+    *tradable* OOS sample — the same rows the acceptance rank-IC is measured on,
+    so the numbers are methodologically consistent with the gate (no phantom
+    edge from untradable names). This is the "严禁只看 IC" requirement: an
+    accepted factor must carry a return/turnover profile, not just an IC.
+
+    Horizon IC-decay is intentionally *not* computed here: the acceptance panel
+    is sub-sampled (``_subsample_panel`` keeps a contiguous date block but a
+    random symbol subset), so re-deriving multi-horizon forward returns by
+    shifting ``close`` would be unreliable. Decay belongs to the full-panel
+    evaluation step (``scripts/evaluate_discovered_factors.py``).
+
+    Best-effort: any failure returns NaNs and never breaks the acceptance loop.
+    """
+    out: dict[str, float] = {
+        "oos_top_quantile_return": float("nan"),
+        "oos_long_short_return": float("nan"),
+        "oos_monotonicity": float("nan"),
+        "oos_top_quantile_turnover": float("nan"),
+    }
+    try:
+        from quantagent.factors import evaluation as _eval
+
+        frame = pd.DataFrame({
+            "trade_date": np.asarray(trade_date.values),
+            "symbol": np.asarray(panel["symbol"].values),
+            "factor": pd.to_numeric(pd.Series(factor_values.values), errors="coerce").to_numpy(),
+            "fwd": pd.to_numeric(pd.Series(labels.values), errors="coerce").to_numpy(),
+        })
+        if tradable_mask is not None:
+            frame = frame[np.asarray(tradable_mask, dtype=bool)]
+        frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=["factor", "fwd"])
+        if frame.empty or frame["trade_date"].nunique() < 2:
+            return out
+        qb = _eval.quantile_group_backtest(frame, "factor", "fwd", quantiles=quantiles)
+        gr = qb.group_returns
+        if quantiles in gr.columns:
+            out["oos_top_quantile_return"] = float(gr[quantiles].mean())
+        if not qb.long_short.dropna().empty:
+            out["oos_long_short_return"] = float(qb.long_short.mean())
+        if np.isfinite(qb.monotonicity):
+            out["oos_monotonicity"] = float(qb.monotonicity)
+        if not qb.turnover.dropna().empty:
+            out["oos_top_quantile_turnover"] = float(qb.turnover.mean())
+    except Exception:  # noqa: BLE001 — profiling must never break acceptance
+        logger.debug("economic profile failed for an accepted factor", exc_info=True)
+    return out
+
+
 def _evaluate_ic(
     tree: E.Expr,
     panel: pd.DataFrame,
@@ -1192,6 +1255,15 @@ def synthesize_factors_rd_agent(
     task_feedback_rows: list[dict[str, object]] = []
     trace_rows: list[dict[str, object]] = []
     seen_exprs: set[str] = set()
+    # Persistent-loop novelty: seed the attempted-set from prior runs' memory so
+    # a fresh run does not re-mine expressions already explored — each iteration
+    # is steered to NEW orthogonal space. (Empty memory => no-op.) Per-run
+    # outputs are unioned across iterations by the closed-loop driver.
+    for _row in persisted_memory:
+        for _key in ("expression", "raw_expression"):
+            _e = _row.get(_key)
+            if _e:
+                seen_exprs.add(str(_e))
     reference_values: dict[str, pd.Series] = {
         ref: pd.to_numeric(oos_panel[ref], errors="coerce")
         for ref in cfg.reference_columns
@@ -1439,6 +1511,12 @@ def synthesize_factors_rd_agent(
                 _rd_agent_feedback_row(hypothesis, task, True, feedback, train_ic, validation_ic, max_novelty_corr)
             )
             round_feedback.append(f"{task.factor_name}: accepted")
+            # Beyond-IC economic profile (top-bucket/long-short return, monotonicity,
+            # turnover) on the same tradable OOS sample the IC gate used — so each
+            # accepted factor carries a return/turnover signature, not just an IC.
+            profile = _factor_economic_profile(
+                oos_values, oos_panel, oos_labels, oos_dates, oos_tradable_mask,
+            )
             leaderboard_rows.append(
                 {
                     "name": definition.name,
@@ -1452,6 +1530,10 @@ def synthesize_factors_rd_agent(
                     "finite_ratio": float(min(finite_ratio, validation_finite)),
                     "max_reference_corr": float(max_reference_corr),
                     "max_sota_corr": float(max_sota_corr),
+                    "oos_top_quantile_return": profile["oos_top_quantile_return"],
+                    "oos_long_short_return": profile["oos_long_short_return"],
+                    "oos_monotonicity": profile["oos_monotonicity"],
+                    "oos_top_quantile_turnover": profile["oos_top_quantile_turnover"],
                     "round": int(round_idx + 1),
                     "structure": candidate.structure,
                     "horizon": candidate.horizon,
@@ -1546,6 +1628,10 @@ def synthesize_factors_rd_agent(
             "finite_ratio",
             "max_reference_corr",
             "max_sota_corr",
+            "oos_top_quantile_return",
+            "oos_long_short_return",
+            "oos_monotonicity",
+            "oos_top_quantile_turnover",
             "round",
             "structure",
             "horizon",

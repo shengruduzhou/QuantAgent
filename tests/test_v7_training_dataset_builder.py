@@ -102,6 +102,73 @@ def test_builder_emits_manifest_and_feature_schema(tmp_path):
     assert "missing_fundamentals" in result.dataset.columns
 
 
+def test_feature_schema_is_versioned_and_hash_is_deterministic(tmp_path):
+    market_path, labels_path, fundamentals_path = _write_inputs(tmp_path)
+
+    def _build(out_name: str):
+        return build_v7_training_dataset_artifact(
+            V7TrainingDatasetConfig(
+                market_panel_path=str(market_path),
+                labels_path=str(labels_path),
+                output_path=str(tmp_path / out_name),
+                fundamentals_root=str(fundamentals_path),
+                horizons=(1, 5), min_rows=20, min_symbols=2, min_dates=10,
+                feature_version="v9-test",
+            )
+        )
+
+    first = _build("a.parquet")
+    second = _build("b.parquet")
+    schema = first.feature_schema
+    assert schema["feature_version"] == "v9-test"
+    assert isinstance(schema["schema_hash"], str) and len(schema["schema_hash"]) == 64
+    # Same logical schema across two builds → identical hash + version in manifest.
+    assert first.feature_schema["schema_hash"] == second.feature_schema["schema_hash"]
+    manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["extra"]["schema_hash"] == schema["schema_hash"]
+    assert manifest["extra"]["feature_version"] == "v9-test"
+    # Feature columns are deterministically ordered (sorted).
+    assert schema["feature_columns"] == sorted(schema["feature_columns"])
+
+
+def test_pinned_feature_schema_reproduces_columns_and_records_drift(tmp_path):
+    market_path, labels_path, fundamentals_path = _write_inputs(tmp_path)
+    base = build_v7_training_dataset_artifact(
+        V7TrainingDatasetConfig(
+            market_panel_path=str(market_path),
+            labels_path=str(labels_path),
+            output_path=str(tmp_path / "base.parquet"),
+            fundamentals_root=str(fundamentals_path),
+            horizons=(1, 5), min_rows=20, min_symbols=2, min_dates=10,
+        )
+    )
+    # Forge a pinned contract = the discovered columns plus one the build cannot
+    # produce, to exercise both the NaN-fill and the drift record.
+    pinned = dict(base.feature_schema)
+    pinned_cols = sorted([*base.feature_schema["feature_columns"], "contract_only_feature"])
+    pinned["feature_columns"] = pinned_cols
+    pinned_path = tmp_path / "pinned_schema.json"
+    pinned_path.write_text(json.dumps(pinned), encoding="utf-8")
+
+    rebuilt = build_v7_training_dataset_artifact(
+        V7TrainingDatasetConfig(
+            market_panel_path=str(market_path),
+            labels_path=str(labels_path),
+            output_path=str(tmp_path / "pinned.parquet"),
+            fundamentals_root=str(fundamentals_path),
+            horizons=(1, 5), min_rows=20, min_symbols=2, min_dates=10,
+            expected_feature_schema_path=str(pinned_path),
+        )
+    )
+    # Contract is honoured exactly, including the column the build could not make.
+    assert rebuilt.feature_schema["feature_columns"] == pinned_cols
+    assert "contract_only_feature" in rebuilt.dataset.columns
+    assert rebuilt.dataset["contract_only_feature"].isna().all()
+    drift = rebuilt.feature_schema["schema_drift"]
+    assert "contract_only_feature" in drift["missing_filled_nan"]
+    assert drift["added_vs_pinned"] == []
+
+
 def test_builder_refuses_synthetic_fallback(tmp_path):
     market_path, labels_path, _ = _write_inputs(tmp_path)
     with pytest.raises(ValueError, match="synthetic fallback"):

@@ -186,6 +186,34 @@ def daily_price_limit(symbol: str, is_st: bool = False, limits: ASharePriceLimit
     return getattr(limits, board)
 
 
+def board_price_limit_vector(
+    symbols: pd.Series,
+    is_st: pd.Series | bool = False,
+    limits: ASharePriceLimit | None = None,
+) -> pd.Series:
+    """Vectorised board-aware price-limit ratio per row.
+
+    Resolves the board once per *distinct* symbol (cheap) then maps it back,
+    applying the ST 5% override per row. Equivalent to calling
+    :func:`daily_price_limit` row-by-row but fast enough for 10M+ row panels,
+    where ``DataFrame.apply(axis=1)`` would be prohibitively slow.
+    """
+    limits = limits or ASharePriceLimit()
+    symbols = symbols.astype(str)
+    uniq = pd.Index(symbols.unique())
+    # Board ratio for the non-ST case, resolved once per distinct symbol.
+    ratio_by_symbol = {
+        s: getattr(limits, board_for_symbol(s, False)) for s in uniq
+    }
+    base = symbols.map(ratio_by_symbol).astype(float)
+    if isinstance(is_st, pd.Series):
+        st_mask = is_st.reindex(symbols.index).fillna(False).astype(bool)
+        return base.mask(st_mask, float(limits.st))
+    if bool(is_st):
+        return pd.Series(float(limits.st), index=symbols.index)
+    return base
+
+
 def limit_up_mask(
     frame: pd.DataFrame,
     symbol_column: str = "symbol",

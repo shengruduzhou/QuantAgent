@@ -8,16 +8,20 @@ to the existing ``ProviderRequest`` / ``ProviderResult`` contract.
 
 Concrete responsibilities
 -------------------------
-* ``daily_ohlcv`` — multi-symbol daily K-line via ``tf.klines.batch`` (or
-  ``tf.klines.get`` for a single symbol), filtered to the requested date
-  window.
-* ``adjusted_prices`` — same call plus a per-symbol merge with
-  ``tf.klines.ex_factors`` and multiplication of OHLC by the qfq factor.
+* ``daily_ohlcv`` — multi-symbol daily K-line via ``tf.klines.batch`` when the
+  batch tier is granted, otherwise a transparent per-symbol ``tf.klines.get``
+  fallback (the batch K-line endpoint is separately priced and returns
+  ``无...批量查询权限`` on the current subscription), filtered to the window.
+* ``adjusted_prices`` — same fetch with the SDK ``adjust="forward"`` (qfq)
+  argument. The dedicated ``tf.klines.ex_factors`` endpoint is permission-gated
+  (``无除权因子查询权限``), but the K-line endpoint applies the qfq adjustment
+  server-side, so true adjusted OHLC is obtained without ex_factors access.
 * ``tradability`` — derived from daily K-line: ``volume == 0`` → suspended,
-  ``close ≈ round(prev_close × 1.10, 2)`` → limit-up (10 % cap is the
-  non-ST default; ST 5 % is an acceptable approximation for the gating
-  use-case), current ST status from the instrument's name carrying
-  "ST" / "*ST" prefix.
+  ``close ≈ round(prev_close × (1 ± board_ratio), 2)`` → limit-up/down. The
+  board ratio is resolved by ``quant_math.ashare.daily_price_limit`` from the
+  ticker prefix (main 10 % / ChiNext / STAR 20 % / BSE 30 %) with the ST 5 %
+  override, so non-main-board names are not mislabelled by a flat 10 % cap.
+  Current ST status comes from the instrument name carrying "ST" / "*ST".
 * ``stock_basic`` — union of ``tf.exchanges.get_instruments`` on SH/SZ/BJ
   filtered to ``type == "stock"``, joined with the SW1/SW2 industry map.
 * ``namechange_history`` — returns an empty frame; tickflow does not
@@ -297,60 +301,87 @@ class TickflowProvider(MarketDataProvider):
     # Real Tickflow client calls
     # ------------------------------------------------------------------
 
-    def _call_tickflow_daily(self, request: ProviderRequest) -> pd.DataFrame:
-        """Daily OHLCV via ``tf.klines.batch`` (≥2 syms) or ``tf.klines.get``."""
+    def _fetch_daily(
+        self,
+        request: ProviderRequest,
+        *,
+        adjust: str | None = None,
+        require_token: bool = False,
+    ) -> pd.DataFrame:
+        """Daily K-lines for ``request.symbols``, optionally SDK-side adjusted.
+
+        ``adjust`` maps to the SDK ``AdjustType`` literal
+        (``"forward"`` = qfq, ``"backward"`` = hfq, ``None`` = raw). For ≥2
+        symbols we attempt ``tf.klines.batch`` first, but the batch K-line
+        endpoint is a separately-priced tier (``无...批量查询权限``); when it is
+        gated we transparently fall back to a per-symbol ``tf.klines.get``
+        loop, which is the always-available path. A single shared helper keeps
+        ``daily_ohlcv`` and ``adjusted_prices`` on identical fetch/fallback
+        logic — the only difference is the ``adjust`` argument.
+        """
         symbols = tuple(request.symbols or ())
         if not symbols:
             return pd.DataFrame()
-        tf = self._sdk(require_token=False)
+        tf = self._sdk(require_token=require_token)
         # tickflow returns the most recent `count` bars. Pull a generous
         # buffer then filter to the requested window.
-        count = _DEFAULT_BAR_BUFFER
+        kw: dict[str, Any] = {"period": "1d", "count": _DEFAULT_BAR_BUFFER,
+                              "as_dataframe": True}
+        if adjust is not None:
+            kw["adjust"] = adjust
+
+        def _get_one(sym: str) -> pd.DataFrame | None:
+            df = tf.klines.get(sym, **kw)
+            if df is None or df.empty:
+                return None
+            return df if "symbol" in df.columns else df.assign(symbol=sym)
+
+        frames: list[pd.DataFrame] = []
         if len(symbols) == 1:
-            df = tf.klines.get(symbols[0], period="1d", count=count, as_dataframe=True)
-            frames = [df] if df is not None else []
+            one = _get_one(symbols[0])
+            frames = [one] if one is not None else []
         else:
-            batch = tf.klines.batch(
-                list(symbols), period="1d", count=count,
-                as_dataframe=True, show_progress=False,
-            ) or {}
-            frames = [
-                (df if "symbol" in df.columns else df.assign(symbol=sym))
-                for sym, df in batch.items() if df is not None and not df.empty
-            ]
+            try:
+                batch = tf.klines.batch(list(symbols), show_progress=False, **kw) or {}
+                frames = [
+                    (df if "symbol" in df.columns else df.assign(symbol=sym))
+                    for sym, df in batch.items() if df is not None and not df.empty
+                ]
+            except ProviderUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 — classify then re-raise non-permission
+                if not _is_permission_error(exc):
+                    raise
+                _log.info(
+                    "tickflow klines.batch gated (%s); falling back to per-symbol "
+                    "get for %d symbols", exc, len(symbols),
+                )
+                for sym in symbols:
+                    try:
+                        one = _get_one(sym)
+                    except Exception as e2:  # noqa: BLE001 — skip the bad symbol, keep the rest
+                        _log.warning("tickflow klines.get(%s) failed: %s", sym, e2)
+                        continue
+                    if one is not None:
+                        frames.append(one)
         if not frames:
             return pd.DataFrame()
         out = pd.concat(frames, ignore_index=True)
         return _filter_window(out, start_date=request.start_date, end_date=request.end_date)
 
+    def _call_tickflow_daily(self, request: ProviderRequest) -> pd.DataFrame:
+        """Raw daily OHLCV (free-tier path; batch→per-symbol fallback)."""
+        return self._fetch_daily(request, adjust=None, require_token=False)
+
     def _call_tickflow_adjusted(self, request: ProviderRequest) -> pd.DataFrame:
-        """Daily K-line × per-symbol qfq ex_factor merge."""
-        raw = self._call_tickflow_daily(request)
-        if raw.empty:
-            return raw
-        tf = self._sdk(require_token=True)
-        adj_frames: list[pd.DataFrame] = []
-        for sym, group in raw.groupby("symbol", sort=False):
-            try:
-                fac = tf.klines.ex_factors(sym, as_dataframe=True)
-            except Exception as exc:  # noqa: BLE001
-                _log.debug("tickflow ex_factors(%s) failed: %s", sym, exc)
-                fac = None
-            if fac is None or fac.empty or "ex_factor" not in fac.columns:
-                adj_frames.append(group)
-                continue
-            fac = fac[["trade_date", "ex_factor"]].copy()
-            fac["trade_date"] = pd.to_datetime(fac["trade_date"], errors="coerce")
-            g = group.copy()
-            g["trade_date"] = pd.to_datetime(g["trade_date"], errors="coerce")
-            merged = g.merge(fac, on="trade_date", how="left")
-            merged["ex_factor"] = merged["ex_factor"].ffill().fillna(1.0)
-            for col in ("open", "high", "low", "close"):
-                if col in merged.columns:
-                    merged[col] = merged[col] * merged["ex_factor"]
-            merged = merged.drop(columns=["ex_factor"])
-            adj_frames.append(merged)
-        return pd.concat(adj_frames, ignore_index=True) if adj_frames else pd.DataFrame()
+        """Forward-adjusted (qfq) daily K-lines via the SDK ``adjust`` param.
+
+        The dedicated ``tf.klines.ex_factors`` endpoint is permission-gated on
+        the current subscription (``无除权因子查询权限``), but the K-line endpoint
+        accepts ``adjust="forward"`` directly and returns server-side qfq OHLC —
+        so we get true adjusted prices without ever touching ex_factors.
+        """
+        return self._fetch_daily(request, adjust="forward", require_token=True)
 
     def _call_tickflow_tradability(self, request: ProviderRequest) -> pd.DataFrame:
         """Derive per (date, symbol) tradability flags from K-line + names."""
@@ -364,19 +395,29 @@ class TickflowProvider(MarketDataProvider):
             for inst in instruments
             if "ST" in str(inst.get("name", "")).upper()
         }
+        # Board-aware price limits (main 10% / ChiNext 20% / STAR 20% / BSE 30% /
+        # ST 5%) via the canonical AShare rule engine. A flat 10% cap mislabels
+        # every ChiNext/STAR/BSE name: a ChiNext stock at +10% is NOT sealed
+        # (its limit is +20%), so the flat rule both false-flags it as untradable
+        # and misses the real +20% seal. ``daily_price_limit`` resolves the board
+        # from the ticker prefix and applies the ST 5% override.
+        from quantagent.quant_math.ashare import daily_price_limit
+
         out_frames: list[pd.DataFrame] = []
         for sym, group in raw.groupby("symbol", sort=False):
             g = group.sort_values("trade_date").copy()
             g["volume"] = pd.to_numeric(g["volume"], errors="coerce")
             g["close"] = pd.to_numeric(g["close"], errors="coerce")
             g["prev_close"] = g["close"].shift(1)
-            cap_up = (g["prev_close"] * 1.10).round(2)
-            cap_dn = (g["prev_close"] * 0.90).round(2)
+            is_st_sym = sym in st_set
+            ratio = float(daily_price_limit(str(sym), is_st_sym))
+            cap_up = (g["prev_close"] * (1.0 + ratio)).round(2)
+            cap_dn = (g["prev_close"] * (1.0 - ratio)).round(2)
             close_round = g["close"].round(2)
             g["is_suspended"] = (g["volume"].fillna(0) == 0).astype(bool)
             g["is_limit_up"] = ((close_round - cap_up).abs() < 0.005).fillna(False).astype(bool)
             g["is_limit_down"] = ((close_round - cap_dn).abs() < 0.005).fillna(False).astype(bool)
-            g["is_st"] = sym in st_set
+            g["is_st"] = is_st_sym
             out_frames.append(g[["symbol", "trade_date",
                                  "is_suspended", "is_st",
                                  "is_limit_up", "is_limit_down"]])
@@ -435,6 +476,26 @@ class TickflowProvider(MarketDataProvider):
 # ---------------------------------------------------------------------------
 # Frame normalisers — conform Tickflow shapes to the canonical schemas.
 # ---------------------------------------------------------------------------
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    """True if ``exc`` is a TickFlow tier/permission denial (vs. a real fault).
+
+    Matches the SDK's typed ``PermissionError`` when available, plus the HTTP
+    403 / Chinese ``无...权限`` message shapes the API returns for gated
+    endpoints. Used to decide when a batch call can safely fall back to the
+    per-symbol path rather than propagating as a hard failure.
+    """
+    try:
+        from tickflow import PermissionError as TFPermissionError  # type: ignore
+        if isinstance(exc, TFPermissionError):
+            return True
+    except Exception:  # noqa: BLE001 — SDK missing or no such symbol; fall through to text match
+        pass
+    msg = str(exc)
+    low = msg.lower()
+    return ("403" in msg or "permission" in low or "forbidden" in low
+            or "权限" in msg)
 
 
 def _filter_window(

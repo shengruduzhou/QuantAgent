@@ -36,3 +36,9 @@ AI_quant_venv/
 .agents/
 
 .rd-agent/
+
+# Quant UI local dependencies and build artifacts
+apps/quant-ui/node_modules/
+apps/quant-ui/dist/
+apps/quant-ui/.npm-cache/
+apps/quant-ui/coverage/

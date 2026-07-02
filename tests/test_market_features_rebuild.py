@@ -59,7 +59,7 @@ def test_is_suspended_flagged_only_on_suspension_day():
 
 def test_is_limit_up_flagged_only_on_jump_day():
     panel = _panel_with_three_symbols()
-    feats = build_market_features(panel, limit_up_pct=0.099)
+    feats = build_market_features(panel)
     c = feats[feats["symbol"] == "C.SZ"].sort_values("trade_date").reset_index(drop=True)
     lu_dates = c.loc[c["is_limit_up"], "trade_date"]
     assert len(lu_dates) == 1
@@ -82,11 +82,74 @@ def test_is_limit_down_flagged_on_drop():
         for d in dates:
             rows.append({"trade_date": d, "symbol": f"Y{sid:03d}.SZ", "open": 5.0, "high": 5.1, "low": 4.9, "close": 5.0, "volume": 1e5, "amount": 1e6})
     panel = pd.DataFrame(rows)
-    feats = build_market_features(panel, limit_down_pct=-0.099)
+    feats = build_market_features(panel)
     d = feats[feats["symbol"] == "D.SZ"].sort_values("trade_date").reset_index(drop=True)
     ld_dates = d.loc[d["is_limit_down"], "trade_date"]
     assert len(ld_dates) == 1
     assert ld_dates.iloc[0] == dates[1]
+
+
+def _three_day_rows(sym: str, closes: list[float], *, is_st: bool = False) -> list[dict]:
+    dates = pd.bdate_range("2024-01-02", periods=len(closes))
+    rows = []
+    for d, c in zip(dates, closes):
+        row = {"trade_date": d, "symbol": sym, "open": c * 0.99, "high": c * 1.01,
+               "low": c * 0.98, "close": c, "volume": 1e6, "amount": 1e7}
+        if is_st:
+            row["is_st"] = True
+        rows.append(row)
+    return rows
+
+
+def test_limit_flags_are_board_aware_not_flat_10pct():
+    """A +10% move seals a main-board name but NOT a ChiNext/STAR/BSE one."""
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    rows = []
+    rows += _three_day_rows("600000.SH", [10.0, 11.0, 11.0])   # main +10% day2 → seal
+    rows += _three_day_rows("300001.SZ", [10.0, 11.0, 12.0])   # chinext +10% → NOT seal
+    rows += _three_day_rows("300002.SZ", [10.0, 12.0, 12.0])   # chinext +20% → seal
+    rows += _three_day_rows("688001.SH", [10.0, 12.0, 12.0])   # star +20% → seal
+    rows += _three_day_rows("830001.BJ", [10.0, 11.0, 13.0])   # bse +10% → NOT seal
+    rows += _three_day_rows("830002.BJ", [10.0, 13.0, 13.0])   # bse +30% → seal
+    feats = build_market_features(pd.DataFrame(rows), prefer_panel_flags=False)
+
+    def lu(sym: str, day: int) -> bool:
+        r = feats[(feats["symbol"] == sym) & (feats["trade_date"] == dates[day])]
+        return bool(r.iloc[0]["is_limit_up"])
+
+    assert lu("600000.SH", 1)          # main 10%: +10% is a seal
+    assert not lu("300001.SZ", 1)      # chinext 20%: +10% is NOT a seal (the core fix)
+    assert lu("300002.SZ", 1)          # chinext 20%: +20% is a seal
+    assert lu("688001.SH", 1)          # star 20%: +20% is a seal
+    assert not lu("830001.BJ", 1)      # bse 30%: +10% is NOT a seal
+    assert lu("830002.BJ", 1)          # bse 30%: +30% is a seal
+
+
+def test_st_limit_is_5pct():
+    """An ST name seals at +5%; the same move on a non-ST main board does not."""
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    panel = pd.DataFrame(_three_day_rows("600001.SH", [10.0, 10.5], is_st=True))  # +5%
+    feats = build_market_features(panel, prefer_panel_flags=False)
+    r = feats[(feats["symbol"] == "600001.SH") & (feats["trade_date"] == dates[1])]
+    assert bool(r.iloc[0]["is_limit_up"])   # +5% on ST = seal
+
+    panel_no_st = pd.DataFrame(_three_day_rows("600001.SH", [10.0, 10.5]))  # no is_st
+    feats2 = build_market_features(panel_no_st, prefer_panel_flags=False)
+    r2 = feats2[(feats2["symbol"] == "600001.SH") & (feats2["trade_date"] == dates[1])]
+    assert not bool(r2.iloc[0]["is_limit_up"])   # +5% on non-ST main board = no seal
+
+
+def test_prefer_panel_flags_preserves_board_aware_panel_else_overrides():
+    """prefer_panel_flags keeps an upstream flag; False forces board-aware re-derive."""
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    rows = _three_day_rows("300003.SZ", [10.0, 10.2])  # chinext +2% — NOT a board-aware seal
+    for r in rows:
+        r.update(is_limit_up=True, is_limit_down=False, is_suspended=False)  # panel disagrees
+    panel = pd.DataFrame(rows)
+    kept = build_market_features(panel, prefer_panel_flags=True)
+    assert bool(kept[(kept["symbol"] == "300003.SZ") & (kept["trade_date"] == dates[1])].iloc[0]["is_limit_up"])
+    forced = build_market_features(panel, prefer_panel_flags=False)
+    assert not bool(forced[(forced["symbol"] == "300003.SZ") & (forced["trade_date"] == dates[1])].iloc[0]["is_limit_up"])
 
 
 def test_is_st_taken_from_caller_table_when_present():

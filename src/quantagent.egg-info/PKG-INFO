@@ -5,8 +5,10 @@ Summary: Production-oriented AI quant research, backtesting, and live-trading sc
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 License-File: LICENSE
-Requires-Dist: numpy>=1.26
-Requires-Dist: pandas>=2.2
+Requires-Dist: numpy<2.3,>=1.26
+Requires-Dist: pandas<3,>=2.2
+Requires-Dist: polars>=1.0
+Requires-Dist: pyarrow>=16.0
 Requires-Dist: scipy>=1.13
 Requires-Dist: pydantic>=2.7
 Requires-Dist: pyyaml>=6.0
@@ -14,17 +16,19 @@ Requires-Dist: typer>=0.12
 Provides-Extra: data
 Requires-Dist: akshare; extra == "data"
 Requires-Dist: tushare; extra == "data"
-Requires-Dist: pyarrow>=16.0; extra == "data"
 Provides-Extra: training
 Requires-Dist: torch>=2.3; extra == "training"
 Requires-Dist: transformers>=4.43; extra == "training"
 Requires-Dist: scikit-learn>=1.5; extra == "training"
-Requires-Dist: pyarrow>=16.0; extra == "training"
 Provides-Extra: research
 Requires-Dist: pyqlib>=0.9.6; extra == "research"
 Requires-Dist: vectorbt>=0.26; extra == "research"
 Provides-Extra: optimization
 Requires-Dist: cvxpy>=1.4; extra == "optimization"
+Provides-Extra: web
+Requires-Dist: fastapi>=0.115; extra == "web"
+Requires-Dist: uvicorn[standard]>=0.30; extra == "web"
+Requires-Dist: httpx>=0.27; extra == "web"
 Dynamic: license-file
 
 # QuantAgent V7 / A-share PIT Research System

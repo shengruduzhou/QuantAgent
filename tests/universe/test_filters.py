@@ -69,6 +69,30 @@ def test_derive_market_flags_detects_suspended_and_limit_up():
     assert c_other["is_limit_up"].sum() == 0
 
 
+def test_derive_market_flags_is_board_aware():
+    """derive_market_flags uses board-aware limits, not a flat 10%."""
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    rows = []
+    for sym, closes in (
+        ("600000.SH", [10.0, 11.0]),   # main +10% → seal
+        ("300001.SZ", [10.0, 11.0]),   # chinext +10% → NOT seal (limit 20%)
+        ("300002.SZ", [10.0, 12.0]),   # chinext +20% → seal
+        ("830001.BJ", [10.0, 13.0]),   # bse +30% → seal
+    ):
+        for d, c in zip(dates, closes):
+            rows.append({"trade_date": d, "symbol": sym, "close": c, "volume": 8e5, "amount": 8e6})
+    flags = derive_market_flags(pd.DataFrame(rows))
+
+    def lu(sym: str) -> bool:
+        r = flags[(flags["symbol"] == sym) & (flags["trade_date"] == dates[1])]
+        return bool(r.iloc[0]["is_limit_up"])
+
+    assert lu("600000.SH")        # main 10%
+    assert not lu("300001.SZ")    # chinext +10% is not a seal
+    assert lu("300002.SZ")        # chinext 20%
+    assert lu("830001.BJ")        # bse 30%
+
+
 def test_apply_filter_blocks_suspended_and_limit_up():
     mp = _make_market_panel()
     preds = pd.DataFrame({

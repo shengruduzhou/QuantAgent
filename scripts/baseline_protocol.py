@@ -96,9 +96,58 @@ def _target_weights(preds: pd.DataFrame, score_col: str, top_k: int, *, eligible
     return tw
 
 
+def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,
+                      start: str, end: str | None, top_k: int) -> str:
+    """Emit a UI-discoverable backtest artifact (metrics.json + nav.csv) so the
+    real-test CAGR/Calmar surfaces in the quant UI (`services/quant_api`).
+
+    The indexer classifies anything under a ``/backtest/`` path as kind=backtest;
+    the adapter needs metrics.json + a sibling nav.csv and reads `calmar` directly.
+    """
+    d = Path(base_dir) / "backtest"
+    d.mkdir(parents=True, exist_ok=True)
+    nav = res.nav.copy()
+    nav.index = pd.to_datetime(nav.index)
+    bnav = (1.0 + bench.reindex(nav.index).fillna(0.0)).cumprod()
+    navdf = pd.DataFrame({
+        "trade_date": nav.index.strftime("%Y-%m-%d"),
+        "nav": nav.to_numpy(),
+        "daily_return": nav.pct_change().to_numpy(),
+        "benchmark_nav": (bnav / bnav.iloc[0]).to_numpy(),
+        "excess_nav": (nav / nav.iloc[0]).to_numpy() - (bnav / bnav.iloc[0]).to_numpy(),
+    })
+    navdf.to_csv(d / "nav.csv", index=False)
+    calmar = (m.annualized_return / abs(m.max_drawdown)) if m.max_drawdown else None
+    metrics = {
+        "start_date": start,
+        "end_date": end or str(nav.index.max().date()),
+        "variant": variant,
+        "top_k": top_k,
+        "universe_size": top_k,
+        "total_return": round(float(m.total_return), 6),
+        "annualized_return": round(float(m.annualized_return), 6),
+        "max_drawdown": round(float(m.max_drawdown), 6),
+        "sharpe": round(float(m.sharpe), 4),
+        "calmar": round(float(calmar), 4) if calmar is not None else None,
+        "benchmark_annualized_return": round(float(bench_ann), 6),
+    }
+    (d / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    (d / "run_config.json").write_text(json.dumps({
+        "strategy_version": "v89_closed_loop", "feature_policy": "judgment",
+        "initial_cash": 1_000_000.0, "horizon": variant, "top_k": top_k,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(d)
+
+
 def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
-             slippage_bps: float, variants: list[str]) -> dict:
+             slippage_bps: float, variants: list[str], score_column: str = "alpha_score",
+             save_backtest_dir: str | None = None,
+             save_variant: str = "C_flags_eligible_delay1") -> dict:
     preds = pd.read_parquet(preds_path)
+    if score_column != "alpha_score":
+        if score_column not in preds.columns:
+            raise KeyError(f"--score-column '{score_column}' not in predictions {list(preds.columns)}")
+        preds = preds.rename(columns={score_column: "alpha_score"})
     preds["trade_date"] = pd.to_datetime(preds["trade_date"])
     preds = preds[preds["trade_date"] >= pd.Timestamp(start)]
     if end:
@@ -150,6 +199,9 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "regime": _regime_excess(res.nav, bench),
         }
         out["variants"][name] = rec
+        if save_backtest_dir and name == save_variant:
+            saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k)
+            out["ui_backtest_dir"] = saved
         print(f"{name:28} ann {m.annualized_return:+8.2%} | excess {m.annualized_return - bench_ann:+8.2%} | "
               f"sharpe {m.sharpe:5.2f} | maxDD {m.max_drawdown:6.2%}")
     print(f"{'eqw_all_A_bench':28} ann {bench_ann:+8.2%}")
@@ -164,10 +216,19 @@ def main() -> int:
     ap.add_argument("--end", default=None)
     ap.add_argument("--slippage-bps", type=float, default=8.0)
     ap.add_argument("--variants", default="A_flags_raw,B_flags_eligible,C_flags_eligible_delay1,D_noflags_raw")
+    ap.add_argument("--score-column", default="alpha_score",
+                    help="Prediction column to rank on (e.g. composite_score). Renamed to alpha_score internally.")
+    ap.add_argument("--save-backtest-dir", default=None,
+                    help="If set, write a UI-discoverable <dir>/backtest/{metrics.json,nav.csv} for --save-variant.")
+    ap.add_argument("--save-variant", default="C_flags_eligible_delay1",
+                    help="Which variant to export as the UI backtest (default = honest variant C).")
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     out = evaluate(args.predictions, top_k=args.top_k, start=args.start, end=args.end,
+                   score_column=args.score_column,
                    slippage_bps=args.slippage_bps,
+                   save_backtest_dir=args.save_backtest_dir,
+                   save_variant=args.save_variant,
                    variants=[v.strip() for v in args.variants.split(",") if v.strip()])
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

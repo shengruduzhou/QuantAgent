@@ -153,6 +153,48 @@ def test_rd_agent_synthesis_loop_accumulates_sota_factor_library(tmp_path):
     assert (tmp_path / "rd_agent_task_feedback.json").exists()
 
 
+def test_rd_agent_leaderboard_carries_economic_profile():
+    """Accepted factors must carry a beyond-IC economic profile, not just IC.
+
+    Fulfils the "严禁只看 IC" acceptance mandate: every accepted factor row must
+    expose top-quantile return, long-short spread, monotonicity, and turnover,
+    measured on the same tradable OOS sample the IC gate used.
+    """
+    panel = _make_panel_with_momentum_signal(n_symbols=8, n_days=200)
+    cfg = RDAgentFactorLoopConfig(
+        rounds=3,
+        factors_per_round=4,
+        top_k=5,
+        label_column="forward_return_5d",
+        validation_fraction=0.25,
+        min_validation_rank_ic=0.0,
+        fitness_sample_dates=0,
+        fitness_sample_symbols=0,
+        seed=2026,
+    )
+    result = synthesize_factors_rd_agent(panel, config=cfg)
+    lb = result.leaderboard
+    assert not lb.empty
+
+    profile_cols = [
+        "oos_top_quantile_return",
+        "oos_long_short_return",
+        "oos_monotonicity",
+        "oos_top_quantile_turnover",
+    ]
+    for col in profile_cols:
+        assert col in lb.columns, f"missing economic-profile column {col}"
+
+    # The profile actually ran (not all-NaN from a swallowed exception).
+    assert lb["oos_long_short_return"].notna().any()
+    assert lb["oos_monotonicity"].notna().any()
+    assert lb["oos_top_quantile_return"].notna().any()
+    # Turnover is a churn fraction in [0, 1].
+    tov = lb["oos_top_quantile_turnover"].dropna()
+    assert not tov.empty
+    assert ((tov >= -1e-9) & (tov <= 1.0 + 1e-9)).all()
+
+
 def test_synthesize_factors_rejects_pure_noise():
     """Random returns should yield few/no factors above the validation gate."""
     rng = np.random.default_rng(123)

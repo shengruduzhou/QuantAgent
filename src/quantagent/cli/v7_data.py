@@ -397,6 +397,11 @@ def build_training_dataset_v7(
         help="If set, load a pre-materialised wide factor parquet "
              "(from `qa materialize-alpha181-v7`) instead of computing factors "
              "in-process. Required for OOM-free large-universe builds."),
+    feature_version: str = typer.Option("v1", "--feature-version",
+        help="Version stamp for the feature-schema contract (written to feature_schema.json + manifest)."),
+    expected_feature_schema: Path | None = typer.Option(None, "--expected-feature-schema",
+        help="Pin the feature column set to a previously written feature_schema.json so rebuilds / "
+             "walk-forward folds share one stable contract (missing columns NaN-filled, drift recorded)."),
 ) -> None:
     """Build the V7 gold-tier training dataset via PIT as-of joins and forward labels."""
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
@@ -433,6 +438,8 @@ def build_training_dataset_v7(
         enable_flow=enable_flow,
         enable_index=enable_index,
         cached_factors_path=str(cached_factors_path) if cached_factors_path else None,
+        feature_version=feature_version,
+        expected_feature_schema_path=str(expected_feature_schema) if expected_feature_schema else None,
     )
     result = build_v7_training_dataset_artifact(config)
     typer.echo(json_dump(result.summary))
