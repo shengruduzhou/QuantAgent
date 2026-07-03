@@ -61,8 +61,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--val-start", default="2024-08-28")
     ap.add_argument("--val-end", default="2025-08-31")
-    ap.add_argument("--test-start", default="2025-09-01")
-    ap.add_argument("--test-end", default="2026-05-15")
+    # No defaults: the old 2025-09-01+ defaults silently consumed the (now
+    # quarantined) holdout. bp.evaluate() fails closed on quarantined windows.
+    ap.add_argument("--test-start", required=True)
+    ap.add_argument("--test-end", required=True)
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--max-units", type=int, default=12, help="greedy steps = max total weight units")
     ap.add_argument("--n-library", type=int, default=24, help="top library factors by |val IC| to admit")

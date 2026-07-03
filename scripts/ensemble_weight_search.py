@@ -47,8 +47,10 @@ def main() -> int:
     ap.add_argument("--predictions", required=True, help="ensemble_composite.parquet with per-sleeve scores")
     ap.add_argument("--val-start", default="2024-08-28")
     ap.add_argument("--val-end", default="2025-08-31")
-    ap.add_argument("--test-start", default="2025-09-01")
-    ap.add_argument("--test-end", default="2026-05-15")
+    # No defaults: the old 2025-09-01+ defaults silently consumed the (now
+    # quarantined) holdout. bp.evaluate() fails closed on quarantined windows.
+    ap.add_argument("--test-start", required=True)
+    ap.add_argument("--test-end", required=True)
     ap.add_argument("--top-k-grid", default="10,20,30")
     ap.add_argument("--output-dir", required=True)
     args = ap.parse_args()

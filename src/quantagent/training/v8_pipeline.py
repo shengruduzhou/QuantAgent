@@ -1,5 +1,10 @@
 """End-to-end v8 training pipeline orchestrator.
 
+.. note:: STATUS (2026-07-03): legacy GA-weight pipeline, NOT the production
+   path. Production training = cli/v8_deep.py (FT-Transformer sleeves) +
+   configs/production_blend.json. Kept for the v8 CLI commands that still
+   reference it; see DEAD_CODE_AUDIT.md before extending.
+
 Wires every stage of the v8 spec into a single Python entry point:
 
     DataSourceRouter (Qlib + AkShare + BaoStock + TuShare)

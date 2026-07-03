@@ -1,5 +1,13 @@
 """Deep multi-horizon alpha model with feature-group towers.
 
+.. warning:: STATUS (2026-07-03, ARCHITECTURE_AUDIT.md §2)
+   NOT the production model and NOT trained: weights are random-seeded
+   deterministic numpy towers. This is the agentic V7 pipeline's
+   graceful-degradation heuristic scorer only. The production alpha model is
+   the FT-Transformer (models/ft_transformer.py via cli/v8_deep.py); its
+   blend is configs/production_blend.json. Do not benchmark or cite this
+   class as "the deep model".
+
 Architecture
 ------------
 The model splits factors into four feature groups (short_term, medium_term,
