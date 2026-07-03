@@ -6,6 +6,13 @@
       "reason": "burned final holdout: >=35 direct strict evaluations + >=5 selection decisions used this window",
       "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md / HOLDOUT_ARTIFACT_CENSUS.csv",
       "declared": "2026-07-03"
+    },
+    {
+      "start": "2026-05-19",
+      "end": "2027-12-31",
+      "reason": "frozen_future_holdout: fresh window accumulating for the first formal read (>=120 trading days, ~2026-11); preregistered evals only — lift via config change, never via override",
+      "evidence": "FRESH_HOLDOUT_FREEZE_MANIFEST.md / EVALUATION_PROTOCOL_V2.md section 2",
+      "declared": "2026-07-03"
     }
   ],
   "log_path": "runtime/state/holdout_access_log.jsonl"
