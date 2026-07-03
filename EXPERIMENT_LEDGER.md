@@ -72,4 +72,6 @@
 - 发现②：SDK 现默认返回**今日向前复权**历史（600519 05-18 close 1292.31 ≠ panel 1323.00）；`adjust="none"` 与 panel as-of-day 基准精确相等；volume 单位 = 手（panel = 股，×100 换算，实测 49,661×100≈4,966,097）；amount/OHLC 完全一致
 - 修复：`update_market_panel_daily.py` 改 epoch-ms + `adjust="none"` + volume×100（含注释审计线索）
 - 冒烟纪律：连通性冒烟**不写 panel**（`--max-symbols` 部分追加会因 `> last` 过滤永久毒化后续全量追加——已识别并规避）
-- 全量摄取 3,653 symbols 2026-05-19→2026-07-02 后台运行中；完成后出 FRESH_HOLDOUT_FREEZE_MANIFEST.md + 冻结守卫
+- 冻结守卫先行：2026-05-19→2027-12-31 已入 quarantined_windows.json（frozen_future_holdout），数据未落地前评测已 fail-closed
+- **首轮摄取 QC（2026-07-03 夜）**：appended 73,284 行 / new_max 2026-07-02，但 ①**2026-05-19 整日缺失**（TickFlow 掉首日，两次实测复现；根因修复=start 提前 3 天缓冲）②**1,281/3,653 symbols 全窗失败**（限流；每日覆盖 3,637→2,361）③05-20 的涨跌停旗标错用 05-18 prev-close
+- 修复：`scripts/repair_fresh_window_20260704.py`（count=40 全量重取 + 3 次退避重试 + 仅插缺失行不覆盖 + **全窗旗标重算** + tail 备份）后台运行中；完成后 QC → FRESH_HOLDOUT_FREEZE_MANIFEST.md

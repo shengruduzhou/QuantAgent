@@ -79,7 +79,11 @@ def main() -> int:
     # panel froze at 2026-05-18; see FRESH_HOLDOUT_FREEZE_MANIFEST.md).
     # adjust="none" verified to match the panel's as-of-day price basis exactly
     # (600519 2026-05-18: close 1323.00 == panel; forward-adjusted would be 1292.31).
-    start_ms = int((last + pd.Timedelta(days=1)).timestamp() * 1000)
+    # Start 3 days EARLY: TickFlow empirically drops the first day of a
+    # start_time-bounded request (verified 2026-07-03/04 — it cost the panel the
+    # whole 2026-05-19 session). The local `trade_date > last` filter below
+    # dedupes the overlap, so the buffer is free.
+    start_ms = int((last - pd.Timedelta(days=3)).timestamp() * 1000)
     end_ms = int((end + pd.Timedelta(days=1)).timestamp() * 1000) - 1
     print(f"fetching {len(symbols)} symbols {start_fetch}..{end_fetch}", flush=True)
 
