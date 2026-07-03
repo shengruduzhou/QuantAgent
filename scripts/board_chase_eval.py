@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): board-chasing rejected (adverse selection -2%/limit-board).
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """打板 honest evaluation — what does board-chasing earn under break-only fills?
 
 For every cached symbol-day whose minute bars touch the limit-up price:

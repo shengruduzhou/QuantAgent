@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): input builder for the rejected intraday family.
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Stage 2.5 (core): full per-minute causal panel for the HELD name-days only.
 
 The 做T overlay only acts on held positions, so we only need per-minute causal

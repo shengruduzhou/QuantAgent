@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): 做T on 1-min OHLCV: no realizable edge (stage3b/4 REJECT).
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Produce a NO_TRADE-default intraday Do-T plan for the held book.
 
 Integration entry point: given the held book (forward targets), a trading day's

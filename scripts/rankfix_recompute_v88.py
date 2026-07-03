@@ -1,3 +1,6 @@
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): v8.8 rank-corruption forensics: mission complete, kept as evidence chain.
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Recompute the 22 batch-rank-tainted alpha101 columns full-universe and patch v88.
 
 Root cause (proven by /tmp/verify_batch_rank.py): the 2026-05-21 materialize run

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): input builder for the rejected intraday family.
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Build a CAUSAL 2026 intraday feature panel from the 675-symbol minute bars.
 
 Output 1 (EOD snapshot): per (symbol, trade_date) the last causal-feature row of

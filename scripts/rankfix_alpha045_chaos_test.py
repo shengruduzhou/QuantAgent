@@ -1,3 +1,6 @@
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): v8.8 rank-corruption forensics: mission complete, kept as evidence chain.
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Is alpha045's <0.99 a residual-corruption signal or intrinsic numeric chaos?
 Two full-universe recomputes with current code, SAME date, different frame starts.
 If they disagree with each other at the same ~0.97 level, 0.97 is the factor's
