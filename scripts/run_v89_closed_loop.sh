@@ -143,14 +143,23 @@ if want_step retrain; then
     --early-stopping-patience 8 --learning-rate 0.0005
     --feature-policy judgment --require-gpu
   )
-  for HZ in short_5d mid_5d_30d long_30d_120d; do
+  # Production blend uses short+mid only (configs/production_blend.json);
+  # long_30d_120d is diagnostic-only and NOT trained by default. To train it:
+  #   QUANTAGENT_TRAIN_SLEEVES="short_5d mid_5d_30d long_30d_120d" scripts/run_v89_closed_loop.sh
+  SLEEVES="${QUANTAGENT_TRAIN_SLEEVES:-short_5d mid_5d_30d}"
+  for HZ in $SLEEVES; do
     EXTRA=(); [ "$HZ" = "long_30d_120d" ] && EXTRA=(--train-micro-batch 1024)
     banner "  sleeve $HZ"
     run $PY -m quantagent.cli train-v8-deep --horizon-class "$HZ" \
       --output-dir "$RETRAIN/$HZ" "${COMMON[@]}" "${EXTRA[@]}"
   done
-  banner "  blend sleeves -> $BLEND_PRED"
-  run $PY -c "import sys, pathlib; sys.path.insert(0,'scripts'); from run_v8_deep_sweep import blend; blend(pathlib.Path('$RETRAIN'))"
+  banner "  blend sleeves (config-driven production blend) -> $BLEND_PRED"
+  # Single source of truth: configs/production_blend.json (weights, rank mode).
+  # Replaces the old run_v8_deep_sweep.blend() 3-sleeve average, which did NOT
+  # match production (see PRODUCTION_REPRODUCIBILITY_AUDIT.md Q1).
+  run $PY scripts/materialize_production_composite.py \
+    --config configs/production_blend.json \
+    --model-run "$RETRAIN" --from-sleeves --out "$BLEND_PRED"
 fi
 
 # 5) RL eval (env-flat guard + strict re-sim vs passive book) ---------------
