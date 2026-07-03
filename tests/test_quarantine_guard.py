@@ -89,6 +89,69 @@ class TestMessagesAndConfig:
         assert any(w.start == pd.Timestamp("2025-09-01") for w in windows)
 
 
+class TestStrictV8TrustStamp:
+    def test_stamp_on_quarantined_dates(self):
+        from quantagent.backtest.strict_v8 import quarantine_trust_stamp
+        stamp = quarantine_trust_stamp(pd.to_datetime(["2025-10-01", "2025-10-02"]))
+        assert stamp is not None
+        assert stamp["trust_class"] == "contaminated_holdout_forensics"
+        assert "2025-09-01" in stamp["quarantine_window"]
+
+    def test_no_stamp_on_clean_dates(self):
+        from quantagent.backtest.strict_v8 import quarantine_trust_stamp
+        assert quarantine_trust_stamp(pd.to_datetime(["2025-06-02", "2025-08-29"])) is None
+        assert quarantine_trust_stamp(None) is None
+        assert quarantine_trust_stamp(pd.DatetimeIndex([])) is None
+
+    def test_write_merges_stamp_into_metrics_json(self, tmp_path):
+        import json
+        from quantagent.backtest.strict_v8 import (
+            StrictBacktestArtifactSet,
+            StrictBacktestMetrics,
+        )
+        metrics = StrictBacktestMetrics(
+            total_return=0.1, annualized_return=0.1, max_drawdown=0.05, sharpe=1.0,
+            calmar=2.0, volatility=0.1, turnover=0.1, win_rate=0.5,
+            avg_profit_per_trade=1.0, median_profit_per_trade=1.0, profit_factor=1.1,
+            gross_profit=10.0, gross_loss=9.0, total_cost=1.0, n_trades=2, n_fills=4,
+            start_date="2025-09-01", end_date="2025-09-30",
+        )
+        empty = pd.DataFrame()
+        art = StrictBacktestArtifactSet(
+            metrics=metrics, nav=pd.Series([1.0, 1.01]), daily_pnl=empty,
+            selected_stocks=empty, trades=empty, failed_orders=empty,
+            risk_events=[], profit_by_stock=empty, profit_by_sector=empty,
+            trust_stamp={"trust_class": "contaminated_holdout_forensics",
+                         "quarantine_window": "2025-09-01..2026-05-18"},
+        )
+        art.write(tmp_path)
+        payload = json.loads((tmp_path / "metrics.json").read_text())
+        assert payload["trust_class"] == "contaminated_holdout_forensics"
+
+    def test_write_without_stamp_unchanged(self, tmp_path):
+        import json
+        from quantagent.backtest.strict_v8 import (
+            StrictBacktestArtifactSet,
+            StrictBacktestMetrics,
+        )
+        metrics = StrictBacktestMetrics(
+            total_return=0.1, annualized_return=0.1, max_drawdown=0.05, sharpe=1.0,
+            calmar=2.0, volatility=0.1, turnover=0.1, win_rate=0.5,
+            avg_profit_per_trade=1.0, median_profit_per_trade=1.0, profit_factor=1.1,
+            gross_profit=10.0, gross_loss=9.0, total_cost=1.0, n_trades=2, n_fills=4,
+            start_date="2025-06-01", end_date="2025-06-30",
+        )
+        empty = pd.DataFrame()
+        art = StrictBacktestArtifactSet(
+            metrics=metrics, nav=pd.Series([1.0]), daily_pnl=empty,
+            selected_stocks=empty, trades=empty, failed_orders=empty,
+            risk_events=[], profit_by_stock=empty, profit_by_sector=empty,
+        )
+        art.write(tmp_path)
+        payload = json.loads((tmp_path / "metrics.json").read_text())
+        assert "trust_class" not in payload
+
+
 class TestEvaluatorIntegration:
     def test_evaluate_fails_closed_before_reading_data(self):
         import sys

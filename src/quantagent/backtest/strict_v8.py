@@ -34,6 +34,29 @@ from quantagent.backtest.ashare_execution_simulator import (
     AShareExecutionSimulationResult,
     simulate_ashare_target_weights,
 )
+from quantagent.backtest.quarantine import (
+    FORENSICS_TRUST_CLASS,
+    check_window,
+)
+
+
+def quarantine_trust_stamp(dates) -> dict[str, object] | None:
+    """Return a forensics trust stamp when any of ``dates`` falls in a
+    quarantined window, else None. Metadata only — never blocks execution
+    (27 research scripts call run_strict_backtest_v8 directly; the trusted
+    fail-closed path is baseline_protocol.evaluate)."""
+    if dates is None or len(dates) == 0:
+        return None
+    start, end = min(dates), max(dates)
+    hit = check_window(start, end)
+    if hit is None:
+        return None
+    return {
+        "trust_class": FORENSICS_TRUST_CLASS,
+        "quarantine_window": f"{hit.start.date()}..{hit.end.date()}",
+        "quarantine_reason": hit.reason,
+        "quarantine_evidence": hit.evidence,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -356,14 +379,20 @@ class StrictBacktestArtifactSet:
     realized_trades: pd.DataFrame = field(default_factory=pd.DataFrame)
     factor_weights: dict[str, float] = field(default_factory=dict)
     config: dict[str, object] = field(default_factory=dict)
+    # Set when the simulated window overlaps a quarantined holdout: merged into
+    # metrics.json so direct callers cannot emit trusted-looking numbers there.
+    trust_stamp: dict[str, object] | None = None
 
     def write(self, output_dir: str | Path) -> dict[str, Path]:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         paths: dict[str, Path] = {}
         paths["metrics"] = out / "metrics.json"
+        metrics_payload = self.metrics.to_dict()
+        if self.trust_stamp:
+            metrics_payload.update(self.trust_stamp)
         paths["metrics"].write_text(
-            json.dumps(self.metrics.to_dict(), indent=2, default=str),
+            json.dumps(metrics_payload, indent=2, default=str),
             encoding="utf-8",
         )
         paths["nav"] = out / "nav.csv"
@@ -409,6 +438,19 @@ def run_strict_backtest_v8(
 ) -> StrictBacktestArtifactSet:
     """Run the existing strict simulator + emit the full v8 report bundle."""
     cfg = config or AShareExecutionSimulationConfig()
+    # Non-blocking quarantine check (P-G): warn + stamp, never alter execution.
+    trust_stamp = quarantine_trust_stamp(
+        pd.to_datetime(target_weights.index) if target_weights is not None and len(target_weights) else None
+    )
+    if trust_stamp:
+        import sys as _sys
+        print(
+            f"[strict_v8] QUARANTINE WARNING: simulated window overlaps quarantined "
+            f"holdout {trust_stamp['quarantine_window']} — results are "
+            f"{trust_stamp['trust_class']}, NOT trusted evaluation evidence "
+            f"(see {trust_stamp['quarantine_evidence']}).",
+            file=_sys.stderr, flush=True,
+        )
     sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
         target_weights, market_panel, cfg,
     )
@@ -457,6 +499,7 @@ def run_strict_backtest_v8(
         realized_trades=realized_trades,
         factor_weights=dict(factor_weights or {}),
         config=dict(sim.config or {}),
+        trust_stamp=trust_stamp,
     )
 
 
