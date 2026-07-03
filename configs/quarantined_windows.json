@@ -1,0 +1,12 @@
+{
+  "windows": [
+    {
+      "start": "2025-09-01",
+      "end": "2026-05-18",
+      "reason": "burned final holdout: >=35 direct strict evaluations + >=5 selection decisions used this window",
+      "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md / HOLDOUT_ARTIFACT_CENSUS.csv",
+      "declared": "2026-07-03"
+    }
+  ],
+  "log_path": "runtime/state/holdout_access_log.jsonl"
+}
