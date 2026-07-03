@@ -74,14 +74,21 @@ def main() -> int:
     tf = _tf_client()
     start_fetch = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     end_fetch = end.strftime("%Y-%m-%d")
+    # SDK 2026-06 change: klines.get takes epoch-ms start_time/end_time (the old
+    # start_date/end_date kwargs raise TypeError — this script was broken and the
+    # panel froze at 2026-05-18; see FRESH_HOLDOUT_FREEZE_MANIFEST.md).
+    # adjust="none" verified to match the panel's as-of-day price basis exactly
+    # (600519 2026-05-18: close 1323.00 == panel; forward-adjusted would be 1292.31).
+    start_ms = int((last + pd.Timedelta(days=1)).timestamp() * 1000)
+    end_ms = int((end + pd.Timedelta(days=1)).timestamp() * 1000) - 1
     print(f"fetching {len(symbols)} symbols {start_fetch}..{end_fetch}", flush=True)
 
     rows: list[pd.DataFrame] = []
     failed = 0
     for i, sym in enumerate(symbols):
         try:
-            k = tf.klines.get(sym, period="1d", start_date=start_fetch,
-                              end_date=end_fetch, as_dataframe=True)
+            k = tf.klines.get(sym, period="1d", start_time=start_ms,
+                              end_time=end_ms, adjust="none", as_dataframe=True)
         except Exception:
             failed += 1
             continue
@@ -89,6 +96,10 @@ def main() -> int:
             continue
         k = k.copy()
         k["symbol"] = sym
+        # TickFlow daily volume is in lots (手); the panel stores shares (股).
+        # Verified: 600519 2026-05-18 tickflow 49,661 lots vs panel 4,966,097 shares.
+        if "volume" in k.columns:
+            k["volume"] = pd.to_numeric(k["volume"], errors="coerce") * 100.0
         rows.append(k)
         if (i + 1) % 500 == 0:
             print(f"  {i + 1}/{len(symbols)} fetched", flush=True)

@@ -53,6 +53,14 @@
 
 - 用 `update_market_panel_daily.py` 把 silver panel 从 2026-05-18 补到当前（约 +30 交易日），随即按 EVALUATION_PROTOCOL_V2 §2 冻结（零评测、零选择，仅积累）。附带：panel 备份 manifest + 更新后 FRESH 窗登记。**不批准则 FRESH 窗永远无法成熟。**
 
+## H-004 长 sleeve 诊断（状态：REGISTERED，EXP-004，诊断类 N+0）
+
+- **来源**：长 sleeve weight=0 来自 likely_overfit 的搜索，从未独立验证（IDEA #5，用户批准 2026-07-03）。
+- **问题**：长 sleeve 是否携带 regime 条件性信息（尤其回撤期），被 weight=0 丢弃？
+- **设计（诊断，不产生选择 ⇒ 试验数 +0）**：SEARCH 窗；每 horizon 的 IC 评估仅用 `label_end_{h}d < 2025-09-01` 的日期（**label 前视不跨隔离窗**）；指标 = 分 regime（bull/sideways/bear）与分季度的 per-date rank-IC、回撤期贡献、与 short/mid 的截面秩相关、shrinkage 稳定性（复用 EXP-000 已有 27 候选日收益矩阵中 w1_1_0.5 vs w1_1_0，**零新回测**）。
+- **纪律**：结果不直接调生产权重；只决定是否立后续假设（如 H-005 regime 条件性 blend）。
+- **资源**：CPU ≤10min，RSS <6G。
+
 ## 队列中未立项（见 IDEA_QUEUE.md）
 
 H-004 sector 集中度约束收紧；H-005 长 sleeve 诊断价值（何时该有非零权重）；H-006 DSL 因子新批次（capped）；H-007 offline RL turnover-controller；H-008 walk-forward 重训协议（模型层，需 GPU 授权）。

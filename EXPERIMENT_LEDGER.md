@@ -54,4 +54,22 @@
 - 累计试验台账：blend 族 37+4+3=**44**
 - 资源：59.5s / RSS 2.1 GiB；产物 runtime/reports/v89_closed_loop/exp002_turnover_ema/（<1MB）
 
-## EXP-003 · **BLOCKED-ON-USER**（H-003 新鲜数据入库+冻结；touching-fresh-data 红线）
+## EXP-004 · 2026-07-03 · 长 sleeve 诊断（H-004）— **DONE / 诊断结论已档**
+
+- git:（P-E 后 HEAD）；窗口 SEARCH，PIT 纪律 = 每 horizon 限 `label_end < 2025-09-01`（h120 评估止于 2025-03-06）
+- 命令：`AI_quant_venv/bin/python3 scripts/analysis/exp004_long_sleeve_diagnostic.py`
+- 结果：长 sleeve h120 ICIR 2.24（全族最高）且唯一 bear-regime 非负 IC（h60 +0.069）；但与 mid 秩相关 0.783（高冗余）；k10 静态掺长伤最差季度（−2.6%→−16%/−26%），k30 掺 0.5 微升（+12.6%→+15.5%）
+- 判定：weight=0 在 k10 生产书**当前可辩护**；熊市保险价值 + 宽书交互 → 派生 H-005 两个候选设计（未立项）。试验数 +0（诊断）
+- 资源：2.6s / RSS 0.91 GiB；详见 LONG_SLEEVE_DIAGNOSTIC.md
+
+## EXP-008 · **SPEC READY — 等待 GPU 授权**（H-008 走式验证 C3+EMA challenger）
+
+- 协议：WALK_FORWARD_PROTOCOL_H008.md（4 折 expanding、embargo 126 交易日、9 次重训 ≈7–10 GPU·h、候选 N=6、选择指标先验声明、全 gate）
+
+## EXP-003 · 2026-07-03 · 新鲜数据入库+冻结（H-003）— **RUNNING（用户已批准）**
+
+- 发现①：TickFlow SDK 2026-06 破坏性变更（`start_date/end_date`→epoch-ms `start_time/end_time`）导致日更脚本静默失效 = **panel 冻在 2026-05-18 的根因**
+- 发现②：SDK 现默认返回**今日向前复权**历史（600519 05-18 close 1292.31 ≠ panel 1323.00）；`adjust="none"` 与 panel as-of-day 基准精确相等；volume 单位 = 手（panel = 股，×100 换算，实测 49,661×100≈4,966,097）；amount/OHLC 完全一致
+- 修复：`update_market_panel_daily.py` 改 epoch-ms + `adjust="none"` + volume×100（含注释审计线索）
+- 冒烟纪律：连通性冒烟**不写 panel**（`--max-symbols` 部分追加会因 `> last` 过滤永久毒化后续全量追加——已识别并规避）
+- 全量摄取 3,653 symbols 2026-05-19→2026-07-02 后台运行中；完成后出 FRESH_HOLDOUT_FREEZE_MANIFEST.md + 冻结守卫
