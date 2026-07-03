@@ -15,7 +15,9 @@
 
 ---
 
-## H-001 族稳健 blend 优于单点赢家（状态：REGISTERED，待跑 EXP-001）
+## H-001 族稳健 blend 优于单点赢家（状态：**TESTED — NOT ACCEPTED**，EXP-001，2026-07-03）
+
+> 结果：无聚合配置全门通过；C3 rank-median 在 maxDD（12.6%）与最差季度（−8.4%）上最佳但换手超标（0.336>0.25）→ 转入 H-002 修复。C2 在本窗占优的结构性偏向（本窗=其选择窗）已记录。详见 EXPERIMENT_LEDGER EXP-001。
 
 - **来源**：PBO_DSR_ANALYSIS.md（PBO 0.886）+ RESEARCH_LOG #R3（组合优于选择）。
 - **假设**：在 sleeve 预测族上做**先验聚合**（不选择），其 SEARCH 窗子窗稳定性与净化后风险指标 ≥ 单点赢家 (1,1,0)k10，且无选择噪声暴露。
@@ -33,7 +35,9 @@
 - **接受**：某聚合配置子窗最差表现 ≥ C2 的子窗最差，且换手 ≤0.25/日、子窗方向一致 ⇒ 立为新参考配置（trust=searched_validation, N=4 记账）。
 - **拒绝**：所有聚合在 ≥3/4 子窗劣于 C2 → 保留 C2 为候选但维持 likely_overfit 标签等 FRESH 窗裁决。
 
-## H-002 换手感知平滑（状态：REGISTERED，待跑 EXP-002，依赖 H-001 出参考配置）
+## H-002 换手感知平滑（状态：**TESTED — ACCEPTED（带窗口注记）**，EXP-002，2026-07-03）
+
+> 结果：α∈{0.3,0.5,0.7} 三档**全部**通过预注册门（换手 0.022–0.077 ≤0.10；CAGR/最差季度不劣化，实测反而改善：ema0.5/0.7 四季全正）。机制接受；α 加冕与绝对量级确认**推迟至 walk-forward / FRESH 窗**（SEARCH 窗复用注记）。候选组合 **C3+EMA** 立为"待 WF 确认的 challenger 配置"；生产配置不变更。累计 N：blend 族 44。
 
 - **来源**：RESEARCH_LOG #R4（Gârleanu–Pedersen 部分调仓）。
 - **假设**：对参考 blend 的 composite_score 做 EMA 平滑可把换手从 ~0.16–0.21/日 压到 ≤0.10/日，SEARCH 窗净 CAGR 损失 ≤3pp（成本节约部分补偿信号迟滞）。
