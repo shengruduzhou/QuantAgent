@@ -101,7 +101,13 @@ class RuntimeCleanupService:
 
         training_root = self.settings.runtime_root / "data" / "v7" / "gold" / "training_dataset"
         keep_datasets = {
+            # PRODUCTION dataset (configs/production_blend.json lineage) — never offer for deletion
+            "training_dataset_alpha181_exec_v89_plus7clean.parquet",
+            # closed-loop base + v8.9 baseline reproducibility
+            "training_dataset_alpha181_exec_v88_rankfix.parquet",
+            "training_dataset_alpha181_exec_v89.parquet",
             "training_dataset_alpha181_exec_v89_plus8.parquet",
+            # governed no-synth baseline (v8_gated / v8_verify default input)
             "training_dataset_alpha181_full_nosynth.parquet",
         }
         superseded = [

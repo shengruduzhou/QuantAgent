@@ -396,7 +396,10 @@ def train_v8_deep(
         "short_5d", help="short_5d | mid_5d_30d | long_30d_120d",
     ),
     dataset_path: Path = typer.Option(
-        Path("runtime/data/v7/gold/training_dataset/training_dataset_alpha181_full_nosynth.parquet"),
+        # Default = the production dataset (configs/production_blend.json lineage).
+        # The old default (training_dataset_alpha181_full_nosynth.parquet) was a
+        # no-edge probe dataset removed in P-E batch 2 (DELETION_CANDIDATE_MANIFEST.csv).
+        Path("runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus7clean.parquet"),
         exists=True, dir_okay=False,
         help="gold training dataset with OHLCV + alphas + forward_return labels",
     ),
