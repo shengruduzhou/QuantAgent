@@ -17,6 +17,7 @@ Candidate evaluation happens afterwards in exp008_walkforward_eval.py.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -42,19 +43,43 @@ RAM_LIMIT_GIB = 48
 DISK_TREE_LIMIT_GIB = 6
 FREE_DISK_MIN_GIB = 20
 
+# Production parity requirements discovered after the 2026-07-04 abort
+# (F1 short/mid trained 17/20 features vs production 22 — schema violation):
+# the plus7 production sleeves were trained with this env var exported by
+# run_v89_plus7_retrain.sh / finish_long_plus7.sh. Mandatory for every fold.
+HORIZON_ASSIGNMENT = "runtime/reports/v89_closed_loop/horizon_factor_assignment_plus7.json"
+PROD_RUN = REPO / "runtime/reports/v89_closed_loop/retrain_plus7_20260620_0300"
+# Long sleeve memory config: 8192/1024 and 4096/512 both FAILED in production
+# history (_RETRAIN_COMPLETE_fail1 / _LONG_REDONE_fail); the only config that
+# ever completed is batch 2048 + micro-batch 128 (finish_long_plus7.sh).
+LONG_BATCH = {"batch_size": "2048", "micro_batch": 128}
+
 COMMON = [
     "--dataset-path", DATASET,
     "--silver-panel-path", "runtime/data/v7/silver/market_panel/market_panel.parquet",
     "--symbols-file", "runtime/data/v7/universe_v88_comma.txt",
     "--train-start", "2018-01-02",
     "--embargo-days", "126",
-    "--top-k", "30", "--max-epochs", "80", "--batch-size", "8192",
+    "--top-k", "30", "--max-epochs", "80",
     "--d-token", "256", "--n-blocks", "6", "--n-heads", "8", "--dates-per-step", "1",
     "--cross-sectional-norm", "rank", "--label-norm",
     "--attention-dropout", "0.25", "--ffn-dropout", "0.25", "--weight-decay", "0.001",
     "--early-stopping-patience", "8", "--learning-rate", "0.0005",
     "--feature-policy", "judgment", "--require-gpu",
 ]
+
+
+def schema_parity_ok(fold: str, sleeve: str) -> tuple[bool, str]:
+    """Protocol invariant: fold sleeve feature columns == production sleeve's."""
+    try:
+        prod = json.loads((PROD_RUN / sleeve / "ft" / "ft_transformer_feature_schema.json").read_text())
+        mine = json.loads((OUT_ROOT / fold / sleeve / "ft" / "ft_transformer_feature_schema.json").read_text())
+    except OSError as exc:
+        return False, f"schema file missing: {exc}"
+    if prod["feature_columns"] != mine["feature_columns"]:
+        return False, (f"SCHEMA_MISMATCH prod={len(prod['feature_columns'])} "
+                       f"fold={len(mine['feature_columns'])}")
+    return True, "schema OK"
 
 
 def git_hash() -> str:
@@ -86,16 +111,19 @@ def log(rec: dict) -> None:
 def run_one(fold: str, sleeve: str, micro_batch: int | None) -> tuple[bool, str, float, float]:
     """Return (ok, reason, runtime_s, rss_peak_gib)."""
     out_dir = OUT_ROOT / fold / sleeve
+    batch_size = LONG_BATCH["batch_size"] if sleeve == "long_30d_120d" else "8192"
     cmd = [PY, "-m", "quantagent.cli", "train-v8-deep", "--horizon-class", sleeve,
            "--train-end", FOLDS[fold]["train_end"], "--test-end", FOLDS[fold]["test_end"],
+           "--batch-size", batch_size,
            *COMMON, "--output-dir", str(out_dir)]
     if micro_batch:
         cmd += ["--train-micro-batch", str(micro_batch)]
     logfile = OUT_ROOT / fold / f"{sleeve}.log"
     logfile.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, QUANTAGENT_HORIZON_ASSIGNMENT=HORIZON_ASSIGNMENT)
     t0 = time.time()
     with logfile.open("w") as lf:
-        proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=REPO)
+        proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=REPO, env=env)
         peak = 0.0
         while proc.poll() is None:
             time.sleep(30)
@@ -118,6 +146,9 @@ def run_one(fold: str, sleeve: str, micro_batch: int | None) -> tuple[bool, str,
         return False, "EMPTY_OR_NAN_PREDICTIONS", rt, peak
     if df["alpha_score"].isna().mean() > 0.5:
         return False, "MAJORITY_NAN_PREDICTIONS", rt, peak
+    ok_schema, schema_msg = schema_parity_ok(fold, sleeve)
+    if not ok_schema:
+        return False, schema_msg, rt, peak
     return True, "OK", rt, peak
 
 
@@ -137,7 +168,7 @@ def main() -> int:
                 ABORT.write_text("disk guard")
                 print(f"DISK_GUARD free={free:.0f}G tree={tree_gib(OUT_ROOT):.1f}G", flush=True)
                 return 3
-            mb = 1024 if sleeve == "long_30d_120d" else None
+            mb = LONG_BATCH["micro_batch"] if sleeve == "long_30d_120d" else None
             print(f"[start] {fold}/{sleeve} (micro_batch={mb})", flush=True)
             ok, reason, rt, peak = run_one(fold, sleeve, mb)
             if not ok and reason == "CUDA_OOM":
