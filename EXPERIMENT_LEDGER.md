@@ -62,9 +62,12 @@
 - 判定：weight=0 在 k10 生产书**当前可辩护**；熊市保险价值 + 宽书交互 → 派生 H-005 两个候选设计（未立项）。试验数 +0（诊断）
 - 资源：2.6s / RSS 0.91 GiB；详见 LONG_SLEEVE_DIAGNOSTIC.md
 
-## EXP-008 · **SPEC READY — 等待 GPU 授权**（H-008 走式验证 C3+EMA challenger）
+## EXP-008 · 2026-07-04 · H-008 走式验证 — **RUNNING（GPU 已授权）**
 
-- 协议：WALK_FORWARD_PROTOCOL_H008.md（4 折 expanding、embargo 126 交易日、9 次重训 ≈7–10 GPU·h、候选 N=6、选择指标先验声明、全 gate）
+- 协议：WALK_FORWARD_PROTOCOL_H008.md（4 折 expanding、embargo 126 交易日、候选 N=6 预注册、选择指标先验=中位折 CAGR、全 gate；累计 N=50）
+- git: `4ac8e8b`（runner+evaluator 入库）；启动 2026-07-04；runner=`scripts/analysis/run_wf_h008.py`（RAM 48G/OOM 重试一次/磁盘 6G 守卫，逐 sleeve ledger → `wf_h008/runner_ledger.jsonl`）
+- F1/short_5d 起跑实测：GPU util 99%；评测驱动 `exp008_walkforward_eval.py` 待重训完成后执行（F4 复用生产 retrain，零 GPU）
+- 纪律：新鲜窗零接触（guard 强制）；候选定义冻结；无中途调参
 
 ## EXP-003 · 2026-07-03 · 新鲜数据入库+冻结（H-003）— **RUNNING（用户已批准）**
 

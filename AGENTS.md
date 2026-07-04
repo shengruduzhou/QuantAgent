@@ -11,7 +11,7 @@ V7 覆盖：
 - Qlib CN market panel、technical features、label generation、training slices、backtest base。
 - Dynamic theme discovery、industry chain graph、stock pool hard gate。
 - Fundamental due diligence、Financial Fraud Risk、News Credibility、Intrinsic Valuation。
-- Multi-horizon Alpha: 1 / 5 / 20 / 60 / 120 / 126 days，默认 Ridge，ElasticNet optional，Deep Alpha disabled unless real training code is wired。
+- Multi-horizon Alpha: 1 / 5 / 20 / 60 / 120 / 126 days。**生产模型 = FT-Transformer sleeves**（`cli/v8_deep.py train-v8-deep` + `configs/production_blend.json`，单命令物化 `scripts/materialize_production_composite.py`）。Ridge/ElasticNet 为 v7 classical 基线；`models/v7_deep_alpha.py` 等启发式 scorer 非生产（见文件头 STATUS WARNING）。
 - Purged walk-forward CV、model artifacts、metrics、acceptance gates。
 - A-share execution simulation：T+1、limit-up/down、suspension、ST、lot size、volume cap、slippage、cost、partial fills、failed order audit。
 - QMT execution-preparation、Risk Gate、Kill Switch、Reconciliation、Audit Replay。
@@ -26,6 +26,7 @@ V7 覆盖：
 - QMT submit 前必须通过 risk gate、kill switch、execution constraint simulation、reconciliation、audit replay。
 - Production mode must not use synthetic fallback；mock data 只允许在 tests 和 smoke examples。
 - 不允许新增任何 guaranteed profitability 或收益保证表述。
+- **评测窗口纪律（2026-07 起）**：`configs/quarantined_windows.json` 定义禁评窗（被烧 holdout 2025-09-01→2026-05-18；冻结新鲜窗 2026-05-19+，正式首读 ≥120 交易日）。可信评测唯一入口 = `scripts/baseline_protocol.py` variant C（守卫 fail-closed）；任何数字引用须带 trust class（见 `BASELINE_TRUST_CLASSIFICATION.md`）。改进验收规则见 `ACCEPTANCE_RULES.md`。
 
 ## Code Style / 代码规范
 
