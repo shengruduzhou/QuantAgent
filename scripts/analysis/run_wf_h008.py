@@ -118,6 +118,11 @@ def run_one(fold: str, sleeve: str, micro_batch: int | None) -> tuple[bool, str,
            *COMMON, "--output-dir", str(out_dir)]
     if micro_batch:
         cmd += ["--train-micro-batch", str(micro_batch)]
+    if sleeve == "long_30d_120d":
+        # 90-feature sleeve sits at the 24G ceiling; checkpointing is the only
+        # lever that reduces activation memory at dates_per_step=1 (see the
+        # 2026-07-04 abort diagnoses in runner_ledger.jsonl).
+        cmd += ["--activation-checkpointing"]
     logfile = OUT_ROOT / fold / f"{sleeve}.log"
     logfile.parent.mkdir(parents=True, exist_ok=True)
     # expandable_segments: the long sleeve (90 features → 91-token attention)
