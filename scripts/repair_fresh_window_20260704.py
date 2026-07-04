@@ -70,11 +70,20 @@ def fetch_with_retry(tf, sym: str, attempts: int = 3):
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--symbols-file", default=None,
+                    help="targeted pass: newline-separated symbols to (re)fetch instead of all seed-date symbols")
+    args = ap.parse_args()
+
     panel = pd.read_parquet(PANEL)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
 
     seed = panel[panel["trade_date"] == SEED_DATE]
-    symbols = sorted(seed["symbol"].astype(str).unique())
+    if args.symbols_file:
+        symbols = sorted(set(Path(args.symbols_file).read_text().split()))
+    else:
+        symbols = sorted(seed["symbol"].astype(str).unique())
     have = set(map(tuple, panel[(panel["trade_date"] >= WIN_START) & (panel["trade_date"] <= WIN_END)]
                    [["symbol", "trade_date"]].astype({"symbol": str}).itertuples(index=False, name=None)))
     print(f"symbols on seed date: {len(symbols)}; existing fresh rows: {len(have):,}", flush=True)

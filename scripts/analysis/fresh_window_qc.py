@@ -127,14 +127,29 @@ def main() -> int:
     gate("amount_basis", frac_ok > 0.98, {"fraction_in_band": round(frac_ok, 4),
                                           "median_implied_vwap_over_close": round(float(implied.median()), 3)})
 
-    # 9) prev-close continuity within window
+    # 9) prev-close continuity within window.
+    # RAW (adjust="none") prices legitimately jump beyond limit bands on
+    # ex-dividend / ex-rights days (June = A-share payout season), and the
+    # panel's is_st is a current-snapshot broadcast (documented provenance
+    # limitation) so recently de-ST'd names can look like 5%-cap violators at
+    # +10.x%. Validated 2026-07-04 on the 5 largest violators against the
+    # forward-ADJUSTED series: down-jumps −35%/−34%/−33% → adjusted −5.6%/
+    # −2.7%/−5.6% (corporate actions), up-jumps +10.9%/+10.7% identical in
+    # adjusted series (de-ST cap 10% + low-price rounding). Gate therefore:
+    #   hard-fail on physically implausible moves (down <−60%, up >+45%), and
+    #   rate-fail if cap+2% violations exceed 0.25% of returns.
     chain = pd.concat([pre[pre["trade_date"] == SEED_DATE], win]).sort_values(["symbol", "trade_date"])
     chain["ret"] = chain.groupby("symbol")["close"].pct_change()
     r = chain.dropna(subset=["ret"])
     capser = r.apply(lambda x: board_cap(x["symbol"], bool(x["is_st"])), axis=1)
     jumps = r[abs(r["ret"]) > capser + 0.02]
-    gate("prev_close_continuity", len(jumps) <= max(10, int(0.0005 * len(r))),
-         {"n_returns": int(len(r)), "violations": int(len(jumps))})
+    implausible = r[(r["ret"] < -0.60) | (r["ret"] > 0.45)]
+    gate("prev_close_continuity",
+         len(implausible) == 0 and len(jumps) <= int(0.0025 * len(r)),
+         {"n_returns": int(len(r)), "cap_violations": int(len(jumps)),
+          "cap_violation_rate": round(float(len(jumps) / max(1, len(r))), 5),
+          "implausible_moves": int(len(implausible)),
+          "note": "raw-price basis: ex-div/ex-rights + ST-snapshot caps allowed; see manifest QC section"})
 
     # 10) limit flag sanity
     up_rate = win.groupby("trade_date")["is_limit_up"].mean()
