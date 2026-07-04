@@ -68,6 +68,11 @@
 - git: `4ac8e8b`（runner+evaluator 入库）；启动 2026-07-04；runner=`scripts/analysis/run_wf_h008.py`（RAM 48G/OOM 重试一次/磁盘 6G 守卫，逐 sleeve ledger → `wf_h008/runner_ledger.jsonl`）
 - F1/short_5d 起跑实测：GPU util 99%；评测驱动 `exp008_walkforward_eval.py` 待重训完成后执行（F4 复用生产 retrain，零 GPU）
 - 纪律：新鲜窗零接触（guard 强制）；候选定义冻结；无中途调参
+- **执行事故链（全部按协议中止+诊断，候选/超参零改动）**：
+  ①abort#1（git 3b9b23d 前）：runner 未设 `QUANTAGENT_HORIZON_ASSIGNMENT` → F1 short/mid 训在 17/20 特征（prod=22）→ 作废重训；同时发现 8192/1024 长 sleeve 配置在生产史上从未成功；新增**机械 schema-parity 门**
+  ②abort#2（5d57906）：长 sleeve 在生产同款 2048/128 下仍 OOM → 诊断出 `--train-micro-batch` 在 dates_per_step=1 下是 **no-op**（按日分组无从再切）+ 碎片化贴顶；expandable_segments 单独不够
+  ③abort#3（c0939b1→29e4c63）：加 activation checkpointing（梯度精确，等价冒烟 6 位小数一致）后长 sleeve 训完 5.3h，**被 schema 门拒绝：fold=178 特征 vs prod=90** → 挖出未记录的生产血统 `QUANTAGENT_JUDGMENT_MAX_FACTORS=64`（finish_long_plus7.sh；已补录 production_blend.json lineage）
+- 副产品：trainer 获得 `--activation-checkpointing`（Phase 8 资产）；生产 lineage 补全两个 env 依赖；浪费 GPU ≈6.5h（全程有账）
 
 ## EXP-003 · 2026-07-03 · 新鲜数据入库+冻结（H-003）— **RUNNING（用户已批准）**
 
