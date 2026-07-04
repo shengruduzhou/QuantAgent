@@ -120,7 +120,15 @@ def run_one(fold: str, sleeve: str, micro_batch: int | None) -> tuple[bool, str,
         cmd += ["--train-micro-batch", str(micro_batch)]
     logfile = OUT_ROOT / fold / f"{sleeve}.log"
     logfile.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, QUANTAGENT_HORIZON_ASSIGNMENT=HORIZON_ASSIGNMENT)
+    # expandable_segments: the long sleeve (90 features → 91-token attention)
+    # sits within ~400MB of the 24G VRAM ceiling and dies to allocator
+    # fragmentation (observed: 22.72G allocated + 415MB reserved-unallocated,
+    # 384MB request failed). NOTE --train-micro-batch is a NO-OP at
+    # dates_per_step=1 (trainer splits by date group only) — kept for ledger
+    # fidelity but it cannot reduce activation memory here.
+    env = dict(os.environ,
+               QUANTAGENT_HORIZON_ASSIGNMENT=HORIZON_ASSIGNMENT,
+               PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
     t0 = time.time()
     with logfile.open("w") as lf:
         proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=REPO, env=env)
