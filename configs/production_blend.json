@@ -60,6 +60,12 @@
       "long_30d_120d": "a134d0da389b79ec03a9d9d5dfbaa0486ea3646dadb1dc1604f8fa3ec585273e"
     },
     "git_hash_at_declaration": "e06ca86582c411ed3842467857f76060d092116f",
-    "created": "2026-07-03"
+    "created": "2026-07-03",
+    "training_env": {
+      "QUANTAGENT_HORIZON_ASSIGNMENT": "runtime/reports/v89_closed_loop/horizon_factor_assignment_plus7.json",
+      "QUANTAGENT_JUDGMENT_MAX_FACTORS": "64 (long sleeve feature cap; no-op for short/mid)",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True (long sleeve rescue)",
+      "note": "discovered during H-008 (2026-07-04): these env vars are REQUIRED to reproduce the production sleeve feature sets (long=90 features); they were previously undocumented lineage"
+    }
   }
 }

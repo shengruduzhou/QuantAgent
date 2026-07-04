@@ -131,8 +131,14 @@ def run_one(fold: str, sleeve: str, micro_batch: int | None) -> tuple[bool, str,
     # 384MB request failed). NOTE --train-micro-batch is a NO-OP at
     # dates_per_step=1 (trainer splits by date group only) — kept for ledger
     # fidelity but it cannot reduce activation memory here.
+    # QUANTAGENT_JUDGMENT_MAX_FACTORS=64: production parity — finish_long_plus7.sh
+    # capped judgment factors to top-64 |ICIR| (178 -> 90 features for long;
+    # no-op for short/mid which have <64). Without it the long sleeve trains a
+    # DIFFERENT feature set (caught by the schema gate on 2026-07-04, 5.3h run
+    # rejected: prod=90 fold=178).
     env = dict(os.environ,
                QUANTAGENT_HORIZON_ASSIGNMENT=HORIZON_ASSIGNMENT,
+               QUANTAGENT_JUDGMENT_MAX_FACTORS="64",
                PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True")
     t0 = time.time()
     with logfile.open("w") as lf:
