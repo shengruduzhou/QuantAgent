@@ -96,6 +96,11 @@ def sleeve_frame(fold: str) -> pd.DataFrame:
     assert merged is not None
     for sl in SLEEVES:
         merged[f"{sl}_score"] = pd.to_numeric(merged[f"{sl}_score"], errors="coerce").fillna(0.0)
+    # F4 reuses the production run whose prediction FILES extend into the
+    # quarantined window (scores only). Truncate at the boundary on read —
+    # rows beyond it are discarded unread-for-evaluation (same treatment as
+    # the EXP-000 _tmp frames) — then assert the invariant on what remains.
+    merged = merged[merged["trade_date"] < QUARANTINE_START].reset_index(drop=True)
     assert merged["trade_date"].max() < QUARANTINE_START, f"{fold}: quarantine breach in predictions"
     return merged
 

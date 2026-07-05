@@ -74,6 +74,17 @@
   ③abort#3（c0939b1→29e4c63）：加 activation checkpointing（梯度精确，等价冒烟 6 位小数一致）后长 sleeve 训完 5.3h，**被 schema 门拒绝：fold=178 特征 vs prod=90** → 挖出未记录的生产血统 `QUANTAGENT_JUDGMENT_MAX_FACTORS=64`（finish_long_plus7.sh；已补录 production_blend.json lineage）
 - 副产品：trainer 获得 `--activation-checkpointing`（Phase 8 资产）；生产 lineage 补全两个 env 依赖；浪费 GPU ≈6.5h（全程有账）
 
+### EXP-008 终局（2026-07-06）— **完成 / C3+EMA 按预注册门 REJECTED（不采纳），相对优势记录在案**
+
+- 重训 9/9 成功（schema 门全过）：short 25–33min、mid 27–40min、long 176–255min；RSS 峰 18.7G；GPU 有效 ≈13h
+- 评测：24 次 variant-C（+8 次 15bps 敏感性）；RSS 峰 1.9G/197s；产物 `wf_h008/{wf_summary.json,candidate_fold_metrics.csv,stitched_daily_returns.csv,cost_sensitivity_15bps.json}`
+- **折表（CAGR）**：F1(bench−2.6%)/F2(**bench−33.1%**)/F3(+69.4%)/F4(+46.5%)：
+  C1 −5.2/−55.2/+29.1/+78.2（中位+12.0，最差−55.2）｜C2 −8.9/−33.0/+82.2/+56.6（+23.8，−33.0，**换手 0.28–0.70/日超 R3**）｜C3中位数 −7.9/−29.7/+39.4/+71.1｜**C3_ema0.7 −6.9/−29.9/+73.0/+77.8（中位+33.0，最差−29.9，worstDD 25.0%，DSR 0.736 全场最高）**
+- 15bps 敏感性：C3_ema0.7 中位衰减 −8.8%（F2 几乎不动 −29.9→−30.2）；C2 −22%（F2 −33→**−52.7**）
+- 门判定（C3_ema0.7）：胜过 C2 门 ✓、DD 门 ✓（C2 自己 worstDD 31.5% ✗）、成本门 ✓、行业门 ✓、新鲜窗零接触 ✓；**换手门 ✗（max 0.259 > 0.10 承诺；SEARCH 窗的 0.02–0.08 不外推）**、**统计门 ✗（fold-block PBO 0.833 粗粒度、DSR 0.736<0.95）** ⇒ 预注册规则下不采纳
+- **科学结论**：①C1 信任锚被走式否定（全场最差）②C2（现生产候选）不稳健：worstDD 超门 + 换手在压力折爆表 ③C3_ema0.7 = 当前证据下最优配置（4/5 轴占优）但族级共同失败模式 = **F2 型崩塌折（2024H1 微盘股崩）无一幸免** → 缺的是回撤/regime 暴露控制层，不是 blend 选择 ④换手本身窗口依赖
+- 试验数台账：blend 族 50（含本次 6 复评）；生产配置**不变更**（无 proposal，按指令）
+
 ## EXP-003 · 2026-07-03 · 新鲜数据入库+冻结（H-003）— **RUNNING（用户已批准）**
 
 - 发现①：TickFlow SDK 2026-06 破坏性变更（`start_date/end_date`→epoch-ms `start_time/end_time`）导致日更脚本静默失效 = **panel 冻在 2026-05-18 的根因**

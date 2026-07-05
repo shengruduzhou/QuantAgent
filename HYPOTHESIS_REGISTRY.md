@@ -61,6 +61,16 @@
 - **纪律**：结果不直接调生产权重；只决定是否立后续假设（如 H-005 regime 条件性 blend）。
 - **资源**：CPU ≤10min，RSS <6G。
 
+## H-008 走式验证（状态：**TESTED — C3+EMA REJECTED for adoption**，EXP-008，2026-07-06）
+
+> 9/9 重训 + 24 评测完成。C3_ema0.7 在 4/5 稳健性轴上胜过现生产候选 C2（中位折 CAGR +33.0% vs +23.8%、最差折 −29.9% vs −33.0%、worstDD 25.0% vs 31.5%、15bps 敏感性中位 −8.8% vs −22%、DSR 0.736 vs 0.651），但换手门（max 0.259>0.10 承诺）与统计门（PBO 0.833/DSR<0.95）未过 ⇒ 预注册规则下**不采纳**，维持 challenger。C2 自身 worstDD 31.5%、压力折换手 0.70/日 —— **现生产候选在自家走式上也过不了验收门**。族级发现：F2 崩塌折全员 −30~−55% ⇒ 下一优先假设 = 回撤/regime 暴露控制层（见 H-009 预告）。
+
+## H-009 回撤/regime 暴露控制（状态：DRAFT，待预注册细则）
+
+- 动机：EXP-008 族级 F2 失败（bench −33.1%，全候选 −29.7~−55.2%）；IDEA #7。
+- 方向：**先验规则**的 gross 缩放（如 bench 20d 回撤 >8% → gross 0.5；>15% → 0.3），叠加在冻结的 C3_ema0.7 书上；候选规则 ≤3 条预注册；SEARCH+WF 折评测；禁止在 F2 上单独调参（garden-of-forking-paths 防护：规则参数先验声明）。
+- 预算：CPU-only（复用冻结 sleeve 预测）；N+≤3。
+
 ## 队列中未立项（见 IDEA_QUEUE.md）
 
 H-004 sector 集中度约束收紧；H-005 长 sleeve 诊断价值（何时该有非零权重）；H-006 DSL 因子新批次（capped）；H-007 offline RL turnover-controller；H-008 walk-forward 重训协议（模型层，需 GPU 授权）。
