@@ -85,6 +85,18 @@
 - **科学结论**：①C1 信任锚被走式否定（全场最差）②C2（现生产候选）不稳健：worstDD 超门 + 换手在压力折爆表 ③C3_ema0.7 = 当前证据下最优配置（4/5 轴占优）但族级共同失败模式 = **F2 型崩塌折（2024H1 微盘股崩）无一幸免** → 缺的是回撤/regime 暴露控制层，不是 blend 选择 ④换手本身窗口依赖
 - 试验数台账：blend 族 50（含本次 6 复评）；生产配置**不变更**（无 proposal，按指令）
 
+## EXP-009 · 2026-07-06 · 暴露控制 overlay（H-009，N=3 先验）— **DONE / 全部 REJECTED**
+
+- git f52a0f2；12 次 variant-C；102s / RSS 1.8G；产物 wf_h008/exp009_overlay/
+- R1 回撤分档 ✗(worstDD 27.0%>25.0%)；R2 MA60 ✗(仅换手 F1 0.360)；R3 波动分档 ✗(中位 26.0%<28.0%)
+- 机制：R2 方向正确（F2 +7.1pp、worstDD 23.1%）败于横盘 whipsaw churn → H-010
+
+## EXP-010 · 2026-07-06 · R2 滞回修复（H-010，N=2 先验，**本线最终迭代**）— **DONE / 全部 REJECTED，线关闭**
+
+- git（见 HEAD）；8 次 variant-C；70s / RSS 1.83G；产物 wf_h008/exp010_hysteresis/
+- R2a 确认滞回：**风险端全周期最佳**（F2 −16.8%、worstDD 19.9%、中位 +33.2%、F3 +117.9%）但 F1 换手 0.362 ✗（whipsaw >5 日，每切换交易半书）；R2b EMA gross：换手 ✓ 但 F2 −38.0% ✗（双向迟钝）
+- 累计 blend+overlay N=**55**；无生产提案；**结构性结论：churn 应在书构建层解（Track A 持有期/节流），不在 overlay 层**；R2a 封存待 FRESH 窗
+
 ## EXP-003 · 2026-07-03 · 新鲜数据入库+冻结（H-003）— **RUNNING（用户已批准）**
 
 - 发现①：TickFlow SDK 2026-06 破坏性变更（`start_date/end_date`→epoch-ms `start_time/end_time`）导致日更脚本静默失效 = **panel 冻在 2026-05-18 的根因**
