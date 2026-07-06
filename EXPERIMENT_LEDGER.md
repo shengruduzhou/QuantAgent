@@ -202,3 +202,9 @@
 - **survivor: D1_low_vol_20 = −TsStd(Returns(Close,1),20)**：rank_IC10 +0.080 / ICIR +0.35 / 换手 0.074（≈13.5 日持有）/ **F2 崩塌 IC +0.080（崩塌期仍有效=防御）** / LS@25bps +0.0045（成本生还）→ 正是 H-015 残余崩塌（信号级）所需杠杆
 - D7_downside_range redundant（0.91 corr D1）；D6_vol_compression reject（换手 0.329>0.15，但 ICIR 0.48 最高→留待中换手批次）；D2/D3/D4/D5 reject（负 oriented IC=反转/流动性溢价，long 侧=capacity trap）
 - **物化计划**：注册 synth_low_vol_20（不入生产）；下一步集成测试 = D1 rank 以 0.3 权重 tilt corrected C3_ema0.7 载体 × L1 min-hold-10 书，看是否改善 F2 崩塌/worstDD；数据集重建延后至集成测试证成。FRESH 仍为仲裁
+
+## EXP-016 · D1_low_vol_20 集成测试（H-015 物化计划）· 2026-07-07 · **防御因子 tilt 修复崩塌/DD，代价=中位收益减半（真实 trade-off）**
+- track: dual（Track C 因子 → Track L 书集成）；候选 1 新（D1 tilt w=0.3；w=0 复现 L1 已计）；N 73→**74**；命令 `AI_quant_venv/bin/python3 scripts/analysis/dual_track_d1_integration.py`；产物 exp016_d1_integration/results.json
+- 载体 = corrected C3_ema0.7 rank ⊕ 0.3×D1 rank；书 = min-hold-10（L1 赢家）；corrected sim；8/15/25bps；4 折；200s，RSS 2.14 GiB，零重训，零 fresh 接触
+- **D1 tilt vs L1 baseline**：中位 CAGR8 +36.4%→**+18.6%**（减半）；worst fold/F2 崩塌 −41.0%→**−27.1%（+14pp，全测最佳崩塌）**；**worstDD 36.6%→24.8%（−12pp，现过门<33.9%）**；median@25bps +24.1%→+9.2%（仍生还）；换手 0.198（不变，D1 低换手不加 churn）；F4 +71.2%→+35.9%（牛市上行被稀释=防御代价）
+- **结论**：D1 防御 tilt 精确修复 H-015 残余崩塌/DD 失败（唯一未过的 worstDD 门现过），代价=中位收益减半（低波 tilt 让出高动量牛市上行）。**真实风险/收益权衡非免费午餐**：Calmar 0.99→0.75（中位降幅>DD 降幅），但绝对 worstDD 与崩塌生还大幅改善。最佳 drawdown-adjusted/崩塌生还候选 = **L1_d1tilt_w30**（worstDD 24.8%、F2 −27.1%、中位 +18.6%、25bps 生还 +9.2%）；最佳原始 CAGR = L1 baseline（+36.4%）。w 不扫（避免 fold 调参）；FRESH 为仲裁。均非生产就绪（DSR 未测新配置，折已重挖）。无生产提案。
