@@ -129,3 +129,21 @@
 - **发现③**：崩塌折与书宽无关（W1 −31.8/W2 −39.4/W3 −37.9 vs k10 −29.9）——**F2 暴露是信号级**（模型族在崩塌期持续把崩塌段排前），任何书变换不解，只有 regime 暴露控制（R2a 型）碰到过它（F2 −16.8%）
 - PBO 0.667（↓自 0.833）；DSR@N=63 全 <0.95（W1 0.786 最高）；累计 N=**63**
 - 结论：无生产提案；**周期结构图完成**：换手已解（partial-adjust 任意 k）+ 路径噪声已解（W2 形态）+ 崩塌未解（书层任何宽度均不可解）⇒ 唯一未测组合 = 低 churn 书 × 快速 R2a de-risk → H-013（本周期最终折接触批次，硬停止条款）
+
+## EXP-013 · 2026-07-06 · 低 churn 书 × 快速 de-risk 合成（H-013，N=2 先验）— **INVALID（处理从未被施加）→ 触发 INC-E1 重大发现**
+
+- git 注册 `4fd2b20`（先注册后跑）；24 次 variant-C；产物 wf_h008/exp013_synthesis/
+- 表面结果（S1/S2 与 W2 基线折表几乎逐点相同、换手 0.008–0.018、mean_gross 0.68–0.88）触发执行取证：**R2a flip 日 invested fraction 0.998 纹丝不动 → overlay 从未表达**
+- 判定：**INVALID-AS-DESIGNED**（非 REJECTED——处理未施加，无信息量）；硬停止条款照常生效：H-008 4 折冻结至 FRESH 首读或用户重开
+- 取证链（3 探针）→ 根因 = **INC-E1 执行模拟器跨日订单去重缺陷**（见下一条与 EVALUATOR_ORDER_DEDUP_BUG.md）
+
+## INC-E1 · 2026-07-06 · 执行模拟器跨日 (symbol,side) 静默吞单 — **全评估栈级缺陷，已证实+量化，修复方案待用户批准**
+
+- **机制**：`OrderManager._make_id` 确定性 sha1（signal_id="manual" 恒定）+ `_submit_all` 对 history 已有 id 静默 `continue` + 模拟器全期共用一个 manager 且从不 `reset_daily_counters` ⇒ **每只股票整个回测最多买一次、卖一次**，重复同向订单无审计地消失
+- **4 行复现**：tw=[0.50,0.25,0.50,0.50] 单票 → d3 回补单消失，仓位永停 25%
+- **量化**：①F1 C3_ema0.7 k10 素书：意图订单值 **81.6% 被静默丢弃**（1,796 单/141.6M vs 成交 31.9M，当日意图口径）②W2×恒定 0.5 gross：首日 48.5% 正确、随后每日+4~5% NAV 爬回满仓 ③W2×R2a flip 日 invested 0.998 不动
+- **影响面**：全部 variant-C（含 +17.3% 信任锚、EXP-000..013、PBO/DSR 重放）；失真分层=素书中度（重入场+drift 再平衡被丢）/平滑书重度（增量全丢，"低换手"是伪影）/overlay 首卖可执行但 re-risk 回补全丢；**EXP-011 发现③的路径噪声大部分即本 bug**（毫厘成交差决定谁先占 history 槽→级联）；基准线不受影响（不经模拟器）
+- **纪律**：EXP-008..013 全部结论戳 `pre-INC-E1`，修复重跑前不得引用；红线"trusted evaluator 语义变更先问"→ **补丁只提案未应用**（两行修复：日循环 reset_daily_counters + signal_id 带日期）；回归契约测试入库 tests/test_order_dedup_regression.py（xfail strict=True，修复落地即强制摘标）
+- **为什么以前没炸**：单测用逐日新 manager/唯一 signal_id；重放保真=坏模拟器 vs 同一坏模拟器（Spearman 0.9922）；只有"同名多次同向交易"书型显形——本周期书构建实验第一次系统性触碰
+- 再验证顺序提案（修复批准后）：单测→信任锚（v8.9 rankfix +17.25%、plus7 holdout 族）→EXP-008 折表→EXP-009..013→PBO/DSR 全量；≈2-3h CPU
+- 累计 N=**65**（EXP-013 两候选照记，虽 INVALID）
