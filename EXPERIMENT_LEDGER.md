@@ -208,3 +208,10 @@
 - 载体 = corrected C3_ema0.7 rank ⊕ 0.3×D1 rank；书 = min-hold-10（L1 赢家）；corrected sim；8/15/25bps；4 折；200s，RSS 2.14 GiB，零重训，零 fresh 接触
 - **D1 tilt vs L1 baseline**：中位 CAGR8 +36.4%→**+18.6%**（减半）；worst fold/F2 崩塌 −41.0%→**−27.1%（+14pp，全测最佳崩塌）**；**worstDD 36.6%→24.8%（−12pp，现过门<33.9%）**；median@25bps +24.1%→+9.2%（仍生还）；换手 0.198（不变，D1 低换手不加 churn）；F4 +71.2%→+35.9%（牛市上行被稀释=防御代价）
 - **结论**：D1 防御 tilt 精确修复 H-015 残余崩塌/DD 失败（唯一未过的 worstDD 门现过），代价=中位收益减半（低波 tilt 让出高动量牛市上行）。**真实风险/收益权衡非免费午餐**：Calmar 0.99→0.75（中位降幅>DD 降幅），但绝对 worstDD 与崩塌生还大幅改善。最佳 drawdown-adjusted/崩塌生还候选 = **L1_d1tilt_w30**（worstDD 24.8%、F2 −27.1%、中位 +18.6%、25bps 生还 +9.2%）；最佳原始 CAGR = L1 baseline（+36.4%）。w 不扫（避免 fold 调参）；FRESH 为仲裁。均非生产就绪（DSR 未测新配置，折已重挖）。无生产提案。
+
+## EXP-017 · 基本面质量 tilt 集成（H-017 阶段2）· 2026-07-07 · **REJECT 崩塌防御——长短 IC 不等于长多书改善**
+- track: dual（Track C 基本面→Track L 书）；候选 1 新（quality tilt w=0.3）；N 74→**75**；命令 `dual_track_d1_integration.py --factor quality`（复用泛化后的集成 harness）；产物 exp017_quality_integration/results.json
+- 载体 = corrected C3_ema0.7 rank ⊕ 0.3×QF_quality rank（roe+net_margin+gross_margin 按日 rank-mean，+1 日 lag）；书 = min-hold-10；206s，RSS 2.64 GiB
+- **quality tilt vs L1 baseline**：中位 +36.4%→**+34.2%**（几乎不减，远好于 D1 的减半）；**F2 崩塌 −41.0%→−45.1%（更差 4pp！）**；worstDD 36.6%→37.8%（略差）；**F1 弱折 +1.5%→+7.8%（改善！DD 15.6→12.4%）**；F3/F4 稀释；median@25bps +24.1%→+20.9%（仍强）；换手不变 0.196
+- **关键方法论发现**：因子的**截面长短 crash-IC（+0.08）不等于集中长多 top-10 书的崩塌改善**——quality 在全宇宙 long-short 崩塌有效，但并入动量 top-10 书后崩塌反而略差。D1 低波有效因其直接剔除高波崩塌名（对长多书有效），quality 是弥散基本面特征。
+- **判定 REJECT 崩塌防御**（未改善崩塌/DD——实际瓶颈）；但 quality **改善 F1 弱/平折**且几乎零收益代价 → 潜在 regime-conditional（弱/震荡市）用途，非崩塌防御。三方对比：L1 baseline（+36.4%/F2 −41%/DD 36.6%）vs L1+D1（+18.6%/−27.1%/24.8%）vs L1+quality（+34.2%/−45.1%/37.8%）。**D1 低波仍是唯一验证的崩塌杠杆。** 均非生产就绪，FRESH 仲裁。无生产提案。
