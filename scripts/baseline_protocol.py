@@ -95,15 +95,19 @@ def _target_weights(preds: pd.DataFrame, score_col: str, top_k: int, *, eligible
     d = d[d["rank"] < top_k]
     d["w"] = 1.0 / float(top_k)
     tw = d.pivot_table(index="trade_date", columns="symbol", values="w", fill_value=0.0).sort_index()
-    if delay_days > 0:
-        # Signal at t is executed on the (t + delay)-th trading day.
-        date_index = pd.DatetimeIndex(sorted(trade_dates))
-        positions = date_index.searchsorted(tw.index) + delay_days
-        keep = positions < len(date_index)
-        tw = tw.iloc[keep]
-        tw.index = date_index[positions[keep]]
-        tw = tw[~tw.index.duplicated(keep="last")].sort_index()
-    return tw
+    return _apply_delay(tw, trade_dates, delay_days)
+
+
+def _apply_delay(tw: pd.DataFrame, trade_dates: list[pd.Timestamp], delay_days: int) -> pd.DataFrame:
+    """Signal at t is executed on the (t + delay)-th trading day."""
+    if delay_days <= 0:
+        return tw
+    date_index = pd.DatetimeIndex(sorted(trade_dates))
+    positions = date_index.searchsorted(tw.index) + delay_days
+    keep = positions < len(date_index)
+    tw = tw.iloc[keep]
+    tw.index = date_index[positions[keep]]
+    return tw[~tw.index.duplicated(keep="last")].sort_index()
 
 
 def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,

@@ -87,7 +87,9 @@
 - **验收（与 H-009 相同四门）**：worstDD<25.0% ∧ F2>−29.9% ∧ maxTurn≤min(0.309,0.35) ∧ 中位≥+28.0%。
 - 累计 N：53+2=**55**。预算 8 次 variant-C ≈7min CPU。
 
-## H-011 书构建层 churn 控制（状态：**REGISTERED 2026-07-06，EXP-011 待跑；Track A 第一批**）
+## H-011 书构建层 churn 控制（状态：**TESTED — 全部 REJECTED（0/5），EXP-011，2026-07-06**）
+
+> 结果：换手门被 B2/B3/B4 以 4–17× 裕度通过（0.014–0.041 vs 0.10）且中位 CAGR 反升、F1 翻正——**churn 机制被证明**；但全员 G2/G3 失败：慢书在 F2 崩塌折死得更惨（−31.6~−43.0% vs 载体 −29.9%，worstDD 30.8–37.4% vs 25.0%）。结构性结论=每日重选是隐性崩盘防御，churn 控制与崩盘生存在本族**直接冲突**。附带发现：k=10 折级 CAGR 有 ±3pp/bps 级执行路径噪声（偶发 >20pp）⇒ 4 折 k=10 继续挖掘收益递减，下一步=k=30 宽书结构变化（H-012 待预注册）。详见 BOOK_CHURN_CONTROL_EXPERIMENT.md / EXP-011。
 
 - 动机：EXP-008 换手门失败（C3_ema0.7 max 0.259 > 0.10 承诺）+ EXP-009/010 结构性结论（churn 在书构建层解，overlay 线已关闭）。
 - **候选（N=5，先验冻结，跑后不改）**——载体=C3_ema0.7 分数（EXP-008 原样重建，零重训），k=10 等权，long-only，gross≤1，eligibility/delay-1 与 variant-C `_target_weights` 完全一致：

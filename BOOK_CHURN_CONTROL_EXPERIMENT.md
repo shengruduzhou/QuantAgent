@@ -1,6 +1,10 @@
 # BOOK_CHURN_CONTROL_EXPERIMENT — EXP-011 / H-011 (Track A)
 
-**Status: REGISTERED 2026-07-06 (candidates frozen at this commit, before any evaluation run).**
+**Status: COMPLETE 2026-07-06 — all 5 candidates REJECTED under pre-registered gates (0/5).
+Churn gate is solved mechanically (turnover 0.014–0.041 « 0.10 for B2/B3/B4), but every
+churn-controlled book makes the F2 crash fold WORSE. See §6–§7.**
+
+*(Registered at commit 1994cd4 before any evaluation run; candidates frozen there.)*
 
 ## 1. Motivation (from the closed overlay line)
 
@@ -87,8 +91,82 @@ after results are seen; the full trial count is ledgered regardless of outcome.
 
 ## 6. Results
 
-*(filled after the run — this section intentionally empty at registration commit)*
+Run: `AI_quant_venv/bin/python3 scripts/analysis/exp011_book_churn.py` — 40 strict variant-C
+backtests (20 @ 8bps + 20 @ 15bps), 327.6 s, peak RSS 2.02 GiB, artifacts in
+`runtime/reports/v89_closed_loop/wf_h008/exp011_book_churn/`. One protocol-neutral
+implementation fix mid-run: an over-strict anti-runaway assert (`len(book) ≤ 40`) contradicted
+the registered B3 definition (no size cap) and was relaxed to 500; no candidate change.
+
+### Fold CAGR (8bps) — carrier C3_ema0.7 baseline in brackets
+
+| Fold | B1_buffer30 | B2_minhold10 | B3_partial30 | B4_reb5d | B5_buffer_r2a_ramp | carrier |
+|------|------------|--------------|--------------|----------|--------------------|---------|
+| F1 | −6.2% | **+14.5%** | +6.5% | **+15.0%** | +7.5% | [−6.9%] |
+| F2 crash | −43.0% | −40.4% | −31.6% | −40.1% | −33.5% | [−29.9%] |
+| F3 | +81.2% | +62.4% | +66.4% | +74.2% | +77.0% | [+73.0%] |
+| F4 | +91.5% | +79.8% | +86.2% | +67.1% | +60.6% | [+77.8%] |
+
+### Aggregates and gates
+
+| Candidate | median | worstDD | maxTurn | G1 turn≤0.10 | G2 DD≤25.0% | G3 F2≥−24.9% | G4 med≥28.0% | G5 sec | all |
+|-----------|--------|---------|---------|----|----|----|----|----|-----|
+| B1_buffer30 | +37.5% | 32.9% | 0.153 | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
+| B2_minhold10 | +38.4% | 32.9% | **0.041** | **✓** | ✗ | ✗ | ✓ | ✓ | ✗ |
+| B3_partial30 | +36.4% | 35.0% | **0.015** | **✓** | ✗ | ✗ | ✓ | ✓ | ✗ |
+| B4_reb5d | +41.1% | 37.4% | **0.034** | **✓** | ✗ | ✗ | ✓ | ✓ | ✗ |
+| B5_buffer_r2a_ramp | +34.0% | 30.8% | 0.140 | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
+
+- G6 no-leverage / G7 quarantine: construction-asserted, all ✓. Sector max ≤0.29 all folds.
+- PBO (fold-block CSCV, 6 books) 0.833 (unchanged, coarse). DSR@N=60 stitched: B3 0.885
+  (highest), B5 0.859, B2 0.853, B1 0.845, B4 0.845, carrier 0.872. None ≥ 0.95.
+- Trial ledger: blend+overlay+book N = **60**.
+
+### Finding 1 — churn is solved, and it was never the bottleneck outside crashes
+
+B2/B3/B4 cut turnover 4–17× below the 0.10 production promise while *raising* median fold CAGR
+(+36–41% vs +33.0%) and flipping the flat-market fold F1 from −6.9% to +14.5/+15.0%. The
+turnover gate that killed C3_ema0.7 in EXP-008 is fully passable at the book layer with
+one-line rules.
+
+### Finding 2 — slow books die harder in the crash fold (the real rejection reason)
+
+Every churn rule degraded F2 (−31.6% to −43.0% vs carrier −29.9%) and worstDD (30.8–37.4% vs
+25.0%). Mechanism: the carrier's daily re-selection was providing *implicit crash defense* —
+rotating out of collapsing microcaps as their scores decayed. Keep-zones let losers ride from
+rank 10→30; min-hold locks them for 10 days; throttling waits 5 days — in 2024-H1 each of those
+delays converts directly into deeper drawdown. Churn control and crash survivability are in
+direct tension on this signal family; B5's ramped R2a de-risking (confirm-5 + 0.1/day) is too
+slow to offset it (F2 −33.5%, DD 30.8%).
+
+### Finding 3 — execution path-dependency noise quantified (evaluator robustness)
+
+The 15bps sensitivity runs exposed non-monotone cost responses (B1/F1: −6.2% @8bps →
+**+17.2%** @15bps). Verified deterministic (identical repeat at 8bps) and input-mutation-free
+(simulator copies inputs); a bps-sweep probe on B1/F1 gives −6.2/−4.2/−8.4/−6.1/+17.2% at
+8/9/10/12/15bps. **k=10 fold CAGRs carry ±3pp noise per 1–2bps perturbation with occasional
+>20pp basin jumps** (lot-size → cash → T+1/limit feasibility cascades). Consequences: (a)
+sub-5pp fold-level margins in EXP-008..011 are within execution-path noise; (b) 15bps columns
+measure path perturbation more than cost drag at these turnover levels; (c) k=10 concentrated
+books are structurally fragile — argues for wide-book variants and/or perturbation-averaged
+evaluation in the next protocol. F2 failures above are NOT noise: 5/5 candidates degraded in
+the same direction, 2–13pp deep.
 
 ## 7. Verdict
 
-*(filled after the run)*
+**REJECTED — 0/5 candidates pass the pre-registered gate set** (all fail G2+G3; B1/B5 also
+fail G1). No production proposal. No candidate was modified after seeing results; trial count
+ledgered at N=60.
+
+**What survives:** the churn mechanisms themselves (B2/B3/B4) are proven, cheap, and
+production-safe *outside crash regimes* — they are shelved as building blocks, not adopted.
+R2a remains sealed pending FRESH-window arbitration (per EXP-010 stop-clause).
+
+**Next recommended path (registered before results were seen? no — chosen after, so it needs
+its own pre-registration):** the churn/crash tension plus Finding 3 says further mining of
+these 4 folds at k=10 has hit diminishing returns (60 trials, PBO 0.833, path noise ≈ candidate
+margins). The highest-EV next step is **structural, not parametric**: evaluate the existing
+frontier configs at k=30 wide-book (capacity↑, path-noise↓, per-name crash impact↓ — EXP-004
+already showed k30 improves worst quarters), with an explicit path-noise-band measurement, as
+a small pre-registered batch (H-012). Crash-exit logic (absolute stop / sell-only stress mode)
+is the other open lever but should wait for the wide-book base to avoid compounding
+fold-mining.
