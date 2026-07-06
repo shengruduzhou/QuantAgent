@@ -215,3 +215,10 @@
 - **quality tilt vs L1 baseline**：中位 +36.4%→**+34.2%**（几乎不减，远好于 D1 的减半）；**F2 崩塌 −41.0%→−45.1%（更差 4pp！）**；worstDD 36.6%→37.8%（略差）；**F1 弱折 +1.5%→+7.8%（改善！DD 15.6→12.4%）**；F3/F4 稀释；median@25bps +24.1%→+20.9%（仍强）；换手不变 0.196
 - **关键方法论发现**：因子的**截面长短 crash-IC（+0.08）不等于集中长多 top-10 书的崩塌改善**——quality 在全宇宙 long-short 崩塌有效，但并入动量 top-10 书后崩塌反而略差。D1 低波有效因其直接剔除高波崩塌名（对长多书有效），quality 是弥散基本面特征。
 - **判定 REJECT 崩塌防御**（未改善崩塌/DD——实际瓶颈）；但 quality **改善 F1 弱/平折**且几乎零收益代价 → 潜在 regime-conditional（弱/震荡市）用途，非崩塌防御。三方对比：L1 baseline（+36.4%/F2 −41%/DD 36.6%）vs L1+D1（+18.6%/−27.1%/24.8%）vs L1+quality（+34.2%/−45.1%/37.8%）。**D1 低波仍是唯一验证的崩塌杠杆。** 均非生产就绪，FRESH 仲裁。无生产提案。
+
+## EXP-018 · 板块轮动 tilt（sector relative strength）· 2026-07-07 · **REJECT——顺周期，崩塌灾难性恶化**
+- track: dual（Track C 板块→Track L 书）；候选 1（sector_rs tilt w=0.3）；N 75→**76**；命令 `dual_track_d1_integration.py --factor sector_rs`（复用泛化 harness + `factors/sector_rotation.sector_relative_strength`，零新模块）；产物 exp018_sector_integration/
+- 载体 = corrected C3_ema0.7 rank ⊕ 0.3×板块20d相对强度 rank；书 = min-hold-10；208s，RSS 2.17 GiB。**PIT 注记：sector_map=current_snapshot 成员=轻度泄漏（成员稳定）**
+- **sector_rs tilt vs L1 baseline**：中位 +36.4%→+34.8%（略降）；**F1 弱折 +1.5%→+16.3%（大改善）**；**F3 牛 +97.2%→+111.8%（改善）**；**F2 崩塌 −41.0%→−66.4%（灾难 −25pp！）** worstDD 36.6%→42.5%；F4 +71.2%→+53.4%；median@25bps +24.1%→+22.8%；换手不变
+- **判定 REJECT**：板块动量顺周期——弱/牛市助力但崩塌灾难性放大（领涨板块崩得最狠，2024H1 题材崩盘）。坐实 Stage 8"naive 板块动量 whipsaws"。
+- **三 tilt 综合（D1/quality/sector）统一图景**：F2 崩塌由顺周期/高波暴露驱动——仅**去风险**（D1 低波）能救；**加动量**（板块）放大；**弥散基本面**（quality）够不到集中长多书。**L1 baseline 仍是收益冠军（中位 +36.4%、超额 +14.4%），无 overlay 能在不炸崩塌的前提下提收益。** 均非生产就绪，FRESH 仲裁。

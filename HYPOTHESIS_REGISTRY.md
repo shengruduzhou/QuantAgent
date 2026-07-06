@@ -175,3 +175,9 @@
 ## 队列中未立项（见 IDEA_QUEUE.md）
 
 H-004 sector 集中度约束收紧；H-005 长 sleeve 诊断价值（何时该有非零权重）；H-006 DSL 因子新批次（capped）；H-007 offline RL turnover-controller；H-008 walk-forward 重训协议（模型层，需 GPU 授权）。
+
+## H-018 板块轮动 tilt（状态：**TESTED — REJECT（顺周期，崩塌 −25pp），EXP-018，2026-07-07**）
+
+> 结果：板块动量 tilt 助弱/牛折（F1 +1.5→+16.3%、F3 +97→+112%）但崩塌灾难（F2 −41→−66.4%，worstDD 42.5%）。坐实 naive 板块动量 whipsaws。L1 baseline 仍收益冠军。原注册如下。
+- 瓶颈/动机：任务显式列 板块轮动 为 critical；复用 `factors/sector_rotation.sector_relative_strength`（20d 板块相对市场强度）作为 tilt，测热板块倾斜是否加 return 或改善崩塌。**PIT 注意：sector_map=current_snapshot(2026-05-31) 成员=轻度非 PIT 泄漏（成员稳定，收益 PIT 安全）——诚实标注。**
+- 候选 1（sector_rs tilt w=0.3 on L1 min-hold-10）；复用 `dual_track_d1_integration.py --factor sector_rs`；N 75→76。验收：改善中位 return 或崩塌/DD 且不破执行。Stage 8 先验=naive 板块动量 whipsaws，预期谨慎。FRESH 仲裁。

@@ -37,6 +37,7 @@ QUALITY_COLS = ["roe", "net_margin", "gross_margin"]
 TILTS = {
     "d1": ("exp016_d1_integration", "d1tilt"),
     "quality": ("exp017_quality_integration", "qualtilt"),
+    "sector_rs": ("exp018_sector_integration", "sectilt"),
 }
 
 
@@ -51,6 +52,19 @@ def tilt_series(pan: pd.DataFrame, factor: str) -> pd.DataFrame:
         out = pan[["symbol", "trade_date"]].copy()
         out["tilt"] = D1.evaluate(pan).to_numpy()
         return out
+    if factor == "sector_rs":
+        # 板块轮动: tilt toward names in strong sectors (20d sector relative
+        # strength vs market). Reuses factors.sector_rotation. CAVEAT: sector_map
+        # is current_snapshot (2026-05-31) membership -> mild non-PIT leakage in
+        # sector assignment (membership is stable; returns are PIT-safe).
+        from quantagent.factors.sector_rotation import sector_relative_strength
+        smap = pd.read_parquet(REPO / bp.SECTOR, columns=["symbol", "sector_level_1"])
+        p = pan.merge(smap, on="symbol", how="left")
+        p["sector_level_1"] = p["sector_level_1"].fillna("UNKNOWN")
+        srs = sector_relative_strength(p, sector_column="sector_level_1", window=20)
+        out = p[["symbol", "trade_date", "sector_level_1"]].merge(
+            srs, on=["trade_date", "sector_level_1"], how="left")
+        return out.rename(columns={"sector_relative_strength": "tilt"})[["symbol", "trade_date", "tilt"]]
     # quality: PIT-safe fundamentals, +1-day per-symbol lag, rank-mean composite
     fin = pd.read_parquet(FIN, columns=["symbol", "trade_date"] + QUALITY_COLS)
     fin["trade_date"] = pd.to_datetime(fin["trade_date"])
