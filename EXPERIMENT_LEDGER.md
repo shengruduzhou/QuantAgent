@@ -172,3 +172,11 @@
 
 ### 再验证③ EXP-011 book-churn（corrected）— 进行中，见下批次
 - pre-INC-E1 副本存各 exp0{09..13}/pre_inc_e1/；EXP-011/012/013 硬编码 BASE 门槛为 pre-INC-E1 载体值，需按 corrected 载体重判（在报告中重裁，非改脚本）
+
+### 再验证④ EXP-010 R2a hysteresis overlay（corrected，EXP010_CORRECTED_INC_E1.md）— **R2a 崩塌优势坐实为伪影**
+- 命令：`AI_quant_venv/bin/python3 scripts/analysis/exp010_hysteresis_overlay.py`；77s，RSS 1.9 GiB；pre 副本 exp010_hysteresis/pre_inc_e1/
+- pre-INC-E1 R2a F2 **−16.8%**（周期最佳风险画像）= 伪影：de-risk 卖出后 bug 丢弃全部 re-risk 回补单 → 书冻结防御。修正后 R2a 正常回补付真实往返
+- **corrected R2a**：F1 −20.3%/DD14.5% · **F2 −48.5%/DD28.2%**（vs 载体 −56.7%/33.9% = +8pp CAGR/+6pp DD）· F3 +16.7%（vs +33.4% 上行被稀释 17pp）· F4 +14.7%（−7pp）；换手 0.74–0.86，mean_gross 0.68–0.88
+- **结论**：R2a 是真实但温和且有成本的崩塌对冲（非免费午餐）。**书层 B2_minhold10 全面碾压 overlay 层 R2a**：B2 崩塌改善更多（−40.2% vs −48.5%）且中位收益↑（+36.4%）而 R2a 崩塌改善少且稀释收益 → **churn/崩塌控制归属书构建（min-hold）而非 gross 切换 overlay**，修正数据更强支持 Track A 优于 overlay 线
+- **Track D 再定范围**：gross-exposure RL overlay 的基线机制（R2a）已被书层压制 → RL 价值（若有）应为 min-hold 书之上的 turnover-aware 控制器，非独立 gross scaler
+- N 不变（冻结候选重跑）。EXP-009 raw overlay (R1/R2/R3) 与 EXP-012 wide-book 修正重跑待做（同属 user-authorized 再验证，无新 trial）
