@@ -65,7 +65,16 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     evidence = DailyEvidenceJob().run(
         DailyEvidenceJobConfig(as_of_date=as_of, dry_run=config.dry_run_evidence)
     )
-    feature_dataset = read_frame(Path(config.feature_dataset_path))
+    feature_path = Path(config.feature_dataset_path)
+    if not feature_path.exists():
+        raise FileNotFoundError(
+            f"feature dataset not found: {feature_path}. The legacy default "
+            "training_dataset.parquet was deleted 2026-07-06 (deletion manifest "
+            "runtime/archives/deletion_manifests/batch4_20260706.json). Rebuild via "
+            "`quantagent v7-data build-training-dataset-v7` or point "
+            "feature_dataset_path at a current gold dataset."
+        )
+    feature_dataset = read_frame(feature_path)
     market_panel = read_frame(Path(config.market_panel_path))
     features_asof = _asof_slice(feature_dataset, as_of)
     if features_asof.empty:
