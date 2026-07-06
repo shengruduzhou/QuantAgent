@@ -23,6 +23,8 @@ sys.path.insert(0, str(REPO / "scripts" / "analysis"))
 import baseline_protocol as bp  # noqa: E402
 from exp008_walkforward_eval import FOLDS, TOP_K, build_candidates, sleeve_frame, cagr, max_dd  # noqa: E402
 from exp011_book_churn import eligible_rank_lists  # noqa: E402
+from exp009_exposure_overlay import bench_series  # noqa: E402
+from exp010_hysteresis_overlay import gross_series  # noqa: E402
 from dual_track_eval import build_book, avg_holding_days  # noqa: E402
 from quantagent.factors import expr as E  # noqa: E402
 from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig  # noqa: E402
@@ -38,6 +40,11 @@ TILTS = {
     "d1": ("exp016_d1_integration", "d1tilt"),
     "quality": ("exp017_quality_integration", "qualtilt"),
     "sector_rs": ("exp018_sector_integration", "sectilt"),
+    # regime-conditional D1: low-vol tilt applied ONLY in the R2a crash regime
+    # (bench < MA60, 5-day confirm; t-1 observed -> t applied), full momentum
+    # otherwise. Reuses D1 (EXP-016) + R2a regime (EXP-010). W_CRASH is the tilt
+    # weight when the crash regime is active.
+    "d1_regime": ("exp019_d1_regime_integration", "d1regime"),
 }
 
 
@@ -48,7 +55,7 @@ def rss_gib():
 def tilt_series(pan: pd.DataFrame, factor: str) -> pd.DataFrame:
     """Return [symbol, trade_date, tilt] for the chosen tilt factor. `pan` is a
     padded (200d warmup) price panel sorted by symbol,trade_date."""
-    if factor == "d1":
+    if factor in ("d1", "d1_regime"):
         out = pan[["symbol", "trade_date"]].copy()
         out["tilt"] = D1.evaluate(pan).to_numpy()
         return out
@@ -113,11 +120,21 @@ def main() -> int:
         c = carrier.merge(tilt, on=["symbol", "trade_date"], how="left")
         c["rc"] = c.groupby("trade_date")["alpha_score"].rank(pct=True)
         c["rd"] = c.groupby("trade_date")["tilt"].rank(pct=True)
+        # regime-conditional weight series (R2a crash trigger; already t-1->t
+        # shifted inside gross_series). Only used when factor == d1_regime.
+        wser = None
+        if args.factor == "d1_regime":
+            regime = gross_series(bench_series(oos_s, oos_e), "R2a_confirm5")
+            wser = (regime < 1.0).astype(float) * args.weight  # tilt weight in crash, else 0
         for name, w in weights.items():
             cc = c.copy()
+            if wser is not None and w > 0:
+                wcol = cc["trade_date"].map(wser).fillna(0.0).to_numpy()
+            else:
+                wcol = w
             # names with no tilt value (insufficient history / no coverage) fall
             # back to carrier rank so the book universe is unchanged
-            cc["blend"] = (1 - w) * cc["rc"] + w * cc["rd"].fillna(cc["rc"])
+            cc["blend"] = (1 - wcol) * cc["rc"] + wcol * cc["rd"].fillna(cc["rc"])
             score = cc[["trade_date", "symbol"]].copy()
             score["alpha_score"] = cc["blend"].to_numpy()
             p = score.merge(flags, on=["symbol", "trade_date"], how="left")

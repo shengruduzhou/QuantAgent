@@ -222,3 +222,10 @@
 - **sector_rs tilt vs L1 baseline**：中位 +36.4%→+34.8%（略降）；**F1 弱折 +1.5%→+16.3%（大改善）**；**F3 牛 +97.2%→+111.8%（改善）**；**F2 崩塌 −41.0%→−66.4%（灾难 −25pp！）** worstDD 36.6%→42.5%；F4 +71.2%→+53.4%；median@25bps +24.1%→+22.8%；换手不变
 - **判定 REJECT**：板块动量顺周期——弱/牛市助力但崩塌灾难性放大（领涨板块崩得最狠，2024H1 题材崩盘）。坐实 Stage 8"naive 板块动量 whipsaws"。
 - **三 tilt 综合（D1/quality/sector）统一图景**：F2 崩塌由顺周期/高波暴露驱动——仅**去风险**（D1 低波）能救；**加动量**（板块）放大；**弥散基本面**（quality）够不到集中长多书。**L1 baseline 仍是收益冠军（中位 +36.4%、超额 +14.4%），无 overlay 能在不炸崩塌的前提下提收益。** 均非生产就绪，FRESH 仲裁。
+
+## EXP-019 · regime-conditional D1 低波 tilt（仅崩塌 regime）· 2026-07-07 · **ACCEPT（最佳 Calmar/风险调整收益）——首个改善 drawdown-adjusted return 的 overlay**
+- track: dual（Track C 因子 × 崩塌 regime overlay）；候选 1（d1_regime w=0.5 crash-only）；N 76→**77**；命令 `dual_track_d1_integration.py --factor d1_regime --weight 0.5`（复用 gross_series R2a + D1，零新模块）；产物 exp019_d1_regime_integration/；198s，RSS 2.22 GiB
+- 载体 = corrected C3_ema0.7；tilt = D1 rank，**权重 0.5 仅当 R2a 崩塌 regime（bench<MA60 confirm-5，t−1观测t执行）激活，其余=纯动量**；书 = min-hold-10
+- **d1_regime vs L1 baseline**：中位 +36.4%→**+25.3%**（远好于静态 D1 +18.6%）；**F2 崩塌 −41.0%→−32.3%（+9pp）**；**worstDD 36.6%→22.1%（−14.5pp，全场最低）**；F1 +1.5→+2.6%(DD 15.6→11.5%)；F3/F4 稀释（+97→+53、+71→+48：R2a 在牛市回调期误触发施加防御 tilt）；median@25bps +24.1%→+16.5%；换手不变 0.197
+- **5-variant Calmar 综合（中位CAGR/worstDD）**：baseline 0.99；D1 静态 0.75；**D1 regime 1.14（最佳）**；quality 0.91；sector 0.82。**regime-D1 是唯一改善风险调整收益（Calmar 1.14>0.99）的 overlay，非单纯拿收益换 DD。**
+- **判定 ACCEPT 机制**（过"更低 DD + 更好崩塌生还，收益代价可接受"验收门）：最佳 drawdown-adjusted 候选。残余成本=R2a 触发器在牛市回调误触（不扫参调触发器=避免 fold-mining）。**收益冠军仍是 L1 baseline（+36.4%，用户容忍高 DD）；风险调整冠军 = L1+D1_regime（Calmar 1.14）。** 非生产就绪（DSR 未测新配置、折已重挖、需 FRESH）。无生产提案。
