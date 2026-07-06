@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""D1_low_vol_20 integration test (materialization plan, DUAL_TRACK_FACTOR_BATCH_PLAN.md).
+"""Tilt-integration harness for the L1 min-hold-10 low-turnover core.
 
-Tilt the corrected C3_ema0.7 carrier by D1's per-date rank at an a-priori weight,
-build the L1 min-hold-10 book, and check whether it improves the F2 crash /
-worst-DD without wrecking median or turnover. New candidate = D1-tilt (w=0.3);
-w=0 reproduces L1 (already counted). N 73->74. Corrected sim, strict variant-C,
-H-008 folds, 8/15/25 bps. Zero retrain, zero fresh-holdout.
+Tilts the corrected C3_ema0.7 carrier by a chosen factor's per-date rank and
+checks whether it improves the F2 crash / worst-DD without wrecking median or
+turnover. Strict variant-C, corrected sim, H-008 folds, 8/15/25 bps, zero
+retrain, zero fresh-holdout. w=0 reproduces the L1 baseline.
+
+  --factor d1         EXP-016  D1 low-vol static tilt (fixes crash, halves return)
+  --factor quality    EXP-017  fundamental quality tilt (REJECT crash; helps flat)
+  --factor sector_rs  EXP-018  sector relative-strength tilt (REJECT; pro-cyclical)
+  --factor d1_regime  EXP-019  D1 tilt ONLY in R2a crash regime (ACCEPT; best Calmar)
 """
 from __future__ import annotations
 import json
@@ -42,8 +46,8 @@ TILTS = {
     "sector_rs": ("exp018_sector_integration", "sectilt"),
     # regime-conditional D1: low-vol tilt applied ONLY in the R2a crash regime
     # (bench < MA60, 5-day confirm; t-1 observed -> t applied), full momentum
-    # otherwise. Reuses D1 (EXP-016) + R2a regime (EXP-010). W_CRASH is the tilt
-    # weight when the crash regime is active.
+    # otherwise. Reuses D1 (EXP-016) + R2a regime (EXP-010); --weight is the tilt
+    # weight while the crash regime is active.
     "d1_regime": ("exp019_d1_regime_integration", "d1regime"),
 }
 
