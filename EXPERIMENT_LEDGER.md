@@ -147,3 +147,28 @@
 - **为什么以前没炸**：单测用逐日新 manager/唯一 signal_id；重放保真=坏模拟器 vs 同一坏模拟器（Spearman 0.9922）；只有"同名多次同向交易"书型显形——本周期书构建实验第一次系统性触碰
 - 再验证顺序提案（修复批准后）：单测→信任锚（v8.9 rankfix +17.25%、plus7 holdout 族）→EXP-008 折表→EXP-009..013→PBO/DSR 全量；≈2-3h CPU
 - 累计 N=**65**（EXP-013 两候选照记，虽 INVALID）
+
+## INC-E1 修复 PROMOTED + 再验证级联 · 2026-07-06 · **用户批准 → trusted-evaluator 默认修正，全部 pre-INC-E1 数字重跑**
+
+- **批准**：用户 2026-07-06 明确批准 "Promote fix + full re-validation"（红线"trusted evaluator 语义变更先问"满足）
+- **修复**：`fix_cross_day_order_dedup` 默认 False→**True**（commit `7f09453`）；日循环 `reset_daily_counters()` + 按日 `signal_id=bt-YYYYMMDD`；置 False 可复现 pre-INC-E1 旧模拟器（取证用）；OrderManager.reconcile 新增 signal_id 参数（默认 "manual"，实盘幂等路径不受影响，模拟器是唯一调用者）
+- **验证**：buy→cut→rebuy 默认 3/3 成交（旧 2/3）；`tests/test_order_dedup_regression.py` 摘除 xfail 标记（现断言修正行为）+ 新增旧路径复现测试（flag=False→2 成交）；95 execution 测试全绿；生产 materializer 字节等价**不受影响**（只 blend sleeve 分数，不经模拟器）
+
+### 再验证① EXP-008 折表（corrected，commit `2825c97`）— **重大反转**
+- 命令：`AI_quant_venv/bin/python3 scripts/analysis/exp008_walkforward_eval.py`（默认拾取修正后 sim）；产物 wf_h008/{wf_summary,candidate_fold_metrics,stitched_daily_returns}，pre-INC-E1 副本存 wf_h008/pre_inc_e1/；报告 EXP008_CORRECTED_INC_E1.md
+- RSS 峰值 **2.0 GiB**；时长 **210s**；CPU-only；零重训；零 fresh-holdout 接触（4 折全 OOS<2025-09-01，guard 武装）
+- **换手 3–13× 上修（核心伪影）**：C3_ema0.7 maxTurn 0.259→**1.035**；C3_ema0.3 0.070→**0.643**；全候选 0.57–1.35/日 → **EXP-011"换手已在书层解决"被推翻**（是被丢的增量单，非低 churn）
+- **DSR 崩塌**：C3_ema0.7 0.736→**0.026**；全候选 DSR<0.05 → N=50 多重检验校正后**无任一 blend 有显著换手调整后 Sharpe**
+- **中位折 CAGR 崩塌**：C3_ema0.7 +33.0%→**+1.3%**；C3_ema0.3→+7.8%（现最佳）；C3_ema0.5→+3.9%；incumbent C2 +23.8%→**−24.6%**（现全场最差）；全候选中位超额 vs 基准为负（−24%..−34%）
+- **F2 崩塌更深**：−53.7%..−70.9%（vs bench −33.1%）；C3_ema0.7 最不坏 −56.7%
+- **15bps 敏感性（重生成 corrected）**：C2 每折 −47%..−78%；C3_ema0.7 −31%/−65%/+8%/+1% → 真实换手下极端成本敏感
+- **fold-block PBO 0.833→0.167**（一致平庸，非利好信号）
+- **方向守恒**：EMA 平滑仍碾压快速逐日重选书（C1/C2/median）→ H-008 定性结论（平滑有益、C2 非强锚）存活，但经济性摧毁、换手门普遍严重违反
+
+### 再验证② 信任锚 v8.9 rankfix k50 clean-OOS（corrected）
+- 命令：`baseline_protocol.py --predictions .../v89_rankfix_20260613_1044/ensemble_composite.parquet --top-k 50 --start 2024-08-09 --end 2025-08-29 --score-column composite_score --variants C_flags_eligible_delay1`
+- **corrected ann +30.09%**（vs pre-INC-E1 +17.25%——但后者窗口更长含 2026 回撤，不可直接比）；**excess −35.23%**（bench +65.32%，clean bull 窗口大幅跑输被动等权）
+- **关键洞察**：INC-E1 对收益方向**不定**——k10 快书隐藏换手成本（修正后收益↓）；k50 牛市窗口冻结回补（修正后收益↑）。诚实结论不变且被强化：strat 在 clean 窗口大幅跑输等权基准
+
+### 再验证③ EXP-011 book-churn（corrected）— 进行中，见下批次
+- pre-INC-E1 副本存各 exp0{09..13}/pre_inc_e1/；EXP-011/012/013 硬编码 BASE 门槛为 pre-INC-E1 载体值，需按 corrected 载体重判（在报告中重裁，非改脚本）
