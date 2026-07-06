@@ -70,38 +70,39 @@ def eligible_rank_lists(p: pd.DataFrame) -> dict[pd.Timestamp, list[str]]:
     return {ts: g["symbol"].tolist() for ts, g in d.groupby("trade_date", sort=True)}
 
 
-def build_book(days: dict[pd.Timestamp, list[str]], rule: str) -> pd.DataFrame:
+def build_book(days: dict[pd.Timestamp, list[str]], rule: str, k: int = TOP_K) -> pd.DataFrame:
     """Iterative book construction -> weights indexed by score date."""
+    prune = 0.05 / k  # 0.005 at k=10; same 5%-of-slot proportion at other k
     rows: dict[pd.Timestamp, dict[str, float]] = {}
     held: dict[str, float] = {}
     ages: dict[str, int] = {}
     for i, (ts, order) in enumerate(days.items()):
         rank = {s: j for j, s in enumerate(order)}
         if rule == "B1_buffer30":
-            keep = [s for s in held if rank.get(s, 1 << 30) < 30]
-            book = keep + [s for s in order if s not in held][: TOP_K - len(keep)]
-            held = {s: 1.0 / TOP_K for s in book}
+            keep = [s for s in held if rank.get(s, 1 << 30) < 3 * k]
+            book = keep + [s for s in order if s not in held][: k - len(keep)]
+            held = {s: 1.0 / k for s in book}
         elif rule == "B2_minhold10":
             locked = [s for s in held if ages.get(s, 99) < 10 and s in rank]
-            free = TOP_K - len(locked)
+            free = k - len(locked)
             fills = [s for s in order if s not in locked][:free]
             book = locked + fills
             ages = {s: ages.get(s, 0) + 1 for s in book}
-            held = {s: 1.0 / TOP_K for s in book}
+            held = {s: 1.0 / k for s in book}
         elif rule == "B3_partial30":
-            target = {s: 1.0 / TOP_K for s in order[:TOP_K]}
+            target = {s: 1.0 / k for s in order[:k]}
             if not held:
                 held = target
             else:
                 nw = {s: 0.7 * w for s, w in held.items()}
                 for s, w in target.items():
                     nw[s] = nw.get(s, 0.0) + 0.3 * w
-                nw = {s: w for s, w in nw.items() if w >= 0.005}
+                nw = {s: w for s, w in nw.items() if w >= prune}
                 tot = sum(nw.values())
                 held = {s: w / tot for s, w in nw.items()} if tot > 0 else target
         elif rule == "B4_reb5d":
             if i % 5 == 0 or not held:
-                held = {s: 1.0 / TOP_K for s in order[:TOP_K]}
+                held = {s: 1.0 / k for s in order[:k]}
         else:
             raise ValueError(rule)
         # anti-runaway guard only — B3's decay tail has no registered size cap
