@@ -87,6 +87,20 @@
 - **验收（与 H-009 相同四门）**：worstDD<25.0% ∧ F2>−29.9% ∧ maxTurn≤min(0.309,0.35) ∧ 中位≥+28.0%。
 - 累计 N：53+2=**55**。预算 8 次 variant-C ≈7min CPU。
 
+## H-011 书构建层 churn 控制（状态：**REGISTERED 2026-07-06，EXP-011 待跑；Track A 第一批**）
+
+- 动机：EXP-008 换手门失败（C3_ema0.7 max 0.259 > 0.10 承诺）+ EXP-009/010 结构性结论（churn 在书构建层解，overlay 线已关闭）。
+- **候选（N=5，先验冻结，跑后不改）**——载体=C3_ema0.7 分数（EXP-008 原样重建，零重训），k=10 等权，long-only，gross≤1，eligibility/delay-1 与 variant-C `_target_weights` 完全一致：
+  - **B1_buffer30** 排名保留区：进入 top-10，持有至跌出 top-30
+  - **B2_minhold10** 最短持有 10 交易日（锁仓名额制，新入者 age=1）
+  - **B3_partial30** 部分调仓 w_t=0.7·w_{t−1}+0.3·target_t（<0.5% 剪除后归一）
+  - **B4_reb5d** 每 5 交易日重构，期间目标权重不变
+  - **B5_buffer_r2a_ramp** B1 书 × R2a confirm-5 MA60 gross{1.0,0.5}，gross 变动 ≤0.1/日（渐进切换，t−1 观测 t 执行）
+- 评测：H-008 同 4 折 variant-C 8bps + 全员 15bps 敏感性（仅报告）；PBO（6 书 CSCV）+ DSR@N=60。
+- **验收门（先验，全过才接受机制）**：G1 maxTurn≤0.10 ∧ G2 worstDD≤0.2503 ∧ G3 F2≥−24.9%（基线+5pp）∧ G4 中位≥+28.02% ∧ G5 sector max≤0.33 ∧ G6 无杠杆 ∧ G7 新鲜窗零接触；生产采纳另需 DSR≥0.95（不自动改生产）。G3 单独不过=churn-solved/crash-unsolved 记录在案。
+- 累计 N：55+5=**60**。预算：CPU 40 次 variant-C ≈10min，RSS<4G，磁盘<50MB。
+- 详细定义/命令/基线冻结：BOOK_CHURN_CONTROL_EXPERIMENT.md。
+
 ## 队列中未立项（见 IDEA_QUEUE.md）
 
 H-004 sector 集中度约束收紧；H-005 长 sleeve 诊断价值（何时该有非零权重）；H-006 DSL 因子新批次（capped）；H-007 offline RL turnover-controller；H-008 walk-forward 重训协议（模型层，需 GPU 授权）。
