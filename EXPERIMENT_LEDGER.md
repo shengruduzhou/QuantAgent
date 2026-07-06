@@ -180,3 +180,17 @@
 - **结论**：R2a 是真实但温和且有成本的崩塌对冲（非免费午餐）。**书层 B2_minhold10 全面碾压 overlay 层 R2a**：B2 崩塌改善更多（−40.2% vs −48.5%）且中位收益↑（+36.4%）而 R2a 崩塌改善少且稀释收益 → **churn/崩塌控制归属书构建（min-hold）而非 gross 切换 overlay**，修正数据更强支持 Track A 优于 overlay 线
 - **Track D 再定范围**：gross-exposure RL overlay 的基线机制（R2a）已被书层压制 → RL 价值（若有）应为 min-hold 书之上的 turnover-aware 控制器，非独立 gross scaler
 - N 不变（冻结候选重跑）。EXP-009 raw overlay (R1/R2/R3) 与 EXP-012 wide-book 修正重跑待做（同属 user-authorized 再验证，无新 trial）
+
+## H-015 双轨换手比较（EXP-015，Track L vs Track H）· 2026-07-07 · **Track L 验证 / Track H 拒绝（成本不生还）**
+- track: dual；候选 8（4L+4H，先验冻结 registry H-015）；N 65→**73**；命令 `AI_quant_venv/bin/python3 scripts/analysis/dual_track_eval.py`；产物 exp015_dual_track/{results.json,dual_track_metrics.csv}；报告 DUAL_TRACK_RESULT_H015.md
+- 数据：wf_h008 冻结 sleeve 预测 + silver panel（sha 见 H-003 manifest）；窗口 H-008 F1–F4（全 OOS<2025-09-01，guard 武装）；bench eqw-all-A；corrected sim；8/15/25bps
+- RSS 峰值 **2.06 GiB**；13m25s；CPU-only；零重训；零 fresh 接触
+- **净指标（8bps median CAGR / median excess / maxTurn / F2 / med@25bps / DSR）**：
+  - L1_c3ema07_minhold10 **+36.4% / +14.4% / 0.202 / −41.0% / +24.1% / 0.055**（最佳整体）
+  - L4_c3ema07_reb10 +31.8% / +9.9% / 0.190 / −46.5% / +21.8% / 0.041
+  - L3_midlong_minhold10 +27.4% / +5.5% / 0.200 / **−33.0%（最佳崩塌）** / +16.9% / 0.040
+  - H4_short_minhold3 +16.8% / −12.0% / 0.627 / −51.8% / **−10.7%（25bps 死）** / 0.004
+  - L2_midlong_ema07 +12.0%（plain 无 hold→churn 1.01 弱）；H1/H2/H3 全负（churn 1.2–1.44，25bps −48~−57%）
+- **门**：Track L L1/L3/L4 各 **4/5**（仅差 worstDD：崩塌折 35–37% vs 载体 33.9%）；Track H H4 4/5 但**差关键 med@25bps 门**（成本生还=H 轨定义门），其余 1–2/5
+- **PBO 0.0**（L1/L4 一致占优→IS 最佳从不 OOS 低于中位）；**DSR 全 <0.06**（N=73 生产统计门不过）
+- **结论**：**Track L 验证为稳健路径；Track H 因不生还真实成本被拒绝**。换手控制（min-hold/reb-throttle）而非周期是杠杆（L2 plain churn 1.01 弱，加 min-hold→L3 +27.4%；快信号 H4 min-hold-3 亦被救 +16.8%）。最佳稳健 = **L1_c3ema07_minhold10**（首个中位超额为正 +14.4%，vs 载体负）；最佳防御 = L3（F2 −33.0%）。**均非生产就绪**（worstDD ~36% 崩塌折 + DSR<0.06）；折已重挖，FRESH 为仲裁。无生产提案。
