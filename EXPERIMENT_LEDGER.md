@@ -194,3 +194,11 @@
 - **门**：Track L L1/L3/L4 各 **4/5**（仅差 worstDD：崩塌折 35–37% vs 载体 33.9%）；Track H H4 4/5 但**差关键 med@25bps 门**（成本生还=H 轨定义门），其余 1–2/5
 - **PBO 0.0**（L1/L4 一致占优→IS 最佳从不 OOS 低于中位）；**DSR 全 <0.06**（N=73 生产统计门不过）
 - **结论**：**Track L 验证为稳健路径；Track H 因不生还真实成本被拒绝**。换手控制（min-hold/reb-throttle）而非周期是杠杆（L2 plain churn 1.01 弱，加 min-hold→L3 +27.4%；快信号 H4 min-hold-3 亦被救 +16.8%）。最佳稳健 = **L1_c3ema07_minhold10**（首个中位超额为正 +14.4%，vs 载体负）；最佳防御 = L3（F2 −33.0%）。**均非生产就绪**（worstDD ~36% 崩塌折 + DSR<0.06）；折已重挖，FRESH 为仲裁。无生产提案。
+
+## Track C 因子批次 1（defensive/low-turnover，DUAL_TRACK_FACTOR_BATCH_PLAN.md）· 2026-07-07 · **1 survivor: D1_low_vol_20**
+- track: C（因子生成）；候选 7（先验冻结）；命令 `AI_quant_venv/bin/python3 scripts/analysis/dual_track_factor_batch.py`；产物 FACTOR_CANDIDATE_LEDGER.csv
+- 窗口 2023-07-03..2025-08-29（pre-quarantine，断言）；PIT-safe DSL（quantagent.factors.expr）；116s，RSS 2.70 GiB，CPU-only，零 fresh 接触
+- **验收逻辑修正**（第一版 bug：sign-agnostic accept 收了负 IC capacity-trap + 去相关把 D1/D7 双杀）→ 现要求 oriented-positive IC + 低换手 + 成本生还 + (defensive)崩塌 IC≥0 + 去相关簇保最优
+- **survivor: D1_low_vol_20 = −TsStd(Returns(Close,1),20)**：rank_IC10 +0.080 / ICIR +0.35 / 换手 0.074（≈13.5 日持有）/ **F2 崩塌 IC +0.080（崩塌期仍有效=防御）** / LS@25bps +0.0045（成本生还）→ 正是 H-015 残余崩塌（信号级）所需杠杆
+- D7_downside_range redundant（0.91 corr D1）；D6_vol_compression reject（换手 0.329>0.15，但 ICIR 0.48 最高→留待中换手批次）；D2/D3/D4/D5 reject（负 oriented IC=反转/流动性溢价，long 侧=capacity trap）
+- **物化计划**：注册 synth_low_vol_20（不入生产）；下一步集成测试 = D1 rank 以 0.3 权重 tilt corrected C3_ema0.7 载体 × L1 min-hold-10 书，看是否改善 F2 崩塌/worstDD；数据集重建延后至集成测试证成。FRESH 仍为仲裁
