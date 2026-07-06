@@ -131,6 +131,17 @@
 - 预算：24 次 variant-C ≈7min CPU，RSS<4G。累计 N=**65**。
 - **硬停止条款**：本批后 H-008 4 折冻结（任何配置不得再评测），直到 FRESH 窗首读（≥120 交易日 ≈2026-11）或用户显式重开。
 
+## H-014 修正后 Track A 收敛：min-hold × partial-adjust 逼近 0.10 换手 while 保留崩塌增益（状态：**已登记 · 待 FRESH 或用户重开 · 不跑（fold-mining 纪律）**，2026-07-06）
+
+- **动机**：INC-E1 修正后 EXP-011 重跑（EXP011_CORRECTED_INC_E1.md）**推翻** pre-INC-E1 结论——真实换手 0.19–0.78（非 0.014–0.041 伪影），且 min-hold **改善**崩塌（非加深）。**B2_minhold10 在修正载体上 4/4 核心轴碾压**：中位 +36.4% vs +1.3%、换手 0.202 vs 1.035（5×↓）、F2 −40.2% vs −56.7%（+16pp）、DSR 0.427 vs 0.025（17×）；仅差绝对换手门（0.202>0.10）与绝对 worstDD（36.6%）。B5（buffer+R2a ramp）是唯一压住 worstDD 的（25.2%）。
+- **设计（先验冻结 ≤4，跑后不改）**——载体 C3_ema0.7@k10 修正 sim：
+  - **M1_minhold15**：min-hold 15 日（B2 的 10→15，进一步压换手）
+  - **M2_minhold10_partial**：min-hold 10 + partial-adjust 0.5（B2×B3 复合，压增量再平衡换手）
+  - **M3_minhold10_r2aramp**：B2 + R2a ramp 0.1/日（B2 收益 × B5 的 DD 控制——最可能同过 G1/G2/G3）
+  - **M4_minhold20**：min-hold 20 日（换手–收益前沿慢端锚点）
+- **验收门（vs 修正载体 + 绝对承诺）**：G1 maxTurn≤0.10（绝对）∧ G2 worstDD≤33.9%（修正载体）∧ G3 F2≥−51.7%（载体+5pp）∧ G4 中位≥+1.3%（载体）∧ G5 sector≤0.33 ∧ 无杠杆 ∧ 隔离零接触。全过且 DSR≥0.95 ⇒ PRODUCTION_CANDIDATE_PROPOSAL（待 FRESH 裁决，不改生产）。
+- **纪律（关键）**：H-008 4 折已被 ~65 次候选看过；INC-E1 修正重跑经用户批准（不加 N）。**H-014 是新候选 = 新 fold-mining**，违反 H-013 硬停止条款。故**登记但不跑**——直到 (a) FRESH 窗首读（≈2026-11）提供真 OOS 仲裁，或 (b) 用户显式批准再花 4 折自由度。符合任务"不优化脆弱参数赢家"红线。预算（若跑）：≈16 次 variant-C ≈5min CPU，N 65→69。
+
 ## 队列中未立项（见 IDEA_QUEUE.md）
 
 H-004 sector 集中度约束收紧；H-005 长 sleeve 诊断价值（何时该有非零权重）；H-006 DSL 因子新批次（capped）；H-007 offline RL turnover-controller；H-008 walk-forward 重训协议（模型层，需 GPU 授权）。

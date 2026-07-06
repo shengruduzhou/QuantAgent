@@ -10,6 +10,15 @@ churn-controlled book makes the F2 crash fold WORSE. See §6–§7.**
 > (incremental orders never reached the broker), and Finding 3's path-noise is largely that
 > bug's cascade. All quantitative claims in this file must be re-run after the approved fix
 > before being cited.
+>
+> ✅ **SUPERSEDED by corrected re-run — see [EXP011_CORRECTED_INC_E1.md](EXP011_CORRECTED_INC_E1.md)
+> (2026-07-06, fix promoted commit 7f09453).** The fix was user-approved and promoted to the
+> trusted default; EXP-011 was re-run on the corrected simulator. **Both conclusions below are
+> REFUTED:** real turnovers are 0.19–0.78 (not 0.014–0.041), and min-hold IMPROVES the F2 crash
+> (B2_minhold10 −40.2% vs corrected carrier −56.7%) rather than deepening it. **B2_minhold10
+> beats the corrected carrier on 4/4 core axes** (median +36.4% vs +1.3%, turnover 0.202 vs
+> 1.035, F2 +16pp, DSR 0.427 vs 0.025) but still fails the absolute 0.10 turnover promise →
+> Track A re-opened as H-014 (registered, held for FRESH per fold-mining discipline).
 
 *(Registered at commit 1994cd4 before any evaluation run; candidates frozen there.)*
 
