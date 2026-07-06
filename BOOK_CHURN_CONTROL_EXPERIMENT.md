@@ -4,6 +4,13 @@
 Churn gate is solved mechanically (turnover 0.014–0.041 « 0.10 for B2/B3/B4), but every
 churn-controlled book makes the F2 crash fold WORSE. See §6–§7.**
 
+> ⚠ **pre-INC-E1 stamp (2026-07-06, same day, post-hoc):** the execution simulator was later
+> found to silently drop all repeat (symbol, side) orders across a backtest
+> (EVALUATOR_ORDER_DEDUP_BUG.md). The low-turnover numbers here are partly an artifact
+> (incremental orders never reached the broker), and Finding 3's path-noise is largely that
+> bug's cascade. All quantitative claims in this file must be re-run after the approved fix
+> before being cited.
+
 *(Registered at commit 1994cd4 before any evaluation run; candidates frozen there.)*
 
 ## 1. Motivation (from the closed overlay line)
