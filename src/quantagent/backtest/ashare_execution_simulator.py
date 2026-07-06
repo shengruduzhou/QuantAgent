@@ -25,6 +25,17 @@ class AShareExecutionSimulationConfig:
     block_st_buy: bool = True
     max_st_weight: float = 0.0
     audit_log_dir: str | None = None
+    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md): PROMOTED to trusted-evaluator
+    # default 2026-07-06 with user approval (all pre-INC-E1 numbers re-run under
+    # the corrected simulator). When True (default): reset per-symbol order
+    # counters each simulated day AND stamp orders with a per-day signal_id so a
+    # later-day repeat (symbol, side) is no longer silently deduped against the
+    # never-cleared history -- each symbol can now re-trade across days as a live
+    # book would. Set False ONLY to reproduce the legacy pre-INC-E1 (buggy)
+    # simulator for forensic comparison against stamped pre-INC-E1 artifacts.
+    # Live-trading idempotency (OrderManager.reconcile default signal_id="manual",
+    # same-day retry -> same id) is unaffected either way.
+    fix_cross_day_order_dedup: bool = True
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,8 @@ def simulate_ashare_target_weights(
         if day_market.empty:
             continue
         broker.advance_trading_day()
+        if config.fix_cross_day_order_dedup:
+            manager.reset_daily_counters()
         broker.set_market_state(day_market.to_dict("records"))
         prices = pd.to_numeric(day_market.set_index("symbol")["close"], errors="coerce")
         invalid_price_symbols = set(prices[prices.isna() | (prices <= 0)].index.astype(str))
@@ -124,7 +137,12 @@ def simulate_ashare_target_weights(
         current_weights = _current_weights(broker, prices)
         adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
         nav = _mark_to_market_nav(broker, prices)
-        states = manager.reconcile(adjusted, prices, nav)
+        day_signal_id = (
+            f"bt-{pd.Timestamp(date):%Y%m%d}"
+            if config.fix_cross_day_order_dedup
+            else "manual"
+        )
+        states = manager.reconcile(adjusted, prices, nav, signal_id=day_signal_id)
         for skipped in manager.last_skipped_orders:
             skipped_rows.append({"trade_date": date, **skipped})
         for state in states:

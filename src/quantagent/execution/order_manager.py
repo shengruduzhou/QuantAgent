@@ -55,9 +55,11 @@ class OrderManager:
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
 
-    def reconcile(self, target_weights: pd.Series, prices: pd.Series, nav: float) -> list[OrderState]:
+    def reconcile(self, target_weights: pd.Series, prices: pd.Series, nav: float,
+                  signal_id: str = "manual") -> list[OrderState]:
         positions = {p.symbol: p for p in self.broker.query_positions()}
-        intents = self.target_weights_to_order_intents(target_weights, prices, nav, positions=positions)
+        intents = self.target_weights_to_order_intents(
+            target_weights, prices, nav, positions=positions, signal_id=signal_id)
         orders: list[Order] = []
         for intent in intents:
             if self.counts_today.get(intent.symbol, 0) >= self.config.max_orders_per_symbol_per_day:
