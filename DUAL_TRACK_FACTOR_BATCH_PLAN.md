@@ -87,3 +87,37 @@ small/illiquid/loser names) → not materialized.
   median or turnover. FRESH (~2026-11) remains the OOS arbiter.
 - Dataset rebuild (adding the column to the 8 GB training set) deferred until the
   integration test justifies it.
+
+---
+
+## BATCH 2 — fundamental quality/growth (H-017, 2026-07-07)
+
+Reused the same harness via `--batch fundamental` (extracted shared `score_factors`;
+merged PIT-safe `tickflow_fin_features.parquet` with the `augment_training_dataset`
+pattern + an extra 1-day per-symbol lag). These features exist but were NEVER in the
+production training dataset → the sleeves never trained on them (untapped orthogonal
+signal). 105s, RSS 3.18 GiB, pre-quarantine, asserted.
+
+| Factor | IC10 | ICIR10 | turn | **F2-crash IC** | LS@25bps | refcorr | verdict |
+|--------|------|--------|------|-----------------|----------|---------|---------|
+| QF_roe | −0.004 | −0.02 | 0.012 | **+0.098** | −0.0046 | 0.23 | discard |
+| QF_net_margin | +0.001 | +0.00 | 0.003 | **+0.091** | −0.0039 | 0.24 | discard |
+| QF_quality | −0.003 | −0.02 | 0.005 | **+0.080** | −0.0033 | 0.20 | discard |
+| QF_net_income_yoy | +0.007 | +0.08 | 0.008 | +0.055 | +0.0020 | 0.11 | discard |
+| QF_growth | +0.006 | +0.06 | 0.008 | +0.058 | +0.0016 | 0.15 | discard |
+| QF_revenue_yoy | +0.004 | +0.04 | 0.007 | +0.045 | +0.0007 | 0.14 | discard |
+| QF_gross_margin | −0.005 | −0.06 | 0.002 | +0.006 | −0.0007 | 0.07 | discard |
+
+**Key finding — quality is a CONDITIONAL crash-regime factor, not an unconditional
+alpha.** All 7 discard on standalone IC (≈0): high quality/growth does not predict
+10-day forward returns unconditionally in this retail-momentum A-share universe (a
+well-known effect — quality lags junk/microcap rallies). **But the F2-crash IC is
+strongly positive** (roe +0.098, net_margin +0.091, quality +0.080): in the 2024-H1
+microcap collapse, high-quality names strongly outperformed. Turnover is ~0 (quarterly
+steps) and the factor is orthogonal to the technical signal (refcorr 0.07–0.24).
+
+→ Quality can't be a static alpha tilt (would drag bull folds), but is a candidate
+**crash-regime defensive lever**. Tested as a static tilt on L1 next (EXP-017) to see
+whether its near-zero unconditional IC gives a better crash/return trade than the D1
+low-vol tilt (which has +IC but sacrifices momentum upside). No `synth_*` materialized
+from this batch (no standalone survivor). Valuation (PE/PB) remains a genuine data gap.

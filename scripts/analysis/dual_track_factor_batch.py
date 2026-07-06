@@ -44,44 +44,80 @@ FACTORS = {
     "D7_downside_range_neg_20": ("defensive", E.Mul(E.Constant(-1.0),
         E.TsMean(E.Div(E.Sub(E.High, E.Low), E.Close), 20))),
 }
-# references for decorrelation
-REF = {"mom20": E.Returns(E.Close, 20), "liq": E.TsMean(E.Amount, 20)}
+# references for decorrelation (technical winners, so a fundamental batch's
+# orthogonality to the existing signal is measured directly)
+REF = {"mom20": E.Returns(E.Close, 20), "liq": E.TsMean(E.Amount, 20),
+       "lowvol20": E.Mul(E.Constant(-1.0), E.TsStd(E.Returns(E.Close, 1), 20))}
+FIN = REPO / "runtime/data/v7/gold/training_dataset/tickflow_fin_features.parquet"
+# fundamental quality/growth factors (batch=fundamental). PIT-safe: tickflow
+# features step on publication dates; an extra 1-day per-symbol lag is applied.
+FUND_COLS = ["roe", "net_margin", "gross_margin", "revenue_yoy", "net_income_yoy"]
+FUND_FACTORS = {  # name -> (class, source spec)
+    "QF_roe": ("fundamental", ["roe"]),
+    "QF_net_margin": ("fundamental", ["net_margin"]),
+    "QF_gross_margin": ("fundamental", ["gross_margin"]),
+    "QF_revenue_yoy": ("fundamental", ["revenue_yoy"]),
+    "QF_net_income_yoy": ("fundamental", ["net_income_yoy"]),
+    "QF_quality": ("fundamental", ["roe", "net_margin", "gross_margin"]),  # rank-mean composite
+    "QF_growth": ("fundamental", ["revenue_yoy", "net_income_yoy"]),        # rank-mean composite
+}
 
 
 def rss_gib():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
 
 
-def main() -> int:
-    t0 = time.time()
+def _load_panel():
     panel = pd.read_parquet(REPO / bp.PANEL,
         columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"],
         filters=[("trade_date", ">=", WIN[0] - pd.Timedelta(days=200)), ("trade_date", "<=", WIN[1])])
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     assert panel["trade_date"].max() < QUAR, "quarantine breach"
-    panel = panel.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    return panel.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
-    # compute all factor columns + refs (warmup uses the 200d pre-window pad)
-    cols = {}
-    for name, (_, ex) in FACTORS.items():
-        cols[name] = ex.evaluate(panel).to_numpy()
-    for name, ex in REF.items():
-        cols[name] = ex.evaluate(panel).to_numpy()
+
+def build_dsl_frame():
+    panel = _load_panel()
+    cols = {n: ex.evaluate(panel).to_numpy() for n, (_, ex) in FACTORS.items()}
+    for n, ex in REF.items():
+        cols[n] = ex.evaluate(panel).to_numpy()
     for k, v in cols.items():
         panel[k] = v
-    lab = forward_return_labels(panel, horizons=(10, 20))
-    lab = lab[(lab["trade_date"] >= WIN[0]) & (lab["trade_date"] <= WIN[1])].copy()
+    return panel, {n: c for n, (c, _) in FACTORS.items()}, list(REF)
 
-    # decorrelation: pooled spearman of per-date ranks
-    fac_names = list(FACTORS)
-    rank_frame = {}
-    for n in fac_names + list(REF):
-        rank_frame[n] = lab.groupby("trade_date")[n].rank(pct=True)
-    R = pd.DataFrame(rank_frame)
-    corr = R.corr(method="spearman")
+
+def build_fundamental_frame():
+    panel = _load_panel()
+    # refs (technical) still computed on price for orthogonality measurement
+    for n, ex in REF.items():
+        panel[n] = ex.evaluate(panel).to_numpy()
+    fin = pd.read_parquet(FIN, columns=["symbol", "trade_date"] + FUND_COLS)
+    fin["trade_date"] = pd.to_datetime(fin["trade_date"])
+    # extra PIT safety: 1-trading-day per-symbol lag (feature at t uses info <= t-1)
+    fin = fin.sort_values(["symbol", "trade_date"])
+    fin[FUND_COLS] = fin.groupby("symbol", sort=False)[FUND_COLS].shift(1)
+    n0 = len(panel)
+    panel = panel.merge(fin, on=["symbol", "trade_date"], how="left")
+    assert len(panel) == n0, f"fundamental merge fan-out {n0}->{len(panel)}"
+    # per-date cross-sectional rank of each raw fundamental (robust to ROE outliers),
+    # then factor columns = rank (single) or rank-mean (composite)
+    for c in FUND_COLS:
+        panel[f"_r_{c}"] = panel.groupby("trade_date")[c].rank(pct=True)
+    for name, (_, srcs) in FUND_FACTORS.items():
+        panel[name] = panel[[f"_r_{c}" for c in srcs]].mean(axis=1)
+    return panel, {n: c for n, (c, _) in FUND_FACTORS.items()}, list(REF)
+
+
+def score_factors(lab, factor_meta, ref_names, out_csv):
+    """Shared scoring: per-factor IC/turnover/cost/crash + decorrelation
+    clustering (keep-best) + verdict. `lab` already has factor + ref columns and
+    forward_return_{10,20}d; `factor_meta` = {name: class}."""
+    fac_names = list(factor_meta)
+    rank_frame = {n: lab.groupby("trade_date")[n].rank(pct=True) for n in fac_names + ref_names}
+    corr = pd.DataFrame(rank_frame).corr(method="spearman")
 
     rows = []
-    for name, (cls, _) in FACTORS.items():
+    for name, cls in factor_meta.items():
         sub = lab.dropna(subset=[name, "forward_return_10d"])
         ic10 = information_coefficient(sub, name, "forward_return_10d").summary
         sub20 = lab.dropna(subset=[name, "forward_return_20d"])
@@ -93,8 +129,8 @@ def main() -> int:
         f2ic = information_coefficient(f2, name, "forward_return_10d").summary.mean_rank_ic if len(f2) else np.nan
         cap = capacity_proxy(sub, name)
         others = [c for c in fac_names if c != name]
-        max_decorr = float(max(abs(corr.loc[name, o]) for o in others))
-        max_ref = float(max(abs(corr.loc[name, r]) for r in REF))
+        max_decorr = float(max(abs(corr.loc[name, o]) for o in others)) if others else 0.0
+        max_ref = float(max(abs(corr.loc[name, r]) for r in ref_names))
         to = float(qb8.turnover.mean())
         ls8, ls25 = float(qb8.cost_adjusted_long_short.mean()), float(qb25.cost_adjusted_long_short.mean())
         # gates. NOTE: factors are oriented high=good, so acceptance requires a
@@ -141,15 +177,33 @@ def main() -> int:
     df["g_decorr"] = [g_decorr[n] for n in df.index]
     df["verdict"] = [verdicts[n] for n in df.index]
     df = df.reset_index()
-    df.to_csv(REPO / "FACTOR_CANDIDATE_LEDGER.csv", index=False)
+    df.to_csv(out_csv, index=False)
     for _, r in df.iterrows():
-        print(f"{r['factor']:26s}[{r['class']:11s}] IC10 {r['rank_ic_h10']:+.4f} ICIR {r['rank_icir_h10']:+.2f} "
+        print(f"{r['factor']:26s}[{r['class']:12s}] IC10 {r['rank_ic_h10']:+.4f} ICIR {r['rank_icir_h10']:+.2f} "
               f"turn {r['topq_turnover']:.3f} F2ic {r['f2_crash_ic_h10']:+.4f} LS25 {r['ls_costadj_25bps']:+.5f} "
-              f"decorr {r['max_decorr_other']:.2f} -> {r['verdict']}", flush=True)
-    print(f"\nwrote FACTOR_CANDIDATE_LEDGER.csv | accept={sum(df.verdict=='accept')} "
+              f"decorr {r['max_decorr_other']:.2f} refcorr {r['max_corr_ref']:.2f} -> {r['verdict']}", flush=True)
+    print(f"\nwrote {out_csv.name} | accept={sum(df.verdict=='accept')} "
           f"redundant={sum(df.verdict=='redundant')} reject={sum(df.verdict=='reject')} "
           f"discard={sum(df.verdict=='discard')}")
-    print(f"peak RSS {rss_gib():.2f} GiB, {time.time()-t0:.0f}s")
+    return df
+
+
+def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--batch", choices=["dsl", "fundamental"], default="dsl")
+    args = ap.parse_args()
+    t0 = time.time()
+    if args.batch == "dsl":
+        panel, meta, refs = build_dsl_frame()
+        out = REPO / "FACTOR_CANDIDATE_LEDGER.csv"
+    else:
+        panel, meta, refs = build_fundamental_frame()
+        out = REPO / "FACTOR_CANDIDATE_LEDGER_fundamental.csv"
+    lab = forward_return_labels(panel, horizons=(10, 20))
+    lab = lab[(lab["trade_date"] >= WIN[0]) & (lab["trade_date"] <= WIN[1])].copy()
+    score_factors(lab, meta, refs, out)
+    print(f"peak RSS {rss_gib():.2f} GiB, {time.time()-t0:.0f}s [batch={args.batch}]")
     return 0
 
 

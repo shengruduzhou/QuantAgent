@@ -131,7 +131,14 @@
 - 预算：24 次 variant-C ≈7min CPU，RSS<4G。累计 N=**65**。
 - **硬停止条款**：本批后 H-008 4 折冻结（任何配置不得再评测），直到 FRESH 窗首读（≥120 交易日 ≈2026-11）或用户显式重开。
 
-## H-014 修正后 Track A 收敛：min-hold × partial-adjust 逼近 0.10 换手 while 保留崩塌增益（状态：**已登记 · 待 FRESH 或用户重开 · 不跑（fold-mining 纪律）**，2026-07-06）
+## H-017 基本面质量/成长 tilt 提升低换手核心（状态：**已登记 · 跑**，2026-07-07）
+
+- **瓶颈诊断**：当前最佳 L1_c3ema07_minhold10 崩塌折 worstDD 36.6% 为信号级（载体=纯技术动量 sleeve 混合，无基本面锚）；D1 低波 tilt 修 DD 但收益减半。**假设：PIT-safe 基本面质量/成长（tickflow_fin_features：roe/net_margin/gross_margin/revenue_yoy/net_income_yoy——已存在但生产数据集未并入、sleeve 从未训练=未开发正交信号）作为 tilt 能以更小收益代价改善崩塌/正交加 alpha。**
+- **复用**：扩展现有 `dual_track_factor_batch.py`（`--batch fundamental`，抽出 `score_factors` 共享评分）+ `augment_training_dataset.py` 的 merge 模式；不新建模块。PIT 安全：tickflow 特征按公告日 step，额外 +1 交易日 per-symbol lag。
+- **候选（7，先验冻结）**：QF_roe / QF_net_margin / QF_gross_margin / QF_revenue_yoy / QF_net_income_yoy / QF_quality(rank-mean roe+net_margin+gross_margin) / QF_growth(rank-mean revenue_yoy+net_income_yoy)。每因子按日截面 rank（对 ROE 极端值稳健）。
+- **评测**：窗口 2023-07-03..2025-08-29（pre-quarantine，断言）；rank_IC/ICIR@h10/h20、top-q 换手、LS cost-adj@8/15/25bps、F2 崩塌 IC、去相关（含 vs 技术 refs mom20/liq/lowvol20——测正交性）、capacity。验收：oriented-positive IC≥0.015 ∧ ICIR≥0.2 ∧ 换手≤0.15 ∧ 成本生还 ∧ 去相关簇保最优。
+- **阶段 2（若有 survivor）**：复用 EXP-016 模式，best 基本面因子 rank 以 0.3 tilt L1 min-hold-10 书，对比 F2/DD/中位 vs L1 baseline vs D1 tilt。
+- **预算**：CPU-only ≈2min 因子批 + ≈3min 集成；RSS<4G；零重训；零 fresh 接触。N 74→75（集成新配置计 1）。FRESH 为仲裁。
 
 - **动机**：INC-E1 修正后 EXP-011 重跑（EXP011_CORRECTED_INC_E1.md）**推翻** pre-INC-E1 结论——真实换手 0.19–0.78（非 0.014–0.041 伪影），且 min-hold **改善**崩塌（非加深）。**B2_minhold10 在修正载体上 4/4 核心轴碾压**：中位 +36.4% vs +1.3%、换手 0.202 vs 1.035（5×↓）、F2 −40.2% vs −56.7%（+16pp）、DSR 0.427 vs 0.025（17×）；仅差绝对换手门（0.202>0.10）与绝对 worstDD（36.6%）。B5（buffer+R2a ramp）是唯一压住 worstDD 的（25.2%）。
 - **设计（先验冻结 ≤4，跑后不改）**——载体 C3_ema0.7@k10 修正 sim：
