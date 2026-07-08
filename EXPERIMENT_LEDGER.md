@@ -242,3 +242,12 @@
 - 诚实排除（无 PIT 数据不造假）：PS/EV-EBITDA/股息率/分析师预期/turnover_rate/market_cap（无股本）
 - 验收：本票纯数据工程，PIT 全过+覆盖达标+行数不变+schema 发出 ⇒ ACCEPTED；不动模型/生产；解锁 H-021 GPU 重训消融
 - 累计 N：不计（数据工程票），维持 77
+
+## EXP-021 · 2026-07-08 · GBM 消融：估值/基本面增量 alpha（H-021，N=4 先验）— **DONE / GPU (H-022) NO-GO，估值弱正/基本面负**
+
+- git 注册：见 H-021 commit；LightGBM 截面 ranker，label=forward_return_60d 逐日 rank，train 2018..2022-12-31 / embargo / OOS test 2023-04..2025-08-29（隔离前，新鲜零接触）；494.6s；**峰 RSS 51.5 GiB（超 <16G 估计，未 OOM；后续须减特征/加流动性过滤降内存）**
+- 折表（OOS mean rank-IC / ICIR）：A base(301) **0.18208 / 1.083**；B base+val(309) 0.18588 / **1.174**（Δ IC +0.0038，ICIR +0.09，pb/book_yield/earnings_yield 进 top15）；C base+fund(312) 0.18024 / 1.013（Δ −0.0018，**基本面伤 IC**）；D full(320) 0.17833 / 1.061（Δ −0.0038）
+- **判定（先验门：B 或 D ΔIC≥+0.005 且新列进 top15 → GPU go）：无一达 +0.005 ⇒ GPU (H-022) NO-GO**。估值小幅正增量+改善一致性（ICIR）但 <门；原始基本面为噪声（regime 混淆，与 [[full-universe-deep-mlp-no-edge]] 及 EXP-017 一致）
+- **诚实注记（方法学，非交付但重要）**：A base top15 由**逐日常量**特征主导（flow_margin_sh、idx_*_close、macro_shibor_1y）——这些无截面信息，作 regime/time 门；叠加全（含不可交易）宇宙 ⇒ 0.18 IC 夸大可交易 edge（phantom breadth，[[honest-baseline-truth]]）。估值标准 IC −0.09 大半已被 base 的 size/技术轴吸收 ⇒ 增量小=冗余，非"估值无用"
+- **科学结论**：把原始估值/基本面塞进同一全宇宙模型不移动指针；提取估值价值的路径 = ①**可交易/容量约束宇宙**（去掉不可交易微盘 size 效应，估值冗余可能消失）②size 中性化后加估值 ③regime 条件化。⇒ 派生 H-022（CPU：cross-sectional-only base + 流动性可交易宇宙的估值增量重测；先于任何 GPU）
+- 累计 N：+4 → 81
