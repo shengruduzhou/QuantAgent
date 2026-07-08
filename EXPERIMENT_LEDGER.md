@@ -229,3 +229,16 @@
 - **d1_regime vs L1 baseline**：中位 +36.4%→**+25.3%**（远好于静态 D1 +18.6%）；**F2 崩塌 −41.0%→−32.3%（+9pp）**；**worstDD 36.6%→22.1%（−14.5pp，全场最低）**；F1 +1.5→+2.6%(DD 15.6→11.5%)；F3/F4 稀释（+97→+53、+71→+48：R2a 在牛市回调期误触发施加防御 tilt）；median@25bps +24.1%→+16.5%；换手不变 0.197
 - **5-variant Calmar 综合（中位CAGR/worstDD）**：baseline 0.99；D1 静态 0.75；**D1 regime 1.14（最佳）**；quality 0.91；sector 0.82。**regime-D1 是唯一改善风险调整收益（Calmar 1.14>0.99）的 overlay，非单纯拿收益换 DD。**
 - **判定 ACCEPT 机制**（过"更低 DD + 更好崩塌生还，收益代价可接受"验收门）：最佳 drawdown-adjusted 候选。残余成本=R2a 触发器在牛市回调误触（不扫参调触发器=避免 fold-mining）。**收益冠军仍是 L1 baseline（+36.4%，用户容忍高 DD）；风险调整冠军 = L1+D1_regime（Calmar 1.14）。** 非生产就绪（DSR 未测新配置、折已重挖、需 FRESH）。无生产提案。
+
+## EXP-020 · 2026-07-08 · PIT 估值+基本面训练集集成（H-020，数据工程票）— **DONE / ACCEPTED（PIT 全过，估值信号强）**
+
+- git 注册：1a39ddd（先注册后建）；VALUATION_FUNDAMENTAL_INTEGRATION_PLAN.md
+- 诊断：生产 plus7clean（327列）零 firm-level 估值/基本面值，仅 missing_* 占位；但 LONG 腿 select_features 已按名 whitelist（架构缺口=数据缺口）；silver/fundamentals/metrics_panel.parquet 已是 PIT 面板（3654 syms，announce_date+available_at，eps/bps/ocfps/roe/margins/growth/debt）；valuation silver 目录空
+- 复用：metrics_panel 原样、enrich merge_asof PIT 模式、trainer name-pattern、修正 strict_v8；新增 build_valuation_fundamental_features.py（TTM 去累计+比率+分位，向量化 rolling-rank）+ merge_valuation_fundamental_into_training.py（分块 RAM 安全）+ audit_val_fund_pit.py + ic_precheck_val_fund.py
+- 产物：val_fund_quarterly.parquet（257k）+ val_fund_features.parquet（6.78M，57s/8.6G）+ training_dataset_alpha181_exec_v89_plus7clean_fund.parquet（6,781,038 行，行数不变，335 特征，feature_version=plus7clean_fund，schema_hash e815e492，55s/11G）
+- TTM 自检：000001.SZ 2025Q3 eps_ttm=2.08 精确（去累计+滚动4Q）
+- PIT 审计全过：G-PIT-3 as-of roe 4000/4000（修正同 available_at 多报表 tie-break：19.2% 组>1 报表，latest period_end 定序胜出）；G-PIT-4 当日截面分位 max|diff|=0.0；负 pb/pe=0%（亏损→NaN 设计）；max date 2026-05-13 隔离前，新鲜窗零接触；近年 pb/roe≈99.7% 覆盖
+- IC 预检（隔离前，原始截面 rank-IC）：**pb vs 60d IC −0.091（t −28.9，ICIR −0.67）估值是强信号且此前缺失**；valuation_percentile +0.061（t +17.6）；pb_own_pctile_2y −0.063（t −25.6）；pe_ttm −0.035（t −10）。原始质量/成长 60d 弱负（roe −0.024、growth −0.012）=regime 混淆（小盘牛），作模型输入非 tilt
+- 诚实排除（无 PIT 数据不造假）：PS/EV-EBITDA/股息率/分析师预期/turnover_rate/market_cap（无股本）
+- 验收：本票纯数据工程，PIT 全过+覆盖达标+行数不变+schema 发出 ⇒ ACCEPTED；不动模型/生产；解锁 H-021 GPU 重训消融
+- 累计 N：不计（数据工程票），维持 77

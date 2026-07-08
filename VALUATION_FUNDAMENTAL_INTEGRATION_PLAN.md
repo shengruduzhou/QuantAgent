@@ -108,5 +108,36 @@ for the core block (pb/roe/margins) with honest missingness flags, and the merge
 the row-count invariant + schema emit. This ticket does **not** by itself change any model or
 production; it produces a training input for H-021. No CAGR claim is made here.
 
-## 7. Results / verdict
-*(filled after the build+audit run)*
+## 7. Results / verdict — **ACCEPTED (data-engineering ticket), 2026-07-08**
+
+**Build:** `build_valuation_fundamental_features.py` → `silver/valuation/val_fund_quarterly.parquet`
+(257k rows) + `val_fund_features.parquet` (6.78M daily rows, 57s, 8.6 GiB RAM). TTM self-test =
+2.08 exact (000001.SZ 2025Q3). Rolling-rank vectorized (sliding_window_view) after a
+`rolling.apply` python-lambda was killed for being ~100× too slow.
+
+**Merge:** `merge_valuation_fundamental_into_training.py` → `…_plus7clean_fund.parquet`
+(6,781,038 rows, **row-count invariant OK**, 335 features, `feature_version=plus7clean_fund`,
+schema_hash `e815e492`, 55s, 11 GiB RAM, chunked by row-group). Stale `missing_*` placeholders
+overwritten with honest flags.
+
+**PIT audit (`audit_val_fund_pit.py`): ALL PASS** — G-PIT-3 as-of roe recompute 4000/4000
+(100%, after fixing a same-`available_at` multi-statement tie-break: 19.2% of groups carry >1
+statement, latest `period_end` now wins deterministically), G-PIT-4 within-date percentile
+max|diff| = 0.0, 0% negative pb/pe (loss-firms → NaN by design), max date 2026-05-13
+(pre-quarantine 2025-09-01 ✓, no fresh-holdout contact). Coverage on recent years: pb/roe ≈
+99.7%, pe_ttm/valuation_percentile 47–84% (honestly limited by TTM-availability + loss-firm
+exclusion — not fabricated).
+
+**Signal pre-check (`ic_precheck_val_fund.py`, pre-quarantine, raw cross-sectional rank-IC):**
+valuation is a strong, correctly-signed, previously-MISSING signal — `pb` vs 60d fwd
+**IC −0.091 (t −28.9, ICIR −0.67)**, `valuation_percentile` +0.061 (t +17.6), `pb_own_pctile_2y`
+−0.063 (t −25.6), `pe_ttm` −0.035 (t −10). Raw fundamental quality/growth is weakly NEGATIVE at
+60d (roe −0.024, growth −0.012) — regime-confounded (2018-25 small-cap rally), consistent with
+"fundamentals dead as a standalone tilt"; these are model INPUTS for regime-aware interactions,
+not tilts. This de-risks and justifies H-021 GPU retrain of the LONG sleeve (which auto-admits
+pb/pe/roe/margins/growth/valuation_percentile via its existing feature patterns).
+
+**Excluded honestly (no clean PIT data):** PS, EV/EBITDA, dividend yield, analyst/forward
+estimates, turnover_rate, market_cap (no shares outstanding on disk). Separate acquisition tickets.
+
+Verdict: ticket ACCEPTED. Produces training input for H-021; no model/production change here.
