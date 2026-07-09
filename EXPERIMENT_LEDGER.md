@@ -261,3 +261,20 @@
 - 保留价值：①PIT 估值面板已建可复用（regime 条件/防御 overlay/特定 regime 估值 tilt——EXP-017/019 已证条件价值）②诚实旗标：base 绝对 IC 0.16 偏高（先验因子库属性，非本实验引入；delta 结论不受影响，绝对值可疑留待未来泄漏审计）
 - **对总任务的含义**：raw-CAGR 瓶颈**不在特征覆盖**（估值/基本面无增量预测力），在容量/book/执行（signal 多在不可交易名上=phantom breadth）+ 修正模拟器下的稳健性。特征线在无条件 alpha 上收敛
 - 累计 N：+2 → 83
+
+## EXP-023 · 2026-07-10 · 学习型 regime→tilt 权重元模型（H-023，N=2 先验）— **DONE / 两轴皆不过 ⇒ REJECT（先验门）；关键诚实发现：手设 overlay 的崩塌保护不可由因果学习复现**
+
+- git 注册 e0a0ad1（先注册后建）；命令 `AI_quant_venv/bin/python3 scripts/analysis/regime_weight_meta.py`；产物 exp023_regime_weight_meta/results.json（含每次 refit 的全部学到权重 trace，可审计）；263s，峰 RSS 4.09 GiB，CPU-only，零重训，零 fresh 接触（IC/label 面板硬顶 2025-08-29，label 前向 10d 永不读隔离窗）
+- 设计回顾：blend=(1−τ_s)·carrier+τ_s·tilt_s；组件 D1/quality/sector_rs（与 EXP-016..019 同函数同 PIT lag）；τ_s 与组件构成由 trailing（2018→t−11 embargo）regime 条件日截面 IC（h=10）**纯因果**学得，月度 refit；动量代理只作 τ 刻度。RW1=trend×vol 4 态；RW2=trend 2 态。carrier/book/sim/折全同 EXP-016..019
+- **折表（CAGR8 / DD8 / CAGR25 / mean_τ）**：
+  - RW1_4state：F1 **+16.4%**/7.6%/+8.7%/0.44 · F2 −32.7%/35.3%/−38.0%/0.19 · F3 +50.5%/11.0%/+35.9%/0.20 · F4 +54.9%/10.3%/+43.5%/0.34
+  - RW2_2state：F1 +4.4%/12.7% · F2 −45.8%/36.6% · F3 +90.1%/9.4% · F4 +44.1%/12.4%
+- **聚合**：RW1 中位 **+33.4%** / worstDD 35.3% / Calmar 0.947 / F2 −32.7% / med@25bps **+21.3%** / maxTurn 0.202；RW2 +24.2% / 36.6% / 0.663 / −45.8% / +16.1%
+- **门判定（先验，跑后未改）**：A 轴（中位>36.4% ∧ DD≤36.6%）：RW1 差中位 3pp ✗；B 轴（Calmar>1.14 ∧ 中位≥25.3%）：RW1 Calmar 0.947 ✗；RW2 两轴皆远 ✗ ⇒ **REJECT 学习型 regime 权重线（本建模下），停线，不看折改规则**。硬门全过：med@25 +21.3% 生还、turn 0.202≤0.25、全因果（embargo 断言）、零隔离接触
+- **科学发现（比门判定更重要）**：
+  1. **因果学习器 3/4 折胜 L1 baseline**（F1 +16.4 vs +1.5、F2 −32.7 vs −41.0、F4 DD 10.3% vs 基线折 DD 更深）且 3/4 折 DD≤11%；输在 F3 牛折稀释（+50.5 vs +97.2，τ≈0.2 让出动量上行）→ 中位差 3pp
+  2. **无法复现 EXP-019 的 worstDD 22.1%**：trailing 2018→2023-06 数据里 crash-highvol 态 D1 IC<0.01（学习器学到 τ=0 不防护），而"D1 在崩塌有效"的手设知识来自 Track C 因子批的 2023-07..2025-08 评估窗——**与折重叠** ⇒ EXP-019 Calmar 1.14 部分是 fold-informed 设计的产物，非纯 OOS 知识。手设 overlay 系列（EXP-016..019）的可信度整体下调一级，FRESH 仲裁地位升级为必要非充分
+  3. **vol-split 是真实信息**（RW1 中位 33.4% vs RW2 24.2%，F2 −32.7 vs −45.8）：2 态 pooling 稀释条件 IC 至阈下（RW2 mean_τ 0.04-0.23），4 态才可检测。regime 条件化方向本身有效
+  4. 学到的结构可解释且随时间演化：早期（2023-06 trailing）up-lowvol 态 D1 主导（w 0.77）、crash-lowvol 纯 D1、crash-highvol 空；F4 期 mean_τ 升至 0.34（trailing 已含 2024 崩塌证据）——学习器"迟到地"学会了防护，正是因果性的代价
+- **FRESH 首读预登记对比集（零新折使用）**：L1 baseline（收益冠军）/ L1+D1_regime（手设风险冠军，fold-informed 嫌疑）/ RW1_4state（纯因果学习者）——三者在 FRESH 窗（≈2026-11 首读）的相对表现直接检验"手设 overlay 是否过拟合折"
+- 累计 N：+2 → **85**
