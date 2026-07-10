@@ -53,3 +53,17 @@
 ## 残余已知局限（如实）
 
 35 个 symbols 窗内零/部分覆盖（0.96%，疑退市/长停牌——正式读日前用披露数据核定处置：退市按真实退市处理，误漏则补取）；is_st 为快照广播（全 panel 既有约定）；TickFlow 限流使日更慢但当日增量（1 天×3.6k）可承受。
+
+---
+
+## 冠军冻结（2026-07-10，EXP-023 后；FRESH 首读三方仲裁预承诺）
+
+自本日起 **H-008 四折对以下三个冻结参照候选关闭一切再评测/再调参**（诊断性容量/成本研究除外，且不得据此改配置）。FRESH 窗首读（≥120 交易日，≈2026-11）按同一修正 sim、variant-C、8/15/25bps 对**恰好这三个配置**做预承诺三方对比，跑前不得修改任何参数：
+
+| 冻结候选 | 定义（全部先验冻结） | 折上参考（8bps） | 复现命令 |
+|---|---|---|---|
+| **L1_c3ema07_minhold10**（收益冠军） | C3 sleeve rank-median → per-symbol EMA α=0.7 → min-hold-10 top-10 | 中位 +36.4% / worstDD 36.6% / Calmar 0.99 | `scripts/analysis/dual_track_eval.py`（L1） |
+| **L1+D1_regime w=0.5**（手设风险冠军；⚠️ fold-informed 嫌疑，EXP-023 发现） | 同上 + D1 低波 tilt w=0.5 仅在 R2a 崩塌态 | 中位 +25.3% / worstDD 22.1% / Calmar 1.14 | `dual_track_d1_integration.py --factor d1_regime --weight 0.5` |
+| **RW1_4state**（纯因果学习者） | trailing regime-conditional IC 学习（H-023 冻结协议全参数） | 中位 +33.4% / worstDD 35.3% / Calmar 0.947 | `scripts/analysis/regime_weight_meta.py` |
+
+裁定规则（预承诺）：主轴 = FRESH 窗成本后 CAGR；并列报 Calmar/worstDD/25bps 生还。**若手设 L1+D1_regime 在 FRESH 显著劣于 RW1_4state，即坐实 EXP-016..019 手设系列 fold-informed。** 生产采纳另需 DSR/容量门（ACCEPTANCE_RULES.md）。
