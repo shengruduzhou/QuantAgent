@@ -1,5 +1,12 @@
 """Forward label generation for V7 model training.
 
+NOTE (2026-07-10, EVALUATOR_VALIDITY_AUDIT_IC016.md): the PRODUCTION training
+datasets (``*_exec_*``, incl. plus7clean/plus7clean_fund) do NOT use this
+module's close(t)->close(t+h) convention. They are re-labelled by
+``scripts/build_executable_labels_dataset.py`` to the DELAY-1 executable form
+``close(t+1+h)/close(t+1) - 1`` with entry-infeasible rows dropped, and that
+convention is regression-locked by tests/test_executable_label_convention.py.
+
 This module emits three families of labels:
 
 * ``forward_return_{h}d`` — raw close-to-close forward returns over a

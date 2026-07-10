@@ -278,3 +278,19 @@
   4. 学到的结构可解释且随时间演化：早期（2023-06 trailing）up-lowvol 态 D1 主导（w 0.77）、crash-lowvol 纯 D1、crash-highvol 空；F4 期 mean_τ 升至 0.34（trailing 已含 2024 崩塌证据）——学习器"迟到地"学会了防护，正是因果性的代价
 - **FRESH 首读预登记对比集（零新折使用）**：L1 baseline（收益冠军）/ L1+D1_regime（手设风险冠军，fold-informed 嫌疑）/ RW1_4state（纯因果学习者）——三者在 FRESH 窗（≈2026-11 首读）的相对表现直接检验"手设 overlay 是否过拟合折"
 - 累计 N：+2 → **85**
+
+## AUDIT-2026-07-10 · evaluator 有效性审计（IC 0.16）+ 数据能力分级 — **evaluator TRUSTED；IC 非泄漏；phantom breadth 定量；Tier A 裁定**
+
+- 报告：EVALUATOR_VALIDITY_AUDIT_IC016.md + reports/tickflow/data_capability_tier.md；回归锁 tests/test_executable_label_convention.py（2 tests 过）；非选择性诊断，N 不变
+- **标签审计**：生产标签实为 **delay-1 executable**（close(t+1+h)/close(t+1)−1，入场不可行行已剔除，scripts/build_executable_labels_dataset.py 有意设计）——1d 匹配 100%、60d 94.7%；同日泄漏通道不存在（corr(ret1,fwd60)=−0.0003）；两个保守向缺陷记录：①~5% 60d 标签建于 2026-07-04 panel 修复前（陈旧日历噪声，非前视）②未复权价标签低估股息（反价值偏置）。v7_label_builder docstring 文档漂移已修
+- **IC 0.158 量级校准**（同宇宙/窗/标签单因子）：lowvol20 +0.110 / rev60 +0.089 / size +0.091 / low_price +0.075 ⇒ 250 特征 GBM 0.158 = 常规因子结构非泄漏；**GBM top-decile +4.58% ≈ rev60 单因子 +4.51%（模型 decile 级增量≈0）**
+- **phantom breadth 定量**（eligible eqw 年化，2023-04..2025-08）：非流动下半 **+25.4%**/流动上半 +11.7%/top20% 流动 **+7.4%** —— breadth 溢价单调消失于流动性
+- **数据能力 Tier A（仅 bar）**：TickFlow L2/分钟全 403（live 探针）；磁盘无任何逐笔/委托/深度数据；qlib 1min 仅 2020-09..2021-06；minute_bars 675 syms 大部分在隔离窗；fundflow_minute 仅 1 日×17 syms。微结构线（Phase 5D/7 高级做T）数据不可行；Tier C 最低采购规格已写入报告
+
+## EXP-024 · 2026-07-10 · 冻结冠军容量研究（诊断，零选择，N 不变）— **机械可执行至 ~100M CNY；经济可信容量 ~10–30M；瓶颈=评估器无非线性冲击模型**
+
+- 命令 `scripts/analysis/exp024_capacity_study.py`；产物 exp024_capacity_study/results.json；469s，RSS 1.94 GiB；书=冻结 L1 + L1+D1_regime（RW1 同 carrier 池/换手，结论可迁移）；AUM 格 {1/10/30/100/300M}（依实测持仓 ADV 23–39M、流动性 rank ~0.10 选定）
+- **持仓流动性画像（关键）**：冠军书 97% 书日在宇宙流动性下半，中位 rank **0.10（底 decile）**；10% 参与帽下单名日可交易中位仅 2.7M CNY ⇒ **+36.4% 冠军是微盘非流动策略，恰在 phantom-breadth 溢价段选股**
+- 8bps 线（L1 中位）：1M +36.4% / 10M +34.0% / 30M +34.8% / 100M +34.8% / 300M +28.3%（300M 帽强制慢入场反降 worstDD 30.8%——附带平滑）；25bps 线：30M +23.9% / 100M +25.1%。d1_regime 全格稳定 +24~28%、DD 19–22%
+- **诚实判读**：微小退化是**线性 8bps + 10%/日参与**假设的产物——底 decile 流动性名以 10% 参与率成交的真实冲击 ≫25bps。故：①参与帽机械可行性证实（订单可跨日建仓，~10 日持有期吸收 2–3 日建仓）②25bps 敏感线 −10pp 中位 ③**可辩护容量声明 = 10–30M CNY（≈$1.5–4M）近基线收益；>30M 不可证（评估器缺 √participation 冲击模型 = 容量声明的硬缺口）**。failed 计数随 AUM 降（530→82）= 小 AUM 的最小手数舍入伪影，非容量信号
+- 对 Phase 4 问题"edge 是否经济真实"：**小规模真实**（25bps 生还、入场过滤、参与帽下成立）；**机构规模未证且当前不可证**。下一评估器能力票（若立项）：√冲击模型 + 成交量分布执行
