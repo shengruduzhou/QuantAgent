@@ -294,3 +294,13 @@
 - 8bps 线（L1 中位）：1M +36.4% / 10M +34.0% / 30M +34.8% / 100M +34.8% / 300M +28.3%（300M 帽强制慢入场反降 worstDD 30.8%——附带平滑）；25bps 线：30M +23.9% / 100M +25.1%。d1_regime 全格稳定 +24~28%、DD 19–22%
 - **诚实判读**：微小退化是**线性 8bps + 10%/日参与**假设的产物——底 decile 流动性名以 10% 参与率成交的真实冲击 ≫25bps。故：①参与帽机械可行性证实（订单可跨日建仓，~10 日持有期吸收 2–3 日建仓）②25bps 敏感线 −10pp 中位 ③**可辩护容量声明 = 10–30M CNY（≈$1.5–4M）近基线收益；>30M 不可证（评估器缺 √participation 冲击模型 = 容量声明的硬缺口）**。failed 计数随 AUM 降（530→82）= 小 AUM 的最小手数舍入伪影，非容量信号
 - 对 Phase 4 问题"edge 是否经济真实"：**小规模真实**（25bps 生还、入场过滤、参与帽下成立）；**机构规模未证且当前不可证**。下一评估器能力票（若立项）：√冲击模型 + 成交量分布执行
+
+## TICKFLOW-INTEGRATION-2026-07-12 · 整合审计 + 能力清单 + volume/amount 回归锁（非选择性工程票，N 不变）
+
+- **审计结论：现有集成已是单一连贯架构**（TickflowProvider SDK 适配器 fail-loud + batch→逐标的回退 + adjust= qfq；router 日/分钟优先级已挂 tickflow；探针脚本；前向 depth 采集器已备但被 403 阻塞）——按治理规则**不重建**，只补缺口
+- **OpenAPI 实取核对**（api.tickflow.org/openapi.json，3.1.0）：19 paths/21 ops 与基线清单**零漂移**；Kline/Quote schema 均强制 volume+amount；财务端点过滤键=period_end（PIT 风险确认：不得当发布时间用）
+- **2026-07-12 重探**（scripts/probe_tickflow_capabilities.py 扩展）：权限与 2026-06-24 一致（11→12 OK：新探 universes.batch=OK；14→15 FORBIDDEN）；**新发现：WebSocket quotes+depth = 独立付费加购**（"当前套餐不支持 WebSocket"）→ §4.7 实时流两通道全关，实时快照只能走 REST 批量轮询
+- **新产物**：reports/data/tickflow_capability_manifest.json（机器可读，25 ops，10 SUPPORTED/15 UNAUTHORIZED，逐 op：权限证据/快照 vs 历史语义/PIT 适用性/实现位置/分类标签）+ reports/tickflow/factor_capability_matrix.csv（CICC 基本面/低频价量/高频三族 20 行，含 BLOCKED_BY_DATA 诚实标注：换手率/自由流通市值因子缺 shares 端点、分析师预期无源、Tier B/C 微结构全阻塞）
+- **volume/amount 端到端核查：无丢失**（历史 P0 已修：adjusted_prices 静默未复权、qfq/raw 刻度混用）——silver 面板活跃行 100% 非空、隐含 VWAP/close 中位 1.001（股数/CNY 单位正确）、gold 数据集两列在册；**回归锁 tests/test_tickflow_volume_amount.py（6 tests：归一化保值/缺列保 NaN 不造 0/窗口过滤/权限分类器/面板单位漂移守卫/gold schema）**
+- **财务数据来源澄清（重要历史事实）**：盘上 silver/fundamentals + tickflow_fin_quarterly 为**早期财务权限尚在（≤2026-05）时拉取的存量**（announce_date 在册，EXP-020 PIT 审计过）；当前刷新 403 → 增量刷新路径 = akshare/tushare（已有 provider）
+- **遗留限制（如实）**：分钟/深度/财务/WS/批量K = 采购决策项（missing_permissions.md P1-P3 优先级不变）；instrument master 原始 ext payload 未单独物化（sector_map 为投影，够用）；quotes 前向采集无 bronze 原始层（快照仅供 live 路径，不入回测）
