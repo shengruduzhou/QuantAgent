@@ -1,10 +1,4 @@
-"""Dependency-light meta-labeling for signal filtering and sizing.
-
-The primary model decides direction.  This second-stage logistic model predicts
-whether the specific signal succeeds using only information available at the
-entry timestamp.  It is implemented with NumPy so importing the ensemble
-package does not require scikit-learn.
-"""
+"""Dependency-light meta-labeling for signal filtering and sizing."""
 
 from __future__ import annotations
 
@@ -72,7 +66,7 @@ def _fit_logistic(
     else:
         sample_weight = np.ones(n_rows, dtype=float)
 
-    previous_loss = float("inf")
+    previous_loss: float | None = None
     for _ in range(max_iter):
         logits = X @ coefficients + intercept
         probability = np.clip(_sigmoid(logits), 1e-8, 1.0 - 1e-8)
@@ -85,8 +79,9 @@ def _fit_logistic(
             -np.mean(sample_weight * (y * np.log(probability) + (1.0 - y) * np.log(1.0 - probability)))
             + 0.5 * regularization * np.dot(coefficients, coefficients)
         )
-        if abs(previous_loss - loss) <= 1e-10 * max(1.0, abs(previous_loss)):
-            break
+        if previous_loss is not None and np.isfinite(previous_loss):
+            if abs(previous_loss - loss) <= 1e-10 * max(1.0, abs(previous_loss)):
+                break
         previous_loss = loss
     return LogisticModel(coefficients=coefficients, intercept=intercept)
 
@@ -100,7 +95,6 @@ def fit_meta_labeler(
     max_iter: int = 2000,
     learning_rate: float = 0.05,
 ) -> MetaLabeler:
-    """Fit a balanced L2 logistic model on completed primary signals."""
     if C <= 0:
         raise ValueError("C must be positive")
     required = set(features) | {label_col}
@@ -130,7 +124,6 @@ def fit_meta_labeler(
 
 
 def build_dot_meta_dataset(fsm_results: pd.DataFrame) -> pd.DataFrame:
-    """Build one completed round-trip row per entered intraday signal."""
     data = fsm_results.copy()
     if "exit_reason" not in data.columns:
         raise ValueError("fsm_results missing exit_reason")
@@ -139,7 +132,6 @@ def build_dot_meta_dataset(fsm_results: pd.DataFrame) -> pd.DataFrame:
 
 
 def meta_filter(p_success: np.ndarray, *, floor: float = 0.5) -> np.ndarray:
-    """Return a zero-to-one size multiplier, not a direct order instruction."""
     if not 0.0 <= floor < 1.0:
         raise ValueError("floor must be in [0, 1)")
     probability = np.asarray(p_success, dtype=float)
