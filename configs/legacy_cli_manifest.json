@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "default_enabled": false,
+  "enable_environment_variable": "QUANTAGENT_ENABLE_LEGACY_CLI",
+  "modules": [
+    {
+      "module": "quantagent.cli.v7_research",
+      "category": "legacy_research",
+      "replacement": "governed factor registry and research workflows",
+      "removal_after": "2026-10-01"
+    },
+    {
+      "module": "quantagent.cli.v7_optimize",
+      "category": "legacy_search",
+      "replacement": "nested selection governance plus production portfolio construction",
+      "removal_after": "2026-10-01"
+    },
+    {
+      "module": "quantagent.cli.v8",
+      "category": "legacy_ga_pipeline",
+      "replacement": "quantagent.cli.v8_deep and trusted evaluator",
+      "removal_after": "2026-10-01"
+    },
+    {
+      "module": "quantagent.cli.v8_gated",
+      "category": "legacy_experiment",
+      "replacement": "pre-registered research runner",
+      "removal_after": "2026-10-01"
+    },
+    {
+      "module": "quantagent.cli.v8_portfolio",
+      "category": "legacy_portfolio",
+      "replacement": "quantagent.portfolio.pareto_allocator",
+      "removal_after": "2026-10-01"
+    },
+    {
+      "module": "quantagent.cli.v8_intraday",
+      "category": "legacy_intraday",
+      "replacement": "paper-only auction and impact workflow",
+      "removal_after": "2026-10-01"
+    }
+  ],
+  "rules": [
+    "Legacy commands are reproduction-only and never production approved.",
+    "Legacy commands must not bypass quarantined evaluation windows.",
+    "Removal requires import, CLI, test and documentation reference audit."
+  ]
+}
