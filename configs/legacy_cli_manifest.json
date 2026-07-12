@@ -16,12 +16,6 @@
       "removal_after": "2026-10-01"
     },
     {
-      "module": "quantagent.cli.v8_gated",
-      "category": "legacy_experiment",
-      "replacement": "pre-registered research runner",
-      "removal_after": "2026-10-01"
-    },
-    {
       "module": "quantagent.cli.v8_portfolio",
       "category": "legacy_portfolio",
       "replacement": "quantagent.portfolio.pareto_allocator",
@@ -39,6 +33,11 @@
       "module": "quantagent.cli.v8",
       "purpose": "supported V8 command aliases required by automation and CLI compatibility tests",
       "production_note": "command availability does not by itself grant production trust"
+    },
+    {
+      "module": "quantagent.cli.v8_gated",
+      "purpose": "supported regime-aware ensemble and factor-expert commands",
+      "production_note": "selection outputs still require governed evaluation and promotion gates"
     }
   ],
   "rules": [
