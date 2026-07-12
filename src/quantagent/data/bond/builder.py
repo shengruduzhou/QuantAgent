@@ -1,10 +1,8 @@
 """Bond, money-market and fiscal-liquidity silver data product.
 
-All rates are normalised to percentage points and all flow quantities to CNY
-billions.  The builder fails closed when units are implausible.  It also keeps
-publication and ingestion timestamps separate and derives a transparent
-``fiscal_liquidity_impulse`` rather than treating bond-fund flow as a proxy for
-all public-sector liquidity.
+Rates are normalised to percentage points and flows to CNY billions. Coverage
+is measured from observed source fields before missing optional fiscal fields
+are zero-filled for transparent derived calculations.
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ DERIVED_COLUMNS: tuple[str, ...] = (
     "spread_10y_3m",
     "credit_spread_aa",
     "credit_spread_aa_aaa",
-    "credit_spread_aaa_aa",  # backward-compatible alias; positive AA-minus-AAA
+    "credit_spread_aaa_aa",
     "omo_net",
     "mlf_net",
     "central_gov_bond_net",
@@ -66,6 +64,17 @@ DERIVED_COLUMNS: tuple[str, ...] = (
     "monetary_liquidity_impulse",
     "fiscal_net_financing",
     "fiscal_liquidity_impulse",
+)
+
+CORE_COVERAGE_COLUMNS: tuple[str, ...] = (
+    "yield_3m",
+    "yield_1y",
+    "yield_5y",
+    "yield_10y",
+    "yield_aa",
+    "yield_aaa",
+    "dr007",
+    "bond_fund_flow",
 )
 
 BOND_FLOW_REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -110,12 +119,12 @@ class BondFlowResult:
 def _coerce_ts(value: Any) -> pd.Timestamp | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    ts = pd.to_datetime(value, errors="coerce", utc=False)
-    if pd.isna(ts):
+    timestamp = pd.to_datetime(value, errors="coerce", utc=False)
+    if pd.isna(timestamp):
         return None
-    if getattr(ts, "tzinfo", None) is not None:
-        ts = ts.tz_localize(None)
-    return pd.Timestamp(ts)
+    if getattr(timestamp, "tzinfo", None) is not None:
+        timestamp = timestamp.tz_localize(None)
+    return pd.Timestamp(timestamp)
 
 
 def _series(frame: pd.DataFrame, name: str, default: float = np.nan) -> pd.Series:
@@ -125,7 +134,7 @@ def _series(frame: pd.DataFrame, name: str, default: float = np.nan) -> pd.Serie
 
 
 def _detect_rate_unit(values: pd.Series) -> str:
-    sample = values.dropna().abs()
+    sample = pd.to_numeric(values, errors="coerce").dropna().abs()
     if sample.empty:
         return "percent"
     median = float(sample.median())
@@ -150,12 +159,10 @@ def _normalise_rate(values: pd.Series, unit: str) -> tuple[pd.Series, str]:
 
 
 def _detect_flow_unit(values: pd.Series) -> str:
-    sample = values.dropna().abs()
+    sample = pd.to_numeric(values, errors="coerce").dropna().abs()
     if sample.empty:
         return "cny_bn"
     median = float(sample.median())
-    # Daily public-sector flows above 1e8 in raw CNY are common.  Values below
-    # roughly 1e5 are more likely already in billions or millions.
     if median >= 1e8:
         return "cny"
     if median >= 1e3:
@@ -175,17 +182,35 @@ def _normalise_flow(values: pd.Series, unit: str) -> tuple[pd.Series, str]:
     return numeric, resolved
 
 
-def _normalise_units(frame: pd.DataFrame, cfg: BondFlowConfig) -> tuple[pd.DataFrame, dict[str, str]]:
+def _observed_field_coverage(frame: pd.DataFrame) -> tuple[float, dict[str, int]]:
+    observed = pd.DataFrame(index=frame.index)
+    counts: dict[str, int] = {}
+    for column in CORE_COVERAGE_COLUMNS:
+        values = (
+            pd.to_numeric(frame[column], errors="coerce")
+            if column in frame.columns
+            else pd.Series(np.nan, index=frame.index, dtype=float)
+        )
+        observed[column] = values
+        counts[column] = int(values.notna().sum())
+    coverage = float(observed.notna().mean(axis=1).mean()) if len(observed) else 0.0
+    return coverage, counts
+
+
+def _normalise_units(
+    frame: pd.DataFrame,
+    cfg: BondFlowConfig,
+) -> tuple[pd.DataFrame, dict[str, str]]:
     out = frame.copy()
     detected: dict[str, str] = {}
-    for col in RATE_COLUMNS:
-        normalised, unit = _normalise_rate(_series(out, col), cfg.rate_unit)
-        out[col] = normalised
-        detected[f"rate:{col}"] = unit
-    for col in FLOW_COLUMNS_CNY_BN:
-        normalised, unit = _normalise_flow(_series(out, col, 0.0), cfg.flow_unit)
-        out[col] = normalised.fillna(0.0)
-        detected[f"flow:{col}"] = unit
+    for column in RATE_COLUMNS:
+        normalised, unit = _normalise_rate(_series(out, column), cfg.rate_unit)
+        out[column] = normalised
+        detected[f"rate:{column}"] = unit
+    for column in FLOW_COLUMNS_CNY_BN:
+        normalised, unit = _normalise_flow(_series(out, column), cfg.flow_unit)
+        out[column] = normalised.fillna(0.0)
+        detected[f"flow:{column}"] = unit
     return out, detected
 
 
@@ -194,7 +219,6 @@ def _derive(frame: pd.DataFrame) -> pd.DataFrame:
     out["spread_10y_1y"] = out["yield_10y"] - out["yield_1y"]
     out["spread_10y_3m"] = out["yield_10y"] - out["yield_3m"]
     out["credit_spread_aa"] = out["yield_aa"] - out["yield_10y"]
-    # Riskier AA minus safer AAA: a widening positive number means stress.
     out["credit_spread_aa_aaa"] = out["yield_aa"] - out["yield_aaa"]
     out["credit_spread_aaa_aa"] = out["credit_spread_aa_aaa"]
 
@@ -221,8 +245,6 @@ def _derive(frame: pd.DataFrame) -> pd.DataFrame:
         + out["local_special_bond_net"]
         + out["policy_bank_bond_net"]
     )
-    # A rise in government deposits withdraws cash from the private banking
-    # system, therefore it enters with a negative sign.
     out["fiscal_liquidity_impulse"] = (
         out["monetary_liquidity_impulse"]
         + out["fiscal_net_financing"]
@@ -248,24 +270,45 @@ def build_bond_flows(
     work = work[work["trade_date"].notna()].copy()
     rejected_no_date = before - len(work)
 
+    mean_field_coverage, core_non_null_counts = _observed_field_coverage(work)
+
     now = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
-    public_source = work.get(
-        "public_available_at",
-        work.get("available_at", work["trade_date"] + pd.tseries.offsets.BDay(1)),
+    public_source = (
+        work["public_available_at"]
+        if "public_available_at" in work.columns
+        else (
+            work["available_at"]
+            if "available_at" in work.columns
+            else work["trade_date"] + pd.tseries.offsets.BDay(1)
+        )
     )
     work["public_available_at"] = public_source.map(_coerce_ts)
-    work["public_available_at"] = work["public_available_at"].fillna(
-        work["trade_date"] + pd.tseries.offsets.BDay(1)
+    work["public_available_at"] = work["public_available_at"].where(
+        work["public_available_at"].notna(),
+        work["trade_date"] + pd.tseries.offsets.BDay(1),
     )
-    ingest_source = work.get(
-        "ingested_at", work.get("fetched_at", pd.Series(now, index=work.index))
+
+    ingest_source = (
+        work["ingested_at"]
+        if "ingested_at" in work.columns
+        else (
+            work["fetched_at"]
+            if "fetched_at" in work.columns
+            else pd.Series(now, index=work.index)
+        )
     )
-    work["ingested_at"] = ingest_source.map(_coerce_ts).fillna(now)
+    work["ingested_at"] = ingest_source.map(_coerce_ts)
+    work["ingested_at"] = work["ingested_at"].where(
+        work["ingested_at"].notna(), now
+    )
     work["fetched_at"] = work["ingested_at"]
+
     if cfg.availability_mode == "public":
         work["available_at"] = work["public_available_at"]
     elif cfg.availability_mode == "ingested":
-        work["available_at"] = work[["public_available_at", "ingested_at"]].max(axis=1)
+        work["available_at"] = work[["public_available_at", "ingested_at"]].max(
+            axis=1
+        )
     else:
         raise ValueError(f"unsupported availability_mode: {cfg.availability_mode}")
 
@@ -273,37 +316,53 @@ def build_bond_flows(
     work = _derive(work)
     work["rate_unit"] = "percent"
     work["flow_unit"] = "cny_bn"
-    work["source"] = work.get("source", pd.Series(cfg.source, index=work.index)).fillna(cfg.source).astype(str)
-    work["source_version"] = work.get(
-        "source_version", pd.Series(cfg.source_version, index=work.index)
-    ).fillna(cfg.source_version).astype(str)
+    work["source"] = (
+        work["source"]
+        if "source" in work.columns
+        else pd.Series(cfg.source, index=work.index)
+    )
+    work["source"] = work["source"].fillna(cfg.source).astype(str)
+    work["source_version"] = (
+        work["source_version"]
+        if "source_version" in work.columns
+        else pd.Series(cfg.source_version, index=work.index)
+    )
+    work["source_version"] = work["source_version"].fillna(
+        cfg.source_version
+    ).astype(str)
 
-    before_dedup = len(work)
+    before = len(work)
     work = work.sort_values(["trade_date", "ingested_at"]).drop_duplicates(
         subset=["trade_date"], keep="last"
     )
-    duplicates_removed = before_dedup - len(work)
+    duplicates_removed = before - len(work)
     out = work[list(BOND_FLOW_REQUIRED_COLUMNS)].reset_index(drop=True)
 
-    numeric_features = [
-        *RATE_COLUMNS,
-        *DERIVED_COLUMNS,
-        *FLOW_COLUMNS_CNY_BN,
-    ]
-    n = int(len(out))
-    mean_field_coverage = float(out[numeric_features].notna().mean(axis=1).mean()) if n else 0.0
-    if n >= 2:
+    n_days = int(len(out))
+    if n_days >= 2:
         expected = pd.bdate_range(out["trade_date"].min(), out["trade_date"].max())
-        date_continuity = float(min(1.0, n / max(1, len(expected))))
+        date_continuity = float(min(1.0, n_days / max(1, len(expected))))
     else:
         date_continuity = 0.0
 
     rate_values = out[list(RATE_COLUMNS)].to_numpy(dtype=float)
-    max_abs_rate = float(np.nanmax(np.abs(rate_values))) if np.isfinite(rate_values).any() else 0.0
+    max_abs_rate = (
+        float(np.nanmax(np.abs(rate_values)))
+        if np.isfinite(rate_values).any()
+        else 0.0
+    )
     flow_values = out[list(FLOW_COLUMNS_CNY_BN)].to_numpy(dtype=float)
-    max_abs_flow = float(np.nanmax(np.abs(flow_values))) if np.isfinite(flow_values).any() else 0.0
-    negative_credit_spread_rows = int((out["credit_spread_aa_aaa"] < -1e-9).sum())
-    availability_violations = int((out["available_at"] < out["public_available_at"]).sum())
+    max_abs_flow = (
+        float(np.nanmax(np.abs(flow_values)))
+        if np.isfinite(flow_values).any()
+        else 0.0
+    )
+    negative_credit_spread_rows = int(
+        (out["credit_spread_aa_aaa"].dropna() < -1e-9).sum()
+    )
+    availability_violations = int(
+        (out["available_at"] < out["public_available_at"]).sum()
+    )
 
     errors: list[str] = []
     if max_abs_rate > cfg.max_abs_rate_percent:
@@ -316,30 +375,38 @@ def build_bond_flows(
         errors.append(f"availability_before_public={availability_violations}")
 
     gate_open = (
-        n >= cfg.min_days
+        n_days >= cfg.min_days
         and mean_field_coverage >= cfg.min_field_coverage
         and date_continuity >= cfg.min_date_continuity
         and not errors
     )
-    reason = "passed" if gate_open else _gate_reason(
-        n=n,
-        field_coverage=mean_field_coverage,
-        date_continuity=date_continuity,
-        errors=errors,
-        cfg=cfg,
+    reason = (
+        "passed"
+        if gate_open
+        else _gate_reason(
+            n=n_days,
+            field_coverage=mean_field_coverage,
+            date_continuity=date_continuity,
+            errors=errors,
+            cfg=cfg,
+        )
     )
+
+    numeric_features = [*RATE_COLUMNS, *DERIVED_COLUMNS, *FLOW_COLUMNS_CNY_BN]
     coverage = {
-        "n_days": n,
+        "n_days": n_days,
         "availability_mode": cfg.availability_mode,
         "rejected_no_date": int(rejected_no_date),
         "duplicates_removed": int(duplicates_removed),
         "mean_field_coverage": mean_field_coverage,
+        "coverage_columns": list(CORE_COVERAGE_COLUMNS),
         "date_continuity": date_continuity,
         "max_abs_rate_percent": max_abs_rate,
         "max_abs_flow_cny_bn": max_abs_flow,
         "detected_input_units": detected_units,
+        "core_field_non_null_counts": core_non_null_counts,
         "field_non_null_counts": {
-            col: int(out[col].notna().sum()) for col in numeric_features
+            column: int(out[column].notna().sum()) for column in numeric_features
         },
         "gate": {
             "bond_flows_usable_for_features": bool(gate_open),
@@ -348,10 +415,10 @@ def build_bond_flows(
     }
     validation = {
         "status": "passed" if gate_open else "failed",
-        "n": n,
+        "n": n_days,
         "errors": errors,
     }
-    return BondFlowResult(frame=out, coverage=coverage, validation=validation)
+    return BondFlowResult(out, coverage, validation)
 
 
 def _gate_reason(
@@ -367,16 +434,22 @@ def _gate_reason(
     if n < cfg.min_days:
         return f"too_few_days_{n}_lt_{cfg.min_days}"
     if field_coverage < cfg.min_field_coverage:
-        return f"field_coverage_{field_coverage:.3f}_below_{cfg.min_field_coverage:.3f}"
+        return (
+            f"field_coverage_{field_coverage:.3f}_below_"
+            f"{cfg.min_field_coverage:.3f}"
+        )
     if date_continuity < cfg.min_date_continuity:
-        return f"date_continuity_{date_continuity:.3f}_below_{cfg.min_date_continuity:.3f}"
+        return (
+            f"date_continuity_{date_continuity:.3f}_below_"
+            f"{cfg.min_date_continuity:.3f}"
+        )
     return "unknown"
 
 
 def _empty_result(cfg: BondFlowConfig) -> BondFlowResult:
     return BondFlowResult(
-        frame=pd.DataFrame(columns=list(BOND_FLOW_REQUIRED_COLUMNS)),
-        coverage={
+        pd.DataFrame(columns=list(BOND_FLOW_REQUIRED_COLUMNS)),
+        {
             "n_days": 0,
             "availability_mode": cfg.availability_mode,
             "mean_field_coverage": 0.0,
@@ -386,7 +459,7 @@ def _empty_result(cfg: BondFlowConfig) -> BondFlowResult:
                 "reason": "no_rows",
             },
         },
-        validation={"status": "failed", "n": 0, "errors": ["no_rows"]},
+        {"status": "failed", "n": 0, "errors": ["no_rows"]},
     )
 
 
@@ -399,17 +472,22 @@ class BondFlowBuilder:
 
     def write(self, result: BondFlowResult) -> BondFlowResult:
         root = Path(self.config.output_root)
-        silver_dir = root / "silver" / "bond_flows"
-        silver_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path = silver_dir / "bond_flows.parquet"
+        silver = root / "silver" / "bond_flows"
+        silver.mkdir(parents=True, exist_ok=True)
+        parquet_path = silver / "bond_flows.parquet"
+        coverage_path = silver / "coverage_report.json"
+        validation_path = silver / "validation_report.json"
         result.frame.to_parquet(parquet_path, index=False)
-        coverage_path = silver_dir / "coverage_report.json"
-        validation_path = silver_dir / "validation_report.json"
-        coverage_path.write_text(json.dumps(result.coverage, indent=2, default=str), encoding="utf-8")
-        validation_path.write_text(json.dumps(result.validation, indent=2, default=str), encoding="utf-8")
-        manifests_dir = root / "manifests"
-        manifests_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = manifests_dir / "bond_flows.json"
+        coverage_path.write_text(
+            json.dumps(result.coverage, indent=2, default=str), encoding="utf-8"
+        )
+        validation_path.write_text(
+            json.dumps(result.validation, indent=2, default=str), encoding="utf-8"
+        )
+
+        manifests = root / "manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        manifest_path = manifests / "bond_flows.json"
         manifest_path.write_text(
             json.dumps(
                 {
@@ -448,14 +526,18 @@ def apply_bond_flow_features(
         return panel.copy()
     if "trade_date" not in panel.columns:
         raise ValueError("panel missing trade_date")
+    if "available_at" not in bond_flows.columns:
+        raise ValueError("bond flow frame missing available_at")
 
     default_features = (
         "yield_1y",
         "yield_5y",
         "yield_10y",
         "spread_10y_1y",
+        "spread_10y_3m",
         "credit_spread_aa",
         "credit_spread_aa_aaa",
+        "credit_spread_aaa_aa",
         "dr007",
         "cd_1y",
         "bond_fund_flow",
@@ -463,32 +545,40 @@ def apply_bond_flow_features(
         "fiscal_net_financing",
         "fiscal_liquidity_impulse",
     )
-    cols = tuple(feature_columns) if feature_columns is not None else default_features
-    missing = [col for col in cols if col not in bond_flows.columns]
-    if missing:
-        raise ValueError(f"bond flow frame missing requested features: {missing}")
+    requested = tuple(feature_columns) if feature_columns is not None else default_features
+    if feature_columns is not None:
+        missing = [column for column in requested if column not in bond_flows.columns]
+        if missing:
+            raise ValueError(f"bond flow frame missing requested features: {missing}")
+        columns = requested
+    else:
+        columns = tuple(column for column in requested if column in bond_flows.columns)
+        if not columns:
+            return panel.copy()
 
     panel_out = panel.copy()
     panel_out["trade_date"] = pd.to_datetime(panel_out["trade_date"], errors="coerce")
     flows = bond_flows.copy()
     flows["available_at"] = pd.to_datetime(flows["available_at"], errors="coerce")
     flows = flows.dropna(subset=["available_at"]).sort_values("available_at")
+    if flows.empty:
+        return panel_out
 
     left = panel_out[["trade_date"]].assign(__orig_index=panel_out.index)
     left = left.sort_values("trade_date").reset_index(drop=True)
     merged = pd.merge_asof(
         left,
-        flows[["available_at", *cols]],
+        flows[["available_at", *columns]],
         left_on="trade_date",
         right_on="available_at",
         direction="backward",
         allow_exact_matches=True,
     )
-    for col in cols:
-        target = f"{prefix}{col}"
+    for column in columns:
+        target = f"{prefix}{column}"
         values = pd.Series(np.nan, index=panel_out.index, dtype=float)
         values.loc[merged["__orig_index"].values] = pd.to_numeric(
-            merged[col], errors="coerce"
+            merged[column], errors="coerce"
         ).values
         panel_out[target] = values
     return panel_out
@@ -498,6 +588,12 @@ def bond_flows_for_features(
     bond_flows: pd.DataFrame | None,
     manifest_path: str | Path | None,
 ) -> pd.DataFrame | None:
+    """Return bond flows only when the manifest gate is open.
+
+    Schema-v1 manifests did not declare unit metadata. They remain readable for
+    historical compatibility. Schema-v2 manifests must explicitly declare the
+    canonical units.
+    """
     if bond_flows is None or bond_flows.empty or manifest_path is None:
         return None
     path = Path(manifest_path)
@@ -507,10 +603,16 @@ def bond_flows_for_features(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    gate = ((payload.get("extra") or {}).get("coverage_report") or {}).get("gate") or {}
+
+    gate = ((payload.get("extra") or {}).get("coverage_report") or {}).get(
+        "gate"
+    ) or {}
     if not gate.get("bond_flows_usable_for_features"):
         return None
-    units = payload.get("units") or {}
-    if units.get("rates") != "percent" or units.get("flows") != "cny_bn":
-        return None
+
+    schema_version = int(payload.get("schema_version") or 1)
+    if schema_version >= 2:
+        units = payload.get("units") or {}
+        if units.get("rates") != "percent" or units.get("flows") != "cny_bn":
+            return None
     return bond_flows.copy()
