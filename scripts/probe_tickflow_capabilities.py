@@ -94,6 +94,192 @@ def probe(name, fn):
     return rec
 
 
+def _ws_quotes_smoke(tf, wait_seconds: float = 8.0) -> dict:
+    """Bounded WebSocket quotes smoke: connect, subscribe 1 symbol, wait, close.
+
+    Never logs the authenticated URL or token. Outside trading hours zero
+    pushed messages is expected — a clean subscribe (no error callback, no
+    exception) is the entitlement signal; message count is informational.
+    """
+    import time
+
+    got = {"messages": 0, "errors": []}
+    tf.stream.on_quotes(lambda rows: got.__setitem__("messages", got["messages"] + len(rows or ())))
+    tf.stream.on_error(lambda msg: got["errors"].append(str(msg)[:160]))
+    tf.stream.connect(block=False)
+    try:
+        tf.stream.subscribe("quotes", [SYM])
+        time.sleep(wait_seconds)
+        tf.stream.unsubscribe("quotes", [SYM])
+    finally:
+        tf.stream.close()
+    if got["errors"]:
+        raise RuntimeError("; ".join(got["errors"]))
+    return got
+
+
+# ---------------------------------------------------------------------------
+# Capability manifest (machine-readable registry per prompt/mission 2026-07-12)
+# ---------------------------------------------------------------------------
+
+# operation inventory verified against https://api.tickflow.org/openapi.json
+# (openapi 3.1.0, 19 paths / 21 ops, fetched 2026-07-12 — matches baseline).
+# probe_key maps each operation to the probe() call that evidences its
+# permission status; "inherit:<key>" reuses another op's evidence when the
+# server gates them with the same permission (verified message text).
+_OPERATIONS: list[dict] = [
+    dict(operation_id="get_klines_daily", method="GET", path="/v1/klines", domain="klines",
+         probe_key="klines.get(1d,count=5,adjust=none)", semantics="historical",
+         pit="PIT-safe (historical bars; available_at=trade_date+1d convention)",
+         batch_limit="count<=10000/request",
+         implemented="TickflowProvider.daily_ohlcv/adjusted_prices; scripts/update_market_panel_daily.py; scripts/fetch_tickflow_daily_klines.py",
+         notes="raw/qfq/hfq via adjust=; minute periods separately gated"),
+    dict(operation_id="get_klines_minute", method="GET", path="/v1/klines?period=5m|15m|30m|60m", domain="klines",
+         probe_key="klines.get(5m,count=5)", semantics="historical",
+         pit="would be PIT-safe", batch_limit="count<=10000/request",
+         implemented="none (gated); minute source = runtime/data/raw/qlib/cn_data_1min (2020-09..2021-06) + silver/minute_bars",
+         notes="无分钟K线查询权限"),
+    dict(operation_id="get_klines_batch", method="GET", path="/v1/klines/batch", domain="klines",
+         probe_key="klines.batch(1d,count=5,adjust=forward)", semantics="historical",
+         pit="PIT-safe", batch_limit="symbols comma-list; separately priced tier",
+         implemented="transparent per-symbol fallback in TickflowProvider._fetch_daily",
+         notes="performance-only gap; fallback loop is the production path"),
+    dict(operation_id="get_ex_factors", method="GET", path="/v1/klines/ex-factors", domain="klines",
+         probe_key="klines.ex_factors([sym])", semantics="historical",
+         pit="PIT-safe", batch_limit="symbols list",
+         implemented="WORKAROUND: klines.get(adjust=forward/backward) returns server-side adjusted OHLC",
+         notes="无除权因子查询权限 — adjusted series obtainable, raw factors not"),
+    dict(operation_id="get_intraday", method="GET", path="/v1/klines/intraday", domain="klines",
+         probe_key="klines.intraday(1m,count=5)", semantics="current-day snapshot",
+         pit="current-day only", batch_limit="count param",
+         implemented="none (gated)", notes="无日内分时查询权限"),
+    dict(operation_id="get_intraday_batch", method="GET", path="/v1/klines/intraday/batch", domain="klines",
+         probe_key="klines.intraday_batch(1m,count=5)", semantics="current-day snapshot",
+         pit="current-day only", batch_limit="symbols list",
+         implemented="none (gated)", notes="无日内分时查询批量查询权限"),
+    dict(operation_id="get_quotes", method="GET", path="/v1/quotes", domain="quotes",
+         probe_key="quotes.get(symbols=)", semantics="realtime snapshot (NOT historical)",
+         pit="NOT for backtests; forward collection only", batch_limit="symbols comma-list",
+         implemented="scripts/intraday_dot_signals.py + live forward loop; volume+amount verified present",
+         notes="quote volume is cumulative-day, not bar volume"),
+    dict(operation_id="post_quotes", method="POST", path="/v1/quotes", domain="quotes",
+         probe_key="quotes.get_by_symbols", semantics="realtime snapshot",
+         pit="NOT for backtests", batch_limit="JSON symbol list",
+         implemented="SDK get_by_symbols", notes=""),
+    dict(operation_id="get_quotes_by_universe", method="GET", path="/v1/quotes?universes=", domain="quotes",
+         probe_key="quotes.get_by_universes(CN_Equity_A)", semantics="realtime snapshot",
+         pit="NOT for backtests", batch_limit="universe ids",
+         implemented="none (gated); full-universe snapshots = explicit symbol batches",
+         notes="无标的池查询权限"),
+    dict(operation_id="get_depth", method="GET", path="/v1/depth", domain="depth",
+         probe_key="depth.get", semantics="realtime L2 5-level snapshot (NO history)",
+         pit="forward collection only", batch_limit="single symbol",
+         implemented="scripts/collect_tickflow_depth.py (forward collector, BLOCKED by tier)",
+         notes="无市场深度查询权限（市场: CN）"),
+    dict(operation_id="get_depth_batch", method="GET", path="/v1/depth/batch", domain="depth",
+         probe_key="inherit:depth.get", semantics="realtime snapshot",
+         pit="forward collection only", batch_limit="symbols comma-list",
+         implemented="none; SDK 0.1.22 lacks depth.batch (REST-only op)",
+         notes="same CN-market depth permission as /v1/depth"),
+    dict(operation_id="list_exchanges", method="GET", path="/v1/exchanges", domain="instruments",
+         probe_key="exchanges.list", semantics="snapshot",
+         pit="metadata", batch_limit="n/a",
+         implemented="TickflowProvider._ensure_all_instruments", notes="SH/SZ/BJ/US/HK"),
+    dict(operation_id="get_exchange_instruments", method="GET", path="/v1/exchanges/{exchange}/instruments", domain="instruments",
+         probe_key="exchanges.get_instruments(SH,stock)", semantics="current snapshot",
+         pit="listing_date in ext; delistings NOT retained by endpoint", batch_limit="per exchange",
+         implemented="TickflowProvider.stock_basic; scripts/fetch_sector_map_tickflow.py",
+         notes="survivorship: current listing snapshot only"),
+    dict(operation_id="get_instruments", method="GET", path="/v1/instruments", domain="instruments",
+         probe_key="instruments.get", semantics="current snapshot", pit="metadata",
+         batch_limit="symbols comma-list", implemented="SDK instruments.get", notes=""),
+    dict(operation_id="post_instruments", method="POST", path="/v1/instruments", domain="instruments",
+         probe_key="instruments.batch", semantics="current snapshot", pit="metadata",
+         batch_limit="JSON list (documented ~1000)", implemented="SDK instruments.batch", notes=""),
+    dict(operation_id="list_universes", method="GET", path="/v1/universes", domain="universes",
+         probe_key="universes.list", semantics="current snapshot",
+         pit="membership is CURRENT — survivorship_safe=false for history", batch_limit="n/a",
+         implemented="TickflowProvider._ensure_industry_map (SW1/SW2)", notes="1013 universes"),
+    dict(operation_id="get_universe", method="GET", path="/v1/universes/{id}", domain="universes",
+         probe_key="universes.get(CN_Equity_A)", semantics="current snapshot",
+         pit="survivorship_safe=false for history", batch_limit="n/a",
+         implemented="sector_map builder", notes=""),
+    dict(operation_id="batch_universes", method="POST", path="/v1/universes/batch", domain="universes",
+         probe_key="universes.batch", semantics="current snapshot",
+         pit="survivorship_safe=false for history", batch_limit="JSON id list",
+         implemented="SDK universes.batch", notes=""),
+    dict(operation_id="get_income", method="GET", path="/v1/financials/income", domain="financials",
+         probe_key="financials.income([sym])", semantics="historical statements",
+         pit="filter is period_end — publication time must come from announce_date field; never use period_end as availability",
+         batch_limit="symbols comma-list",
+         implemented="TickflowProvider.financials_income (fail-loud); on-disk history silver/fundamentals + tickflow_fin_quarterly pulled under an EARLIER entitlement (~<=2026-05); refresh = akshare/tushare/baostock",
+         notes="无公司财务数据查询权限 (entitlement since revoked)"),
+    dict(operation_id="get_balance_sheet", method="GET", path="/v1/financials/balance-sheet", domain="financials",
+         probe_key="financials.balance_sheet([sym])", semantics="historical statements",
+         pit="same period_end caveat", batch_limit="symbols comma-list",
+         implemented="TickflowProvider.financials_balance_sheet (fail-loud); alternatives as income",
+         notes="无公司财务数据查询权限"),
+    dict(operation_id="get_cash_flow", method="GET", path="/v1/financials/cash-flow", domain="financials",
+         probe_key="financials.cash_flow([sym])", semantics="historical statements",
+         pit="same period_end caveat", batch_limit="symbols comma-list",
+         implemented="TickflowProvider.financials_cash_flow (fail-loud)", notes="无公司财务数据查询权限"),
+    dict(operation_id="get_metrics", method="GET", path="/v1/financials/metrics", domain="financials",
+         probe_key="financials.metrics([sym])", semantics="historical statements",
+         pit="announce_date present when entitled (verified in on-disk history)", batch_limit="symbols comma-list",
+         implemented="TickflowProvider.financials_metrics (fail-loud); on-disk metrics_panel.parquet is PIT-audited (EXP-020)",
+         notes="无公司财务数据查询权限"),
+    dict(operation_id="get_shares", method="GET", path="/v1/financials/shares", domain="financials",
+         probe_key="financials.shares([sym])", semantics="historical share-capital",
+         pit="same period_end caveat", batch_limit="symbols comma-list",
+         implemented="none; share-capital absent on disk (why market_cap/turnover_rate factors are excluded — see H-020)",
+         notes="无公司财务数据查询权限"),
+    dict(operation_id="ws_stream_quotes", method="WS", path="wss://.../v1/ws/stream#quotes", domain="stream",
+         probe_key="stream.quotes(subscribe/unsubscribe)", semantics="realtime push",
+         pit="forward collection only", batch_limit="server-side subscription limits",
+         implemented="SDK stream namespace; no production collector (optional)", notes=""),
+    dict(operation_id="ws_stream_depth", method="WS", path="wss://.../v1/ws/stream#depth", domain="stream",
+         probe_key="inherit:depth.get", semantics="realtime push",
+         pit="forward collection only", batch_limit="server-side subscription limits",
+         implemented="none; gated with REST depth", notes="depth permission gates the channel"),
+]
+
+
+def _classify(status: str | None, implemented: str) -> str:
+    if status == "OK":
+        return "SUPPORTED" if implemented and not implemented.startswith("none") else "NOT_IMPLEMENTED"
+    if status and "FORBIDDEN" in status:
+        return "UNAUTHORIZED"
+    if status == "NOT_FOUND":
+        return "UNSUPPORTED_BY_API"
+    if status in ("RATE_LIMIT", "AUTH"):
+        return "TEMPORARILY_UNAVAILABLE"
+    return "BLOCKED_BY_MISSING_SPEC" if status is None else "TEMPORARILY_UNAVAILABLE"
+
+
+def build_capability_manifest(results: list[dict], probed_at: str, sdk_version: str) -> dict:
+    by_key = {r["call"]: r for r in results}
+
+    def resolve(probe_key: str) -> tuple[str | None, str]:
+        if probe_key.startswith("inherit:"):
+            parent = by_key.get(probe_key.split(":", 1)[1])
+            status = parent["status"] if parent else None
+            return status, f"inferred_from:{probe_key.split(':', 1)[1]}"
+        rec = by_key.get(probe_key)
+        return (rec["status"] if rec else None), "direct"
+
+    ops = []
+    for op in _OPERATIONS:
+        status, evidence = resolve(op["probe_key"])
+        ops.append({**{k: v for k, v in op.items() if k != "probe_key"},
+                    "permission_status": status or "NOT_PROBED",
+                    "probe_evidence": evidence,
+                    "classification": _classify(status, op["implemented"]),
+                    "last_probe": probed_at})
+    return {"schema_version": 1, "probed_at": probed_at, "sdk_version": sdk_version,
+            "openapi_verified": "2026-07-12 (19 paths / 21 ops, matches baseline inventory)",
+            "operations": ops}
+
+
 def main():
     print(f"TickFlow probe :: endpoint={ENDPOINT} :: token={'SET' if TOKEN else 'MISSING'} :: sdk={getattr(tickflow,'__version__','?')}")
     tf = tickflow.TickFlow(api_key=TOKEN, base_url=ENDPOINT) if TOKEN else tickflow.TickFlow.free()
@@ -149,6 +335,10 @@ def main():
     results.append(probe("instruments.batch", lambda: tf.instruments.batch([SYM, SYM2])))
     results.append(probe("universes.list", lambda: tf.universes.list()))
     results.append(probe("universes.get(CN_Equity_A)", lambda: tf.universes.get("CN_Equity_A")))
+    results.append(probe("universes.batch", lambda: tf.universes.batch(["CN_Equity_A"])))
+
+    print("\n== websocket stream (quotes channel, bounded smoke) ==")
+    results.append(probe("stream.quotes(subscribe/unsubscribe)", lambda: _ws_quotes_smoke(tf)))
 
     out_path = Path(__file__).resolve().parents[1] / "reports" / "data" / "tickflow_capability_probe.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +351,14 @@ def main():
     }
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     print(f"\nWrote {out_path}")
+
+    manifest = build_capability_manifest(results, payload["probed_at"], payload["sdk_version"])
+    manifest_path = out_path.with_name("tickflow_capability_manifest.json")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    counts: dict[str, int] = {}
+    for op in manifest["operations"]:
+        counts[op["classification"]] = counts.get(op["classification"], 0) + 1
+    print(f"Wrote {manifest_path} :: {counts}")
     ok = [r["call"] for r in results if r["status"] == "OK"]
     forbidden = [r["call"] for r in results if "FORBIDDEN" in (r["status"] or "")]
     other = [(r["call"], r["status"]) for r in results if r["status"] != "OK" and "FORBIDDEN" not in (r["status"] or "")]

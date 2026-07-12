@@ -77,13 +77,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--val-start", default="2024-08-28")
     ap.add_argument("--val-end", default="2025-08-31")
-    ap.add_argument("--non2026-start", default="2025-09-01")
-    ap.add_argument("--non2026-end", default="2025-12-31")
-    ap.add_argument("--y2026-start", default="2026-01-02")
-    ap.add_argument("--y2026-end", default="2026-05-13")
+    # OOS windows are REQUIRED (no defaults): the old 2025-09-01+ defaults let
+    # this script select policies on the now-quarantined holdout (its
+    # finalscore weighted y2026 CAGR — see HOLDOUT_CONTAMINATION_AUDIT.md §2.1).
+    ap.add_argument("--non2026-start", required=True)
+    ap.add_argument("--non2026-end", required=True)
+    ap.add_argument("--y2026-start", required=True)
+    ap.add_argument("--y2026-end", required=True)
     ap.add_argument("--top-strict", type=int, default=8)
     ap.add_argument("--output-dir", default="runtime/reports/v89_closed_loop/regime_search")
     args = ap.parse_args()
+    # This script calls run_strict_backtest_v8 directly (bypasses bp.evaluate),
+    # so enforce the quarantine guard explicitly on every requested window.
+    from quantagent.backtest.quarantine import QuarantineViolation, check_window, violation_message
+    for w_start, w_end in ((args.val_start, args.val_end),
+                           (args.non2026_start, args.non2026_end),
+                           (args.y2026_start, args.y2026_end)):
+        hit = check_window(w_start, w_end)
+        if hit is not None:
+            raise QuarantineViolation(violation_message(w_start, w_end, hit), hit)
     out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
 
     ens = pd.read_parquet(ENSEMBLE); ens["trade_date"] = pd.to_datetime(ens["trade_date"])

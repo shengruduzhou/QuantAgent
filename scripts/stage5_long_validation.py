@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-04, DEAD_CODE_AUDIT.md / PRUNE_PLAN.md P-C): one-shot stage research; conclusion recorded in stage3_to_6_report.md / memory.
+# Zero references found in scripts/src/tests/docs/systemd (dependency scan 2026-07-03).
+# Scheduled for removal after 2026-10-01 if still unused. Do not build on this.
 """Stage 5 — long-history STRICT validation of turnover-reduced daily books.
 
 IMPORTANT (stated per spec): the model was trained on data <=2024-06 and its

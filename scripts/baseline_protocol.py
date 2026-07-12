@@ -24,12 +24,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig
+from quantagent.backtest.quarantine import (
+    FORENSICS_TRUST_CLASS,
+    QuarantineViolation,
+    check_window,
+    clamp_panel_window,
+    load_windows,
+    log_access,
+    violation_message,
+)
 from quantagent.backtest.strict_v8 import run_strict_backtest_v8
 
 PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
@@ -85,19 +95,24 @@ def _target_weights(preds: pd.DataFrame, score_col: str, top_k: int, *, eligible
     d = d[d["rank"] < top_k]
     d["w"] = 1.0 / float(top_k)
     tw = d.pivot_table(index="trade_date", columns="symbol", values="w", fill_value=0.0).sort_index()
-    if delay_days > 0:
-        # Signal at t is executed on the (t + delay)-th trading day.
-        date_index = pd.DatetimeIndex(sorted(trade_dates))
-        positions = date_index.searchsorted(tw.index) + delay_days
-        keep = positions < len(date_index)
-        tw = tw.iloc[keep]
-        tw.index = date_index[positions[keep]]
-        tw = tw[~tw.index.duplicated(keep="last")].sort_index()
-    return tw
+    return _apply_delay(tw, trade_dates, delay_days)
+
+
+def _apply_delay(tw: pd.DataFrame, trade_dates: list[pd.Timestamp], delay_days: int) -> pd.DataFrame:
+    """Signal at t is executed on the (t + delay)-th trading day."""
+    if delay_days <= 0:
+        return tw
+    date_index = pd.DatetimeIndex(sorted(trade_dates))
+    positions = date_index.searchsorted(tw.index) + delay_days
+    keep = positions < len(date_index)
+    tw = tw.iloc[keep]
+    tw.index = date_index[positions[keep]]
+    return tw[~tw.index.duplicated(keep="last")].sort_index()
 
 
 def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,
-                      start: str, end: str | None, top_k: int) -> str:
+                      start: str, end: str | None, top_k: int,
+                      trust_class: str | None = None) -> str:
     """Emit a UI-discoverable backtest artifact (metrics.json + nav.csv) so the
     real-test CAGR/Calmar surfaces in the quant UI (`services/quant_api`).
 
@@ -131,6 +146,8 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
         "calmar": round(float(calmar), 4) if calmar is not None else None,
         "benchmark_annualized_return": round(float(bench_ann), 6),
     }
+    if trust_class:
+        metrics["trust_class"] = trust_class
     (d / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     (d / "run_config.json").write_text(json.dumps({
         "strategy_version": "v89_closed_loop", "feature_policy": "judgment",
@@ -142,7 +159,19 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
 def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
              slippage_bps: float, variants: list[str], score_column: str = "alpha_score",
              save_backtest_dir: str | None = None,
-             save_variant: str = "C_flags_eligible_delay1") -> dict:
+             save_variant: str = "C_flags_eligible_delay1",
+             allow_quarantined: str | None = None) -> dict:
+    # ---- quarantine guard (fail closed, BEFORE any data is read) ----------
+    q_windows, q_log_path = load_windows()
+    q_hit = check_window(start, end, q_windows)
+    q_record = None
+    if q_hit is not None:
+        if not (allow_quarantined and allow_quarantined.strip()):
+            raise QuarantineViolation(violation_message(start, end, q_hit), q_hit)
+        q_record = log_access(q_hit, allow_quarantined.strip(), start, end, q_log_path)
+        print(f"[quarantine] FORENSIC OVERRIDE — outputs stamped trust_class={FORENSICS_TRUST_CLASS}",
+              flush=True)
+
     preds = pd.read_parquet(preds_path)
     if score_column != "alpha_score":
         if score_column not in preds.columns:
@@ -157,9 +186,15 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
                   "available_at", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]
     panel = pd.read_parquet(PANEL, columns=panel_cols)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
-    panel = panel[panel["trade_date"] >= pd.Timestamp(start) - pd.Timedelta(days=10)]
-    if end:
-        panel = panel[panel["trade_date"] <= pd.Timestamp(end) + pd.Timedelta(days=10)]
+    p_start = pd.Timestamp(start) - pd.Timedelta(days=10)
+    p_end = pd.Timestamp(end) + pd.Timedelta(days=10) if end else None
+    if q_record is None:
+        # Clean eval window: keep the +/-10d fill buffers out of quarantine too
+        # (delay-1 fills otherwise execute inside the burned window).
+        p_start, p_end = clamp_panel_window(p_start, p_end, q_windows)
+    panel = panel[panel["trade_date"] >= p_start]
+    if p_end is not None:
+        panel = panel[panel["trade_date"] <= p_end]
     sector = pd.read_parquet(SECTOR)
 
     flags = panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
@@ -180,6 +215,9 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
     out: dict = {"bench_ann": round(bench_ann, 4), "predictions": preds_path,
                  "top_k": top_k, "start": start, "end": end, "slippage_bps": slippage_bps,
                  "variants": {}}
+    if q_record is not None:
+        out["trust_class"] = FORENSICS_TRUST_CLASS
+        out["quarantine_override"] = q_record
     for name in variants:
         v = spec[name]
         tw = _target_weights(preds, "alpha_score", top_k, eligible_only=v["eligible"],
@@ -200,7 +238,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         }
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:
-            saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k)
+            saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k,
+                                      trust_class=(FORENSICS_TRUST_CLASS if q_record is not None else None))
             out["ui_backtest_dir"] = saved
         print(f"{name:28} ann {m.annualized_return:+8.2%} | excess {m.annualized_return - bench_ann:+8.2%} | "
               f"sharpe {m.sharpe:5.2f} | maxDD {m.max_drawdown:6.2%}")
@@ -222,14 +261,23 @@ def main() -> int:
                     help="If set, write a UI-discoverable <dir>/backtest/{metrics.json,nav.csv} for --save-variant.")
     ap.add_argument("--save-variant", default="C_flags_eligible_delay1",
                     help="Which variant to export as the UI backtest (default = honest variant C).")
+    ap.add_argument("--allow-quarantined", default=None, metavar="REASON",
+                    help="Forensic override for quarantined windows (configs/quarantined_windows.json). "
+                         "Requires a non-empty justification; access is logged and outputs are "
+                         "stamped trust_class=contaminated_holdout_forensics.")
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
-    out = evaluate(args.predictions, top_k=args.top_k, start=args.start, end=args.end,
-                   score_column=args.score_column,
-                   slippage_bps=args.slippage_bps,
-                   save_backtest_dir=args.save_backtest_dir,
-                   save_variant=args.save_variant,
-                   variants=[v.strip() for v in args.variants.split(",") if v.strip()])
+    try:
+        out = evaluate(args.predictions, top_k=args.top_k, start=args.start, end=args.end,
+                       score_column=args.score_column,
+                       slippage_bps=args.slippage_bps,
+                       save_backtest_dir=args.save_backtest_dir,
+                       save_variant=args.save_variant,
+                       variants=[v.strip() for v in args.variants.split(",") if v.strip()],
+                       allow_quarantined=args.allow_quarantined)
+    except QuarantineViolation as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")

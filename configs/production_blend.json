@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "description": "Machine-readable production blend config. Single source of truth; consumed by scripts/materialize_production_composite.py and run_v89_closed_loop.sh step 4.",
+  "model_run": "runtime/reports/v89_closed_loop/retrain_plus7_20260620_0300",
+  "composite_source": "ensemble_composite.parquet",
+  "sleeve_predictions": {
+    "short_5d": "short_5d/predictions.parquet",
+    "mid_5d_30d": "mid_5d_30d/predictions.parquet",
+    "long_30d_120d": "long_30d_120d/predictions.parquet"
+  },
+  "blend": {
+    "method": "cs_rank_pct_weighted_sum",
+    "weights": {
+      "short_5d": 1.0,
+      "mid_5d_30d": 1.0,
+      "long_30d_120d": 0.0
+    },
+    "note": "per trade_date pct-rank of each sleeve score, weighted sum; exact replica of ensemble_weight_search._ranked_sleeves"
+  },
+  "top_k": 10,
+  "evaluator": {
+    "script": "scripts/baseline_protocol.py",
+    "variant": "C_flags_eligible_delay1",
+    "slippage_bps": 8.0
+  },
+  "long_sleeve": {
+    "status": "excluded_from_blend_retained_for_diagnostics",
+    "reason": "weight 0 chosen by ensemble_weight_search on validation 2024-08-28..2025-08-31; that selection is classified likely_overfit (PBO 0.886) and was never independently validated. Training the long sleeve is optional: QUANTAGENT_TRAIN_SLEEVES env in run_v89_closed_loop.sh."
+  },
+  "selection": {
+    "window": "2024-08-28..2025-08-31",
+    "script": "scripts/ensemble_weight_search.py",
+    "n_trials": 27,
+    "pbo_s8": 0.886,
+    "pbo_s16": 0.882,
+    "dsr_n27": 0.919,
+    "analysis": "PBO_DSR_ANALYSIS.md"
+  },
+  "trust": {
+    "class": "likely_overfit",
+    "holdout_claim": "the 38.6% CAGR (2025-09-01..2026-05-15) is contaminated_holdout — never cite as clean OOS",
+    "reference_config": "a-priori 3-sleeve average blend (HorizonEnsembleWeights 0.30/0.45/0.25)",
+    "audits": [
+      "HOLDOUT_CONTAMINATION_AUDIT.md",
+      "BASELINE_TRUST_CLASSIFICATION.md",
+      "PBO_DSR_ANALYSIS.md"
+    ]
+  },
+  "lineage": {
+    "dataset": "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus7clean.parquet",
+    "dataset_sha256": "272e473612df576cc66f15e81b77f4f1b97d59563e3475aec2162c2d75a01095",
+    "dataset_schema_json": null,
+    "dataset_schema_note": "plus7clean has no sibling schema json on disk (gap recorded in PRODUCTION_REPRODUCIBILITY_AUDIT.md Q5); per-sleeve feature schemas hashed below",
+    "train_window": "2018-01-02..2024-06-30",
+    "prediction_window": "2024-08-09..2026-05-07",
+    "ensemble_composite_sha256": "c982e3a5105e6c2c01af1faa099b83b64a8d30a7719fbbb30d1dd5f304b0be85",
+    "feature_schema_sha256": {
+      "short_5d": "f83041fa6b98cb56c53775e3d40cb003bffe8d8e8b10c65cdd88cf93cc2cdf84",
+      "mid_5d_30d": "0af2c6169c68f9a59ee627e813e858e5a6d02033d346fffd8ea64a03a1a60e6f",
+      "long_30d_120d": "a134d0da389b79ec03a9d9d5dfbaa0486ea3646dadb1dc1604f8fa3ec585273e"
+    },
+    "git_hash_at_declaration": "e06ca86582c411ed3842467857f76060d092116f",
+    "created": "2026-07-03",
+    "training_env": {
+      "QUANTAGENT_HORIZON_ASSIGNMENT": "runtime/reports/v89_closed_loop/horizon_factor_assignment_plus7.json",
+      "QUANTAGENT_JUDGMENT_MAX_FACTORS": "64 (long sleeve feature cap; no-op for short/mid)",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True (long sleeve rescue)",
+      "note": "discovered during H-008 (2026-07-04): these env vars are REQUIRED to reproduce the production sleeve feature sets (long=90 features); they were previously undocumented lineage"
+    }
+  }
+}

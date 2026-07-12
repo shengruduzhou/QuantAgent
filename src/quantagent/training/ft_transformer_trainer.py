@@ -55,6 +55,12 @@ class FTTransformerTrainerConfig:
     rank_loss_temperature: float = 0.5  # softmax temperature for top-K listwise loss
     dates_per_step: int = 8
     train_micro_batch: int | None = None
+    # Gradient-exact memory reduction: recompute transformer-block activations
+    # in backward instead of storing them (needed for the 90-feature long
+    # sleeve whose per-date forward sits at the 24G VRAM ceiling; note that
+    # train_micro_batch CANNOT reduce activation memory at dates_per_step=1
+    # because it only splits by date group — H-008 abort diagnosis 2026-07-04).
+    activation_checkpointing: bool = False
     gradient_clip_norm: float = 1.0
     log_gpu_memory: bool = True
     device: str = "auto"
@@ -177,6 +183,23 @@ class FTTransformerTrainer:
         if self.config.resume_checkpoint:
             state = torch.load(self.config.resume_checkpoint, map_location=device)
             model.load_state_dict(state["model"])
+        if self.config.activation_checkpointing and hasattr(model, "blocks"):
+            from torch.utils.checkpoint import checkpoint as _ckpt
+
+            class _CheckpointedBlock(nn.Module):
+                """Recompute block activations in backward — gradients are exact
+                (same math, memory traded for ~30% extra compute)."""
+
+                def __init__(self, block: nn.Module) -> None:
+                    super().__init__()
+                    self.block = block
+
+                def forward(self, x):
+                    if self.training and torch.is_grad_enabled():
+                        return _ckpt(self.block, x, use_reentrant=False)
+                    return self.block(x)
+
+            model.blocks = nn.ModuleList([_CheckpointedBlock(b) for b in model.blocks])
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=self.config.learning_rate,
@@ -365,6 +388,12 @@ class FTTransformerTrainer:
 
         if best_state is not None:
             model.load_state_dict(best_state)
+        # Unwrap checkpointing wrappers so the saved state_dict keeps the clean
+        # FTTransformer key layout the predict path rebuilds against.
+        if self.config.activation_checkpointing and hasattr(model, "blocks"):
+            model.blocks = nn.ModuleList(
+                [m.block if hasattr(m, "block") else m for m in model.blocks]
+            )
 
         if torch.cuda.is_available() and self.config.log_gpu_memory and str(device).startswith("cuda"):
             try:

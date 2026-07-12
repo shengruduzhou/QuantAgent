@@ -1,0 +1,60 @@
+section,name,value
+candidate,w1_1_1_k10,cagr=0.6783 sharpe=1.874 maxdd=0.2115 turnover=0.1549 fidelity_delta=-0.0106
+candidate,w1_1_1_k20,cagr=0.445 sharpe=1.648 maxdd=0.1702 turnover=0.2047 fidelity_delta=-0.0049
+candidate,w1_1_1_k30,cagr=0.4813 sharpe=2.757 maxdd=0.0657 turnover=0.2136 fidelity_delta=-0.0148
+candidate,w1_0_0_k10,cagr=0.6205 sharpe=1.831 maxdd=0.1771 turnover=0.1797 fidelity_delta=0.0002
+candidate,w1_0_0_k20,cagr=0.5522 sharpe=2.162 maxdd=0.124 turnover=0.2401 fidelity_delta=-0.0073
+candidate,w1_0_0_k30,cagr=0.451 sharpe=2.106 maxdd=0.0993 turnover=0.2767 fidelity_delta=-0.0049
+candidate,w0_1_0_k10,cagr=0.3407 sharpe=1.273 maxdd=0.1578 turnover=0.1234 fidelity_delta=0.0139
+candidate,w0_1_0_k20,cagr=0.4206 sharpe=1.404 maxdd=0.1995 turnover=0.1196 fidelity_delta=0.0002
+candidate,w0_1_0_k30,cagr=0.3772 sharpe=1.35 maxdd=0.1854 turnover=0.1846 fidelity_delta=-0.0118
+candidate,w1_1_0_k10,cagr=0.7324 sharpe=2.235 maxdd=0.1446 turnover=0.159 fidelity_delta=0.0152
+candidate,w1_1_0_k20,cagr=0.5128 sharpe=1.896 maxdd=0.157 turnover=0.1847 fidelity_delta=-0.0107
+candidate,w1_1_0_k30,cagr=0.682 sharpe=2.324 maxdd=0.142 turnover=0.189 fidelity_delta=-0.011
+candidate,w2_1_0_k10,cagr=0.6055 sharpe=1.954 maxdd=0.1633 turnover=0.1958 fidelity_delta=-0.0219
+candidate,w2_1_0_k20,cagr=0.6667 sharpe=2.211 maxdd=0.1642 turnover=0.2196 fidelity_delta=0.0003
+candidate,w2_1_0_k30,cagr=0.509 sharpe=2.466 maxdd=0.0673 turnover=0.229 fidelity_delta=-0.0118
+candidate,w1_2_0_k10,cagr=0.5032 sharpe=1.776 maxdd=0.1576 turnover=0.116 fidelity_delta=0.0011
+candidate,w1_2_0_k20,cagr=0.5983 sharpe=2.111 maxdd=0.1568 turnover=0.2201 fidelity_delta=-0.0049
+candidate,w1_2_0_k30,cagr=0.5439 sharpe=2.203 maxdd=0.1217 turnover=0.2263 fidelity_delta=-0.0145
+candidate,w1_1_0.5_k10,cagr=0.5637 sharpe=1.749 maxdd=0.1934 turnover=0.1014 fidelity_delta=0.0054
+candidate,w1_1_0.5_k20,cagr=0.5332 sharpe=1.962 maxdd=0.1256 turnover=0.2285 fidelity_delta=-0.0166
+candidate,w1_1_0.5_k30,cagr=0.4798 sharpe=2.231 maxdd=0.1193 turnover=0.2062 fidelity_delta=-0.0141
+candidate,w2_1_1_k10,cagr=0.5435 sharpe=1.618 maxdd=0.2428 turnover=0.1061 fidelity_delta=0.0011
+candidate,w2_1_1_k20,cagr=0.5056 sharpe=1.725 maxdd=0.1809 turnover=0.1945 fidelity_delta=-0.0092
+candidate,w2_1_1_k30,cagr=0.5632 sharpe=2.639 maxdd=0.0815 turnover=0.2133 fidelity_delta=-0.0095
+candidate,w1_2_1_k10,cagr=0.5614 sharpe=1.806 maxdd=0.1867 turnover=0.1676 fidelity_delta=-0.0044
+candidate,w1_2_1_k20,cagr=0.6382 sharpe=1.984 maxdd=0.1909 turnover=0.1837 fidelity_delta=0.0086
+candidate,w1_2_1_k30,cagr=0.5435 sharpe=2.227 maxdd=0.0906 turnover=0.1954 fidelity_delta=-0.0071
+pbo_s8,n_blocks,8
+pbo_s8,n_splits,70
+pbo_s8,pbo,0.8857
+pbo_s8,median_logit,-1.7918
+pbo_s8,mean_oos_rank_of_is_winner,6.5
+pbo_s8,n_candidates,27
+pbo_s16,n_blocks,16
+pbo_s16,n_splits,12870
+pbo_s16,pbo,0.8824
+pbo_s16,median_logit,-1.5261
+pbo_s16,mean_oos_rank_of_is_winner,6.62
+pbo_s16,n_candidates,27
+dsr,N=27,dsr=0.9194 sr_ann=2.235 exp_max_sr_daily=0.0474
+dsr,N=54,dsr=0.9044 sr_ann=2.235 exp_max_sr_daily=0.0538
+dsr,N=100,dsr=0.8907 sr_ann=2.235 exp_max_sr_daily=0.059
+dsr,N=200,dsr=0.8749 sr_ann=2.235 exp_max_sr_daily=0.0645
+rank_stability_halves,spearman,[-0.12]
+rank_stability_halves,winner_rank_per_part,"[8, 1]"
+rank_stability_halves,winner_cagr_per_part,"[0.6646, 0.818]"
+rank_stability_thirds,spearman,"[-0.551, 0.292, -0.092]"
+rank_stability_thirds,winner_rank_per_part,"[9, 13, 1]"
+rank_stability_thirds,winner_cagr_per_part,"[0.8752, 0.3044, 1.1544]"
+global,val_window,2024-08-30..2025-08-29
+global,n_days,242
+global,fidelity_ok,False
+global,fidelity_max_abs_delta,0.0219
+global,mean_pairwise_corr,0.805
+global,cagr_best,0.7324
+global,cagr_median,0.5435
+global,cagr_degradation_best_to_median,0.1889
+global,peak_rss_gib,2.23
+global,runtime_sec,435.1

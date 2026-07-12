@@ -194,6 +194,17 @@ def main() -> int:
     ap.add_argument("--output", default=str(OUT_PATH))
     args = ap.parse_args()
 
+    import sys as _sys
+    print(
+        "[forward_daily_inference] WARNING: pinned to the v8.8 run "
+        f"({args.run_dir}) — a SUPERSEDED, data-corrupted generation whose "
+        "3-sleeve blend does NOT match production (configs/production_blend.json), "
+        "with 11 known non-reproducible feature columns (overlap spearman ~0.71). "
+        "Scores must NOT be used as production or trusted-evaluation evidence. "
+        "See PRODUCTION_REPRODUCIBILITY_AUDIT.md Q6 / patch P6.",
+        file=_sys.stderr, flush=True,
+    )
+
     run_dir = Path(args.run_dir)
     sleeve_feats = _sleeve_features(run_dir)
     union_feats = sorted({c for cols in sleeve_feats.values() for c in cols})

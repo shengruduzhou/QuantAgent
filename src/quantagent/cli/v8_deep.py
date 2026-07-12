@@ -396,7 +396,10 @@ def train_v8_deep(
         "short_5d", help="short_5d | mid_5d_30d | long_30d_120d",
     ),
     dataset_path: Path = typer.Option(
-        Path("runtime/data/v7/gold/training_dataset/training_dataset_alpha181_full_nosynth.parquet"),
+        # Default = the production dataset (configs/production_blend.json lineage).
+        # The old default (training_dataset_alpha181_full_nosynth.parquet) was a
+        # no-edge probe dataset removed in P-E batch 2 (DELETION_CANDIDATE_MANIFEST.csv).
+        Path("runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus7clean.parquet"),
         exists=True, dir_okay=False,
         help="gold training dataset with OHLCV + alphas + forward_return labels",
     ),
@@ -428,7 +431,11 @@ def train_v8_deep(
     ),
     train_micro_batch: Optional[int] = typer.Option(
         None,
-        help="If set, split each date-chunk into sub-batches of ≤ N rows for forward/backward; used to fit large universes on tight VRAM.",
+        help="If set, split each date-chunk into sub-batches of ≤ N rows for forward/backward; used to fit large universes on tight VRAM. NOTE: no effect at --dates-per-step 1 (splitting is by date group); use --activation-checkpointing there instead.",
+    ),
+    activation_checkpointing: bool = typer.Option(
+        False, "--activation-checkpointing",
+        help="Recompute transformer-block activations in backward (gradient-exact, ~30% slower) — required for the 90-feature long sleeve at dates_per_step=1 on 24G VRAM.",
     ),
     cross_sectional_norm: str = typer.Option(
         "rank",
@@ -623,6 +630,7 @@ def train_v8_deep(
         batch_size=batch_size, max_epochs=max_epochs,
         dates_per_step=dates_per_step,
         train_micro_batch=train_micro_batch,
+        activation_checkpointing=activation_checkpointing,
         learning_rate=learning_rate,
         require_gpu=require_gpu,
         device="cuda" if require_gpu else "auto",

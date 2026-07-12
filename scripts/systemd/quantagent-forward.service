@@ -1,5 +1,10 @@
+# DISABLED (P-F, 2026-07-03): scores with the corrupted, superseded v8.8
+# generation. Do NOT install/enable until patch P6 repoints inference to the
+# production run (configs/production_blend.json). The wrapped script also
+# fail-fasts unless QUANTAGENT_ALLOW_DEPRECATED_FORWARD=1.
+# See FORWARD_SCORING_TIMER_AUDIT.md.
 [Unit]
-Description=QuantAgent forward daily loop (panel append + v8.8 inference + hold-band A/B books + 反T watchlist + ledger)
+Description=QuantAgent forward daily loop (DISABLED - corrupted v8.8 generation; see FORWARD_SCORING_TIMER_AUDIT.md)
 ConditionPathExists=/home/shanhefu/QuantAgent
 
 [Service]
