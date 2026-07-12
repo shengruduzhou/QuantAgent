@@ -1,18 +1,23 @@
-"""PolicyEventBuilder — produces silver/policy_events.parquet + manifest.
+"""Canonical policy-event builder with explicit publication and ingestion time.
 
-Contract:
+The original implementation overloaded ``available_at`` with the later of the
+announcement timestamp and the crawler fetch timestamp.  That is safe for a
+live replay, but it destroys historical point-in-time semantics when an old
+policy document is backfilled years later.  This module keeps the clocks
+separate:
 
-* Input: a frame of *raw* policy rows with at least ``source``,
-  ``announced_at``, ``title``, and a URL.  Optional: ``effective_at``,
-  ``body_summary``.  Any rows missing one of the required columns are
-  rejected.
-* Output: a normalised parquet with the canonical columns listed in
-  :data:`POLICY_EVENT_REQUIRED_COLUMNS`, plus a JSON coverage_report
-  and a manifest gate (`policy_events_usable_for_features`).
+``published_at``
+    Timestamp at which the document became public.
+``public_available_at``
+    First timestamp at which a market participant could have observed it.
+``ingested_at``
+    Timestamp at which QuantAgent fetched the document.
+``available_at``
+    Feature-availability timestamp selected by ``availability_mode``.
 
-The builder does not crawl. Fetching live data is the job of a
-separate ingestion script (``scripts/fetch_policy_events.py`` in
-spec); the builder *only* normalises + validates + writes.
+Historical research should normally use ``availability_mode='public'``.  A
+strict live replay can use ``availability_mode='ingested'`` so a document is
+not consumed before the local pipeline actually received it.
 """
 
 from __future__ import annotations
@@ -22,56 +27,91 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
-from quantagent.data.policy.theme_tagger import (
-    POLICY_THEMES,
-    SECTOR_KEYWORDS,
-    tag_policy_event,
-)
+from quantagent.data.policy.theme_tagger import tag_policy_event
 
 
 POLICY_EVENT_REQUIRED_COLUMNS: tuple[str, ...] = (
     "event_id",
     "source",
+    "source_authority",
+    "document_type",
     "url",
-    "announced_at",
-    "effective_at",
-    "available_at",
     "title",
     "body_summary",
+    "announced_at",  # backward-compatible alias of published_at
+    "published_at",
+    "effective_at",
+    "public_available_at",
+    "ingested_at",
+    "available_at",
+    "revised_at",
+    "superseded_at",
+    "jurisdiction",
+    "funding_amount_cny",
     "themes",
     "sectors_hint",
     "policy_strength",
-    "fetched_at",
+    "raw_hash",
+    "fetched_at",  # backward-compatible alias of ingested_at
     "source_version",
 )
 
-
 VALID_SOURCES: tuple[str, ...] = (
-    "csrc", "pboc", "mof", "ndrc", "state_council", "manual_local_import",
+    "csrc",
+    "pboc",
+    "mof",
+    "ndrc",
+    "state_council",
+    "sse",
+    "szse",
+    "bse",
+    "stats",
+    "local_government",
+    "manual_local_import",
 )
 
+SOURCE_AUTHORITY: dict[str, float] = {
+    "state_council": 1.00,
+    "pboc": 0.95,
+    "mof": 0.95,
+    "ndrc": 0.92,
+    "csrc": 0.92,
+    "sse": 0.85,
+    "szse": 0.85,
+    "bse": 0.85,
+    "stats": 0.82,
+    "local_government": 0.75,
+    "manual_local_import": 0.50,
+}
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+DOCUMENT_TYPE_WEIGHT: dict[str, float] = {
+    "law": 1.00,
+    "administrative_regulation": 0.95,
+    "measure": 0.90,
+    "rule": 0.88,
+    "opinion": 0.82,
+    "notice": 0.78,
+    "plan": 0.76,
+    "meeting": 0.65,
+    "speech": 0.55,
+    "other": 0.50,
+}
+
 
 @dataclass(frozen=True)
 class PolicyEventConfig:
     source_version: str = "unknown"
     output_root: str | Path = "runtime/data/v7"
-    # Coverage gate
-    min_theme_coverage: float = 0.50  # ≥50% rows must have at least one theme
-    min_strength_median: float = 0.30  # median policy_strength to "open" the gate
-    min_events: int = 5  # below this, the gate stays closed regardless
+    availability_mode: Literal["public", "ingested"] = "public"
+    min_theme_coverage: float = 0.50
+    min_strength_median: float = 0.30
+    min_events: int = 5
+    require_official_url: bool = False
 
-
-# ---------------------------------------------------------------------------
-# Result
-# ---------------------------------------------------------------------------
 
 @dataclass
 class PolicyEventResult:
@@ -81,206 +121,268 @@ class PolicyEventResult:
     output_paths: dict[str, str] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _compute_event_id(source: str, url: str, announced_at: str) -> str:
-    raw = f"{source}||{url}||{announced_at}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-
-
 def _coerce_timestamp(value: Any) -> pd.Timestamp | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     ts = pd.to_datetime(value, errors="coerce", utc=False)
     if pd.isna(ts):
         return None
-    try:
-        return ts.tz_localize(None) if ts.tzinfo is not None else ts
-    except (AttributeError, TypeError):
-        return ts
+    if getattr(ts, "tzinfo", None) is not None:
+        ts = ts.tz_localize(None)
+    return pd.Timestamp(ts)
 
 
 def _normalise_source(value: Any) -> str:
-    s = str(value or "").strip().lower()
-    if s in VALID_SOURCES:
-        return s
-    return "manual_local_import"
+    source = str(value or "").strip().lower()
+    return source if source in VALID_SOURCES else "manual_local_import"
+
+
+def _normalise_document_type(value: Any) -> str:
+    value = str(value or "other").strip().lower()
+    aliases = {
+        "法律": "law",
+        "行政法规": "administrative_regulation",
+        "办法": "measure",
+        "规定": "rule",
+        "意见": "opinion",
+        "通知": "notice",
+        "规划": "plan",
+        "会议": "meeting",
+        "讲话": "speech",
+    }
+    value = aliases.get(value, value)
+    return value if value in DOCUMENT_TYPE_WEIGHT else "other"
 
 
 def _ensure_list(value: Any) -> list[str]:
-    if value is None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
-    if isinstance(value, (list, tuple)):
-        return [str(v) for v in value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
     if isinstance(value, str):
-        # JSON-encoded list or comma-separated
         try:
             parsed = json.loads(value)
             if isinstance(parsed, list):
-                return [str(v) for v in parsed]
+                return [str(v).strip() for v in parsed if str(v).strip()]
         except (json.JSONDecodeError, TypeError):
             pass
         return [v.strip() for v in value.split(",") if v.strip()]
-    return [str(value)]
+    return [str(value).strip()]
 
 
-# ---------------------------------------------------------------------------
-# Core builder
-# ---------------------------------------------------------------------------
+def _content_hash(title: str, body: str, url: str) -> str:
+    payload = f"{title.strip()}\n{body.strip()}\n{url.strip()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _event_id(source: str, url: str, published_at: pd.Timestamp, title: str) -> str:
+    raw = f"{source}||{url}||{published_at.isoformat()}||{title.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _numeric_or_nan(value: Any) -> float:
+    number = pd.to_numeric(value, errors="coerce")
+    return float(number) if pd.notna(number) else float("nan")
+
+
+def _derive_strength(
+    *,
+    source: str,
+    document_type: str,
+    tag_strength: float,
+    funding_amount_cny: float,
+) -> float:
+    authority = SOURCE_AUTHORITY.get(source, 0.50)
+    document = DOCUMENT_TYPE_WEIGHT.get(document_type, 0.50)
+    funding_bonus = 0.0
+    if pd.notna(funding_amount_cny) and funding_amount_cny > 0:
+        # Log-scaled bonus: explicit funding matters, but cannot dominate.
+        funding_bonus = min(0.12, 0.02 * max(0.0, len(str(int(funding_amount_cny))) - 8))
+    score = 0.45 * float(tag_strength) + 0.35 * authority + 0.20 * document + funding_bonus
+    return float(min(1.0, max(0.0, score)))
+
 
 def build_policy_events(
     raw: pd.DataFrame,
     *,
     config: PolicyEventConfig | None = None,
 ) -> PolicyEventResult:
-    """Normalise a raw policy frame into the canonical silver schema."""
+    """Normalise raw policy rows into an auditable PIT-safe silver product."""
     cfg = config or PolicyEventConfig()
     if raw is None or raw.empty:
         return _empty_result(cfg)
 
-    required_in = {"source", "announced_at", "title"}
-    missing = required_in - set(raw.columns)
+    required = {"source", "title"}
+    missing = required - set(raw.columns)
     if missing:
-        raise ValueError(
-            f"raw policy frame missing required columns: {sorted(missing)}"
-        )
+        raise ValueError(f"raw policy frame missing required columns: {sorted(missing)}")
+    if "published_at" not in raw.columns and "announced_at" not in raw.columns:
+        raise ValueError("raw policy frame requires published_at or announced_at")
 
-    frame = raw.copy()
+    frame = raw.copy().reset_index(drop=False).rename(columns={"index": "_source_row_id"})
     frame["source"] = frame["source"].map(_normalise_source)
-    frame["url"] = frame.get("url", pd.Series([""] * len(frame))).fillna("").astype(str)
+    frame["source_authority"] = frame["source"].map(SOURCE_AUTHORITY).fillna(0.50)
+    frame["document_type"] = frame.get("document_type", "other").map(_normalise_document_type)
+    frame["url"] = frame.get("url", pd.Series("", index=frame.index)).fillna("").astype(str)
     frame["title"] = frame["title"].fillna("").astype(str)
-    frame["body_summary"] = (
-        frame.get("body_summary", pd.Series([""] * len(frame))).fillna("").astype(str)
+    frame["body_summary"] = frame.get(
+        "body_summary", pd.Series("", index=frame.index)
+    ).fillna("").astype(str)
+
+    published_source = frame["published_at"] if "published_at" in frame.columns else frame["announced_at"]
+    frame["published_at"] = published_source.map(_coerce_timestamp)
+    frame["announced_at"] = frame["published_at"]
+    frame["effective_at"] = frame.get(
+        "effective_at", frame["published_at"]
+    ).map(_coerce_timestamp)
+    frame["effective_at"] = frame["effective_at"].fillna(frame["published_at"])
+
+    public_source = frame.get("public_available_at", frame["published_at"])
+    frame["public_available_at"] = public_source.map(_coerce_timestamp)
+    frame["public_available_at"] = frame["public_available_at"].fillna(frame["published_at"])
+
+    now = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+    ingest_source = frame.get(
+        "ingested_at",
+        frame.get("fetched_at", pd.Series(now, index=frame.index)),
     )
+    frame["ingested_at"] = ingest_source.map(_coerce_timestamp).fillna(now)
+    frame["fetched_at"] = frame["ingested_at"]
 
-    frame["announced_at"] = frame["announced_at"].map(_coerce_timestamp)
-    if "effective_at" in frame.columns:
-        frame["effective_at"] = frame["effective_at"].map(_coerce_timestamp)
-    else:
-        frame["effective_at"] = frame["announced_at"]
-    frame["effective_at"] = frame["effective_at"].fillna(frame["announced_at"])
+    frame["revised_at"] = frame.get(
+        "revised_at", pd.Series(pd.NaT, index=frame.index)
+    ).map(_coerce_timestamp)
+    frame["superseded_at"] = frame.get(
+        "superseded_at", pd.Series(pd.NaT, index=frame.index)
+    ).map(_coerce_timestamp)
+    frame["jurisdiction"] = frame.get(
+        "jurisdiction", pd.Series("national", index=frame.index)
+    ).fillna("national").astype(str)
+    frame["funding_amount_cny"] = frame.get(
+        "funding_amount_cny", pd.Series(float("nan"), index=frame.index)
+    ).map(_numeric_or_nan)
 
-    # available_at = max(announced_at, fetched_at) — we never see a row
-    # before the fetcher actually pulled it. If fetched_at missing, fall
-    # back to announced_at.
-    fetched_default = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
-    if "fetched_at" in frame.columns:
-        frame["fetched_at"] = frame["fetched_at"].map(_coerce_timestamp).fillna(fetched_default)
-    else:
-        frame["fetched_at"] = fetched_default
-    frame["available_at"] = frame[["announced_at", "fetched_at"]].max(axis=1)
+    if cfg.availability_mode == "public":
+        frame["available_at"] = frame["public_available_at"]
+    elif cfg.availability_mode == "ingested":
+        frame["available_at"] = frame[["public_available_at", "ingested_at"]].max(axis=1)
+    else:  # pragma: no cover - dataclass typing is not runtime enforcement
+        raise ValueError(f"unsupported availability_mode: {cfg.availability_mode}")
 
-    # Drop rows with unparseable announced_at
     before = len(frame)
-    frame = frame[frame["announced_at"].notna()].reset_index(drop=True)
+    frame = frame[frame["published_at"].notna()].copy()
     rejected_no_date = before - len(frame)
+    if cfg.require_official_url:
+        before_url = len(frame)
+        frame = frame[frame["url"].str.startswith(("http://", "https://"))].copy()
+        rejected_no_url = before_url - len(frame)
+    else:
+        rejected_no_url = 0
 
-    # event_id: stable hash for deduplication
     frame["event_id"] = frame.apply(
-        lambda r: _compute_event_id(r["source"], r["url"], r["announced_at"].isoformat()),
+        lambda row: _event_id(row["source"], row["url"], row["published_at"], row["title"]),
+        axis=1,
+    )
+    frame["raw_hash"] = frame.apply(
+        lambda row: _content_hash(row["title"], row["body_summary"], row["url"]),
         axis=1,
     )
 
-    # Theme + sector + strength tagging
-    tags = frame.apply(
-        lambda r: tag_policy_event(r["title"], r.get("body_summary", "")),
-        axis=1,
-    )
-    frame["themes"] = [t["themes"] for t in tags]
-    frame["sectors_hint"] = [t["sectors_hint"] for t in tags]
-    frame["policy_strength"] = [t["policy_strength"] for t in tags]
+    tags = frame.apply(lambda row: tag_policy_event(row["title"], row["body_summary"]), axis=1)
+    frame["themes"] = [tag["themes"] for tag in tags]
+    frame["sectors_hint"] = [tag["sectors_hint"] for tag in tags]
+    tag_strengths = [float(tag["policy_strength"]) for tag in tags]
 
-    # Allow caller to override themes/sectors_hint if supplied. We assign
-    # cell-by-cell because pandas .loc unpacks lists when bulk-assigning
-    # object columns.
-    if "themes_override" in raw.columns:
-        for idx in frame.index:
-            override = _ensure_list(raw.at[idx, "themes_override"])
+    # Overrides are read from the filtered frame itself.  Keeping _source_row_id
+    # avoids the old reset-index/raw.at mismatch after invalid rows are removed.
+    if "themes_override" in frame.columns:
+        for idx, value in frame["themes_override"].items():
+            override = _ensure_list(value)
             if override:
                 frame.at[idx, "themes"] = override
-    if "sectors_hint_override" in raw.columns:
-        for idx in frame.index:
-            override = _ensure_list(raw.at[idx, "sectors_hint_override"])
+    if "sectors_hint_override" in frame.columns:
+        for idx, value in frame["sectors_hint_override"].items():
+            override = _ensure_list(value)
             if override:
                 frame.at[idx, "sectors_hint"] = override
 
-    # Dedup by event_id (first-write-wins)
-    before_dedup = len(frame)
-    frame = frame.drop_duplicates(subset=["event_id"], keep="first").reset_index(drop=True)
-    duplicates_removed = before_dedup - len(frame)
-
+    frame["policy_strength"] = [
+        _derive_strength(
+            source=source,
+            document_type=document_type,
+            tag_strength=tag_strength,
+            funding_amount_cny=funding,
+        )
+        for source, document_type, tag_strength, funding in zip(
+            frame["source"], frame["document_type"], tag_strengths, frame["funding_amount_cny"]
+        )
+    ]
     frame["source_version"] = cfg.source_version
 
-    # Canonical column ordering
-    out = frame[list(POLICY_EVENT_REQUIRED_COLUMNS)].copy()
+    before_dedup = len(frame)
+    frame = frame.sort_values(["published_at", "ingested_at", "event_id"])
+    frame = frame.drop_duplicates(subset=["event_id"], keep="first")
+    duplicates_removed = before_dedup - len(frame)
 
-    # Coverage report
+    out = frame[list(POLICY_EVENT_REQUIRED_COLUMNS)].reset_index(drop=True)
     n = int(len(out))
-    n_tagged = int(out["themes"].map(lambda l: bool(l)).sum())
+    theme_coverage = float(out["themes"].map(bool).mean()) if n else 0.0
     median_strength = float(out["policy_strength"].median()) if n else 0.0
-    theme_coverage = float(n_tagged / n) if n else 0.0
-
-    sector_counts = (
-        out["sectors_hint"]
-        .explode()
-        .dropna()
-        .value_counts()
-        .to_dict()
-    )
-    theme_counts = (
-        out["themes"].explode().dropna().value_counts().to_dict()
+    public_before_ingest_rate = float(
+        (out["public_available_at"] <= out["ingested_at"]).mean()
+    ) if n else 0.0
+    invalid_effective_before_publish = int(
+        (out["effective_at"] < out["published_at"]).sum()
     )
 
     gate_open = (
         n >= cfg.min_events
         and theme_coverage >= cfg.min_theme_coverage
         and median_strength >= cfg.min_strength_median
+        and invalid_effective_before_publish == 0
     )
     reason = "passed" if gate_open else _gate_reason(
-        n, theme_coverage, median_strength, cfg
+        n=n,
+        theme_coverage=theme_coverage,
+        median_strength=median_strength,
+        invalid_effective_before_publish=invalid_effective_before_publish,
+        cfg=cfg,
     )
 
     coverage = {
         "n_events": n,
-        "n_tagged_at_least_one_theme": n_tagged,
+        "availability_mode": cfg.availability_mode,
         "theme_coverage": theme_coverage,
         "median_policy_strength": median_strength,
+        "public_before_ingest_rate": public_before_ingest_rate,
         "rejected_no_date": int(rejected_no_date),
+        "rejected_no_url": int(rejected_no_url),
         "duplicates_removed": int(duplicates_removed),
         "source_counts": out["source"].value_counts().to_dict(),
-        "theme_counts": theme_counts,
-        "sector_hint_counts": sector_counts,
+        "document_type_counts": out["document_type"].value_counts().to_dict(),
+        "theme_counts": out["themes"].explode().dropna().value_counts().to_dict(),
+        "sector_hint_counts": out["sectors_hint"].explode().dropna().value_counts().to_dict(),
         "gate": {
             "policy_events_usable_for_features": bool(gate_open),
             "reason": reason,
         },
     }
-    validation = {"status": "passed", "n": n, "errors": []}
-
+    validation = {
+        "status": "passed" if gate_open else "failed",
+        "n": n,
+        "errors": [] if invalid_effective_before_publish == 0 else [
+            f"{invalid_effective_before_publish} rows have effective_at before published_at"
+        ],
+    }
     return PolicyEventResult(frame=out, coverage=coverage, validation=validation)
 
 
-def _empty_result(cfg: PolicyEventConfig) -> PolicyEventResult:
-    empty_frame = pd.DataFrame(columns=list(POLICY_EVENT_REQUIRED_COLUMNS))
-    coverage = {
-        "n_events": 0,
-        "n_tagged_at_least_one_theme": 0,
-        "theme_coverage": 0.0,
-        "median_policy_strength": 0.0,
-        "gate": {
-            "policy_events_usable_for_features": False,
-            "reason": "no_events",
-        },
-    }
-    return PolicyEventResult(frame=empty_frame, coverage=coverage, validation={"status": "passed", "n": 0, "errors": []})
-
-
 def _gate_reason(
+    *,
     n: int,
     theme_coverage: float,
     median_strength: float,
+    invalid_effective_before_publish: int,
     cfg: PolicyEventConfig,
 ) -> str:
     if n < cfg.min_events:
@@ -289,12 +391,27 @@ def _gate_reason(
         return f"theme_coverage_{theme_coverage:.3f}_below_{cfg.min_theme_coverage:.3f}"
     if median_strength < cfg.min_strength_median:
         return f"median_strength_{median_strength:.3f}_below_{cfg.min_strength_median:.3f}"
+    if invalid_effective_before_publish:
+        return f"effective_before_publish_{invalid_effective_before_publish}"
     return "unknown"
 
 
-# ---------------------------------------------------------------------------
-# Builder with writer
-# ---------------------------------------------------------------------------
+def _empty_result(cfg: PolicyEventConfig) -> PolicyEventResult:
+    return PolicyEventResult(
+        frame=pd.DataFrame(columns=list(POLICY_EVENT_REQUIRED_COLUMNS)),
+        coverage={
+            "n_events": 0,
+            "availability_mode": cfg.availability_mode,
+            "theme_coverage": 0.0,
+            "median_policy_strength": 0.0,
+            "gate": {
+                "policy_events_usable_for_features": False,
+                "reason": "no_events",
+            },
+        },
+        validation={"status": "failed", "n": 0, "errors": ["no_rows"]},
+    )
+
 
 class PolicyEventBuilder:
     def __init__(self, config: PolicyEventConfig | None = None) -> None:
@@ -309,12 +426,11 @@ class PolicyEventBuilder:
         silver_dir.mkdir(parents=True, exist_ok=True)
         parquet_path = silver_dir / "policy_events.parquet"
         result.frame.to_parquet(parquet_path, index=False)
-        (silver_dir / "coverage_report.json").write_text(
-            json.dumps(result.coverage, indent=2, default=str), encoding="utf-8"
-        )
-        (silver_dir / "validation_report.json").write_text(
-            json.dumps(result.validation, indent=2, default=str), encoding="utf-8"
-        )
+        coverage_path = silver_dir / "coverage_report.json"
+        validation_path = silver_dir / "validation_report.json"
+        coverage_path.write_text(json.dumps(result.coverage, indent=2, default=str), encoding="utf-8")
+        validation_path.write_text(json.dumps(result.validation, indent=2, default=str), encoding="utf-8")
+
         manifests_dir = root / "manifests"
         manifests_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = manifests_dir / "policy_events.json"
@@ -323,6 +439,8 @@ class PolicyEventBuilder:
                 {
                     "name": "policy_events",
                     "rows": int(len(result.frame)),
+                    "schema_version": 2,
+                    "availability_mode": self.config.availability_mode,
                     "extra": {"coverage_report": result.coverage},
                     "source_version": self.config.source_version,
                 },
@@ -333,43 +451,31 @@ class PolicyEventBuilder:
         )
         result.output_paths = {
             "policy_events": str(parquet_path),
-            "coverage_report": str(silver_dir / "coverage_report.json"),
-            "validation_report": str(silver_dir / "validation_report.json"),
+            "coverage_report": str(coverage_path),
+            "validation_report": str(validation_path),
             "manifest": str(manifest_path),
         }
         return result
 
 
-# ---------------------------------------------------------------------------
-# Overlay helper for downstream consumers
-# ---------------------------------------------------------------------------
-
 def policy_events_for_features(
     events: pd.DataFrame | None,
     manifest_path: str | Path | None,
 ) -> pd.DataFrame | None:
-    """Return ``events`` only if the manifest gate is open.
-
-    Downstream feature engineering (Stage 4.2 time-lag model and the
-    training feature panel) must call this — never read the parquet
-    directly — so the gate cannot be bypassed.
-    """
-    if events is None or len(events) == 0:
+    """Return policy events only when the manifest gate and schema are valid."""
+    if events is None or events.empty or manifest_path is None:
         return None
-    if manifest_path is None:
-        return None
-    p = Path(manifest_path)
-    if not p.exists():
+    path = Path(manifest_path)
+    if not path.exists():
         return None
     try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    gate = (
-        (payload.get("extra") or {})
-        .get("coverage_report", {})
-        .get("gate", {})
-    )
+    gate = ((payload.get("extra") or {}).get("coverage_report") or {}).get("gate") or {}
     if not gate.get("policy_events_usable_for_features"):
         return None
-    return events
+    required = {"event_id", "published_at", "available_at", "themes", "policy_strength"}
+    if not required.issubset(events.columns):
+        return None
+    return events.copy()
