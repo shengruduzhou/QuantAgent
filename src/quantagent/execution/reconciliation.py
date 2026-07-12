@@ -30,7 +30,7 @@ def reconcile_broker_state(
         return ReconciliationResult(False, "broker_disconnected", snapshot)
     if not np.isfinite(snapshot.account_value) or snapshot.account_value < min_account_value:
         return ReconciliationResult(False, "account_value_below_minimum", snapshot)
-    symbols = [position.symbol for position in snapshot.positions]
+    symbols = [str(position.symbol) for position in snapshot.positions]
     if len(symbols) != len(set(symbols)):
         return ReconciliationResult(False, "duplicate_broker_positions", snapshot)
     if any(position.available_shares < 0 or position.frozen_shares < 0 for position in snapshot.positions):
@@ -77,11 +77,13 @@ def _fill_slippage_bps(
 ) -> float:
     if not fills or reference_prices is None:
         return 0.0
+    references = reference_prices.copy()
+    references.index = references.index.astype(str)
     weighted_slippage = 0.0
     total_notional = 0.0
     for fill in fills:
         symbol = str(getattr(fill, "symbol", ""))
-        reference = float(reference_prices.get(symbol, np.nan))
+        reference = float(references.get(symbol, np.nan))
         price = float(getattr(fill, "fill_price", 0.0) or 0.0)
         quantity = int(getattr(fill, "fill_quantity", getattr(fill, "filled_quantity", 0)) or 0)
         if not np.isfinite(reference) or reference <= 0 or price <= 0 or quantity <= 0:
@@ -108,21 +110,24 @@ def reconcile_virtual_state(
     reference_prices: pd.Series | None = None,
     tolerance: ReconciliationTolerance | None = None,
 ) -> V6ReconciliationReport:
-    """Reconcile target, paper ledger and fills with explicit tolerances.
-
-    The previous implementation accepted any per-symbol discrepancy below one
-    million shares.  This version rounds target shares to A-share lots and uses
-    a configurable one-lot tolerance by default.
-    """
     cfg = tolerance or ReconciliationTolerance()
     if nav <= 0 or not np.isfinite(nav):
         raise ValueError("nav must be positive and finite")
-    px = pd.to_numeric(prices, errors="coerce")
+
+    px = pd.to_numeric(prices, errors="coerce").copy()
+    px.index = px.index.astype(str)
+    if px.index.duplicated().any():
+        raise ValueError("prices contain duplicate symbols after normalization")
     if px.isna().any() or (px <= 0).any():
         raise ValueError("prices must be positive and finite")
-    target = pd.to_numeric(target_weights.reindex(px.index), errors="coerce").fillna(0.0)
-    raw_expected = target * nav / px
-    expected_shares = _round_expected_shares(raw_expected, cfg.round_lot)
+
+    targets = target_weights.copy()
+    targets.index = targets.index.astype(str)
+    if targets.index.duplicated().any():
+        targets = targets.groupby(level=0).sum()
+    target = pd.to_numeric(targets.reindex(px.index), errors="coerce").fillna(0.0)
+    expected_shares = _round_expected_shares(target * nav / px, cfg.round_lot)
+    expected_shares.index = expected_shares.index.astype(str)
 
     broker: dict[str, float] = {}
     duplicate_symbols: set[str] = set()
@@ -133,7 +138,7 @@ def reconcile_virtual_state(
         broker[symbol] = broker.get(symbol, 0.0) + float(
             position.available_shares + position.frozen_shares
         )
-    symbols = sorted(set(expected_shares.index.astype(str)).union(broker))
+    symbols = sorted(set(expected_shares.index).union(broker))
     expected = {
         symbol: float(expected_shares.reindex(symbols).fillna(0.0).loc[symbol])
         for symbol in symbols
@@ -149,13 +154,11 @@ def reconcile_virtual_state(
         for state in states
     )
     if states:
-        filled_states = sum(
-            _status_value(getattr(state, "status", "")) == "filled" for state in states
-        )
-        partial_credit = sum(
+        filled = sum(_status_value(getattr(state, "status", "")) == "filled" for state in states)
+        partial = sum(
             0.5 for state in states if _status_value(getattr(state, "status", "")) == "partial"
         )
-        fill_rate = float((filled_states + partial_credit) / len(states))
+        fill_rate = float((filled + partial) / len(states))
     else:
         fill_rate = 1.0
 
@@ -169,10 +172,7 @@ def reconcile_virtual_state(
     )
     slippage = _fill_slippage_bps(fill_list, reference_prices)
     cash_difference = float(cash_actual - cash_expected)
-    cash_tolerance = max(
-        cfg.cash_absolute_tolerance,
-        abs(nav) * cfg.cash_relative_tolerance,
-    )
+    cash_tolerance = max(cfg.cash_absolute_tolerance, abs(nav) * cfg.cash_relative_tolerance)
     lot_tolerance = cfg.round_lot * cfg.position_lot_tolerance
     residual_notional = float(
         sum(abs(difference[symbol]) * float(px.get(symbol, 0.0)) for symbol in symbols)
@@ -187,19 +187,13 @@ def reconcile_virtual_state(
     if off_positions:
         discrepancies.append("position_mismatch:" + ",".join(off_positions))
     if abs(cash_difference) > cash_tolerance:
-        discrepancies.append(
-            f"cash_mismatch:{cash_difference:.2f}>tol{cash_tolerance:.2f}"
-        )
+        discrepancies.append(f"cash_mismatch:{cash_difference:.2f}>tol{cash_tolerance:.2f}")
     if unresolved > cfg.allow_unresolved_orders:
-        discrepancies.append(
-            f"unresolved_orders:{unresolved}>{cfg.allow_unresolved_orders}"
-        )
+        discrepancies.append(f"unresolved_orders:{unresolved}>{cfg.allow_unresolved_orders}")
     if fill_rate < cfg.min_fill_rate:
         discrepancies.append(f"fill_rate:{fill_rate:.4f}<{cfg.min_fill_rate:.4f}")
     if abs(slippage) > cfg.max_abs_slippage_bps:
-        discrepancies.append(
-            f"slippage_bps:{slippage:.4f}>{cfg.max_abs_slippage_bps:.4f}"
-        )
+        discrepancies.append(f"slippage_bps:{slippage:.4f}>{cfg.max_abs_slippage_bps:.4f}")
 
     return V6ReconciliationReport(
         passed=not discrepancies,
