@@ -1,4 +1,8 @@
-"""Dependency-light meta-labeling for signal filtering and sizing."""
+"""Dependency-light meta-labeling for signal filtering and sizing.
+
+The primary model decides direction. This second-stage logistic model predicts
+whether a signal succeeds using only information available at entry time.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +14,12 @@ import pandas as pd
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=float)
-    out = np.empty_like(values)
+    output = np.empty_like(values)
     positive = values >= 0
-    out[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+    output[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
     exp_values = np.exp(values[~positive])
-    out[~positive] = exp_values / (1.0 + exp_values)
-    return out
+    output[~positive] = exp_values / (1.0 + exp_values)
+    return output
 
 
 @dataclass(frozen=True)
@@ -24,7 +28,9 @@ class LogisticModel:
     intercept: float
 
     def predict_proba(self, values: np.ndarray) -> np.ndarray:
-        probability = _sigmoid(np.asarray(values, dtype=float) @ self.coefficients + self.intercept)
+        probability = _sigmoid(
+            np.asarray(values, dtype=float) @ self.coefficients + self.intercept
+        )
         return np.column_stack([1.0 - probability, probability])
 
 
@@ -39,7 +45,9 @@ class MetaLabeler:
         missing = [feature for feature in self.features if feature not in X.columns]
         if missing:
             raise ValueError(f"meta-label input missing features: {missing}")
-        z = ((X[self.features].astype(float) - self.mean) / self.std).fillna(0.0).to_numpy()
+        z = (
+            (X[self.features].astype(float) - self.mean) / self.std
+        ).fillna(0.0).to_numpy(dtype=float)
         return self.model.predict_proba(z)[:, 1]
 
 
@@ -55,6 +63,7 @@ def _fit_logistic(
     n_rows, n_features = X.shape
     coefficients = np.zeros(n_features, dtype=float)
     intercept = 0.0
+
     if class_weight_balanced:
         positives = max(1, int((y == 1).sum()))
         negatives = max(1, int((y == 0).sum()))
@@ -73,16 +82,29 @@ def _fit_logistic(
         error = (probability - y) * sample_weight
         grad_w = X.T @ error / n_rows + regularization * coefficients
         grad_b = float(error.mean())
+
         coefficients -= learning_rate * grad_w
         intercept -= learning_rate * grad_b
+
+        updated_probability = np.clip(
+            _sigmoid(X @ coefficients + intercept), 1e-8, 1.0 - 1e-8
+        )
         loss = float(
-            -np.mean(sample_weight * (y * np.log(probability) + (1.0 - y) * np.log(1.0 - probability)))
+            -np.mean(
+                sample_weight
+                * (
+                    y * np.log(updated_probability)
+                    + (1.0 - y) * np.log(1.0 - updated_probability)
+                )
+            )
             + 0.5 * regularization * np.dot(coefficients, coefficients)
         )
-        if previous_loss is not None and np.isfinite(previous_loss):
-            if abs(previous_loss - loss) <= 1e-10 * max(1.0, abs(previous_loss)):
-                break
+        if previous_loss is not None and abs(previous_loss - loss) <= 1e-10 * max(
+            1.0, abs(previous_loss)
+        ):
+            break
         previous_loss = loss
+
     return LogisticModel(coefficients=coefficients, intercept=intercept)
 
 
@@ -95,12 +117,20 @@ def fit_meta_labeler(
     max_iter: int = 2000,
     learning_rate: float = 0.05,
 ) -> MetaLabeler:
+    """Fit a balanced L2 logistic model on completed primary signals.
+
+    ``C`` follows scikit-learn's inverse-regularisation convention. Because the
+    data loss is averaged, the equivalent penalty scale is ``1 / (C * n)``;
+    using ``1 / C`` over-regularises large datasets and collapses probabilities
+    toward 0.5.
+    """
     if C <= 0:
         raise ValueError("C must be positive")
     required = set(features) | {label_col}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"meta-label frame missing columns: {sorted(missing)}")
+
     data = df.dropna(subset=[label_col]).copy()
     if data.empty:
         raise ValueError("meta-label frame has no labelled rows")
@@ -108,6 +138,7 @@ def fit_meta_labeler(
     data = data.loc[y.index]
     if not set(y.unique()).issubset({0, 1}) or y.nunique() < 2:
         raise ValueError("meta-label target must contain both binary classes")
+
     X = data[features].apply(pd.to_numeric, errors="coerce")
     mean = X.mean()
     std = X.std(ddof=0).replace(0, 1.0).fillna(1.0)
@@ -115,7 +146,7 @@ def fit_meta_labeler(
     model = _fit_logistic(
         z,
         y.to_numpy(dtype=float),
-        regularization=1.0 / C,
+        regularization=1.0 / (C * max(len(data), 1)),
         max_iter=max_iter,
         learning_rate=learning_rate,
         class_weight_balanced=True,
@@ -124,6 +155,7 @@ def fit_meta_labeler(
 
 
 def build_dot_meta_dataset(fsm_results: pd.DataFrame) -> pd.DataFrame:
+    """Build one completed round-trip row per entered intraday signal."""
     data = fsm_results.copy()
     if "exit_reason" not in data.columns:
         raise ValueError("fsm_results missing exit_reason")
@@ -132,12 +164,15 @@ def build_dot_meta_dataset(fsm_results: pd.DataFrame) -> pd.DataFrame:
 
 
 def meta_filter(p_success: np.ndarray, *, floor: float = 0.5) -> np.ndarray:
+    """Return a zero-to-one size multiplier, not a direct order instruction."""
     if not 0.0 <= floor < 1.0:
         raise ValueError("floor must be in [0, 1)")
     probability = np.asarray(p_success, dtype=float)
     take = probability >= floor
     return np.where(
         take,
-        np.clip((probability - floor) / max(1.0 - floor, 1e-12), 0.0, 1.0),
+        np.clip(
+            (probability - floor) / max(1.0 - floor, 1e-12), 0.0, 1.0
+        ),
         0.0,
     )
