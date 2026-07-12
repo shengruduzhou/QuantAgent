@@ -1,0 +1,4 @@
+[submodule "rd-agent"]
+	path = rd-agent
+	url = https://github.com/microsoft/RD-Agent.git
+	branch = main
