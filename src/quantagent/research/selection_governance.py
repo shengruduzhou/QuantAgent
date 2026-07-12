@@ -34,6 +34,14 @@ class NestedSelectionConfig:
     max_spa_pvalue: float = 0.05
     max_losing_outer_fold_rate: float = 0.40
 
+    def __post_init__(self) -> None:
+        if self.outer_splits < 2 or self.inner_splits < 2:
+            raise ValueError("outer_splits and inner_splits must be >= 2")
+        if not 0.0 <= self.embargo_pct < 0.5:
+            raise ValueError("embargo_pct must be in [0, 0.5)")
+        if self.pbo_partitions < 4:
+            raise ValueError("pbo_partitions must be >= 4")
+
 
 @dataclass(frozen=True)
 class TrialRecord:
@@ -70,8 +78,6 @@ class TrialRecord:
 
 
 class TrialRegistry:
-    """Append-only JSONL registry used to count all attempted configurations."""
-
     def __init__(self, path: str | Path = "runtime/state/experiment_trials.jsonl") -> None:
         self.path = Path(path)
 
@@ -79,8 +85,6 @@ class TrialRegistry:
         payload = record.to_dict()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n"
-        # O_APPEND makes each small record a single append operation.  This is
-        # intentionally simpler and more robust than rewriting a shared JSON file.
         fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
         try:
             os.write(fd, line.encode("utf-8"))
@@ -158,6 +162,17 @@ def _subset_label_times(
     return subset_times, subset_end
 
 
+def _resolve_pbo_partitions(requested: int, n_rows: int) -> int:
+    if n_rows < 4:
+        raise ValueError("PBO requires at least four time rows")
+    partitions = min(int(requested), int(n_rows))
+    if partitions % 2:
+        partitions -= 1
+    if partitions < 4:
+        raise ValueError("PBO requires an even partition count >= 4")
+    return partitions
+
+
 def nested_purged_select(
     candidate_returns: pd.DataFrame,
     *,
@@ -166,12 +181,6 @@ def nested_purged_select(
     config: NestedSelectionConfig | None = None,
     cumulative_trials: int | None = None,
 ) -> SelectionGovernanceReport:
-    """Select a candidate using inner folds and evaluate only on outer folds.
-
-    ``candidate_returns`` must have a monotonic DatetimeIndex and one column per
-    candidate.  The final candidate is chosen by the median inner-fold score
-    across outer folds; outer performance never participates in final selection.
-    """
     cfg = config or NestedSelectionConfig()
     if candidate_returns is None or candidate_returns.empty:
         raise ValueError("candidate_returns is empty")
@@ -180,14 +189,21 @@ def nested_purged_select(
     returns = candidate_returns.sort_index().astype(float)
     if not isinstance(returns.index, pd.DatetimeIndex):
         returns.index = pd.to_datetime(returns.index, errors="raise")
+    if not returns.index.is_monotonic_increasing or returns.index.has_duplicates:
+        raise ValueError("candidate_returns index must be unique and monotonic")
+    if len(returns) < max(cfg.outer_splits, cfg.inner_splits) * 2:
+        raise ValueError("insufficient rows for requested nested split counts")
+
     times = pd.Series(returns.index, index=pd.RangeIndex(len(returns)))
     label_end = pd.Series(pd.to_datetime(label_end_times, errors="coerce").to_numpy())
     if len(label_end) != len(returns) or label_end.isna().any():
         raise ValueError("label_end_times must align one-to-one with candidate_returns")
+    if (label_end.to_numpy() < times.to_numpy()).any():
+        raise ValueError("label_end_times cannot precede sample times")
 
-    outer_cfg = PurgedKFoldConfig(n_splits=cfg.outer_splits, embargo_pct=cfg.embargo_pct)
+    outer_cfg = PurgedKFoldConfig(cfg.outer_splits, cfg.embargo_pct)
     outer_results: list[OuterFoldSelection] = []
-    candidate_inner_history: dict[str, list[float]] = {str(c): [] for c in returns.columns}
+    history: dict[str, list[float]] = {str(column): [] for column in returns.columns}
 
     for fold_idx, (outer_train_idx, outer_test_idx) in enumerate(
         purged_kfold_split(times, label_end, outer_cfg)
@@ -195,13 +211,11 @@ def nested_purged_select(
         outer_train = returns.iloc[outer_train_idx]
         outer_test = returns.iloc[outer_test_idx]
         inner_times, inner_end = _subset_label_times(times, label_end, outer_train_idx)
-        inner_cfg = PurgedKFoldConfig(n_splits=cfg.inner_splits, embargo_pct=cfg.embargo_pct)
-        scores: dict[str, list[float]] = {str(c): [] for c in returns.columns}
-        for inner_train_idx, inner_test_idx in purged_kfold_split(inner_times, inner_end, inner_cfg):
-            # Candidate ranking is evaluated on the inner validation partition.
-            # The inner train partition exists to purge labels and may be used by
-            # model-training callers before they materialise candidate returns.
-            del inner_train_idx
+        if len(inner_times) < cfg.inner_splits:
+            continue
+        scores: dict[str, list[float]] = {str(column): [] for column in returns.columns}
+        inner_cfg = PurgedKFoldConfig(cfg.inner_splits, cfg.embargo_pct)
+        for _, inner_test_idx in purged_kfold_split(inner_times, inner_end, inner_cfg):
             validation = outer_train.iloc[inner_test_idx]
             for candidate in returns.columns:
                 scores[str(candidate)].append(
@@ -213,7 +227,7 @@ def nested_purged_select(
         }
         selected = max(aggregate, key=aggregate.get)
         for candidate, value in aggregate.items():
-            candidate_inner_history[candidate].append(value)
+            history[candidate].append(value)
         outer_series = outer_test[selected].dropna()
         outer_results.append(
             OuterFoldSelection(
@@ -231,28 +245,23 @@ def nested_purged_select(
         raise ValueError("no valid outer folds")
     final_scores = {
         candidate: float(np.median(values)) if values else -1e9
-        for candidate, values in candidate_inner_history.items()
+        for candidate, values in history.items()
     }
     selected_candidate = max(final_scores, key=final_scores.get)
-
-    # PBO consumes time-slice performance.  Use daily/cadence returns directly;
-    # the function partitions the time axis symmetrically.
     pbo = probability_of_backtest_overfitting(
         returns,
-        n_partitions=min(cfg.pbo_partitions, max(4, (len(returns) // 2) * 2)),
+        n_partitions=_resolve_pbo_partitions(cfg.pbo_partitions, len(returns)),
     )
     candidate_sharpes = np.asarray(
-        [_safe_sharpe(returns[col], cfg.periods_per_year) for col in returns.columns],
-        dtype=float,
+        [_safe_sharpe(returns[column], cfg.periods_per_year) for column in returns.columns]
     )
-    if cumulative_trials is not None and cumulative_trials > len(candidate_sharpes):
-        # DSR must reflect the full family search count, including rejected runs.
-        padding = np.full(cumulative_trials - len(candidate_sharpes), np.nanmedian(candidate_sharpes))
-        candidate_sharpes = np.concatenate([candidate_sharpes, padding])
+    trial_count = max(len(candidate_sharpes), int(cumulative_trials or 0))
+    if trial_count > len(candidate_sharpes):
+        candidate_sharpes = np.concatenate(
+            [candidate_sharpes, np.full(trial_count - len(candidate_sharpes), np.nanmedian(candidate_sharpes))]
+        )
     dsr = deflated_sharpe_ratio(
-        returns[selected_candidate],
-        candidate_sharpes,
-        periods_per_year=cfg.periods_per_year,
+        returns[selected_candidate], candidate_sharpes, periods_per_year=cfg.periods_per_year
     )
     bench = (
         benchmark_returns.reindex(returns.index).fillna(0.0)
@@ -261,9 +270,7 @@ def nested_purged_select(
     )
     spa = spa_test(returns, bench, n_bootstrap=500, rng_seed=0)
     spa_pvalue = float(spa.get("p_consistent", float("nan")))
-    losing_rate = float(
-        np.mean([fold.outer_mean_return <= 0 for fold in outer_results])
-    )
+    losing_rate = float(np.mean([fold.outer_mean_return <= 0 for fold in outer_results]))
 
     reasons: list[str] = []
     if not np.isfinite(pbo) or pbo > cfg.max_pbo:
@@ -277,14 +284,13 @@ def nested_purged_select(
             f"losing_outer_fold_rate={losing_rate:.4f} exceeds "
             f"{cfg.max_losing_outer_fold_rate:.4f}"
         )
-
     return SelectionGovernanceReport(
         selected_candidate=selected_candidate,
         outer_folds=outer_results,
         pbo=float(pbo),
         dsr_probability=float(dsr),
         spa_pvalue=spa_pvalue,
-        cumulative_trials=int(cumulative_trials or len(candidate_sharpes)),
+        cumulative_trials=trial_count,
         losing_outer_fold_rate=losing_rate,
         accepted=not reasons,
         rejection_reasons=reasons,
