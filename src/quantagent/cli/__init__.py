@@ -1,8 +1,8 @@
 """Governed QuantAgent CLI entry point.
 
-The supported V7/V8 command aliases remain registered on the main application so
-existing automation and tests keep a stable CLI contract.  Only explicitly
-experimental search/intraday modules are hidden behind
+Supported V7/V8 command aliases and the governed V8 ensemble commands remain
+registered so existing automation has a stable CLI contract. Only reproduction-
+only research, intraday and legacy portfolio modules require
 ``QUANTAGENT_ENABLE_LEGACY_CLI``.
 """
 
@@ -27,6 +27,7 @@ from quantagent.cli import v7_storage  # noqa: F401,E402
 from quantagent.cli import v7_train  # noqa: F401,E402
 from quantagent.cli import v8  # noqa: F401,E402
 from quantagent.cli import v8_deep  # noqa: F401,E402
+from quantagent.cli import v8_gated  # noqa: F401,E402
 from quantagent.cli import v8_verify  # noqa: F401,E402
 
 
@@ -43,7 +44,6 @@ LEGACY_CLI_ENABLED = _legacy_enabled()
 if LEGACY_CLI_ENABLED:
     from quantagent.cli import v7_optimize  # noqa: F401,E402
     from quantagent.cli import v7_research  # noqa: F401,E402
-    from quantagent.cli import v8_gated  # noqa: F401,E402
     from quantagent.cli import v8_intraday  # noqa: F401,E402
     from quantagent.cli import v8_portfolio  # noqa: F401,E402
 
