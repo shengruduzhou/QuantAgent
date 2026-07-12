@@ -16,12 +16,6 @@
       "removal_after": "2026-10-01"
     },
     {
-      "module": "quantagent.cli.v8",
-      "category": "legacy_ga_pipeline",
-      "replacement": "quantagent.cli.v8_deep and trusted evaluator",
-      "removal_after": "2026-10-01"
-    },
-    {
       "module": "quantagent.cli.v8_gated",
       "category": "legacy_experiment",
       "replacement": "pre-registered research runner",
@@ -38,6 +32,13 @@
       "category": "legacy_intraday",
       "replacement": "paper-only auction and impact workflow",
       "removal_after": "2026-10-01"
+    }
+  ],
+  "stable_compatibility_modules": [
+    {
+      "module": "quantagent.cli.v8",
+      "purpose": "supported V8 command aliases required by automation and CLI compatibility tests",
+      "production_note": "command availability does not by itself grant production trust"
     }
   ],
   "rules": [
