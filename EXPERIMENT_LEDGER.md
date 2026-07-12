@@ -333,3 +333,22 @@
   4. 方向纪律成本 = M5/M6 两票（若允许事后翻符号会"变成" survivor——正是 batch-1 判例要防的容量陷阱路径）。
 - **处置（预注册先验，跑后未改）**：6 survivor **不物化进生产、不做书级集成、不触冻结冠军三元组**（19e05f4）；记入 FACTOR_CANDIDATE_LEDGER_batch3.csv + factor_gap_matrix，排队 **post-FRESH 下一代 carrier/模型**候选池。最高信任标签 = `candidate_research_only_not_fresh_holdout_validated`。
 - 累计 N：因子筛选族 7+7+13=**27**；全库 85 → **98**。
+
+## EXP-026 · 2026-07-13 · 统一因子整合 + CPU 增量消融（H-026，N=4 先验，fu_20260713_h026）— **DONE / GPU_NO_GO（门控模型下全组不过）；关键诊断发现：survivor 信息真实但对非线性基座冗余、对线性模型有超门增量**
+
+- 预注册 commit **f2931d7**（先注册先提交后跑，修复 EXP-025 流程弱点）；产物 runtime/reports/full_universe/fu_20260713_h026/*；累计 N 98 → **102**（消融族 4+2+4=10）。全程 CPU、零隔离/FRESH 接触（断言）、Track A 标签 fixed_cohort_searched_validation。
+- **C1 统一注册表**（factor_master_registry.{parquet,csv}，156 行）：生产 judgment schema 联合 **127 特征**（short 22/mid 22/long 90，含 18 synth/llm）+ 池 7（D1+6 个 H-025）+ RC7 复合 + conditional 5 + 历史 reject 审计 16；**复议=0**（无一满足四类失效条件，逐行理由在册）；exact duplicate=0。
+- **C2 exec 标签重评**（delay-1 executable 自建，t+1 涨停/停牌入场剔除；原 H-025 同日指标保留）：**7/7 survivor 在可执行口径下成立**——M12 execIC20 +0.087/LS25 +1.87bp/d/crash +0.141；M7 +0.074；D1 +0.081；**RC7 复合最强 execIC20 +0.096/ICIR 0.65/crash +0.131**（分散化生效，vs 成员相关 max 0.728）。筛选信号非同日入场假象。
+- **C3 去冗余**：池内互 |ρ| max 0.826 < 0.90 ⇒ 0 集群剪枝，M3=全 7（如实记录，不造假试验）。
+- **Phase D 消融**（LightGBM=门控模型，参数逐项同 EXP-022；3 purged expanding 折，embargo 62 交易日；label=gold exec forward_return_20d 逐日 rank；tradable 宇宙 2.0M 行；376s，峰 RSS 34.6 GiB）：
+  | 组 | ΔIC 逐折 | 中位 ΔIC | Δ 顶十分位中位 | 门 A/B |
+  |---|---|---|---|---|
+  | M1 (+D1) | −0.0005/−0.0018/+0.0006 | **−0.0005** | −0.0002 | ✗/✗ |
+  | M2 (+6) | **+0.0051**/−0.0011/+0.0019 | +0.0019 | −0.0003 | ✗/✗ |
+  | M3 (+7) | +0.0013/+0.0001/−0.0007 | +0.0001 | −0.0006 | ✗/✗ |
+  | M4 (+RC7) | +0.0022/+0.0035/+0.0007（**3/3 正**） | +0.0022 | +0.0008 | ✗/✗ |
+  M12 全 3 折进 top-15 importance（F3 加 M7）——模型**使用**新列但净增量 < 门（+0.005）。**判定：GPU_NO_GO，Phase E 不进入，严格回测 0 次**（strict_backtest_leaderboard.csv 存根+理由）。
+- **Ridge 诊断（预注册 report-only，不参与门判定）**：M2/M3 中位 ΔIC **+0.0058（3/3 折正，数值超 +0.005 门）**vs GBM +0.0019；M1≈0；M4 +0.0006。**科学解读：survivor 信息真实存在，但相对 250 特征基座是"非线性可重构"的——GBM 能从既有库自行合成，线性模型不能。门控模型=LGBM 是跑前锁定的，ridge 不得翻案（拒绝事后换门）。**
+- **发现汇总**：① 特征收敛结论第三次复制（EXP-021 估值/EXP-022 基本面/本票价量 survivor）；② 增量呈 regime 集中性：M2 唯一折级通过 = F1（2022 熊市，+0.0051），F2（2023 修复）为负——与 batch-2/EXP-017 "conditional value" 模式一致，支持 conditional_reserve 处置而非无条件模型输入；③ M3(全7)<M2(6)<M4(复合)：相关原始列稀释，复合是更稳的递送载体；④ **线性层假设**（入 IDEA_QUEUE，不在本票跑）：池的正当出路可能是 carrier 的线性 rank-blend 层（repo 书级正是线性 blend）而非 GBM 特征空间——书级集成依 EXP-023 教训推迟至 post-FRESH。
+- **Track B**（universe_repair_audit.md）：INCOMPLETE_BY_DESIGN——修复需上市/退市主表（tushare stock_basic L/D/P）+ ~1,500 新股 TickFlow 回填（2–6h 网络）+ cohort 外退市股探测；精确命令/新脚本规格/三风险（新股 phantom breadth 加重、benchmark 变、旧数字不迁移）在册。完成前一切"全宇宙"表述 = fixed_cohort。
+- **最终决定：REJECT_INCREMENTAL_FACTOR_POOL**（本周期，GBM 特征空间用途）；7 survivor + RC7 维持 `candidate_research_only_not_fresh_holdout_validated`，处置不变（post-FRESH 下一代 + 线性层假设排队）。资源合计：C1-C3 117s/2.7G + Phase D 376s/34.6G + ridge 130s/32.6G，全部 CPU，新磁盘 ~340MB（new_factor_panel 缓存，可清）。

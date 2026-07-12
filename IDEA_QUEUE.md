@@ -16,6 +16,7 @@
 | 10 | walk-forward 重训协议（模型层变更的唯一评测路径；embargo 修至 ≥126d） | training | EVALUATION_PROTOCOL_V2 §4a | 模型改动的选择基础 | 低（协议本身） | GPU 多小时/折（需授权） | 排队（Phase 6 后段） |
 | 11 | 市场冲击 √participation 容量模型精化 | eval | 市场冲击文献 | 容量估算从 ADV 比例升级 | 低 | CPU 小 | 排队 |
 | 12 | UI trust_class 徽标透传 | infra | OUTPUT_ARTIFACT_AUDIT §4 | 防"漂亮数字"复流 | 无 | 20 行 | 排队（P-H） |
+| 13 | 池因子线性层集成（carrier rank-blend 层加 RC7/M12，非 GBM 特征空间） | ensemble | EXP-026 ridge 诊断（线性 ΔIC +0.0058，3/3 折正；GBM 冗余） | survivor 信息线性模型不可从基座重构，而书级 blend 恰是线性 | 中（书级集成 fold-informed 风险 ⇒ 必须 post-FRESH 首读后） | CPU ~20min | 排队（post-FRESH 硬前置） |
 
 ## 已否决（勿重提，证据在案）
 
