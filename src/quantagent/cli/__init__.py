@@ -1,13 +1,10 @@
 """Governed QuantAgent CLI entry point.
 
 The default command surface contains data, training, trusted evaluation,
-evidence, paper trading and storage operations.  Historical v7/v8 search and
-one-shot experiment commands are disabled by default so they cannot be mistaken
-for the current production path.
+evidence, paper trading, governance and storage operations. Historical v7/v8
+search and one-shot experiment commands are disabled by default.
 
 Set ``QUANTAGENT_ENABLE_LEGACY_CLI=1`` only for explicit reproduction work.
-Legacy commands retain their old names when enabled, but are not imported in a
-normal process.
 """
 
 from __future__ import annotations
@@ -16,7 +13,7 @@ import os
 
 from quantagent.cli._utils import app
 
-# Stable/governed command surface.
+from quantagent.cli import governance  # noqa: F401,E402
 from quantagent.cli import paper  # noqa: F401,E402
 from quantagent.cli import v7_backtest  # noqa: F401,E402
 from quantagent.cli import v7_bond  # noqa: F401,E402
@@ -34,10 +31,7 @@ from quantagent.cli import v8_verify  # noqa: F401,E402
 
 def _legacy_enabled() -> bool:
     return os.getenv("QUANTAGENT_ENABLE_LEGACY_CLI", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
+        "1", "true", "yes", "on"
     }
 
 
