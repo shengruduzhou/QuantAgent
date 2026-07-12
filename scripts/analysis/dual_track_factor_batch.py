@@ -108,10 +108,17 @@ def build_fundamental_frame():
     return panel, {n: c for n, (c, _) in FUND_FACTORS.items()}, list(REF)
 
 
-def score_factors(lab, factor_meta, ref_names, out_csv):
+def score_factors(lab, factor_meta, ref_names, out_csv, *,
+                  turnover_caps=None, max_ref_corr=None, cost_decay_classes=frozenset()):
     """Shared scoring: per-factor IC/turnover/cost/crash + decorrelation
     clustering (keep-best) + verdict. `lab` already has factor + ref columns and
-    forward_return_{10,20}d; `factor_meta` = {name: class}."""
+    forward_return_{10,20}d; `factor_meta` = {name: class}.
+
+    Optional a-priori gate parameters (defaults preserve batch-1/2 behavior):
+    - turnover_caps: {class: cap}; classes absent from the dict use 0.15.
+    - max_ref_corr: if set, adds a novelty gate max|corr(ref)| <= max_ref_corr.
+    - cost_decay_classes: classes whose cost gate additionally requires
+      LS@25bps >= 0.5 * LS@8bps (medium-turnover track)."""
     fac_names = list(factor_meta)
     rank_frame = {n: lab.groupby("trade_date")[n].rank(pct=True) for n in fac_names + ref_names}
     corr = pd.DataFrame(rank_frame).corr(method="spearman")
@@ -139,9 +146,13 @@ def score_factors(lab, factor_meta, ref_names, out_csv):
         # = capacity trap for a capacity-aware long book -> rejected, not silently
         # sign-flipped. Decorrelation clustering (keep-best) is applied post-loop.
         g_ic = ic10.mean_rank_ic >= 0.015 and (ic10.rank_icir >= 0.20 or ic20.rank_icir >= 0.20)
-        g_turn = to <= 0.15
+        turn_cap = (turnover_caps or {}).get(cls, 0.15)
+        g_turn = to <= turn_cap
         g_cost = ls8 > 0 and ls25 > 0  # oriented long-short survives costs, both positive
-        g_crash = (f2ic >= 0) if cls == "defensive" else True
+        if cls in cost_decay_classes:
+            g_cost = g_cost and ls25 >= 0.5 * ls8  # medium-turnover: cost decay <= 50%
+        g_crash = (f2ic >= 0) if cls in ("defensive", "defensive_medium") else True
+        g_novel = (max_ref <= max_ref_corr) if max_ref_corr is not None else None
         rows.append({
             "factor": name, "class": cls,
             "rank_ic_h10": round(ic10.mean_rank_ic, 4), "rank_icir_h10": round(ic10.rank_icir, 3),
@@ -154,14 +165,15 @@ def score_factors(lab, factor_meta, ref_names, out_csv):
             "max_decorr_other": round(max_decorr, 3), "max_corr_ref": round(max_ref, 3),
             "capacity_rmb": round(cap.capacity_rmb / 1e8, 3),  # 亿元
             "g_ic_pos": bool(g_ic), "g_turn": bool(g_turn), "g_cost": bool(g_cost),
-            "g_crash": bool(g_crash),
+            "g_crash": bool(g_crash), "g_novel": g_novel,
         })
 
     # ---- decorrelation clustering (keep-best): among factors that PASS the
     # standalone gates and are >0.90 correlated, keep only the highest |ICIR|.
     df = pd.DataFrame(rows).set_index("factor")
     passes_solo = {n: bool(df.loc[n, "g_ic_pos"] and df.loc[n, "g_turn"]
-                           and df.loc[n, "g_cost"] and df.loc[n, "g_crash"]) for n in df.index}
+                           and df.loc[n, "g_cost"] and df.loc[n, "g_crash"]
+                           and df.loc[n, "g_novel"] != False) for n in df.index}  # noqa: E712 (None passes, numpy False fails)
     verdicts, g_decorr = {}, {}
     for n in df.index:
         if not passes_solo[n]:

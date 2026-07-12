@@ -304,3 +304,32 @@
 - **volume/amount 端到端核查：无丢失**（历史 P0 已修：adjusted_prices 静默未复权、qfq/raw 刻度混用）——silver 面板活跃行 100% 非空、隐含 VWAP/close 中位 1.001（股数/CNY 单位正确）、gold 数据集两列在册；**回归锁 tests/test_tickflow_volume_amount.py（6 tests：归一化保值/缺列保 NaN 不造 0/窗口过滤/权限分类器/面板单位漂移守卫/gold schema）**
 - **财务数据来源澄清（重要历史事实）**：盘上 silver/fundamentals + tickflow_fin_quarterly 为**早期财务权限尚在（≤2026-05）时拉取的存量**（announce_date 在册，EXP-020 PIT 审计过）；当前刷新 403 → 增量刷新路径 = akshare/tushare（已有 provider）
 - **遗留限制（如实）**：分钟/深度/财务/WS/批量K = 采购决策项（missing_permissions.md P1-P3 优先级不变）；instrument master 原始 ext payload 未单独物化（sector_map 为投影，够用）；quotes 前向采集无 bronze 原始层（快照仅供 live 路径，不入回测）
+
+## EXP-025 · 2026-07-13 · 有据价量因子批次 3（H-025，N=13 先验，fu_20260713 任务）— **DONE / 6 accept · 6 reject · 1 discard；全部判定由先验门直接给出**
+
+- 预注册：H-025 先写入 registry（含 13 个冻结 DSL 公式、方向、全部门槛、新颖性门 0.85、中换手 track 规则）后才执行；preregistration.json 同步存档（runtime/reports/full_universe/fu_20260713/）。诚实注记：registry 追加发生在跑前（文件时间戳可证），git commit 在同 session 跑后合并提交——与 H-023 的"先 commit 后跑"相比是流程弱化，已如实记录。
+- 命令 `AI_quant_venv/bin/python3 scripts/analysis/factor_batch3_pv.py`；236s，峰 RSS 3.21 GiB，CPU-only，零 GPU，零 variant-C，零隔离/FRESH 接触（loader 断言）；新磁盘 <1 MB。Stage A 静态验证 = tests/research/test_factor_batch3.py 6 tests 全过（no-lookahead/finite/columns/dup-expr/门槛扩展/batch-1 向后兼容）；tests/test_v7_factor_expr.py 8 过（DSL 回归）。
+- **共享 scorer 扩展**（dual_track_factor_batch.score_factors，向后兼容默认值，回归测试锁定）：turnover_caps 按类、max_ref_corr 新颖性门、cost_decay_classes 中换手成本衰减门；REF 集扩至 5（+rev60、+pv_ret_corr 既有 survivor 族代理）。
+- **结果表（窗 2023-07-03..2025-08-29，h10 主）**：
+  | 因子 | IC10 | ICIR10 | turn | F2crash | LS@25 | refcorr | 判定 |
+  |---|---|---|---|---|---|---|---|
+  | M3_pv_corr_neg_20 | +0.077 | **0.75** | 0.134 | **+0.110** | +0.985bp | 0.31 | **accept** |
+  | M4_volume_quiet_5_60 | +0.072 | 0.68 | 0.123 | +0.047 | +0.958bp | 0.44 | **accept** |
+  | M7_vov_neg_20 | +0.069 | 0.39 | 0.084 | +0.074 | +0.533bp | 0.83 | **accept**（贴近新颖门） |
+  | M10_vol_cv_neg_20 | +0.059 | **0.76** | 0.121 | +0.044 | +0.672bp | 0.47 | **accept** |
+  | M12_cgo_vwap60_neg | +0.080 | 0.53 | 0.090 | **+0.117** | **+1.118bp** | 0.66 | **accept**（approximation 标注保持） |
+  | D6R_vol_compression_regate | +0.049 | 0.48 | 0.329 | +0.009 | +0.632bp（衰减 8%） | 0.24 | **accept**（中换手 track，batch-1 遗留 TODO 兑现） |
+  | M1_max_ret_neg_20 | +0.084 | 0.50 | 0.083 | +0.084 | +0.721bp | **0.859** | reject（新颖门——与已物化 D1 低波族冗余，门起效的设计目的） |
+  | M8_semivol_neg_20 | +0.052 | 0.22 | 0.079 | +0.056 | +0.194bp | **0.859** | reject（同上） |
+  | M2_skew_neg_20 | +0.044 | 0.43 | **0.165** | +0.058 | +0.506bp | 0.56 | reject（换手门） |
+  | M9_liq_shock_neg_20 | +0.050 | 0.53 | **0.512** | +0.027 | +0.518bp | 0.25 | reject（换手门） |
+  | M5_clv_20 | **−0.012** | −0.09 | — | −0.032 | −0.560bp | 0.51 | reject（先验方向判错，照纪律不翻符号：A股高收盘位置=追高=反转牺牲品） |
+  | M6_overnight_neg_20 | **−0.012** | −0.14 | — | +0.001 | −0.040bp | 0.21 | reject（隔夜负溢价假设在本宇宙/窗不成立） |
+  | M11_fip_20 | +0.000 | 0.00 | — | — | −0.004bp | 0.08 | discard（FIP 不迁移到 A 股弱动量环境，IC≈0） |
+- **科学解读（诚实旗标全带）**：
+  1. 6 个 accept 的 IC 量级（0.049–0.080）落在本宇宙已知单因子带内（lowvol 0.110 / rev60 0.089，见 IC016 审计）——**筛选级证据，非书级收益声明**；phantom-breadth 警告适用（筛选宇宙含不可交易微盘，capacity_rmb 列 0.06–0.15 亿元量级）。
+  2. 最强轮廓 = M3 量价背离（ICIR 0.75 + 单调性 1.0 + crash +0.11 + 新颖 0.31）与 M12 CGO 近似（成本后 LS 最高 + crash 最佳 +0.117；但其本质含 60d 反转-to-VWAP 成分，refcorr 0.66 如实在册）。
+  3. 新颖性门首战履职：M1 MAX 效应各门全过却被 0.859 拦下——证明"再多一个波动族因子"确实是库里已有信息（若无此门，本批会虚报 8 个 survivor）。
+  4. 方向纪律成本 = M5/M6 两票（若允许事后翻符号会"变成" survivor——正是 batch-1 判例要防的容量陷阱路径）。
+- **处置（预注册先验，跑后未改）**：6 survivor **不物化进生产、不做书级集成、不触冻结冠军三元组**（19e05f4）；记入 FACTOR_CANDIDATE_LEDGER_batch3.csv + factor_gap_matrix，排队 **post-FRESH 下一代 carrier/模型**候选池。最高信任标签 = `candidate_research_only_not_fresh_holdout_validated`。
+- 累计 N：因子筛选族 7+7+13=**27**；全库 85 → **98**。
