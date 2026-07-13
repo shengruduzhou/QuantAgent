@@ -352,3 +352,20 @@
 - **发现汇总**：① 特征收敛结论第三次复制（EXP-021 估值/EXP-022 基本面/本票价量 survivor）；② 增量呈 regime 集中性：M2 唯一折级通过 = F1（2022 熊市，+0.0051），F2（2023 修复）为负——与 batch-2/EXP-017 "conditional value" 模式一致，支持 conditional_reserve 处置而非无条件模型输入；③ M3(全7)<M2(6)<M4(复合)：相关原始列稀释，复合是更稳的递送载体；④ **线性层假设**（入 IDEA_QUEUE，不在本票跑）：池的正当出路可能是 carrier 的线性 rank-blend 层（repo 书级正是线性 blend）而非 GBM 特征空间——书级集成依 EXP-023 教训推迟至 post-FRESH。
 - **Track B**（universe_repair_audit.md）：INCOMPLETE_BY_DESIGN——修复需上市/退市主表（tushare stock_basic L/D/P）+ ~1,500 新股 TickFlow 回填（2–6h 网络）+ cohort 外退市股探测；精确命令/新脚本规格/三风险（新股 phantom breadth 加重、benchmark 变、旧数字不迁移）在册。完成前一切"全宇宙"表述 = fixed_cohort。
 - **最终决定：REJECT_INCREMENTAL_FACTOR_POOL**（本周期，GBM 特征空间用途）；7 survivor + RC7 维持 `candidate_research_only_not_fresh_holdout_validated`，处置不变（post-FRESH 下一代 + 线性层假设排队）。资源合计：C1-C3 117s/2.7G + Phase D 376s/34.6G + ridge 130s/32.6G，全部 CPU，新磁盘 ~340MB（new_factor_panel 缓存，可清）。
+
+## EXP-027 · 2026-07-13 · 线性残差 alpha + LTR + 替代表格模型基准（H-027，13/15 trials 执行，fu_20260713_h027）— **DONE / 全部 13 候选不过门 ⇒ REJECT_ALL_ALTERNATIVE_MODELS；核心发现：H-026 线性增量在正确交叉拟合下反转（残差 sleeve 学到反基线赌注）**
+
+- 预注册 commit **4ca88e2**（先注册先提交后跑）；产物 runtime/reports/full_universe/fu_20260713_h027/*（OOF 预测全持久化）；E2/E3 条件 blend 因组件全败**未跑**（不造假试验）⇒ 实际 +13，累计 N 102 → **115**。全程禁窗零接触（断言）；Track A `fixed_cohort_searched_validation`。
+- **两处如实注记**：① B0 重生成与 EXP-026 M0 有行序级差异（F1 IC 0.1126 vs 0.1140；LGBM bagging 对行序敏感）——H-027 内部全部配对比较对同一 B0，一致性不受影响；② X0/X1 首跑因 xgboost 3.2 API 误用（qid_eval_set→eval_qid）失败，修复后 stage1b 重跑（代码缺陷修复，非新试验）。
+- **结果矩阵（vs B0 逐折 IC 0.1126/0.1778/0.1294；门=8 项 AND，全体不过）**：
+  | 候选 | 中位 ΔIC | 逐折 ΔIC | 要点 |
+  |---|---|---|---|
+  | L1/L2 残差 ×λ{.1,.2,.3} | −0.002…−0.007（单调恶化） | 全负 | **残差预测本身 IC = −0.09/−0.15/−0.09（全折负）**：交叉拟合残差目标下，7 池因子学到的是"反基线"（预测均值回归），非正交 alpha；Ridge≡ElasticNet（差 <0.0002），非正则化特异 |
+  | C1 CatBoost LambdaMart M3 | **+0.0003** | +0.0027/+0.0003/−0.0249 | **经济门 3/3 全过**：top-decile 换手比 **0.76**（−24%），costadj25 中位 +0.00017/日 vs B0 −0.0001；但 F3 IC 塌 −0.025、pooled t=−3.86 ⇒ g1/g3 拒。唯一结构性有趣候选 |
+  | LG1 rank_xendcg M0 | −0.075 | 全负（F1 0.038 vs 0.113） | 排序损失远逊逐日 rank 回归目标 |
+  | X0/X1 XGB rank:ndcg | −0.094/−0.088 | 全负 | 固定 topk-8-pair 配置严重欠拟合（117s/6 fits=NDCG@100 早停即停）；照预注册不重调 |
+  | T0/T1 TabM（默认架构,k=32,VRAM 12.2G） | −0.013/−0.011 | 全负 | 深度表格低于树基线 1.1–1.3pp；T1>T0 微幅（池对 NN 有点用=线性可提取性一致）|
+  | R1 RealMLP-TD（VRAM ≤3.1G） | −0.013 | −0.013/**+0.005**/−0.017 | 唯一单折胜 B0（F2）；换手 ~0.20 恒低；中位仍远不过门 |
+- **七问定答（任务书 §8）**：①H-026 Ridge 增量**不生还**——它是"线性 vs 线性"的对比产物，对 GBM 基线做残差正确交叉拟合后反转为负；②与正则化无关（L1≡L2）；③排序对齐损失**未**胜过回归目标（xendcg/rank:ndcg 大败；LambdaMart IC 平但换手−24%）；④TabM 仅达树基线之下，无证据替代 FT/树（与 FT sleeve 不同标签/宇宙不直接可比）；⑤无候选达严格回测（0 次，按门规则）；⑥全场唯一改善（C1 经济门）来自**更低换手**而非预测质量；⑦GBM-输入路线与残差 sleeve 路线**关闭**（三次复制+一次交叉拟合证伪）——post-FRESH 剩余正当路径：(a) LambdaMart 型 top-list 稳定化作为**书层**换手削减机制（IDEA_QUEUE #14 新增），(b) RC7/M12 作 carrier **线性 blend 组件**（IDEA_QUEUE #13 修订：绝不可作 GBM 残差）
+- 资源：stage1 873s/35.4G + stage1b 117s/33.0G + stage2 536s/33.4G RSS、VRAM 峰 12.22G（≤20 限）、OOM 0、合计 ~25min 计算；OOF+IC 存档磁盘 ~0.4GB（≤2GB 限）。
+- **决定：REJECT_ALL_ALTERNATIVE_MODELS**；严格回测 0；冻结 FRESH 三候选零变更；全部结果 `searched_validation` / `candidate_research_only_not_fresh_holdout_validated`。
