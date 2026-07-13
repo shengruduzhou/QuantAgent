@@ -389,3 +389,14 @@
 - **§7 首读资格（权威日期）**：**2026-11-11** = 第 120 个 FRESH 交易日（面板真实日历 32 天 + akshare 交易所日历 88 天，程序化计算，fresh_first_read_eligibility.json）。
 - **基础设施决定：NOT_READY_REPRODUCIBILITY**（主）；NOT_READY_UNIVERSE（次，显式在册）。执行模型 = READY（Track B 完成）；冻结书复现 = PASS。**FRESH 首读关键路径 = P6-v89 保真修复（根因清单在 certificate）→ 保真 ≥0.99 认证 → 盲跑/批式打分解锁**。修复窗口充裕（117 日历日）。
 - 改动文件：impact_model.py + tests、exp028_track_c.py、build_security_master_h028.py、fresh_blind_daily.py、fresh_blind_status.py、forward_daily_inference.py（守卫补丁）、configs/preregistered_evals.json、runtime/reports/h028/*、runtime/paper/fresh_blind/*。资源峰：RSS 35.4G（探针）/2.0G（Track C）；网络 = akshare 主表 ~2min + 探针 idx 特征；磁盘 +~50MB。
+
+## EXP-029 · 2026-07-14 · v8.9 前向推理保真修复（H-029，纯 lineage 修复，非选择性，N 不变=115）— **DONE / FORWARD_FIDELITY_PASS（composite 0.99903 ≥0.99）；根因 = 七个 "+7" llm_* 因子整列静默 NaN（定义文件指错代）；2026-11-11 首读维持有效**
+
+- 预注册 commit **1b47c3d**（黄金窗/层分解/修复规则/0.99 门先验冻结）；全程读数 ≤2025-08-29 断言，零标签零表现读取。
+- **层分解定位（教科书式）**：L3a 推理层 = **1.0000 全 sleeve**（checkpoint/rank 归一化/blend 全部零缺陷）⇒ 失真在特征层。V1/V2/V3 判别：非群体（V1 不变）、额外行无害（V2≈1.0）、**NaN 掩码对齐即痊愈（V3 short 1.0000）**。warmup 420→1250 输出逐位不变（排除窗口预热）。
+- **根因**：fwd-only NaN 1,515,400 cell = **恰好 7 列整列** = v8.9 "+7" 的 llm_* 因子（short 5/22、mid 2/22、long 0/90——精确解释 sleeve 保真 0.93/0.91/0.997 分布）。`forward_daily_inference.py` 只读 v8.7 时代 `eval_v87/accepted_definitions.json`；llm_* 定义在 `v89_closed_loop/pooled_eval_clean/accepted_definitions.json`。FT missing-mask embedding 将整列 NaN 变为系统性错误 token——**值漂移几乎无关（L1 绝大多数列 ≥0.998），缺失掩码就是一切**。
+- **修复（只恢复冻结语义）**：synth/llm 从两个定义文件合并计算（去重）；附带 `--sleeve-scores-output`（S2-S4 需每 sleeve 分数）。零模型/因子/宇宙/组合变更。
+- **证书（修复后，双跑）**：composite 日中位 **0.99903** / 最低 0.99871；sleeve 中位 0.99786/0.99801/0.99695（全 ≥0.99）；top-10 重合 0.242→**0.816**、top-50 0.354→0.885；**确定性重跑差 = 0.0**；64/64 日无缺；schema hash 全对齐（artifact_lineage.json）；隔离零访问。→ runtime/reports/h028/forward_fidelity_certificate.json（passes=true，取代 07-13 失败版）+ runtime/reports/h029/{forward_fidelity_report.md, layer_comparison.csv, daily_score_fidelity.csv, topk_overlap.csv, stage2_summary.json, stage3_results.json, stage3b_population_tests.json, artifact_lineage.json, reproduction_environment.lock}。
+- **残留（如实）**：alpha045/gtja032/gtja036 值级漂移（构建后向量化重构类；仅 long sleeve，其 0.9969 仍过门）**未修**——若未来重建数据集必须复核；gold-only NaN 577 cell = 构建时代数据洞（面板已修复），对未来日期无影响。
+- **对总线的意义**：H-028 的 NOT_READY_REPRODUCIBILITY 主阻塞**解除**；每日盲跑与批式读时打分解锁；**2026-11-11 FRESH 首读维持有效**（冻结时钟不变）。PASS 后动作（7 交易日运营影子测试 → cron 安装）随即启动，影子测试完成本质上需 7 个交易日墙钟。剩余次阻塞 = Track A 宇宙回填（独立数据票）。
+- 资源：3× 特征重算 + 12× GPU sleeve 推理 ≈ 共 ~25min 计算；RSS ≤8G；VRAM «20G；新磁盘 ~700MB（fwd 缓存，可清）。

@@ -107,10 +107,16 @@ def step_score() -> dict:
                           "batch-score at read time once fidelity >=0.99 is certified."}
     cert = json.loads(CERT.read_text())
     if not cert.get("passes"):
-        return {"status": "FIDELITY_CERT_FAILED", "cert": cert}
-    return {"status": "READY_NOT_WIRED",
-            "detail": "certificate passes; wire forward_daily_inference "
-                      "--run-dir retrain_plus7 sleeve-score persistence next"}
+        return {"status": "FIDELITY_CERT_FAILED", "cert": {"passes": False}}
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts/forward_daily_inference.py"),
+         "--run-dir", "runtime/reports/v89_closed_loop/retrain_plus7_20260620_0300",
+         "--warmup-days", "420", "--device", "cuda",
+         "--output", str(ROOT / "daily" / "composite_forward.parquet"),
+         "--sleeve-scores-output", str(ROOT / "daily" / "sleeve_scores.parquet")],
+        capture_output=True, text=True, timeout=7200, cwd=REPO)
+    return {"status": "OK" if r.returncode == 0 else "FAILED",
+            "returncode": r.returncode, "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
 
 
 def main() -> int:
