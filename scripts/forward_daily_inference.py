@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -222,7 +223,22 @@ def main() -> int:
 
     if args.validate:
         t_end = base["trade_date"].max()
+        if args.end:  # honor --end in validate mode (H-028 guard-gap fix)
+            t_end = min(t_end, pd.Timestamp(args.end))
         target = panel_dates[(panel_dates <= t_end)][-args.validate_days:]
+        # P4-style quarantine guard (previously missing here; incident logged
+        # 2026-07-13 in runtime/state/holdout_access_log.jsonl — EXP-028)
+        qcfg = json.loads(Path("configs/quarantined_windows.json").read_text())
+        for w in qcfg["windows"]:
+            ws, we = pd.Timestamp(w["start"]), pd.Timestamp(w["end"])
+            hit = [d for d in target if ws <= d <= we]
+            if hit and not os.environ.get("QUANTAGENT_ALLOW_QUARANTINED_VALIDATE"):
+                raise SystemExit(
+                    f"REFUSED: validate window intersects quarantined window "
+                    f"{w['start']}..{w['end']} ({len(hit)} dates, e.g. {hit[0].date()}). "
+                    f"Choose --end <= pre-quarantine or set "
+                    f"QUANTAGENT_ALLOW_QUARANTINED_VALIDATE='<reason>' (logged, per "
+                    f"EVALUATION_PROTOCOL_V2 section 3 exception process).")
     else:
         out_path = Path(args.output)
         last_scored = base["trade_date"].max()

@@ -369,3 +369,23 @@
 - **七问定答（任务书 §8）**：①H-026 Ridge 增量**不生还**——它是"线性 vs 线性"的对比产物，对 GBM 基线做残差正确交叉拟合后反转为负；②与正则化无关（L1≡L2）；③排序对齐损失**未**胜过回归目标（xendcg/rank:ndcg 大败；LambdaMart IC 平但换手−24%）；④TabM 仅达树基线之下，无证据替代 FT/树（与 FT sleeve 不同标签/宇宙不直接可比）；⑤无候选达严格回测（0 次，按门规则）；⑥全场唯一改善（C1 经济门）来自**更低换手**而非预测质量；⑦GBM-输入路线与残差 sleeve 路线**关闭**（三次复制+一次交叉拟合证伪）——post-FRESH 剩余正当路径：(a) LambdaMart 型 top-list 稳定化作为**书层**换手削减机制（IDEA_QUEUE #14 新增），(b) RC7/M12 作 carrier **线性 blend 组件**（IDEA_QUEUE #13 修订：绝不可作 GBM 残差）
 - 资源：stage1 873s/35.4G + stage1b 117s/33.0G + stage2 536s/33.4G RSS、VRAM 峰 12.22G（≤20 限）、OOM 0、合计 ~25min 计算；OOF+IC 存档磁盘 ~0.4GB（≤2GB 限）。
 - **决定：REJECT_ALL_ALTERNATIVE_MODELS**；严格回测 0；冻结 FRESH 三候选零变更；全部结果 `searched_validation` / `candidate_research_only_not_fresh_holdout_validated`。
+
+## EXP-028 · 2026-07-13 · 冻结策略定稿基础设施票（H-028，非选择性，N 不变=115）— **DONE / 基础设施决定：NOT_READY_REPRODUCIBILITY（前向打分保真 0.846 < 0.99）；次阻塞 INCOMPLETE_HISTORICAL_UNIVERSE；冻结书数值复现 PASS；容量声明大幅收紧**
+
+- 预注册 commit **d444872**（§8 终选规则 configs/preregistered_evals.json 在读任何 FRESH 表现前写定提交）。全程零候选选择、零调参、零 FRESH 表现读取。
+- **冻结候选清单**：runtime/reports/h028/frozen_candidate_manifest.json（S0-S4 全参数 + sleeve 预测 sha256 bb712c34/5e74683e/5a11a38f + panel sha b6508f4d + exp023 结果 hash 31d3a5b3）。
+- **数值复现（Track C 内嵌，fail-closed 门）**：S2 中位 +36.37% vs 冻结参考 +36.4%（差 3bp）✓；S3 +25.32% vs +25.3%（差 2bp）✓ —— 冻结书经修正 sim 全链路重建**数值复现通过**。
+- **关键负发现 1（决定性）：v8.9 前向推理保真探针 FAIL** —— forward_daily_inference --run-dir retrain_plus7 重算 vs 训练期 composite 逐日 spearman **均值 0.846 / 最低 0.821**（要求 ≥0.99）。含义：FRESH 窗（预测止于 2026-05-07 之后）的候选打分**现在无法忠实生成**——每日盲跑与批式读时打分同被阻塞。根因假设在 forward_fidelity_certificate.json（rank 宇宙口径/akshare idx 现值 vs 数据集存值/残余因子漂移）。**P6-v89 移植修复 = FRESH 首读的关键路径**。
+- **事故（如实）：探针 validate 窗落入隔离窗**（2026-04-23..05-07）——脚本 --validate 无视 --end 且无 P4 守卫（守卫缺口）。已登记 runtime/state/holdout_access_log.jsonl；所读 rank-IC 判废弃永不引用；守卫已补（validate 尊重 --end + 隔离断言 + 环境变量例外通道留痕）。保真结论（0.846）保留——其为可复现性诊断非表现读数。
+- **关键负发现 2：固定 cohort 从未包含科创板与北交所**（Track A 主表实测：STAR 0/610、BSE 0/327；另缺 ChiNext 571/SH 主板 230/SZ 主板 146；listed 覆盖率 66%，post-2020H2 缺 1,769/1,870）。"等权全A" benchmark 实为"等权沪深主板+创业板 pre-2020H2 cohort"。主表 5,888 行已建（akshare 双源，358 退市），回填未执行 ⇒ **INCOMPLETE_HISTORICAL_UNIVERSE**（命令/风险在 track_a/universe_quality_report.md + survivorship_bias_report.md）。
+- **Track B 交付：√冲击模型**（src/quantagent/backtest/impact_model.py，η=1.0 base/2.0 stressed **在观察任何候选结果前冻结于 prereg**；analysis-layer opt-in 不动可信评测器默认；9/9 单元测试过含零量/低ADV/缺波动/超参与帽/部分成交）——IDEA_QUEUE #11 兑现，EXP-024 声明的评估器硬缺口关闭。
+- **Track C 非选择性审计**（387s，RSS 2.0G，40 sim + 8 overlay，无赢家宣布）：
+  | 书 | 1M 8bps→sqrt_base→stressed | 30M 同链 |
+  |---|---|---|
+  | S2 L1 | +36.4% → **+30.8%** → +25.4% | +34.8% → **+9.0%** → **−11.9%** |
+  | S3 L1+D1 | +25.3% → +21.0% → +16.7% | +24.0% → **+0.4%** → **−18.6%** |
+  **容量声明修订（本审计最重要经济产出）**：EXP-024 "10–30M 可辩护" 收紧为 **"~1–10M 舒适；30M 在 η=1 √冲击下不可辩护（stressed 为负）"**。15bps 全格与 10M 线性格亦在册（historical_strict_metrics.csv）。S4 = EXP-023 在册 + 转移论证；S1 = SEARCH 窗在册（不跨 H-008 折）——覆盖方式如实记录。
+- **Track D 交付：盲化前向骨架**（runtime/paper/fresh_blind/ 全树 + SHA-256 哈希链 ledger（验证 VALID）+ Fernet 加密表现 + 运营健康-only 状态器 + **提前解盲拒绝（exit 2，尝试本身入账）**；daily runner 烟测：对 FIDELITY_CERT_FAILED 正确 fail-closed 阻塞下游）。cron 行已文档化未安装（打分步 PENDING 时安装无意义）。
+- **§7 首读资格（权威日期）**：**2026-11-11** = 第 120 个 FRESH 交易日（面板真实日历 32 天 + akshare 交易所日历 88 天，程序化计算，fresh_first_read_eligibility.json）。
+- **基础设施决定：NOT_READY_REPRODUCIBILITY**（主）；NOT_READY_UNIVERSE（次，显式在册）。执行模型 = READY（Track B 完成）；冻结书复现 = PASS。**FRESH 首读关键路径 = P6-v89 保真修复（根因清单在 certificate）→ 保真 ≥0.99 认证 → 盲跑/批式打分解锁**。修复窗口充裕（117 日历日）。
+- 改动文件：impact_model.py + tests、exp028_track_c.py、build_security_master_h028.py、fresh_blind_daily.py、fresh_blind_status.py、forward_daily_inference.py（守卫补丁）、configs/preregistered_evals.json、runtime/reports/h028/*、runtime/paper/fresh_blind/*。资源峰：RSS 35.4G（探针）/2.0G（Track C）；网络 = akshare 主表 ~2min + 探针 idx 特征；磁盘 +~50MB。
