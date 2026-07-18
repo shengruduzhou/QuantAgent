@@ -86,16 +86,15 @@ def step_update_data(dry: bool) -> dict:
     if dry:
         return {"status": "SKIPPED_DRY_RUN"}
     try:
-        r = subprocess.run([sys.executable, str(REPO / "scripts/update_market_panel_daily.py")],
+        # chunked + resumable (2026-07-19): a timeout loses at most one 250-symbol
+        # chunk; the next run (or healthcheck remediation) continues from staging.
+        # Replaces the monolithic updater whose end-of-run persistence lost 3h of
+        # fetches under ~2s/call throttling (CATCHUP_FAILED rc=124, 2026-07-18).
+        r = subprocess.run([sys.executable, str(REPO / "scripts/catchup_panel_chunked.py")],
                            capture_output=True, text=True, timeout=10800)
-        # measured 2026-07-15..17: a full per-symbol update is ~60-70 min even for a
-        # 1-day backlog (3,639 sequential TickFlow calls dominate) — 3600s guaranteed
-        # daily timeouts; 10800s gives 3x headroom
     except subprocess.TimeoutExpired:
-        # steady-state (1 trading day) fits comfortably; a multi-day backlog
-        # must be caught up with a standalone run — record, never crash
-        return {"status": "FAILED", "error": "TIMEOUT_3600S (backlog too large for the "
-                "daily window; run update_market_panel_daily.py standalone to catch up)"}
+        return {"status": "FAILED", "error": "TIMEOUT_10800S (chunked catch-up staged "
+                "partial progress; rerun continues from staging)"}
     return {"status": "OK" if r.returncode == 0 else "FAILED",
             "returncode": r.returncode, "tail": r.stdout[-300:] + r.stderr[-200:]}
 

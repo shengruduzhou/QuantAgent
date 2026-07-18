@@ -13,6 +13,10 @@ exec >> "$LOG" 2>&1
 
 echo "=== auto-repair start $(date -Is) ==="
 
+# --from-catchup: skip the (already-converged) 07-03..14 repair passes
+if [ "${1:-}" = "--from-catchup" ]; then
+  echo "skipping repair passes (--from-catchup)"
+else
 for pass in 1 2 3; do
   echo "--- repair pass $pass $(date -Is)"
   timeout 7200 $PY scripts/repair_window_20260715.py
@@ -34,9 +38,16 @@ EOF
   [ "$gaps" -le 40 ] && break   # 2026-07-04 precedent floor: ~35 delisted/long-suspended
 done
 
-echo "--- standalone panel catch-up (missing closes since last panel max) $(date -Is)"
-timeout 10800 $PY scripts/update_market_panel_daily.py
-rc=$?
+fi  # end of repair-pass skip branch
+
+echo "--- chunked panel catch-up (resumable; missing closes since panel max) $(date -Is)"
+rc=1
+for attempt in 1 2 3; do
+  timeout 10800 $PY scripts/catchup_panel_chunked.py
+  rc=$?
+  echo "catchup attempt $attempt rc=$rc"
+  [ $rc -eq 0 ] && break
+done
 if [ $rc -ne 0 ]; then echo "CATCHUP_FAILED rc=$rc"; echo "=== auto-repair ABORT $(date -Is) ==="; exit 3; fi
 
 echo "--- rescore fresh window $(date -Is)"
