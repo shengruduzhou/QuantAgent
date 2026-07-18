@@ -50,7 +50,20 @@ def main() -> int:
     if win_start > win_end:
         print(json.dumps({"appended": 0, "note": "panel already current"}))
         return 0
+    # weekend/holiday early exit: no business day in the window => nothing can exist
+    if len(pd.bdate_range(win_start, win_end)) == 0:
+        print(json.dumps({"appended": 0, "note": "no business day in window (weekend/holiday)"}))
+        return 0
     seed_syms = sorted(panel.loc[panel["trade_date"] == pmax, "symbol"].astype(str).unique())
+
+    # staging is WINDOW-SCOPED: a manifest pins the window; any mismatch clears
+    # staging so stale done-markers can never poison a different catch-up window
+    manifest = STAGING / "window.json"
+    wtag = f"{win_start.date()}_{win_end.date()}"
+    if not manifest.exists() or json.loads(manifest.read_text()).get("window") != wtag:
+        for f in list(STAGING.glob("chunk_*.parquet")) + list(STAGING.glob("done_*.json")):
+            f.unlink()
+        manifest.write_text(json.dumps({"window": wtag}))
 
     done_syms: set[str] = set()
     for f in sorted(STAGING.glob("done_*.json")):
@@ -103,6 +116,9 @@ def main() -> int:
     new = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
     new = new.drop_duplicates(["symbol", "trade_date"], keep="first") if len(new) else new
     if not len(new):
+        for f in list(STAGING.glob("chunk_*.parquet")) + list(STAGING.glob("done_*.json")):
+            f.unlink()  # empty window: clear staging so markers never leak forward
+        manifest.unlink(missing_ok=True)
         print(json.dumps({"appended": 0, "n_failed": len(failed), "note": "no new rows fetched"}))
         return 0
     for c in ("open", "high", "low", "close", "volume", "amount"):
@@ -156,6 +172,7 @@ def main() -> int:
     merged.to_parquet(PANEL, index=False)
     for f in list(STAGING.glob("chunk_*.parquet")) + list(STAGING.glob("done_*.json")):
         f.unlink()
+    manifest.unlink(missing_ok=True)
     win = merged[win_mask]
     report = {"appended": int(len(new)), "n_failed": len(failed),
               "failed_sample": failed[:20],
