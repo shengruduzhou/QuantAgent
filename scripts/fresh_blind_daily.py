@@ -85,8 +85,17 @@ def ledger_append(record: dict) -> str:
 def step_update_data(dry: bool) -> dict:
     if dry:
         return {"status": "SKIPPED_DRY_RUN"}
-    r = subprocess.run([sys.executable, str(REPO / "scripts/update_market_panel_daily.py")],
-                       capture_output=True, text=True, timeout=3600)
+    try:
+        r = subprocess.run([sys.executable, str(REPO / "scripts/update_market_panel_daily.py")],
+                           capture_output=True, text=True, timeout=10800)
+        # measured 2026-07-15..17: a full per-symbol update is ~60-70 min even for a
+        # 1-day backlog (3,639 sequential TickFlow calls dominate) — 3600s guaranteed
+        # daily timeouts; 10800s gives 3x headroom
+    except subprocess.TimeoutExpired:
+        # steady-state (1 trading day) fits comfortably; a multi-day backlog
+        # must be caught up with a standalone run — record, never crash
+        return {"status": "FAILED", "error": "TIMEOUT_3600S (backlog too large for the "
+                "daily window; run update_market_panel_daily.py standalone to catch up)"}
     return {"status": "OK" if r.returncode == 0 else "FAILED",
             "returncode": r.returncode, "tail": r.stdout[-300:] + r.stderr[-200:]}
 
@@ -119,11 +128,97 @@ def step_score() -> dict:
             "returncode": r.returncode, "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
 
 
+def step_books_and_fills(today: str) -> dict:
+    """S1/S2/S3 decisions + strict-sim fills on the FRESH window; performance
+    is encrypted, never printed. S4 learner port = recorded PENDING item.
+    Stateless recompute from window start on accumulated sleeve scores."""
+    from cryptography.fernet import Fernet
+    sys.path.insert(0, str(REPO / "scripts"))
+    sys.path.insert(0, str(REPO / "scripts" / "analysis"))
+    import baseline_protocol as bp
+    from exp011_book_churn import eligible_rank_lists
+    from exp009_exposure_overlay import bench_series
+    from exp010_hysteresis_overlay import gross_series
+    from dual_track_eval import build_book
+    from dual_track_d1_integration import tilt_series
+    from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig
+    from quantagent.backtest.strict_v8 import run_strict_backtest_v8
+
+    sc_path = ROOT / "daily" / "sleeve_scores.parquet"
+    if not sc_path.exists():
+        return {"status": "NO_SLEEVE_SCORES"}
+    sc = pd.read_parquet(sc_path)
+    sc["trade_date"] = pd.to_datetime(sc["trade_date"])
+    sc = sc[sc["trade_date"] >= "2026-05-19"]
+    if sc.empty:
+        return {"status": "NO_FRESH_SCORES"}
+    fresh_start = pd.Timestamp("2026-05-19")
+    pcols = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
+             "available_at", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]
+    panel = pd.read_parquet(PANEL, columns=pcols,
+                            filters=[("trade_date", ">=", fresh_start - pd.Timedelta(days=210))])
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+    bt_panel = panel[panel["trade_date"] >= fresh_start - pd.Timedelta(days=10)].copy()
+    flags = bt_panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
+    trade_dates = sorted(bt_panel["trade_date"].unique())
+
+    slv = ["short_5d", "mid_5d_30d", "long_30d_120d"]
+    for c in slv:
+        sc[f"rk_{c}"] = sc.groupby("trade_date")[f"score_{c}"].rank(pct=True)
+    sc["c3"] = sc[[f"rk_{c}" for c in slv]].median(axis=1)
+    sc = sc.sort_values(["symbol", "trade_date"])
+    sc["c3_ema"] = sc.groupby("symbol", sort=False)["c3"].transform(
+        lambda s: s.ewm(alpha=0.7, adjust=False).mean())
+    sc["s1"] = sc["rk_short_5d"] + sc["rk_mid_5d_30d"]
+
+    tilt = tilt_series(panel.sort_values(["symbol", "trade_date"]), "d1")
+    m = sc.merge(tilt, on=["symbol", "trade_date"], how="left")
+    m["rc"] = m.groupby("trade_date")["c3_ema"].rank(pct=True)
+    m["rd"] = m.groupby("trade_date")["tilt"].rank(pct=True)
+    oos_e = max(sc["trade_date"])
+    regime = gross_series(bench_series(fresh_start, oos_e), "R2a_confirm5")
+    wser = (regime < 1.0).astype(float) * 0.5
+    w = m["trade_date"].map(wser).fillna(0.0).to_numpy()
+    m["s3"] = (1 - w) * m["rc"] + w * m["rd"].fillna(m["rc"])
+
+    key = get_key()
+    fern = Fernet(key)
+    out = {"status": "OK", "books": {}, "s4": "PENDING_S4_LEARNER_PORT (regime_weight_meta daily port spec'd)"}
+    sector = pd.read_parquet(REPO / bp.SECTOR)
+    for cand, col, style in (("S1", "s1", "plain"), ("S2", "c3_ema", "minhold"), ("S3", "s3", "minhold")):
+        score = m[["trade_date", "symbol"]].copy()
+        score["alpha_score"] = m[col].to_numpy()
+        p = score.merge(flags, on=["symbol", "trade_date"], how="left")
+        book = build_book(eligible_rank_lists(p),
+                          "minhold" if style == "minhold" else "plain",
+                          {"n": 10})
+        tw = bp._apply_delay(book, trade_dates, 1)
+        last_w = tw.iloc[-1]
+        holdings = {s: round(float(v), 4) for s, v in last_w[last_w > 0].items()}
+        (ROOT / "order_logs" / f"{today}_{cand}_weights.json").write_text(
+            json.dumps({"date": today, "candidate": cand, "target_weights": holdings}, indent=1))
+        cfg = AShareExecutionSimulationConfig(initial_cash=1e6, slippage_bps=8.0)
+        r = run_strict_backtest_v8(tw, bt_panel, sector_map=sector, config=cfg)
+        nav = r.nav.copy()
+        perf = {"candidate": cand, "as_of": today,
+                "nav": {str(k): float(v) for k, v in nav.items()}}
+        (ROOT / "encrypted_performance" / f"{today}_{cand}.bin").write_bytes(
+            fern.encrypt(json.dumps(perf).encode()))
+        fo = r.failed_orders if r.failed_orders is not None else pd.DataFrame()
+        (ROOT / "fill_logs" / f"{today}_{cand}_fills.json").write_text(json.dumps(
+            {"date": today, "candidate": cand, "n_failed_orders": int(len(fo)),
+             "n_holdings": len(holdings)}, indent=1))
+        out["books"][cand] = {"n_holdings": len(holdings), "failed_orders": int(len(fo)),
+                              "weights_hash": sha(json.dumps(holdings, sort_keys=True).encode())[:16]}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     t0 = time.time()
+    os.chdir(REPO)  # cron-safe: all repo-relative paths resolve regardless of caller cwd
     ensure_tree()
     get_key()  # ensure key exists with 600 before any performance is produced
     today = datetime.now().strftime("%Y-%m-%d")
@@ -132,9 +227,16 @@ def main() -> int:
     steps["freshness"] = step_freshness()
     steps["scoring"] = step_score()
     ok_so_far = steps["freshness"]["status"] == "OK" and steps["scoring"]["status"].startswith(("OK", "READY"))
-    steps["weights"] = {"status": "OK" if ok_so_far else "BLOCKED_UPSTREAM"}
-    steps["risk_gates"] = {"status": "OK" if ok_so_far else "BLOCKED_UPSTREAM"}
-    steps["fills"] = {"status": "OK" if ok_so_far else "BLOCKED_UPSTREAM"}
+    if ok_so_far:
+        try:
+            steps["weights"] = step_books_and_fills(today)
+        except Exception as e:
+            steps["weights"] = {"status": "FAILED", "error": str(e)[:300]}
+    else:
+        steps["weights"] = {"status": "BLOCKED_UPSTREAM"}
+    steps["risk_gates"] = {"status": steps["weights"]["status"] if steps["weights"]["status"] != "OK"
+                           else "OK"}
+    steps["fills"] = {"status": steps["weights"]["status"]}
 
     health = {
         "run_date": today,
