@@ -196,7 +196,11 @@ export function VnpyParityPage(): JSX.Element {
                     >
                       <td className="mono">{item.category}</td>
                       <td>
-                        <button type="button" className="parity-row-button" onClick={() => setSelectedId(item.id)}>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedId(item.id)}
+                          style={{ width: "100%", padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left" }}
+                        >
                           <strong>{item.name}</strong><small className="mono">{item.id}</small>
                         </button>
                       </td>
