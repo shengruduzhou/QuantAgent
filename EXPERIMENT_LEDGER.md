@@ -304,3 +304,109 @@
 - **volume/amount 端到端核查：无丢失**（历史 P0 已修：adjusted_prices 静默未复权、qfq/raw 刻度混用）——silver 面板活跃行 100% 非空、隐含 VWAP/close 中位 1.001（股数/CNY 单位正确）、gold 数据集两列在册；**回归锁 tests/test_tickflow_volume_amount.py（6 tests：归一化保值/缺列保 NaN 不造 0/窗口过滤/权限分类器/面板单位漂移守卫/gold schema）**
 - **财务数据来源澄清（重要历史事实）**：盘上 silver/fundamentals + tickflow_fin_quarterly 为**早期财务权限尚在（≤2026-05）时拉取的存量**（announce_date 在册，EXP-020 PIT 审计过）；当前刷新 403 → 增量刷新路径 = akshare/tushare（已有 provider）
 - **遗留限制（如实）**：分钟/深度/财务/WS/批量K = 采购决策项（missing_permissions.md P1-P3 优先级不变）；instrument master 原始 ext payload 未单独物化（sector_map 为投影，够用）；quotes 前向采集无 bronze 原始层（快照仅供 live 路径，不入回测）
+
+## EXP-025 · 2026-07-13 · 有据价量因子批次 3（H-025，N=13 先验，fu_20260713 任务）— **DONE / 6 accept · 6 reject · 1 discard；全部判定由先验门直接给出**
+
+- 预注册：H-025 先写入 registry（含 13 个冻结 DSL 公式、方向、全部门槛、新颖性门 0.85、中换手 track 规则）后才执行；preregistration.json 同步存档（runtime/reports/full_universe/fu_20260713/）。诚实注记：registry 追加发生在跑前（文件时间戳可证），git commit 在同 session 跑后合并提交——与 H-023 的"先 commit 后跑"相比是流程弱化，已如实记录。
+- 命令 `AI_quant_venv/bin/python3 scripts/analysis/factor_batch3_pv.py`；236s，峰 RSS 3.21 GiB，CPU-only，零 GPU，零 variant-C，零隔离/FRESH 接触（loader 断言）；新磁盘 <1 MB。Stage A 静态验证 = tests/research/test_factor_batch3.py 6 tests 全过（no-lookahead/finite/columns/dup-expr/门槛扩展/batch-1 向后兼容）；tests/test_v7_factor_expr.py 8 过（DSL 回归）。
+- **共享 scorer 扩展**（dual_track_factor_batch.score_factors，向后兼容默认值，回归测试锁定）：turnover_caps 按类、max_ref_corr 新颖性门、cost_decay_classes 中换手成本衰减门；REF 集扩至 5（+rev60、+pv_ret_corr 既有 survivor 族代理）。
+- **结果表（窗 2023-07-03..2025-08-29，h10 主）**：
+  | 因子 | IC10 | ICIR10 | turn | F2crash | LS@25 | refcorr | 判定 |
+  |---|---|---|---|---|---|---|---|
+  | M3_pv_corr_neg_20 | +0.077 | **0.75** | 0.134 | **+0.110** | +0.985bp | 0.31 | **accept** |
+  | M4_volume_quiet_5_60 | +0.072 | 0.68 | 0.123 | +0.047 | +0.958bp | 0.44 | **accept** |
+  | M7_vov_neg_20 | +0.069 | 0.39 | 0.084 | +0.074 | +0.533bp | 0.83 | **accept**（贴近新颖门） |
+  | M10_vol_cv_neg_20 | +0.059 | **0.76** | 0.121 | +0.044 | +0.672bp | 0.47 | **accept** |
+  | M12_cgo_vwap60_neg | +0.080 | 0.53 | 0.090 | **+0.117** | **+1.118bp** | 0.66 | **accept**（approximation 标注保持） |
+  | D6R_vol_compression_regate | +0.049 | 0.48 | 0.329 | +0.009 | +0.632bp（衰减 8%） | 0.24 | **accept**（中换手 track，batch-1 遗留 TODO 兑现） |
+  | M1_max_ret_neg_20 | +0.084 | 0.50 | 0.083 | +0.084 | +0.721bp | **0.859** | reject（新颖门——与已物化 D1 低波族冗余，门起效的设计目的） |
+  | M8_semivol_neg_20 | +0.052 | 0.22 | 0.079 | +0.056 | +0.194bp | **0.859** | reject（同上） |
+  | M2_skew_neg_20 | +0.044 | 0.43 | **0.165** | +0.058 | +0.506bp | 0.56 | reject（换手门） |
+  | M9_liq_shock_neg_20 | +0.050 | 0.53 | **0.512** | +0.027 | +0.518bp | 0.25 | reject（换手门） |
+  | M5_clv_20 | **−0.012** | −0.09 | — | −0.032 | −0.560bp | 0.51 | reject（先验方向判错，照纪律不翻符号：A股高收盘位置=追高=反转牺牲品） |
+  | M6_overnight_neg_20 | **−0.012** | −0.14 | — | +0.001 | −0.040bp | 0.21 | reject（隔夜负溢价假设在本宇宙/窗不成立） |
+  | M11_fip_20 | +0.000 | 0.00 | — | — | −0.004bp | 0.08 | discard（FIP 不迁移到 A 股弱动量环境，IC≈0） |
+- **科学解读（诚实旗标全带）**：
+  1. 6 个 accept 的 IC 量级（0.049–0.080）落在本宇宙已知单因子带内（lowvol 0.110 / rev60 0.089，见 IC016 审计）——**筛选级证据，非书级收益声明**；phantom-breadth 警告适用（筛选宇宙含不可交易微盘，capacity_rmb 列 0.06–0.15 亿元量级）。
+  2. 最强轮廓 = M3 量价背离（ICIR 0.75 + 单调性 1.0 + crash +0.11 + 新颖 0.31）与 M12 CGO 近似（成本后 LS 最高 + crash 最佳 +0.117；但其本质含 60d 反转-to-VWAP 成分，refcorr 0.66 如实在册）。
+  3. 新颖性门首战履职：M1 MAX 效应各门全过却被 0.859 拦下——证明"再多一个波动族因子"确实是库里已有信息（若无此门，本批会虚报 8 个 survivor）。
+  4. 方向纪律成本 = M5/M6 两票（若允许事后翻符号会"变成" survivor——正是 batch-1 判例要防的容量陷阱路径）。
+- **处置（预注册先验，跑后未改）**：6 survivor **不物化进生产、不做书级集成、不触冻结冠军三元组**（19e05f4）；记入 FACTOR_CANDIDATE_LEDGER_batch3.csv + factor_gap_matrix，排队 **post-FRESH 下一代 carrier/模型**候选池。最高信任标签 = `candidate_research_only_not_fresh_holdout_validated`。
+- 累计 N：因子筛选族 7+7+13=**27**；全库 85 → **98**。
+
+## EXP-026 · 2026-07-13 · 统一因子整合 + CPU 增量消融（H-026，N=4 先验，fu_20260713_h026）— **DONE / GPU_NO_GO（门控模型下全组不过）；关键诊断发现：survivor 信息真实但对非线性基座冗余、对线性模型有超门增量**
+
+- 预注册 commit **f2931d7**（先注册先提交后跑，修复 EXP-025 流程弱点）；产物 runtime/reports/full_universe/fu_20260713_h026/*；累计 N 98 → **102**（消融族 4+2+4=10）。全程 CPU、零隔离/FRESH 接触（断言）、Track A 标签 fixed_cohort_searched_validation。
+- **C1 统一注册表**（factor_master_registry.{parquet,csv}，156 行）：生产 judgment schema 联合 **127 特征**（short 22/mid 22/long 90，含 18 synth/llm）+ 池 7（D1+6 个 H-025）+ RC7 复合 + conditional 5 + 历史 reject 审计 16；**复议=0**（无一满足四类失效条件，逐行理由在册）；exact duplicate=0。
+- **C2 exec 标签重评**（delay-1 executable 自建，t+1 涨停/停牌入场剔除；原 H-025 同日指标保留）：**7/7 survivor 在可执行口径下成立**——M12 execIC20 +0.087/LS25 +1.87bp/d/crash +0.141；M7 +0.074；D1 +0.081；**RC7 复合最强 execIC20 +0.096/ICIR 0.65/crash +0.131**（分散化生效，vs 成员相关 max 0.728）。筛选信号非同日入场假象。
+- **C3 去冗余**：池内互 |ρ| max 0.826 < 0.90 ⇒ 0 集群剪枝，M3=全 7（如实记录，不造假试验）。
+- **Phase D 消融**（LightGBM=门控模型，参数逐项同 EXP-022；3 purged expanding 折，embargo 62 交易日；label=gold exec forward_return_20d 逐日 rank；tradable 宇宙 2.0M 行；376s，峰 RSS 34.6 GiB）：
+  | 组 | ΔIC 逐折 | 中位 ΔIC | Δ 顶十分位中位 | 门 A/B |
+  |---|---|---|---|---|
+  | M1 (+D1) | −0.0005/−0.0018/+0.0006 | **−0.0005** | −0.0002 | ✗/✗ |
+  | M2 (+6) | **+0.0051**/−0.0011/+0.0019 | +0.0019 | −0.0003 | ✗/✗ |
+  | M3 (+7) | +0.0013/+0.0001/−0.0007 | +0.0001 | −0.0006 | ✗/✗ |
+  | M4 (+RC7) | +0.0022/+0.0035/+0.0007（**3/3 正**） | +0.0022 | +0.0008 | ✗/✗ |
+  M12 全 3 折进 top-15 importance（F3 加 M7）——模型**使用**新列但净增量 < 门（+0.005）。**判定：GPU_NO_GO，Phase E 不进入，严格回测 0 次**（strict_backtest_leaderboard.csv 存根+理由）。
+- **Ridge 诊断（预注册 report-only，不参与门判定）**：M2/M3 中位 ΔIC **+0.0058（3/3 折正，数值超 +0.005 门）**vs GBM +0.0019；M1≈0；M4 +0.0006。**科学解读：survivor 信息真实存在，但相对 250 特征基座是"非线性可重构"的——GBM 能从既有库自行合成，线性模型不能。门控模型=LGBM 是跑前锁定的，ridge 不得翻案（拒绝事后换门）。**
+- **发现汇总**：① 特征收敛结论第三次复制（EXP-021 估值/EXP-022 基本面/本票价量 survivor）；② 增量呈 regime 集中性：M2 唯一折级通过 = F1（2022 熊市，+0.0051），F2（2023 修复）为负——与 batch-2/EXP-017 "conditional value" 模式一致，支持 conditional_reserve 处置而非无条件模型输入；③ M3(全7)<M2(6)<M4(复合)：相关原始列稀释，复合是更稳的递送载体；④ **线性层假设**（入 IDEA_QUEUE，不在本票跑）：池的正当出路可能是 carrier 的线性 rank-blend 层（repo 书级正是线性 blend）而非 GBM 特征空间——书级集成依 EXP-023 教训推迟至 post-FRESH。
+- **Track B**（universe_repair_audit.md）：INCOMPLETE_BY_DESIGN——修复需上市/退市主表（tushare stock_basic L/D/P）+ ~1,500 新股 TickFlow 回填（2–6h 网络）+ cohort 外退市股探测；精确命令/新脚本规格/三风险（新股 phantom breadth 加重、benchmark 变、旧数字不迁移）在册。完成前一切"全宇宙"表述 = fixed_cohort。
+- **最终决定：REJECT_INCREMENTAL_FACTOR_POOL**（本周期，GBM 特征空间用途）；7 survivor + RC7 维持 `candidate_research_only_not_fresh_holdout_validated`，处置不变（post-FRESH 下一代 + 线性层假设排队）。资源合计：C1-C3 117s/2.7G + Phase D 376s/34.6G + ridge 130s/32.6G，全部 CPU，新磁盘 ~340MB（new_factor_panel 缓存，可清）。
+
+## EXP-027 · 2026-07-13 · 线性残差 alpha + LTR + 替代表格模型基准（H-027，13/15 trials 执行，fu_20260713_h027）— **DONE / 全部 13 候选不过门 ⇒ REJECT_ALL_ALTERNATIVE_MODELS；核心发现：H-026 线性增量在正确交叉拟合下反转（残差 sleeve 学到反基线赌注）**
+
+- 预注册 commit **4ca88e2**（先注册先提交后跑）；产物 runtime/reports/full_universe/fu_20260713_h027/*（OOF 预测全持久化）；E2/E3 条件 blend 因组件全败**未跑**（不造假试验）⇒ 实际 +13，累计 N 102 → **115**。全程禁窗零接触（断言）；Track A `fixed_cohort_searched_validation`。
+- **两处如实注记**：① B0 重生成与 EXP-026 M0 有行序级差异（F1 IC 0.1126 vs 0.1140；LGBM bagging 对行序敏感）——H-027 内部全部配对比较对同一 B0，一致性不受影响；② X0/X1 首跑因 xgboost 3.2 API 误用（qid_eval_set→eval_qid）失败，修复后 stage1b 重跑（代码缺陷修复，非新试验）。
+- **结果矩阵（vs B0 逐折 IC 0.1126/0.1778/0.1294；门=8 项 AND，全体不过）**：
+  | 候选 | 中位 ΔIC | 逐折 ΔIC | 要点 |
+  |---|---|---|---|
+  | L1/L2 残差 ×λ{.1,.2,.3} | −0.002…−0.007（单调恶化） | 全负 | **残差预测本身 IC = −0.09/−0.15/−0.09（全折负）**：交叉拟合残差目标下，7 池因子学到的是"反基线"（预测均值回归），非正交 alpha；Ridge≡ElasticNet（差 <0.0002），非正则化特异 |
+  | C1 CatBoost LambdaMart M3 | **+0.0003** | +0.0027/+0.0003/−0.0249 | **经济门 3/3 全过**：top-decile 换手比 **0.76**（−24%），costadj25 中位 +0.00017/日 vs B0 −0.0001；但 F3 IC 塌 −0.025、pooled t=−3.86 ⇒ g1/g3 拒。唯一结构性有趣候选 |
+  | LG1 rank_xendcg M0 | −0.075 | 全负（F1 0.038 vs 0.113） | 排序损失远逊逐日 rank 回归目标 |
+  | X0/X1 XGB rank:ndcg | −0.094/−0.088 | 全负 | 固定 topk-8-pair 配置严重欠拟合（117s/6 fits=NDCG@100 早停即停）；照预注册不重调 |
+  | T0/T1 TabM（默认架构,k=32,VRAM 12.2G） | −0.013/−0.011 | 全负 | 深度表格低于树基线 1.1–1.3pp；T1>T0 微幅（池对 NN 有点用=线性可提取性一致）|
+  | R1 RealMLP-TD（VRAM ≤3.1G） | −0.013 | −0.013/**+0.005**/−0.017 | 唯一单折胜 B0（F2）；换手 ~0.20 恒低；中位仍远不过门 |
+- **七问定答（任务书 §8）**：①H-026 Ridge 增量**不生还**——它是"线性 vs 线性"的对比产物，对 GBM 基线做残差正确交叉拟合后反转为负；②与正则化无关（L1≡L2）；③排序对齐损失**未**胜过回归目标（xendcg/rank:ndcg 大败；LambdaMart IC 平但换手−24%）；④TabM 仅达树基线之下，无证据替代 FT/树（与 FT sleeve 不同标签/宇宙不直接可比）；⑤无候选达严格回测（0 次，按门规则）；⑥全场唯一改善（C1 经济门）来自**更低换手**而非预测质量；⑦GBM-输入路线与残差 sleeve 路线**关闭**（三次复制+一次交叉拟合证伪）——post-FRESH 剩余正当路径：(a) LambdaMart 型 top-list 稳定化作为**书层**换手削减机制（IDEA_QUEUE #14 新增），(b) RC7/M12 作 carrier **线性 blend 组件**（IDEA_QUEUE #13 修订：绝不可作 GBM 残差）
+- 资源：stage1 873s/35.4G + stage1b 117s/33.0G + stage2 536s/33.4G RSS、VRAM 峰 12.22G（≤20 限）、OOM 0、合计 ~25min 计算；OOF+IC 存档磁盘 ~0.4GB（≤2GB 限）。
+- **决定：REJECT_ALL_ALTERNATIVE_MODELS**；严格回测 0；冻结 FRESH 三候选零变更；全部结果 `searched_validation` / `candidate_research_only_not_fresh_holdout_validated`。
+
+## EXP-028 · 2026-07-13 · 冻结策略定稿基础设施票（H-028，非选择性，N 不变=115）— **DONE / 基础设施决定：NOT_READY_REPRODUCIBILITY（前向打分保真 0.846 < 0.99）；次阻塞 INCOMPLETE_HISTORICAL_UNIVERSE；冻结书数值复现 PASS；容量声明大幅收紧**
+
+- 预注册 commit **d444872**（§8 终选规则 configs/preregistered_evals.json 在读任何 FRESH 表现前写定提交）。全程零候选选择、零调参、零 FRESH 表现读取。
+- **冻结候选清单**：runtime/reports/h028/frozen_candidate_manifest.json（S0-S4 全参数 + sleeve 预测 sha256 bb712c34/5e74683e/5a11a38f + panel sha b6508f4d + exp023 结果 hash 31d3a5b3）。
+- **数值复现（Track C 内嵌，fail-closed 门）**：S2 中位 +36.37% vs 冻结参考 +36.4%（差 3bp）✓；S3 +25.32% vs +25.3%（差 2bp）✓ —— 冻结书经修正 sim 全链路重建**数值复现通过**。
+- **关键负发现 1（决定性）：v8.9 前向推理保真探针 FAIL** —— forward_daily_inference --run-dir retrain_plus7 重算 vs 训练期 composite 逐日 spearman **均值 0.846 / 最低 0.821**（要求 ≥0.99）。含义：FRESH 窗（预测止于 2026-05-07 之后）的候选打分**现在无法忠实生成**——每日盲跑与批式读时打分同被阻塞。根因假设在 forward_fidelity_certificate.json（rank 宇宙口径/akshare idx 现值 vs 数据集存值/残余因子漂移）。**P6-v89 移植修复 = FRESH 首读的关键路径**。
+- **事故（如实）：探针 validate 窗落入隔离窗**（2026-04-23..05-07）——脚本 --validate 无视 --end 且无 P4 守卫（守卫缺口）。已登记 runtime/state/holdout_access_log.jsonl；所读 rank-IC 判废弃永不引用；守卫已补（validate 尊重 --end + 隔离断言 + 环境变量例外通道留痕）。保真结论（0.846）保留——其为可复现性诊断非表现读数。
+- **关键负发现 2：固定 cohort 从未包含科创板与北交所**（Track A 主表实测：STAR 0/610、BSE 0/327；另缺 ChiNext 571/SH 主板 230/SZ 主板 146；listed 覆盖率 66%，post-2020H2 缺 1,769/1,870）。"等权全A" benchmark 实为"等权沪深主板+创业板 pre-2020H2 cohort"。主表 5,888 行已建（akshare 双源，358 退市），回填未执行 ⇒ **INCOMPLETE_HISTORICAL_UNIVERSE**（命令/风险在 track_a/universe_quality_report.md + survivorship_bias_report.md）。
+- **Track B 交付：√冲击模型**（src/quantagent/backtest/impact_model.py，η=1.0 base/2.0 stressed **在观察任何候选结果前冻结于 prereg**；analysis-layer opt-in 不动可信评测器默认；9/9 单元测试过含零量/低ADV/缺波动/超参与帽/部分成交）——IDEA_QUEUE #11 兑现，EXP-024 声明的评估器硬缺口关闭。
+- **Track C 非选择性审计**（387s，RSS 2.0G，40 sim + 8 overlay，无赢家宣布）：
+  | 书 | 1M 8bps→sqrt_base→stressed | 30M 同链 |
+  |---|---|---|
+  | S2 L1 | +36.4% → **+30.8%** → +25.4% | +34.8% → **+9.0%** → **−11.9%** |
+  | S3 L1+D1 | +25.3% → +21.0% → +16.7% | +24.0% → **+0.4%** → **−18.6%** |
+  **容量声明修订（本审计最重要经济产出）**：EXP-024 "10–30M 可辩护" 收紧为 **"~1–10M 舒适；30M 在 η=1 √冲击下不可辩护（stressed 为负）"**。15bps 全格与 10M 线性格亦在册（historical_strict_metrics.csv）。S4 = EXP-023 在册 + 转移论证；S1 = SEARCH 窗在册（不跨 H-008 折）——覆盖方式如实记录。
+- **Track D 交付：盲化前向骨架**（runtime/paper/fresh_blind/ 全树 + SHA-256 哈希链 ledger（验证 VALID）+ Fernet 加密表现 + 运营健康-only 状态器 + **提前解盲拒绝（exit 2，尝试本身入账）**；daily runner 烟测：对 FIDELITY_CERT_FAILED 正确 fail-closed 阻塞下游）。cron 行已文档化未安装（打分步 PENDING 时安装无意义）。
+- **§7 首读资格（权威日期）**：**2026-11-11** = 第 120 个 FRESH 交易日（面板真实日历 32 天 + akshare 交易所日历 88 天，程序化计算，fresh_first_read_eligibility.json）。
+- **基础设施决定：NOT_READY_REPRODUCIBILITY**（主）；NOT_READY_UNIVERSE（次，显式在册）。执行模型 = READY（Track B 完成）；冻结书复现 = PASS。**FRESH 首读关键路径 = P6-v89 保真修复（根因清单在 certificate）→ 保真 ≥0.99 认证 → 盲跑/批式打分解锁**。修复窗口充裕（117 日历日）。
+- 改动文件：impact_model.py + tests、exp028_track_c.py、build_security_master_h028.py、fresh_blind_daily.py、fresh_blind_status.py、forward_daily_inference.py（守卫补丁）、configs/preregistered_evals.json、runtime/reports/h028/*、runtime/paper/fresh_blind/*。资源峰：RSS 35.4G（探针）/2.0G（Track C）；网络 = akshare 主表 ~2min + 探针 idx 特征；磁盘 +~50MB。
+
+## EXP-029 · 2026-07-14 · v8.9 前向推理保真修复（H-029，纯 lineage 修复，非选择性，N 不变=115）— **DONE / FORWARD_FIDELITY_PASS（composite 0.99903 ≥0.99）；根因 = 七个 "+7" llm_* 因子整列静默 NaN（定义文件指错代）；2026-11-11 首读维持有效**
+
+- 预注册 commit **1b47c3d**（黄金窗/层分解/修复规则/0.99 门先验冻结）；全程读数 ≤2025-08-29 断言，零标签零表现读取。
+- **层分解定位（教科书式）**：L3a 推理层 = **1.0000 全 sleeve**（checkpoint/rank 归一化/blend 全部零缺陷）⇒ 失真在特征层。V1/V2/V3 判别：非群体（V1 不变）、额外行无害（V2≈1.0）、**NaN 掩码对齐即痊愈（V3 short 1.0000）**。warmup 420→1250 输出逐位不变（排除窗口预热）。
+- **根因**：fwd-only NaN 1,515,400 cell = **恰好 7 列整列** = v8.9 "+7" 的 llm_* 因子（short 5/22、mid 2/22、long 0/90——精确解释 sleeve 保真 0.93/0.91/0.997 分布）。`forward_daily_inference.py` 只读 v8.7 时代 `eval_v87/accepted_definitions.json`；llm_* 定义在 `v89_closed_loop/pooled_eval_clean/accepted_definitions.json`。FT missing-mask embedding 将整列 NaN 变为系统性错误 token——**值漂移几乎无关（L1 绝大多数列 ≥0.998），缺失掩码就是一切**。
+- **修复（只恢复冻结语义）**：synth/llm 从两个定义文件合并计算（去重）；附带 `--sleeve-scores-output`（S2-S4 需每 sleeve 分数）。零模型/因子/宇宙/组合变更。
+- **证书（修复后，双跑）**：composite 日中位 **0.99903** / 最低 0.99871；sleeve 中位 0.99786/0.99801/0.99695（全 ≥0.99）；top-10 重合 0.242→**0.816**、top-50 0.354→0.885；**确定性重跑差 = 0.0**；64/64 日无缺；schema hash 全对齐（artifact_lineage.json）；隔离零访问。→ runtime/reports/h028/forward_fidelity_certificate.json（passes=true，取代 07-13 失败版）+ runtime/reports/h029/{forward_fidelity_report.md, layer_comparison.csv, daily_score_fidelity.csv, topk_overlap.csv, stage2_summary.json, stage3_results.json, stage3b_population_tests.json, artifact_lineage.json, reproduction_environment.lock}。
+- **残留（如实）**：alpha045/gtja032/gtja036 值级漂移（构建后向量化重构类；仅 long sleeve，其 0.9969 仍过门）**未修**——若未来重建数据集必须复核；gold-only NaN 577 cell = 构建时代数据洞（面板已修复），对未来日期无影响。
+- **对总线的意义**：H-028 的 NOT_READY_REPRODUCIBILITY 主阻塞**解除**；每日盲跑与批式读时打分解锁；**2026-11-11 FRESH 首读维持有效**（冻结时钟不变）。PASS 后动作（7 交易日运营影子测试 → cron 安装）随即启动，影子测试完成本质上需 7 个交易日墙钟。剩余次阻塞 = Track A 宇宙回填（独立数据票）。
+- 资源：3× 特征重算 + 12× GPU sleeve 推理 ≈ 共 ~25min 计算；RSS ≤8G；VRAM «20G；新磁盘 ~700MB（fwd 缓存，可清）。
+
+## INC-P1 · 2026-07-21 · 前向面板摄入分区内错采盘中未完成日线（partial intraday bar）— **已发现·已修复·已补救；无污染流入任何选择决策**
+
+- **事实**：catchup 窗口末端取 `today`，而 TickFlow 在**盘中即返回当日未完成日线**。2026-07-21 的 catch-up 于 12:42 JST（11:42 CST，盘中）启动、20:14 完成，导致早批抓取的 symbol 落入**部分成交量快照**。实测：000001.SZ 面板量 124,327,200 vs 收盘终值 175,511,300（比 **0.708**，close 10.87 vs 10.84）；000002.SZ 比 0.699。估算约 1,800/3,487 行受染。
+- **为何既有守卫全部失效（重要教训）**：①覆盖率守卫看不见——07-21 覆盖 3,487 = 07-20 同值，100%；②聚合成交量看不见——07-21 聚合 1.025×近期中位（真实应更高，部分bar把高量日压成"正常"）；③日频量比分布看不见——0.708 的部分bar落在正常日间波动区间内，直方图单峰无低位簇（我的第一次分布检验因此给出**假阴性**）。**唯一可靠检测 = 收盘后对少量 symbol 直接重取比对**（本次即由此确证）。
+- **根因修复（防在源头）**：`catchup_panel_chunked.py` 增加**可用性钳制**——窗口末端永不超过"已发布收盘"（CST 15:30 规则），跑前实测：11:42 CST 情形下 last_available=07-20，本次事故不会发生。
+- **守卫升级**：`coverage_guard.sh` 增加**值级 partial-bar 探针**（收盘后重取 6 个 symbol，量比 <0.95 即判定该日为部分日 → 备份后丢弃 → 重打分+重跑 runner）。覆盖率检查保留为第二道。
+- **补救**：3,487 行 07-21 已丢弃（备份 `market_panel.pre_partial_drop_20260721_202035.parquet`），panel_max 回到 07-20（全覆盖）；rescore + runner 在受染面板上产出的当日 artifact 已作废并重跑（tmux `remediate`）。07-21 数据不丢失——次日 06:00 supervisor 在收盘后窗口干净重取。
+- **纪律边界（关键）**：受染数据**仅**进入前向盲化影子测试的运营 artifact，**未**触及任何选择/调参/回测/FRESH 读数；冻结候选定义与 2026-11-11 首读时钟均不受影响。ledger 中受染那次 daily_run 记录保留（append-only），本条为其更正记录。
+- **附带发现**：TickFlow 限速实测 **10 请求/分钟** ⇒ 全宇宙单遍 ≈6 小时（非 3 小时）。日更节奏据此确认为"次日晨取前一交易日收盘"的 T-1 模式（与 delay-1 执行假设一致），supervisor 的 MAX_ITERS=8 足够覆盖。

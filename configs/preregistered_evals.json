@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "declared": "2026-07-13",
+  "declared_before_any_fresh_read": true,
+  "source": "H-028 section 8 + FRESH_HOLDOUT_FREEZE_MANIFEST.md champion freeze (19e05f4) + EVALUATION_PROTOCOL_V2.md section 2",
+  "note": "Single source of truth for the one-time FRESH first read. Guard lift happens via config change referencing this file — never via override.",
+  "frozen_candidates": {
+    "S0": {"id": "eqw_eligible_benchmark", "definition": "point-in-time equal-weight eligible A-share benchmark, same universe protocol as candidates"},
+    "S1": {"id": "production_2sleeve_rank_k10", "definition": "configs/production_blend.json (trust likely_overfit; evaluated for honesty, not favored)"},
+    "S2": {"id": "L1_c3ema07_minhold10", "definition": "C3 sleeve rank-median -> per-symbol EMA alpha=0.7 -> min-hold-10 top-10", "repro": "scripts/analysis/dual_track_eval.py"},
+    "S3": {"id": "L1_D1_regime_w05", "definition": "S2 + D1 low-vol tilt w=0.5 in R2a crash regime only", "repro": "scripts/analysis/dual_track_d1_integration.py --factor d1_regime --weight 0.5", "flag": "fold-informed suspicion (EXP-023)"},
+    "S4": {"id": "RW1_4state", "definition": "trailing regime-conditional IC learner, H-023 frozen protocol", "repro": "scripts/analysis/regime_weight_meta.py"}
+  },
+  "first_read_eligibility": {
+    "min_fresh_trading_days": 120,
+    "calendar": "actual exchange trading days from the ingested panel (never calendar-day approximation)",
+    "additional_conditions": [
+      "all frozen candidates produced decisions for required dates (or batch-scored by the frozen checkpoints under validated >=0.99 feature fidelity)",
+      "no candidate definition changes since 19e05f4",
+      "no hidden FRESH access (holdout_access_log.jsonl clean)",
+      "no missing performance intervals that materially bias comparison",
+      "all artifact hashes valid vs frozen_candidate_manifest.json"
+    ],
+    "machine_readable_date": "runtime/reports/h028/fresh_first_read_eligibility.json"
+  },
+  "final_and_gates": [
+    "zero PIT violations",
+    "PBO <= 0.25",
+    "DSR significant under cumulative trial correction (N from HYPOTHESIS_REGISTRY cumulative table at read time; >=115 as of 2026-07-13)",
+    "losing-fold ratio <= 40%",
+    "positive net excess return vs S0 at 15 bps",
+    "25 bps degradation <= 40% of 8 bps annualized (ACCEPTANCE_RULES R3.2)",
+    "median fold max drawdown <= 20%",
+    "worst fold max drawdown <= 30%",
+    "single industry <= 30%",
+    "single stock <= 10%",
+    "capacity passes at CNY 1M and 10M (10% ADV participation)",
+    "beta and Jensen alpha reported (pure beta amplification is not improvement)",
+    "no execution-integrity failure (failed-order audit clean)"
+  ],
+  "lexicographic_order_among_full_gate_passers": [
+    "positive FRESH net excess return",
+    "highest FRESH information ratio",
+    "highest FRESH Calmar",
+    "lowest worst drawdown",
+    "strongest 15/25bps cost survival",
+    "greatest capacity",
+    "lowest turnover",
+    "CAGR"
+  ],
+  "no_passer_outcome": "NO_PRODUCTION_STRATEGY",
+  "read_protocol": "each candidate evaluated EXACTLY once on the FRESH window (variant C, corrected simulator, 8/15/25 bps; sqrt-impact reported as diagnostic overlay), results recorded regardless of outcome; no re-runs, no parameter changes, no relative winner that fails a hard gate"
+}

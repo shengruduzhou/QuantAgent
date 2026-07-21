@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -45,6 +46,11 @@ import pandas as pd
 PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
 RUN_DIR = Path("runtime/reports/v8/deep/v88_judgment_20260611_2015")
 DISCOVERED = "runtime/reports/v8/discovery/eval_v87/accepted_definitions.json"
+# H-029 fidelity repair (frozen-semantics restore): the v8.9 "+7" llm_* factor
+# definitions live in the closed-loop pooled_eval_clean file, NOT in the
+# v8.7-era file above. Before this fix the seven llm_* sleeve features were
+# silently NaN-filled -> missing-mask tokens -> short/mid sleeve fidelity 0.93/0.91.
+DISCOVERED_PLUS7 = "runtime/reports/v89_closed_loop/pooled_eval_clean/accepted_definitions.json"
 INDEX_ROOT = Path("runtime/data/v7/raw/akshare/index")
 OUT_PATH = Path("runtime/reports/v8/forward/ensemble_forward.parquet")
 SLEEVES = ("short_5d", "mid_5d_30d", "long_30d_120d")
@@ -126,7 +132,14 @@ def build_feature_frame(panel: pd.DataFrame, needed: list[str],
         print(f"  gtja191: {len(gtja_names)} columns", flush=True)
     if synth_names:
         from quantagent.factors.factor_synthesis import compute_synthesized_factors
-        s_long = compute_synthesized_factors(panel, DISCOVERED)
+        pieces = []
+        for defs in (DISCOVERED, DISCOVERED_PLUS7):
+            part = compute_synthesized_factors(panel, defs)
+            if not part.empty:
+                pieces.append(part)
+        s_long = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+        if not s_long.empty:
+            s_long = s_long.drop_duplicates(subset=["symbol", "trade_date", "factor_name"])
         if not s_long.empty:
             s_wide = s_long[s_long["factor_name"].isin(synth_names)].pivot_table(
                 index=["symbol", "trade_date"], columns="factor_name",
@@ -192,6 +205,9 @@ def main() -> int:
                     help="score an overlap window and rank-correlate vs the training run")
     ap.add_argument("--validate-days", type=int, default=8)
     ap.add_argument("--output", default=str(OUT_PATH))
+    ap.add_argument("--sleeve-scores-output", default=None,
+                    help="also append per-sleeve raw scores (wide parquet) — "
+                         "needed by the frozen candidates S2-S4 (H-029)")
     args = ap.parse_args()
 
     import sys as _sys
@@ -222,7 +238,22 @@ def main() -> int:
 
     if args.validate:
         t_end = base["trade_date"].max()
+        if args.end:  # honor --end in validate mode (H-028 guard-gap fix)
+            t_end = min(t_end, pd.Timestamp(args.end))
         target = panel_dates[(panel_dates <= t_end)][-args.validate_days:]
+        # P4-style quarantine guard (previously missing here; incident logged
+        # 2026-07-13 in runtime/state/holdout_access_log.jsonl — EXP-028)
+        qcfg = json.loads(Path("configs/quarantined_windows.json").read_text())
+        for w in qcfg["windows"]:
+            ws, we = pd.Timestamp(w["start"]), pd.Timestamp(w["end"])
+            hit = [d for d in target if ws <= d <= we]
+            if hit and not os.environ.get("QUANTAGENT_ALLOW_QUARANTINED_VALIDATE"):
+                raise SystemExit(
+                    f"REFUSED: validate window intersects quarantined window "
+                    f"{w['start']}..{w['end']} ({len(hit)} dates, e.g. {hit[0].date()}). "
+                    f"Choose --end <= pre-quarantine or set "
+                    f"QUANTAGENT_ALLOW_QUARANTINED_VALIDATE='<reason>' (logged, per "
+                    f"EVALUATION_PROTOCOL_V2 section 3 exception process).")
     else:
         out_path = Path(args.output)
         last_scored = base["trade_date"].max()
@@ -272,6 +303,21 @@ def main() -> int:
             columns={"prediction": "alpha_score"})
         sleeve_preds[sl] = f
         print(f"  {sl}: {len(f)} predictions", flush=True)
+
+    if args.sleeve_scores_output:
+        wide = None
+        for sl in SLEEVES:
+            p = sleeve_preds[sl].rename(columns={"alpha_score": f"score_{sl}"})
+            wide = p if wide is None else wide.merge(p, on=["symbol", "trade_date"], how="outer")
+        sp_path = Path(args.sleeve_scores_output)
+        sp_path.parent.mkdir(parents=True, exist_ok=True)
+        if sp_path.exists():
+            prev = pd.read_parquet(sp_path)
+            prev["trade_date"] = pd.to_datetime(prev["trade_date"])
+            wide = pd.concat([prev[~prev["trade_date"].isin(wide["trade_date"].unique())], wide],
+                             ignore_index=True)
+        wide.to_parquet(sp_path, index=False)
+        print(f"sleeve scores -> {sp_path} ({len(wide)} rows total)", flush=True)
 
     from quantagent.training.horizon_models import (
         HorizonClass, HorizonEnsembleWeights, ensemble_horizon_predictions)

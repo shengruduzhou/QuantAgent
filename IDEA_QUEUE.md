@@ -16,6 +16,8 @@
 | 10 | walk-forward 重训协议（模型层变更的唯一评测路径；embargo 修至 ≥126d） | training | EVALUATION_PROTOCOL_V2 §4a | 模型改动的选择基础 | 低（协议本身） | GPU 多小时/折（需授权） | 排队（Phase 6 后段） |
 | 11 | 市场冲击 √participation 容量模型精化 | eval | 市场冲击文献 | 容量估算从 ADV 比例升级 | 低 | CPU 小 | 排队 |
 | 12 | UI trust_class 徽标透传 | infra | OUTPUT_ARTIFACT_AUDIT §4 | 防"漂亮数字"复流 | 无 | 20 行 | 排队（P-H） |
+| 13 | 池因子线性层集成（carrier rank-blend 层加 RC7/M12 作**并列组件**；**EXP-027 已证伪残差-on-GBM 路线，绝不可作残差 sleeve**） | ensemble | EXP-026 ridge 诊断 + EXP-027 交叉拟合证伪 | survivor 信息只在与基线**并列**的线性混合里可用，对 GBM 残差为反基线赌注 | 中（书级集成 fold-informed 风险 ⇒ 必须 post-FRESH 首读后） | CPU ~20min | 排队（post-FRESH 硬前置） |
+| 14 | LambdaMart 型 top-list 稳定化 → 书层换手削减（信号级低换手，非 EXP-011 的机械 churn 控制） | book/signal | EXP-027 C1（top-decile 换手比 0.76，经济门 3/3 过，IC 平） | 排序损失天然稳定列表头部 ⇒ 同等 IC 下省 ~24% 换手成本 | 中（书级评测 fold-informed 风险 ⇒ post-FRESH） | CPU ~40min（CatBoost 重训+书评） | 排队（post-FRESH） |
 
 ## 已否决（勿重提，证据在案）
 
