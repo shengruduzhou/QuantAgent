@@ -8,7 +8,11 @@ from pathlib import Path
 from threading import RLock
 import time
 from services.quant_api.config import ApiSettings, project_relative, stable_id
+from services.quant_api.runtime_indexer.contracts import resolve_artifact_contract
 from services.quant_api.runtime_indexer.parsers import parser_for
+
+
+CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -28,6 +32,15 @@ class IndexedArtifact:
     dateStart: str | None = None
     dateEnd: str | None = None
     tags: list[str] = field(default_factory=list)
+    schemaVersion: str | None = None
+    trustClass: str = "unclassified"
+    validationStatus: str = "unverified"
+    freshnessStatus: str = "unknown"
+    staleReason: str | None = None
+    sourceTime: str | None = None
+    manifestPath: str | None = None
+    contentHash: str | None = None
+    capabilities: list[str] = field(default_factory=lambda: ["metadata"])
     issues: list[dict] = field(default_factory=list)
 
 
@@ -64,6 +77,12 @@ class RuntimeIndexer:
                         relative = project_relative(self.settings, path)
                         parser_name, _ = parser_for(path)
                         kind, tags = _classify(relative, path.name)
+                        contract = resolve_artifact_contract(
+                            path,
+                            self.settings,
+                            previewable=True,
+                        )
+                        contract_payload = contract.to_dict()
                         artifact = IndexedArtifact(
                             id=stable_id("artifact", relative),
                             kind=kind,
@@ -72,10 +91,25 @@ class RuntimeIndexer:
                             extension=path.suffix.lower(),
                             sizeBytes=int(stat.st_size),
                             modifiedAt=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                            status=(
+                                "error" if contract.validationStatus == "invalid"
+                                else "partial" if contract.freshnessStatus == "stale"
+                                else "ready"
+                            ),
                             parser=parser_name,
                             runId=_run_id(relative),
                             horizon=_horizon(relative),
                             tags=tags,
+                            schemaVersion=contract_payload["schemaVersion"],
+                            trustClass=contract_payload["trustClass"],
+                            validationStatus=contract_payload["validationStatus"],
+                            freshnessStatus=contract_payload["freshnessStatus"],
+                            staleReason=contract_payload["staleReason"],
+                            sourceTime=contract_payload["sourceTime"],
+                            manifestPath=contract_payload["manifestPath"],
+                            contentHash=contract_payload["contentHash"],
+                            capabilities=contract_payload["capabilities"],
+                            issues=contract_payload["contractIssues"],
                         )
                         artifacts.append(asdict(artifact))
                     except (OSError, ValueError) as exc:
@@ -155,14 +189,22 @@ class RuntimeIndexer:
     def stats(self) -> dict:
         items = self.scan()
         by_kind: dict[str, int] = {}
+        by_trust: dict[str, int] = {}
+        by_validation: dict[str, int] = {}
         total_size = 0
         for item in items:
             by_kind[item["kind"]] = by_kind.get(item["kind"], 0) + 1
+            trust_class = str(item.get("trustClass") or "unclassified")
+            validation_status = str(item.get("validationStatus") or "unverified")
+            by_trust[trust_class] = by_trust.get(trust_class, 0) + 1
+            by_validation[validation_status] = by_validation.get(validation_status, 0) + 1
             total_size += int(item["sizeBytes"])
         return {
             "artifactCount": len(items),
             "totalSizeBytes": total_size,
             "byKind": by_kind,
+            "byTrust": by_trust,
+            "byValidation": by_validation,
             "indexedAt": datetime.fromtimestamp(self._indexed_at, tz=timezone.utc).isoformat(),
         }
 
@@ -171,6 +213,8 @@ class RuntimeIndexer:
             return False
         try:
             payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != CACHE_SCHEMA_VERSION:
+                return False
             indexed_at = float(payload.get("indexed_at_epoch", 0.0))
             if time.time() - indexed_at >= self.settings.index_ttl_seconds:
                 return False
@@ -183,6 +227,7 @@ class RuntimeIndexer:
     def _write_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": CACHE_SCHEMA_VERSION,
             "indexed_at_epoch": self._indexed_at,
             "artifacts": self._artifacts,
         }
@@ -210,6 +255,8 @@ class RuntimeIndexer:
 def _classify(relative: str, name: str) -> tuple[str, list[str]]:
     lower = relative.lower()
     tags: list[str] = []
+    if "manifest" in name.lower():
+        return "manifest", tags
     if "/backtest/" in lower or name in {"nav.csv", "pnl.csv", "realized_trades.csv", "failed_orders.csv"}:
         return "backtest", tags
     if name.endswith((".pt", ".pth", ".joblib", ".zip")) or "/models/" in lower:
@@ -228,8 +275,6 @@ def _classify(relative: str, name: str) -> tuple[str, list[str]]:
         return "do_t", tags
     if "/logs/" in lower or path_suffix(name) in {".log", ".jsonl"}:
         return "log", tags
-    if "manifest" in lower:
-        return "manifest", tags
     if "/data/" in lower:
         return "dataset", tags
     if "/reports/" in lower or path_suffix(name) in {".md", ".html"}:

@@ -1,4 +1,7 @@
-export type DataStatus = "ready" | "partial" | "empty" | "error";
+export type DataStatus = "ready" | "partial" | "empty" | "error" | "stale" | "unavailable";
+export type ArtifactTrustClass = "production_ready" | "paper_only" | "research_only" | "contaminated" | "unclassified";
+export type ArtifactValidationStatus = "verified" | "declared" | "unverified" | "invalid";
+export type ArtifactFreshnessStatus = "current" | "stale" | "unknown";
 
 export interface DataIssue {
   code: string;
@@ -35,6 +38,16 @@ export interface RuntimeArtifact {
   runId?: string | null;
   horizon?: string | null;
   tags: string[];
+  schemaVersion?: string | null;
+  trustClass: ArtifactTrustClass;
+  validationStatus: ArtifactValidationStatus;
+  freshnessStatus: ArtifactFreshnessStatus;
+  staleReason?: string | null;
+  sourceTime?: string | null;
+  manifestPath?: string | null;
+  contentHash?: string | null;
+  capabilities: string[];
+  issues: DataIssue[];
 }
 
 export interface BacktestSummary {
@@ -65,6 +78,9 @@ export interface BacktestSummary {
   status: DataStatus;
   path: string;
   tags: string[];
+  trustClass?: ArtifactTrustClass;
+  validationStatus?: ArtifactValidationStatus;
+  manifestPath?: string | null;
   capabilities?: Record<string, boolean | string | null>;
 }
 

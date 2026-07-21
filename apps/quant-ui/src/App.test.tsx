@@ -90,3 +90,51 @@ test("command palette routes a stock code to stock replay", () => {
 
   expect(screen.getByTestId("location")).toHaveTextContent("/stock-replay?symbol=000001.SZ");
 });
+
+test("runtime explorer distinguishes verified production artifacts", async () => {
+  const artifact = {
+    id: "artifact_metrics",
+    kind: "backtest",
+    name: "metrics.json",
+    path: "runtime/reports/run-1/backtest/metrics.json",
+    extension: ".json",
+    sizeBytes: 128,
+    modifiedAt: "2026-01-06T00:00:00+00:00",
+    status: "ready",
+    parser: "json",
+    runId: "run-1",
+    horizon: "short_5d",
+    tags: [],
+    schemaVersion: "quantagent.backtest.metrics.1",
+    trustClass: "production_ready",
+    validationStatus: "verified",
+    freshnessStatus: "unknown",
+    sourceTime: "2026-01-06T00:00:00+00:00",
+    manifestPath: "runtime/reports/run-1/backtest/metrics.json.manifest.json",
+    contentHash: "a".repeat(64),
+    capabilities: ["metadata", "preview", "research_display", "production_display"],
+    issues: [],
+  };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const data = url.includes("/system/overview") ? overview
+      : url.includes("/system/runtime-index/artifact_metrics/preview") ? { total_return: 0.12 }
+        : url.includes("/system/runtime-index") ? {
+          items: [artifact], total: 1, page: 1, pageSize: 100, hasNext: false,
+        }
+          : [];
+    return new Response(JSON.stringify({ status: "ready", data, issues: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }));
+
+  renderApp("/runtime");
+
+  expect(await screen.findByText("metrics.json")).toBeInTheDocument();
+  expect(screen.getByText("production_ready")).toBeInTheDocument();
+  expect(screen.getByText("verified")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("metrics.json"));
+  expect(await screen.findByText("quantagent.backtest.metrics.1")).toBeInTheDocument();
+  expect(screen.getByText(/production_display/)).toBeInTheDocument();
+});

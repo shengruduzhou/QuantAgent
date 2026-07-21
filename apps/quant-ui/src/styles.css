@@ -627,6 +627,14 @@ time {
   color: var(--red);
 }
 
+.state-stale {
+  color: var(--amber);
+}
+
+.state-unavailable {
+  color: var(--muted);
+}
+
 .spin {
   animation: spin 900ms linear infinite;
 }
@@ -2041,6 +2049,69 @@ time {
   font: 8px "JetBrains Mono Variable", monospace;
 }
 
+.artifact-trust-cell {
+  min-width: 128px;
+}
+
+.artifact-trust-cell > span:last-child {
+  margin-top: 4px;
+  color: var(--muted);
+  font: 8px "JetBrains Mono Variable", monospace;
+}
+
+.artifact-contract {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(8, 20, 31, 0.78);
+}
+
+.artifact-contract-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.artifact-contract dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.artifact-contract dl div {
+  min-width: 0;
+}
+
+.artifact-contract dt {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.artifact-contract dd {
+  overflow: hidden;
+  margin: 2px 0 0;
+  color: #b8c8d4;
+  font: 8px/1.45 "JetBrains Mono Variable", monospace;
+  text-overflow: ellipsis;
+}
+
+.artifact-contract-issues {
+  display: grid;
+  gap: 4px;
+  color: var(--amber);
+  font-size: 8px;
+}
+
+.artifact-contract-issues span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .kind-backtest,
 .kind-model {
   border-color: #2b67ab;
@@ -2060,7 +2131,7 @@ time {
 }
 
 .runtime-preview-panel .json-view {
-  height: calc(100vh - 164px);
+  max-height: calc(100vh - 330px);
 }
 
 .pagination {
