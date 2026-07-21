@@ -22,7 +22,6 @@ type LayerKey = "ma5" | "ma10" | "ma20" | "ma60" | "trades" | "tTrades" | "risk"
 
 interface TooltipParam {
   axisValue?: string | number;
-  dataIndex?: number;
 }
 
 const RANGE_OPTIONS: Array<{ value: KlineViewRange; label: string }> = [
@@ -233,7 +232,11 @@ export function CandlestickChart({
         {
           scale: true,
           position: "right",
-          axisLabel: { color: "#71879a", fontSize: 10, formatter: (value: number) => value.toFixed(2) },
+          axisLabel: {
+            color: "#71879a",
+            fontSize: 10,
+            formatter: (value: string | number) => Number(value).toFixed(2),
+          },
           axisLine: { show: true, lineStyle: { color: "#20364a" } },
           axisTick: { show: false },
           splitLine: { lineStyle: { color: "#13283a", type: "dashed" } },
@@ -281,16 +284,15 @@ export function CandlestickChart({
           type: "candlestick",
           data: bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
           itemStyle: {
-            color: "#2ac89f",
+            color: "#3f8cff",
             color0: "#ef5c63",
-            borderColor: "#2ac89f",
+            borderColor: "#3f8cff",
             borderColor0: "#ef5c63",
           },
           markPoint: {
             silent: false,
             symbolKeepAspect: true,
             data: tradePoints,
-            label: { hideOverlap: true },
           },
         },
         ...maSeries,
@@ -302,7 +304,7 @@ export function CandlestickChart({
           barMaxWidth: 8,
           data: bars.map((bar) => ({
             value: bar.volume ?? 0,
-            itemStyle: { color: bar.close >= bar.open ? "rgba(42,200,159,.66)" : "rgba(239,92,99,.66)" },
+            itemStyle: { color: bar.close >= bar.open ? "rgba(63,140,255,.68)" : "rgba(239,92,99,.66)" },
           })),
         },
       ],
