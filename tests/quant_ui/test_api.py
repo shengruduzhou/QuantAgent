@@ -170,6 +170,19 @@ def test_runtime_index_and_backtest_expose_verified_trust_contract(quant_ui_sett
     assert artifact["sourceTime"] == "2026-01-06T00:00:00+00:00"
     assert "production_display" in artifact["capabilities"]
 
+    catalog = request(app, "GET", "/api/system/runtime-catalog").json()
+    assert catalog["status"] == "ready"
+    assert catalog["data"]["summary"]["runCount"] >= 1
+    assert catalog["data"]["summary"]["byTrust"]["production_ready"] >= 1
+
+    lineage = request(
+        app,
+        "GET",
+        f"/api/system/runtime-index/{artifact['id']}/lineage",
+    ).json()
+    assert lineage["status"] == "ready"
+    assert lineage["data"]["upstream"][0]["artifact"]["name"] == "nav.csv"
+
     backtest = request(app, "GET", "/api/backtests").json()["data"][0]
     assert backtest["trustClass"] == "production_ready"
     assert backtest["validationStatus"] == "verified"

@@ -1,287 +1,216 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import {
   ArrowClockwise,
+  ArrowRight,
   Broom,
-  Check,
+  CirclesThreePlus,
   Database,
   File,
+  FlowArrow,
   MagnifyingGlass,
   ShieldCheck,
-  Trash,
+  Stack,
   WarningCircle,
-  X,
 } from "@phosphor-icons/react";
-import { useSearchParams } from "react-router-dom";
-import { apiPost } from "../api/client";
-import type {
-  CleanupResult,
-  Page,
-  RuntimeArtifact,
-  RuntimeCleanupAnalysis,
-} from "../api/types";
-import { useApi } from "../hooks/useApi";
-import { MetricCard } from "../components/MetricCard";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import type { Page, RuntimeArtifact, RuntimeCatalog, RuntimeLineage, RuntimeRunSummary } from "../api/types";
+import { RuntimeCleanupWorkspace } from "../components/runtime_manager/RuntimeCleanupWorkspace";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatBytes, formatDate } from "../utils/format";
+import { useApi } from "../hooks/useApi";
+import { formatBytes, formatDate, formatNumber } from "../utils/format";
 
-const kinds = ["", "backtest", "model", "prediction", "factor", "selection", "risk", "do_t", "log", "dataset", "report"];
+const kinds = ["", "backtest", "model", "prediction", "target_weights", "factor", "selection", "risk", "do_t", "log", "dataset", "report", "manifest", "unknown"];
+const trustClasses = ["", "production_ready", "paper_only", "research_only", "contaminated", "unclassified"];
+const validations = ["", "verified", "declared", "unverified", "invalid"];
+const capabilities = ["", "preview", "research_display", "production_display", "paper_execution", "audit_replay"];
 
-type RuntimeTab = "artifacts" | "cleanup";
+type RuntimeTab = "catalog" | "runs" | "lineage" | "cleanup";
 
 export function RuntimeExplorerPage(): JSX.Element {
   const [searchParams] = useSearchParams();
-  const [tab, setTab] = useState<RuntimeTab>("artifacts");
+  const navigate = useNavigate();
+  const [tab, setTab] = useState<RuntimeTab>("catalog");
   const [kind, setKind] = useState("");
+  const [trustClass, setTrustClass] = useState("");
+  const [validationStatus, setValidationStatus] = useState("");
+  const [capability, setCapability] = useState("");
+  const [runId, setRunId] = useState(searchParams.get("runId") ?? "");
   const [query, setQuery] = useState(searchParams.get("query") ?? "");
+  const [sortBy, setSortBy] = useState("modifiedAt");
+  const [sortDirection, setSortDirection] = useState("desc");
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState("");
-  const [refresh, setRefresh] = useState(false);
-  const [selectedCandidates, setSelectedCandidates] = useState<string[]>([]);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [cleanupBusy, setCleanupBusy] = useState(false);
-  const [cleanupError, setCleanupError] = useState("");
-  const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null);
+  const [refreshToken, setRefreshToken] = useState(false);
   const deferredQuery = useDeferredValue(query);
+
+  const catalog = useApi<RuntimeCatalog>(["runtime-catalog", refreshToken], "/system/runtime-catalog", { refresh: refreshToken });
   const artifacts = useApi<Page<RuntimeArtifact>>(
-    ["runtime-index", kind, deferredQuery, page, refresh],
+    ["runtime-index", kind, trustClass, validationStatus, capability, runId, deferredQuery, sortBy, sortDirection, page, refreshToken],
     "/system/runtime-index",
-    { kind, query: deferredQuery, page, pageSize: 100, refresh },
+    {
+      kind,
+      trustClass,
+      validationStatus,
+      capability,
+      runId,
+      query: deferredQuery,
+      sortBy,
+      sortDirection,
+      page,
+      pageSize: 100,
+      refresh: refreshToken,
+    },
   );
   const preview = useApi<Record<string, unknown>>(
     ["runtime-preview", selectedId],
-    selectedId ? `/system/runtime-index/${selectedId}/preview` : null,
+    selectedId && tab === "catalog" ? `/system/runtime-index/${selectedId}/preview` : null,
     { limit: 100 },
   );
-  const cleanup = useApi<RuntimeCleanupAnalysis>(
-    ["runtime-cleanup", refresh],
-    tab === "cleanup" ? "/system/runtime-cleanup" : null,
+  const lineage = useApi<RuntimeLineage>(
+    ["runtime-lineage", selectedId],
+    selectedId && tab === "lineage" ? `/system/runtime-index/${selectedId}/lineage` : null,
   );
   const data = artifacts.data?.data;
+  const summary = catalog.data?.data.summary;
   const selectedArtifact = useMemo(
-    () => data?.items.find((artifact) => artifact.id === selectedId) ?? null,
-    [data?.items, selectedId],
+    () => data?.items.find((artifact) => artifact.id === selectedId) ?? lineage.data?.data.artifact ?? null,
+    [data?.items, lineage.data?.data.artifact, selectedId],
   );
 
-  useEffect(() => {
-    const defaults = cleanup.data?.data.candidates.filter((item) => item.safeDefault).map((item) => item.id);
-    if (defaults?.length && !selectedCandidates.length && !cleanupResult) {
-      setSelectedCandidates(defaults);
-    }
-  }, [cleanup.data?.data.candidates, cleanupResult, selectedCandidates.length]);
-
-  const selectedSize = useMemo(() => (
-    (cleanup.data?.data.candidates ?? [])
-      .filter((item) => selectedCandidates.includes(item.id))
-      .reduce((sum, item) => sum + item.sizeBytes, 0)
-  ), [cleanup.data?.data.candidates, selectedCandidates]);
-
-  const runCleanup = async (): Promise<void> => {
-    setCleanupBusy(true);
-    setCleanupError("");
-    try {
-      const result = await apiPost<CleanupResult>("/system/runtime-cleanup", {
-        candidateIds: selectedCandidates,
-        confirmation: "DELETE",
-      });
-      setCleanupResult(result.data);
-      setSelectedCandidates([]);
-      setConfirmOpen(false);
-      setRefresh((value) => !value);
-      await artifacts.refetch();
-      await cleanup.refetch();
-    } catch (error) {
-      setCleanupError(error instanceof Error ? error.message : "cleanup failed");
-    } finally {
-      setCleanupBusy(false);
-    }
+  const resetPage = (): void => setPage(1);
+  const rebuildIndex = (): void => setRefreshToken((value) => !value);
+  const openRun = (run: RuntimeRunSummary): void => {
+    setRunId(run.id);
+    setPage(1);
+    setTab("catalog");
+  };
+  const selectForLineage = (artifact: RuntimeArtifact): void => {
+    setSelectedId(artifact.id);
+    setTab("lineage");
+  };
+  const openModule = (artifact: RuntimeArtifact): void => {
+    const destinations: Record<string, string> = {
+      backtest: "/backtests", model: "/models", factor: "/factors", selection: "/selection",
+      risk: "/risk", do_t: "/t-plus-one", report: "/reports",
+    };
+    const destination = destinations[artifact.kind];
+    if (destination) navigate(`${destination}${artifact.runId ? `?runId=${encodeURIComponent(artifact.runId)}` : ""}`);
   };
 
   return (
-    <div className="page runtime-page">
-      <section className="runtime-topline">
+    <div className="page runtime-page runtime-manager-page">
+      <section className="runtime-commandbar">
         <div>
-          <span className="page-kicker">RUNTIME OPERATIONS</span>
-          <h2>Artifact Explorer & Safe Cleanup</h2>
-          <p>统一查看真实产物、解析能力、空间占用和可审计删除候选。</p>
+          <span className="page-kicker">RUNTIME / DATA MANAGER</span>
+          <h2>Artifact Catalog · Runs · Lineage</h2>
+          <p>唯一 RuntimeIndexer 投影；manifest 声明优先，未声明关系不推断。</p>
         </div>
-        <div className="runtime-tabs">
-          <button className={tab === "artifacts" ? "active" : ""} onClick={() => setTab("artifacts")}><Database size={16} /> 产物索引</button>
-          <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}><Broom size={16} /> 安全清理</button>
+        <div className="runtime-tabs terminal-segments">
+          <button className={tab === "catalog" ? "active" : ""} onClick={() => setTab("catalog")}><Database size={15} /> Catalog</button>
+          <button className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}><Stack size={15} /> Runs</button>
+          <button className={tab === "lineage" ? "active" : ""} onClick={() => setTab("lineage")}><FlowArrow size={15} /> Lineage</button>
+          <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}><Broom size={15} /> Cleanup</button>
         </div>
       </section>
 
-      {tab === "artifacts" ? (
+      <section className="runtime-stat-strip" aria-label="Runtime catalog summary">
+        <RuntimeStat label="Artifacts" value={summary?.artifactCount.toLocaleString() ?? "—"} detail={formatBytes(summary?.totalSizeBytes)} />
+        <RuntimeStat label="Runs" value={summary?.runCount.toLocaleString() ?? "—"} detail="declared path groups" />
+        <RuntimeStat label="Manifest" value={summary ? `${(summary.manifestCoverage * 100).toFixed(1)}%` : "—"} detail="contract coverage" />
+        <RuntimeStat label="Verified" value={(summary?.byValidation.verified ?? 0).toLocaleString()} detail="hash / declared checks" tone="positive" />
+        <RuntimeStat label="Invalid" value={(summary?.byValidation.invalid ?? 0).toLocaleString()} detail="fail-closed" tone={(summary?.byValidation.invalid ?? 0) ? "negative" : "neutral"} />
+        <RuntimeStat label="Contaminated" value={(summary?.byTrust.contaminated ?? 0).toLocaleString()} detail="not production-ready" tone={(summary?.byTrust.contaminated ?? 0) ? "warning" : "neutral"} />
+        <RuntimeStat label="Indexed" value={summary?.indexedAt ? formatDate(summary.indexedAt) : "—"} detail={catalog.data?.data.roots?.join(" · ") || "runtime unavailable"} />
+      </section>
+
+      {tab === "catalog" ? (
         <>
-          <section className="workbench-toolbar runtime-toolbar">
-            <label className="runtime-search">
-              <span>Artifact 搜索</span>
-              <div><MagnifyingGlass size={16} /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="path / run / model / symbol" /></div>
-            </label>
-            <label>
-              <span>类型</span>
-              <select value={kind} onChange={(event) => { setKind(event.target.value); setPage(1); }}>
-                {kinds.map((item) => <option value={item} key={item}>{item || "全部类型"}</option>)}
-              </select>
-            </label>
-            <button className="secondary-button" onClick={() => setRefresh((value) => !value)}><ArrowClockwise size={16} /> 重建索引</button>
-            <div className="truth-note"><File size={17} /><span>大文件只读取 schema/metadata；preview 有严格行列上限。</span></div>
+          <section className="runtime-filterbar">
+            <label className="runtime-search"><span>Search</span><div><MagnifyingGlass size={15} /><input value={query} onChange={(event) => { setQuery(event.target.value); resetPage(); }} placeholder="path / run / model / symbol" /></div></label>
+            <FilterSelect label="Kind" value={kind} onChange={(value) => { setKind(value); resetPage(); }} values={kinds} />
+            <FilterSelect label="Trust" value={trustClass} onChange={(value) => { setTrustClass(value); resetPage(); }} values={trustClasses} />
+            <FilterSelect label="Validation" value={validationStatus} onChange={(value) => { setValidationStatus(value); resetPage(); }} values={validations} />
+            <FilterSelect label="Capability" value={capability} onChange={(value) => { setCapability(value); resetPage(); }} values={capabilities} />
+            <label><span>Run</span><input value={runId} onChange={(event) => { setRunId(event.target.value); resetPage(); }} placeholder="all runs" /></label>
+            <label><span>Sort</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="modifiedAt">Modified</option><option value="sizeBytes">Size</option><option value="name">Name</option><option value="kind">Kind</option><option value="trustClass">Trust</option></select></label>
+            <button className="sort-direction" onClick={() => setSortDirection((value) => value === "desc" ? "asc" : "desc")}>{sortDirection.toUpperCase()}</button>
+            <button className="secondary-button" onClick={rebuildIndex}><ArrowClockwise size={15} /> Reindex</button>
           </section>
 
-          <section className="runtime-grid">
-            <Panel title="Runtime Artifact Index" eyebrow={`${data?.total ?? 0} matched · page ${data?.page ?? 1}`} className="runtime-table-panel">
+          <section className="runtime-workbench-grid">
+            <Panel title="Artifact Catalog" eyebrow={`${data?.total ?? 0} matched · page ${data?.page ?? 1}`} className="runtime-catalog-panel">
               {data?.items.length ? (
                 <>
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead><tr><th>类型</th><th>文件</th><th>Run / Horizon</th><th>Trust / Validation</th><th className="numeric">大小</th><th>来源时间</th><th>状态</th></tr></thead>
-                      <tbody>
-                        {data.items.map((artifact) => (
-                          <tr
-                            key={artifact.id}
-                            className={selectedId === artifact.id ? "row-selected" : ""}
-                            onClick={() => setSelectedId(artifact.id)}
-                            tabIndex={0}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") setSelectedId(artifact.id);
-                            }}
-                          >
-                            <td><span className={`artifact-kind kind-${artifact.kind}`}>{artifact.kind}</span></td>
-                            <td className="artifact-path"><strong>{artifact.name}</strong><span>{artifact.path}</span></td>
-                            <td><strong>{artifact.runId ?? "—"}</strong><span>{artifact.horizon ?? artifact.extension}</span></td>
-                            <td className="artifact-trust-cell">
-                              <StatusBadge status={trustBadgeStatus(artifact.trustClass)} label={artifact.trustClass} />
-                              <span>{artifact.validationStatus}</span>
-                            </td>
-                            <td className="numeric mono">{formatBytes(artifact.sizeBytes)}</td>
-                            <td className="mono"><strong>{formatDate(artifact.sourceTime ?? artifact.modifiedAt)}</strong><span>{artifact.sourceTime ? "manifest" : "filesystem"}</span></td>
-                            <td><StatusBadge status={artifact.status} /></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="pagination">
-                    <button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
-                    <span>{page} / {Math.max(1, Math.ceil(data.total / data.pageSize))}</span>
-                    <button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button>
-                  </div>
+                  <div className="table-scroll runtime-catalog-table"><table className="data-table"><thead><tr><th>Kind</th><th>Artifact / Path</th><th>Run / Range</th><th>Trust</th><th>Validation</th><th>Quality</th><th className="numeric">Rows / Size</th><th>Time</th></tr></thead>
+                    <tbody>{data.items.map((artifact) => (
+                      <tr key={artifact.id} className={selectedId === artifact.id ? "row-selected" : ""} onClick={() => setSelectedId(artifact.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(artifact.id); }}>
+                        <td><span className={`artifact-kind kind-${artifact.kind}`}>{artifact.kind}</span></td>
+                        <td className="artifact-path"><strong>{artifact.name}</strong><span>{artifact.path}</span></td>
+                        <td><strong>{artifact.runId ?? "—"}</strong><span>{artifact.dateStart || artifact.dateEnd ? `${artifact.dateStart ?? "?"} → ${artifact.dateEnd ?? "?"}` : artifact.horizon ?? artifact.extension}</span></td>
+                        <td><StatusBadge status={trustBadgeStatus(artifact.trustClass)} label={artifact.trustClass} /></td>
+                        <td><StatusBadge status={validationBadgeStatus(artifact.validationStatus)} label={artifact.validationStatus} /></td>
+                        <td>{artifact.qualityStatus ?? "undeclared"}</td>
+                        <td className="numeric mono"><strong>{artifact.rows != null ? formatNumber(artifact.rows, 0) : "—"}</strong><span>{formatBytes(artifact.sizeBytes)}</span></td>
+                        <td className="mono"><strong>{formatDate(artifact.dataAsOf ?? artifact.sourceTime ?? artifact.modifiedAt)}</strong><span>{artifact.dataAsOf ? "data as-of" : artifact.sourceTime ? "manifest" : "filesystem"}</span></td>
+                      </tr>
+                    ))}</tbody>
+                  </table></div>
+                  <div className="pagination"><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>{page} / {Math.max(1, Math.ceil(data.total / data.pageSize))}</span><button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button></div>
                 </>
               ) : <StateView state={artifacts.isLoading ? "loading" : artifacts.isError ? "error" : "empty"} detail={artifacts.error?.message} />}
             </Panel>
 
-            <Panel title="Artifact Contract & Preview" eyebrow="Manifest-aware · fail-closed capabilities" className="runtime-preview-panel">
+            <Panel title="Artifact Inspector" eyebrow="contract · preview · operations" className="runtime-inspector-panel">
               {selectedArtifact ? (
-                <section className="artifact-contract">
-                  <div className="artifact-contract-badges">
-                    <StatusBadge status={trustBadgeStatus(selectedArtifact.trustClass)} label={selectedArtifact.trustClass} />
-                    <StatusBadge status={validationBadgeStatus(selectedArtifact.validationStatus)} label={selectedArtifact.validationStatus} />
-                    <StatusBadge status={selectedArtifact.freshnessStatus} label={selectedArtifact.freshnessStatus} />
-                  </div>
-                  <dl>
-                    <div><dt>Schema</dt><dd>{selectedArtifact.schemaVersion ?? "undeclared"}</dd></div>
-                    <div><dt>Manifest</dt><dd>{selectedArtifact.manifestPath ?? "none"}</dd></div>
-                    <div><dt>Source time</dt><dd>{formatDate(selectedArtifact.sourceTime ?? selectedArtifact.modifiedAt)}</dd></div>
-                    <div><dt>Capabilities</dt><dd>{selectedArtifact.capabilities.join(" · ") || "metadata"}</dd></div>
+                <>
+                  <section className="artifact-inspector-head"><File size={18} /><div><strong>{selectedArtifact.name}</strong><code>{selectedArtifact.path}</code></div></section>
+                  <div className="artifact-contract-badges"><StatusBadge status={trustBadgeStatus(selectedArtifact.trustClass)} label={selectedArtifact.trustClass} /><StatusBadge status={validationBadgeStatus(selectedArtifact.validationStatus)} label={selectedArtifact.validationStatus} /><StatusBadge status={selectedArtifact.freshnessStatus} label={selectedArtifact.freshnessStatus} /></div>
+                  <dl className="artifact-metadata-grid">
+                    <div><dt>Schema</dt><dd>{selectedArtifact.schemaVersion ?? "undeclared"}</dd></div><div><dt>Declared type</dt><dd>{selectedArtifact.declaredKind ?? "undeclared"} · {selectedArtifact.kindSource ?? "legacy"}</dd></div>
+                    <div><dt>Producer</dt><dd>{selectedArtifact.producer ?? "undeclared"}</dd></div><div><dt>Quality</dt><dd>{selectedArtifact.qualityStatus ?? "undeclared"}</dd></div>
+                    <div><dt>Manifest / Run source</dt><dd>{selectedArtifact.manifestPath ?? "none"} · {selectedArtifact.runIdSource ?? "none"}</dd></div><div><dt>Source / as-of</dt><dd>{selectedArtifact.dataAsOf ?? selectedArtifact.sourceTime ?? "filesystem mtime only"}</dd></div>
                   </dl>
-                  {selectedArtifact.issues.length ? (
-                    <div className="artifact-contract-issues">
-                      {selectedArtifact.issues.map((issue) => <span key={`${issue.code}-${issue.path ?? ""}`}><WarningCircle size={13} />{issue.code}: {issue.message}</span>)}
-                    </div>
-                  ) : null}
-                </section>
-              ) : null}
-              {selectedId ? (
-                preview.isLoading ? <StateView state="loading" /> :
-                  preview.data ? <pre className="json-view">{JSON.stringify(preview.data.data, null, 2)}</pre> :
-                    <StateView state="error" detail={preview.error?.message} />
-              ) : <StateView state="empty" detail="点击左侧 artifact 查看安全预览。" />}
+                  <div className="capability-list">{selectedArtifact.capabilities.map((item) => <span key={item}>{item}</span>)}</div>
+                  {selectedArtifact.issues.length ? <div className="artifact-contract-issues">{selectedArtifact.issues.map((issue) => <span key={`${issue.code}-${issue.path ?? ""}`}><WarningCircle size={13} />{issue.code}: {issue.message}</span>)}</div> : null}
+                  <div className="inspector-actions"><button onClick={() => selectForLineage(selectedArtifact)}><FlowArrow size={14} /> Lineage</button>{selectedArtifact.runId ? <button onClick={() => { setRunId(selectedArtifact.runId ?? ""); resetPage(); }}><Stack size={14} /> Filter run</button> : null}{["backtest", "model", "factor", "selection", "risk", "do_t", "report"].includes(selectedArtifact.kind) ? <button onClick={() => openModule(selectedArtifact)}><ArrowRight size={14} /> Open module</button> : null}</div>
+                  <div className="safe-preview">{preview.isLoading ? <StateView state="loading" /> : preview.data ? <pre className="json-view">{JSON.stringify(preview.data.data, null, 2)}</pre> : <StateView state={preview.isError ? "error" : "unavailable"} detail={preview.error?.message ?? "该 artifact 没有安全预览能力。"} />}</div>
+                </>
+              ) : <StateView state="empty" detail="选择 catalog 中的 artifact 查看契约、预览和操作。" />}
             </Panel>
           </section>
         </>
-      ) : (
-        <section className="cleanup-page">
-          <div className="metric-grid metric-grid-4 cleanup-metrics">
-            <MetricCard label="Runtime 总体积" value={formatBytes(cleanup.data?.data.runtimeSizeBytes)} icon={Database} />
-            <MetricCard label="可清理候选" value={formatBytes(cleanup.data?.data.candidateSizeBytes)} detail={`${cleanup.data?.data.candidates.length ?? 0} candidate groups`} icon={Trash} />
-            <MetricCard label="默认安全项" value={formatBytes(cleanup.data?.data.safeDefaultSizeBytes)} tone="positive" detail="test / smoke / superseded UI captures" icon={ShieldCheck} />
-            <MetricCard label="已选择" value={formatBytes(selectedSize)} tone={selectedSize > 0 ? "warning" : "neutral"} detail={`${selectedCandidates.length} groups`} icon={Check} />
-          </div>
-
-          <div className="cleanup-layout">
-            <Panel title="清理候选" eyebrow="每项均由 backend 重新验证路径与保护规则" className="cleanup-candidates-panel">
-              {cleanup.isLoading ? <StateView state="loading" /> : cleanup.data?.data.candidates.length ? (
-                <div className="cleanup-list">
-                  {cleanup.data.data.candidates.map((candidate) => {
-                    const checked = selectedCandidates.includes(candidate.id);
-                    return (
-                      <button
-                        key={candidate.id}
-                        className={`${checked ? "selected" : ""} ${candidate.requiresExplicit ? "cleanup-review" : ""}`}
-                        onClick={() => setSelectedCandidates((current) =>
-                          checked ? current.filter((id) => id !== candidate.id) : [...current, candidate.id],
-                        )}
-                      >
-                        <span className={`cleanup-check ${checked ? "checked" : ""}`}>{checked ? <Check size={13} weight="bold" /> : null}</span>
-                        <span className="cleanup-copy">
-                          <strong>{candidate.label}</strong>
-                          <small>{candidate.reason}</small>
-                          <em>{candidate.paths.slice(0, 2).join(" · ")}{candidate.paths.length > 2 ? ` · +${candidate.paths.length - 2}` : ""}</em>
-                        </span>
-                        <span className="cleanup-size"><strong>{formatBytes(candidate.sizeBytes)}</strong><small>{candidate.itemCount} files</small></span>
-                        <StatusBadge
-                          status={candidate.safeDefault ? "ready" : candidate.requiresExplicit ? "warning" : "partial"}
-                          label={candidate.safeDefault ? "默认安全" : candidate.requiresExplicit ? "需人工复核" : "可重建"}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : <StateView state="empty" detail="当前没有可识别清理候选。" />}
-              <div className="cleanup-actions">
-                <div><ShieldCheck size={18} /><span>canonical raw/silver/manifests 与主模型 registry 永久受保护。</span></div>
-                <button className="danger-button" disabled={!selectedCandidates.length} onClick={() => setConfirmOpen(true)}><Trash size={16} /> 删除已选 · {formatBytes(selectedSize)}</button>
-              </div>
-            </Panel>
-
-            <Panel title="保护范围" eyebrow="Hard backend guardrails" className="cleanup-protected-panel">
-              <div className="protected-list">
-                {(cleanup.data?.data.protected ?? []).map((path) => <div key={path}><ShieldCheck size={16} /><code>{path}</code></div>)}
-              </div>
-              {cleanupResult ? (
-                <div className="cleanup-result">
-                  <Check size={20} />
-                  <div>
-                    <strong>清理完成 · 释放 {formatBytes(cleanupResult.freedBytes)}</strong>
-                    <span>{cleanupResult.auditPath}</span>
-                  </div>
-                </div>
-              ) : null}
-              {cleanupError ? <div className="cleanup-error"><WarningCircle size={18} />{cleanupError}</div> : null}
-            </Panel>
-          </div>
-        </section>
-      )}
-
-      {confirmOpen ? (
-        <div className="modal-overlay" role="presentation" onMouseDown={() => setConfirmOpen(false)}>
-          <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-label="确认清理 runtime" onMouseDown={(event) => event.stopPropagation()}>
-            <header><div><WarningCircle size={22} /><span><strong>确认删除 runtime 产物</strong><small>此操作只作用于当前选中的 backend-approved candidates。</small></span></div><button onClick={() => setConfirmOpen(false)}><X size={17} /></button></header>
-            <div className="confirm-summary">
-              <strong>{selectedCandidates.length} groups</strong>
-              <span>{formatBytes(selectedSize)}</span>
-            </div>
-            <p>删除后会写入 cleanup audit，并自动重建 runtime index。大型训练集候选可能影响历史复现，请确认选择范围。</p>
-            <footer>
-              <button className="secondary-button" onClick={() => setConfirmOpen(false)}>取消</button>
-              <button className="danger-button" disabled={cleanupBusy} onClick={runCleanup}>{cleanupBusy ? "正在清理…" : "确认删除"}</button>
-            </footer>
-          </section>
-        </div>
       ) : null}
+
+      {tab === "runs" ? <RunCatalog runs={catalog.data?.data.runs ?? []} loading={catalog.isLoading} error={catalog.error?.message} onOpen={openRun} /> : null}
+      {tab === "lineage" ? <LineageWorkbench selected={selectedArtifact} lineage={lineage.data?.data} loading={lineage.isLoading} error={lineage.error?.message} onSelect={selectForLineage} onCatalog={() => setTab("catalog")} /> : null}
+      {tab === "cleanup" ? <RuntimeCleanupWorkspace refreshToken={refreshToken} onChanged={rebuildIndex} /> : null}
     </div>
   );
+}
+
+function RuntimeStat({ label, value, detail, tone = "neutral" }: { label: string; value: string; detail: string; tone?: string }): JSX.Element {
+  return <div className={`runtime-stat tone-${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
+}
+
+function FilterSelect({ label, value, values, onChange }: { label: string; value: string; values: string[]; onChange: (value: string) => void }): JSX.Element {
+  return <label><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{values.map((item) => <option value={item} key={item}>{item || `All ${label.toLowerCase()}`}</option>)}</select></label>;
+}
+
+function RunCatalog({ runs, loading, error, onOpen }: { runs: RuntimeRunSummary[]; loading: boolean; error?: string; onOpen: (run: RuntimeRunSummary) => void }): JSX.Element {
+  return <Panel title="Run Catalog" eyebrow={`${runs.length} indexed run groups · derived from the existing RuntimeIndexer`} className="runtime-runs-panel">{runs.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Run ID</th><th>Artifacts</th><th>Kinds</th><th>Trust / Validation</th><th>Capabilities</th><th>Data range</th><th>Updated</th><th>Issues</th></tr></thead><tbody>{runs.map((run) => <tr key={run.id} onClick={() => onOpen(run)} tabIndex={0}><td className="mono"><strong>{run.id}</strong><span>{formatBytes(run.totalSizeBytes)}</span></td><td>{run.artifactCount}</td><td>{run.kinds.join(" · ")}</td><td><strong>{run.trustClasses.join(" · ")}</strong><span>{run.validationStatuses.join(" · ")}</span></td><td>{run.capabilities.join(" · ")}</td><td className="mono">{run.dateStart || run.dateEnd ? `${run.dateStart ?? "?"} → ${run.dateEnd ?? "?"}` : "undeclared"}</td><td>{formatDate(run.latestModifiedAt)}</td><td><StatusBadge status={run.issueCount ? "warning" : "ready"} label={String(run.issueCount)} /></td></tr>)}</tbody></table></div> : <StateView state={loading ? "loading" : error ? "error" : "empty"} detail={error ?? "没有可识别 runId 的 artifacts。"} />}</Panel>;
+}
+
+function LineageWorkbench({ selected, lineage, loading, error, onSelect, onCatalog }: { selected: RuntimeArtifact | null; lineage?: RuntimeLineage; loading: boolean; error?: string; onSelect: (artifact: RuntimeArtifact) => void; onCatalog: () => void }): JSX.Element {
+  if (!selected) return <Panel title="Artifact Lineage" eyebrow="manifest-declared relations only"><StateView state="empty" detail="先在 Catalog 中选择 artifact；系统不会根据相似文件名伪造 lineage。" /><div className="lineage-empty-action"><button className="secondary-button" onClick={onCatalog}>返回 Catalog</button></div></Panel>;
+  if (loading) return <StateView state="loading" />;
+  if (error || !lineage) return <StateView state="error" detail={error ?? "lineage unavailable"} />;
+  return <section className="lineage-workbench"><div className="lineage-status"><FlowArrow size={16} /><strong>{lineage.status.toUpperCase()}</strong><span>Only explicit, safe repository-relative references are resolved.</span></div><div className="lineage-columns"><LineageColumn title="UPSTREAM" empty="No upstream declared" items={lineage.upstream.map((edge) => edge.artifact ?? edge.reference)} onSelect={onSelect} /><div className="lineage-focus"><CirclesThreePlus size={23} /><span>{lineage.artifact.kind}</span><strong>{lineage.artifact.name}</strong><code>{lineage.artifact.path}</code><StatusBadge status={trustBadgeStatus(lineage.artifact.trustClass)} label={lineage.artifact.trustClass} /></div><LineageColumn title="DOWNSTREAM" empty="No indexed downstream" items={lineage.downstream} onSelect={onSelect} /></div>{lineage.issues.length ? <div className="artifact-contract-issues">{lineage.issues.map((issue) => <span key={issue.code}><WarningCircle size={13} />{issue.message}</span>)}</div> : null}</section>;
+}
+
+function LineageColumn({ title, empty, items, onSelect }: { title: string; empty: string; items: Array<RuntimeArtifact | string>; onSelect: (artifact: RuntimeArtifact) => void }): JSX.Element {
+  return <section className="lineage-column"><header>{title}</header>{items.length ? items.map((item) => typeof item === "string" ? <div className="lineage-unresolved" key={item}><WarningCircle size={14} /><span><strong>Unresolved reference</strong><code>{item}</code></span></div> : <button key={item.id} onClick={() => onSelect(item)}><span className={`artifact-kind kind-${item.kind}`}>{item.kind}</span><strong>{item.name}</strong><code>{item.path}</code></button>) : <div className="lineage-none">{empty}</div>}</section>;
 }
 
 function trustBadgeStatus(trustClass: RuntimeArtifact["trustClass"]): string {

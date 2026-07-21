@@ -26,6 +26,14 @@ def test_runtime_indexer_classifies_and_excludes_internal_cache(quant_ui_setting
     assert metrics["manifestPath"].endswith("metrics.json.manifest.json")
     assert "production_display" in metrics["capabilities"]
     assert "paper_execution" in metrics["capabilities"]
+    assert metrics["declaredKind"] == "backtest_metrics"
+    assert metrics["kindSource"] == "manifest"
+    assert metrics["runIdSource"] == "manifest"
+    assert metrics["producer"] == "run-strict-a-share-backtest-v8"
+    assert metrics["qualityStatus"] == "passed"
+    assert metrics["rows"] == 1
+    assert metrics["dateStart"] == "2026-01-02"
+    assert metrics["dateEnd"] == "2026-01-05"
 
     second = indexer.scan()
     assert [item["id"] for item in second] == [item["id"] for item in artifacts]
@@ -34,6 +42,17 @@ def test_runtime_indexer_classifies_and_excludes_internal_cache(quant_ui_setting
     assert filtered
     assert all(item["runId"] == "fixture_run" for item in filtered)
     assert all(item["horizon"] == "short_5d" for item in filtered)
+
+    catalog = indexer.catalog()
+    assert catalog["summary"]["runCount"] >= 1
+    assert catalog["summary"]["byCapability"]["production_display"] >= 1
+    assert catalog["summary"]["manifestCoverage"] > 0
+    assert catalog["runs"][0]["artifactCount"] >= 1
+
+    lineage = indexer.lineage(metrics["id"])
+    assert lineage is not None
+    assert lineage["status"] == "complete"
+    assert lineage["upstream"][0]["artifact"]["name"] == "nav.csv"
 
 
 def test_empty_runtime_indexer(empty_quant_ui_settings) -> None:

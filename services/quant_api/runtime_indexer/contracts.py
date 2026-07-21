@@ -55,6 +55,16 @@ class ArtifactContract:
     sourceTime: str | None = None
     manifestPath: str | None = None
     contentHash: str | None = None
+    declaredKind: str | None = None
+    runId: str | None = None
+    horizon: str | None = None
+    producer: str | None = None
+    qualityStatus: str | None = None
+    dataAsOf: str | None = None
+    rows: int | None = None
+    dateStart: str | None = None
+    dateEnd: str | None = None
+    upstreamPaths: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=lambda: [ArtifactCapability.METADATA.value])
     contractIssues: list[dict[str, Any]] = field(default_factory=list)
 
@@ -106,6 +116,15 @@ def resolve_artifact_contract(
 
     schema_version = _string_value(payload, "schema_version", "schemaVersion")
     source_time = _string_value(payload, "created_at", "created", "fetch_time", "generated_at")
+    declared_kind = _string_value(payload, "artifact_type", "artifactType", "kind")
+    run_id = _string_value(payload, "run_id", "runId")
+    horizon = _string_value(payload, "horizon", "horizon_class", "horizonClass")
+    producer = _producer(payload)
+    quality_status = _quality_status(payload)
+    data_as_of = _string_value(payload, "data_as_of", "dataAsOf", "as_of", "asOf")
+    rows = _integer_value(payload, "row_count", "rowCount", "rows")
+    date_start, date_end = _date_range(payload)
+    upstream_paths = _upstream_paths(payload)
     trust_class = _trust_class(payload)
     expected_hash = _expected_hash(payload, path, manifest_path)
     issues: list[dict[str, Any]] = []
@@ -166,6 +185,16 @@ def resolve_artifact_contract(
         sourceTime=source_time,
         manifestPath=logical_manifest_path,
         contentHash=content_hash,
+        declaredKind=declared_kind,
+        runId=run_id,
+        horizon=horizon,
+        producer=producer,
+        qualityStatus=quality_status,
+        dataAsOf=data_as_of,
+        rows=rows,
+        dateStart=date_start,
+        dateEnd=date_end,
+        upstreamPaths=upstream_paths,
         capabilities=list(dict.fromkeys(capabilities)),
         contractIssues=issues,
     )
@@ -277,6 +306,78 @@ def _string_value(payload: dict[str, Any], *keys: str) -> str | None:
         if value not in (None, ""):
             return str(value)
     return None
+
+
+def _integer_value(payload: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            continue
+        return result if result >= 0 else None
+    return None
+
+
+def _producer(payload: dict[str, Any]) -> str | None:
+    direct = _string_value(payload, "producer", "generated_by", "generatedBy", "command_id", "commandId")
+    if direct:
+        return direct
+    job = payload.get("job")
+    if isinstance(job, dict):
+        return _string_value(job, "command_id", "commandId", "type", "name")
+    return None
+
+
+def _quality_status(payload: dict[str, Any]) -> str | None:
+    direct = _string_value(payload, "quality_status", "qualityStatus")
+    if direct:
+        return direct
+    quality = payload.get("quality")
+    if isinstance(quality, dict):
+        return _string_value(quality, "status", "verdict")
+    return None
+
+
+def _date_range(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    start = _string_value(payload, "date_start", "dateStart", "start_date", "startDate")
+    end = _string_value(payload, "date_end", "dateEnd", "end_date", "endDate")
+    value = payload.get("date_range", payload.get("dateRange"))
+    if isinstance(value, dict):
+        start = start or _string_value(value, "start", "from", "min")
+        end = end or _string_value(value, "end", "to", "max")
+    elif isinstance(value, (list, tuple)) and len(value) >= 2:
+        start = start or (str(value[0]) if value[0] not in (None, "") else None)
+        end = end or (str(value[1]) if value[1] not in (None, "") else None)
+    return start, end
+
+
+def _upstream_paths(payload: dict[str, Any]) -> list[str]:
+    """Return only safe, explicit repository-relative lineage references."""
+
+    candidates: list[Any] = []
+    for key in ("upstream_paths", "upstreamPaths", "source_paths", "sourcePaths", "inputs", "upstream"):
+        value = payload.get(key)
+        if isinstance(value, (list, tuple)):
+            candidates.extend(value)
+        elif value not in (None, ""):
+            candidates.append(value)
+
+    resolved: list[str] = []
+    for value in candidates:
+        if isinstance(value, dict):
+            value = next((value.get(key) for key in ("path", "artifact", "output", "source") if value.get(key)), None)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip().replace("\\", "/")
+        if not normalized or normalized.startswith(("/", "~")) or "../" in normalized:
+            continue
+        if len(normalized) >= 2 and normalized[1] == ":":
+            continue
+        resolved.append(normalized.lstrip("./"))
+    return list(dict.fromkeys(resolved))
 
 
 def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:

@@ -12,7 +12,7 @@ from services.quant_api.runtime_indexer.contracts import resolve_artifact_contra
 from services.quant_api.runtime_indexer.parsers import parser_for
 
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -40,6 +40,13 @@ class IndexedArtifact:
     sourceTime: str | None = None
     manifestPath: str | None = None
     contentHash: str | None = None
+    declaredKind: str | None = None
+    kindSource: str = "path_heuristic"
+    runIdSource: str | None = None
+    producer: str | None = None
+    qualityStatus: str | None = None
+    dataAsOf: str | None = None
+    upstreamPaths: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=lambda: ["metadata"])
     issues: list[dict] = field(default_factory=list)
 
@@ -76,13 +83,17 @@ class RuntimeIndexer:
                         stat = path.stat()
                         relative = project_relative(self.settings, path)
                         parser_name, _ = parser_for(path)
-                        kind, tags = _classify(relative, path.name)
                         contract = resolve_artifact_contract(
                             path,
                             self.settings,
                             previewable=True,
                         )
                         contract_payload = contract.to_dict()
+                        fallback_kind, tags = _classify(relative, path.name)
+                        declared_kind = _canonical_declared_kind(contract_payload["declaredKind"])
+                        kind = declared_kind or fallback_kind
+                        declared_run_id = contract_payload["runId"]
+                        fallback_run_id = _run_id(relative)
                         artifact = IndexedArtifact(
                             id=stable_id("artifact", relative),
                             kind=kind,
@@ -97,8 +108,11 @@ class RuntimeIndexer:
                                 else "ready"
                             ),
                             parser=parser_name,
-                            runId=_run_id(relative),
-                            horizon=_horizon(relative),
+                            runId=declared_run_id or fallback_run_id,
+                            horizon=contract_payload["horizon"] or _horizon(relative),
+                            rows=contract_payload["rows"],
+                            dateStart=contract_payload["dateStart"],
+                            dateEnd=contract_payload["dateEnd"],
                             tags=tags,
                             schemaVersion=contract_payload["schemaVersion"],
                             trustClass=contract_payload["trustClass"],
@@ -108,6 +122,13 @@ class RuntimeIndexer:
                             sourceTime=contract_payload["sourceTime"],
                             manifestPath=contract_payload["manifestPath"],
                             contentHash=contract_payload["contentHash"],
+                            declaredKind=contract_payload["declaredKind"],
+                            kindSource="manifest" if declared_kind else "path_heuristic",
+                            runIdSource="manifest" if declared_run_id else "path_heuristic" if fallback_run_id else None,
+                            producer=contract_payload["producer"],
+                            qualityStatus=contract_payload["qualityStatus"],
+                            dataAsOf=contract_payload["dataAsOf"],
+                            upstreamPaths=contract_payload["upstreamPaths"],
                             capabilities=contract_payload["capabilities"],
                             issues=contract_payload["contractIssues"],
                         )
@@ -144,6 +165,12 @@ class RuntimeIndexer:
         strategy: str | None = None,
         model: str | None = None,
         symbol: str | None = None,
+        trust_class: str | None = None,
+        validation_status: str | None = None,
+        freshness_status: str | None = None,
+        capability: str | None = None,
+        sort_by: str = "modifiedAt",
+        sort_direction: str = "desc",
     ) -> list[dict]:
         items = self.scan()
         if kind:
@@ -158,6 +185,14 @@ class RuntimeIndexer:
             items = [item for item in items if str(item.get("runId") or "") == run_id]
         if horizon:
             items = [item for item in items if str(item.get("horizon") or "") == horizon]
+        if trust_class:
+            items = [item for item in items if str(item.get("trustClass") or "") == trust_class]
+        if validation_status:
+            items = [item for item in items if str(item.get("validationStatus") or "") == validation_status]
+        if freshness_status:
+            items = [item for item in items if str(item.get("freshnessStatus") or "") == freshness_status]
+        if capability:
+            items = [item for item in items if capability in item.get("capabilities", [])]
         if modified_after:
             items = [item for item in items if item.get("modifiedAt", "") >= modified_after]
         if modified_before:
@@ -174,7 +209,14 @@ class RuntimeIndexer:
                         " ".join(str(tag) for tag in item.get("tags", [])),
                     ]).lower()
                 ]
-        return items
+        sort_fields = {"modifiedAt", "sizeBytes", "name", "kind", "runId", "trustClass", "validationStatus"}
+        resolved_sort = sort_by if sort_by in sort_fields else "modifiedAt"
+        reverse = sort_direction.lower() != "asc"
+        return sorted(
+            items,
+            key=lambda item: (item.get(resolved_sort) is not None, item.get(resolved_sort) or ""),
+            reverse=reverse,
+        )
 
     def get(self, artifact_id: str) -> dict | None:
         return next((item for item in self.scan() if item["id"] == artifact_id), None)
@@ -191,6 +233,9 @@ class RuntimeIndexer:
         by_kind: dict[str, int] = {}
         by_trust: dict[str, int] = {}
         by_validation: dict[str, int] = {}
+        by_freshness: dict[str, int] = {}
+        by_capability: dict[str, int] = {}
+        by_status: dict[str, int] = {}
         total_size = 0
         for item in items:
             by_kind[item["kind"]] = by_kind.get(item["kind"], 0) + 1
@@ -198,6 +243,12 @@ class RuntimeIndexer:
             validation_status = str(item.get("validationStatus") or "unverified")
             by_trust[trust_class] = by_trust.get(trust_class, 0) + 1
             by_validation[validation_status] = by_validation.get(validation_status, 0) + 1
+            freshness_status = str(item.get("freshnessStatus") or "unknown")
+            by_freshness[freshness_status] = by_freshness.get(freshness_status, 0) + 1
+            status = str(item.get("status") or "unavailable")
+            by_status[status] = by_status.get(status, 0) + 1
+            for capability in item.get("capabilities", []):
+                by_capability[capability] = by_capability.get(capability, 0) + 1
             total_size += int(item["sizeBytes"])
         return {
             "artifactCount": len(items),
@@ -205,7 +256,80 @@ class RuntimeIndexer:
             "byKind": by_kind,
             "byTrust": by_trust,
             "byValidation": by_validation,
+            "byFreshness": by_freshness,
+            "byCapability": by_capability,
+            "byStatus": by_status,
+            "runCount": len(self.runs(items=items)),
+            "manifestCoverage": (
+                sum(bool(item.get("manifestPath")) for item in items) / len(items)
+                if items else 0.0
+            ),
             "indexedAt": datetime.fromtimestamp(self._indexed_at, tz=timezone.utc).isoformat(),
+        }
+
+    def runs(self, *, items: list[dict] | None = None) -> list[dict]:
+        grouped: dict[str, list[dict]] = {}
+        for item in items if items is not None else self.scan():
+            run_id = item.get("runId")
+            if run_id:
+                grouped.setdefault(str(run_id), []).append(item)
+
+        runs: list[dict] = []
+        for run_id, artifacts in grouped.items():
+            runs.append({
+                "id": run_id,
+                "artifactCount": len(artifacts),
+                "totalSizeBytes": sum(int(item.get("sizeBytes") or 0) for item in artifacts),
+                "kinds": sorted({str(item.get("kind") or "unknown") for item in artifacts}),
+                "trustClasses": sorted({str(item.get("trustClass") or "unclassified") for item in artifacts}),
+                "validationStatuses": sorted({str(item.get("validationStatus") or "unverified") for item in artifacts}),
+                "capabilities": sorted({cap for item in artifacts for cap in item.get("capabilities", [])}),
+                "issueCount": sum(len(item.get("issues", [])) for item in artifacts),
+                "latestModifiedAt": max(str(item.get("modifiedAt") or "") for item in artifacts),
+                "dateStart": min((str(item["dateStart"]) for item in artifacts if item.get("dateStart")), default=None),
+                "dateEnd": max((str(item["dateEnd"]) for item in artifacts if item.get("dateEnd")), default=None),
+            })
+        return sorted(runs, key=lambda item: item["latestModifiedAt"], reverse=True)
+
+    def catalog(self) -> dict:
+        items = self.scan()
+        return {
+            "summary": self.stats(),
+            "runs": self.runs(items=items),
+            "roots": [project_relative(self.settings, self.settings.runtime_root)],
+        }
+
+    def lineage(self, artifact_id: str) -> dict | None:
+        items = self.scan()
+        artifact = next((item for item in items if item["id"] == artifact_id), None)
+        if artifact is None:
+            return None
+
+        by_path = {str(item["path"]): item for item in items}
+        upstream = []
+        for reference in artifact.get("upstreamPaths", []):
+            match = by_path.get(reference)
+            if match is None:
+                candidates = [item for path, item in by_path.items() if path.endswith(f"/{reference}")]
+                match = candidates[0] if len(candidates) == 1 else None
+            upstream.append({"reference": reference, "artifact": match})
+
+        downstream = [
+            item for item in items
+            if artifact["path"] in item.get("upstreamPaths", [])
+            or any(artifact["path"].endswith(f"/{reference}") for reference in item.get("upstreamPaths", []))
+        ]
+        unresolved = [edge["reference"] for edge in upstream if edge["artifact"] is None]
+        return {
+            "artifact": artifact,
+            "upstream": upstream,
+            "downstream": downstream,
+            "status": "complete" if upstream and not unresolved else "partial" if upstream else "undeclared",
+            "issues": ([{
+                "code": "lineage_reference_unresolved",
+                "message": f"{len(unresolved)} declared upstream reference(s) are not indexed",
+                "recoverable": True,
+            }] if unresolved else []),
         }
 
     def _load_cache_if_fresh(self) -> bool:
@@ -284,6 +408,30 @@ def _classify(relative: str, name: str) -> tuple[str, list[str]]:
 
 def path_suffix(name: str) -> str:
     return Path(name).suffix.lower()
+
+
+def _canonical_declared_kind(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    direct = {
+        "backtest", "model", "prediction", "target_weights", "factor", "selection",
+        "risk", "do_t", "log", "dataset", "report", "manifest",
+    }
+    if normalized in direct:
+        return normalized
+    prefixes = {
+        "backtest": "backtest",
+        "model": "model",
+        "prediction": "prediction",
+        "factor": "factor",
+        "selection": "selection",
+        "risk": "risk",
+        "dataset": "dataset",
+        "report": "report",
+        "target_weight": "target_weights",
+    }
+    return next((kind for prefix, kind in prefixes.items() if normalized.startswith(prefix)), None)
 
 
 def _run_id(relative: str) -> str | None:

@@ -6,6 +6,7 @@ produce official decisions.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -67,7 +68,74 @@ def test_complete_cross_section_kept():
 
 
 # --- 3/4/5. shadow-day gate semantics ---------------------------------------
+import shadow_day_registry as registry_module  # noqa: E402
 from shadow_day_registry import OK_DATA  # noqa: E402
+
+
+@pytest.fixture
+def built_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Build a representative registry without depending on mutable runtime state."""
+    root = tmp_path / "fresh_blind"
+    daily = root / "daily"
+    ledger = root / "append_only_ledger.jsonl"
+    cert = tmp_path / "forward_fidelity_certificate.json"
+    panel = tmp_path / "market_panel.parquet"
+
+    daily.mkdir(parents=True)
+    cert.write_text(json.dumps({"passes": True}))
+    pd.DataFrame({"trade_date": ["2026-07-21"] * 4}).to_parquet(panel, index=False)
+
+    records = []
+    previous_hash = "GENESIS"
+    for timestamp, data_status in (
+        ("2026-07-21T19:30:00+08:00", "FAILED"),
+        ("2026-07-21T20:18:00+08:00", "FAILED"),
+        ("2026-07-21T23:56:00+08:00", "OK"),
+    ):
+        record = {
+            "kind": "daily_run",
+            "ts": timestamp,
+            "run_date": "2026-07-21",
+            "prev_hash": previous_hash,
+            "data_status": data_status,
+            "failed_job_count": 0 if data_status == "OK" else 1,
+            "prediction_status": "OK",
+            "order_generation_status": "OK",
+            "fill_status": "OK",
+            "schema_hash": "fixture-schema-v1",
+        }
+        payload = json.dumps(record, sort_keys=True, ensure_ascii=False)
+        record_hash = hashlib.sha256((previous_hash + payload).encode()).hexdigest()
+        record["record_hash"] = record_hash
+        records.append(record)
+        previous_hash = record_hash
+    ledger.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    health = {
+        "steps": {
+            "freshness": {"panel_max": "2026-07-21", "lag_calendar_days": 0},
+            "weights": {
+                "books": {
+                    candidate: {"weights_hash": f"{candidate.lower()}-weights"}
+                    for candidate in registry_module.CANDIDATES
+                }
+            },
+        }
+    }
+    (daily / "2026-07-21_health.json").write_text(json.dumps(health))
+    for directory in ("order_logs", "fill_logs", "encrypted_performance"):
+        (root / directory).mkdir()
+    for candidate in registry_module.CANDIDATES:
+        (root / "order_logs" / f"2026-07-21_{candidate}_weights.json").write_text("fixture")
+        (root / "fill_logs" / f"2026-07-21_{candidate}_fills.json").write_text("fixture")
+        (root / "encrypted_performance" / f"2026-07-21_{candidate}.bin").write_text("fixture")
+
+    monkeypatch.setattr(registry_module, "ROOT", root)
+    monkeypatch.setattr(registry_module, "DAILY", daily)
+    monkeypatch.setattr(registry_module, "LEDGER", ledger)
+    monkeypatch.setattr(registry_module, "CERT", cert)
+    monkeypatch.setattr(registry_module, "PANEL", panel)
+    return registry_module.build()
 
 
 def test_partial_staged_is_not_a_failure():
@@ -90,20 +158,21 @@ def test_stale_panel_blocks_official_decisions():
     assert freshness("2026-07-14", "2026-07-21")[0] == "STALE"   # 7-day gap blocks
 
 
-def test_registry_excludes_superseded_records():
+def test_registry_excludes_superseded_records(built_registry):
     """The INC-P1 corrupted record must not count as its own shadow day."""
-    reg = json.loads((REPO / "runtime/paper/fresh_blind/shadow_day_registry.json").read_text())
+    reg = built_registry
     day21 = [d for d in reg["days"] if d["trade_date"] == "2026-07-21"]
     assert day21, "07-21 must be present in the registry"
     d = day21[0]
     assert len(d["superseded_record_ids"].split("|")) == 2   # 19:30 cron + 20:18 corrupted
     assert d["authoritative_record_id"] not in d["superseded_record_ids"]
+    assert d["data_status"] == "OK" and d["valid_shadow_day"] is True
     assert sum(1 for x in reg["days"] if x["trade_date"] == "2026-07-21") == 1
 
 
-def test_no_candidate_performance_in_registry():
+def test_no_candidate_performance_in_registry(built_registry):
     """Blinding: registry may carry existence counts and hashes only."""
-    txt = (REPO / "runtime/paper/fresh_blind/shadow_day_registry.json").read_text().lower()
+    txt = json.dumps(built_registry).lower()
     for banned in ("nav", "sharpe", "cagr", "drawdown", "return_pct", "pnl"):
         assert banned not in txt, f"registry leaks performance field: {banned}"
 

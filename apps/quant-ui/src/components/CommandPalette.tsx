@@ -1,32 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Atom,
-  Brain,
-  ChartLine,
-  ChartLineUp,
-  Database,
-  FileText,
-  Flask,
-  Funnel,
-  Gear,
-  MagnifyingGlass,
-  ShieldCheck,
-  X,
-} from "@phosphor-icons/react";
+import { MagnifyingGlass, X } from "@phosphor-icons/react";
 import { useNavigate } from "react-router-dom";
-
-const commands = [
-  { path: "/", label: "量化工作台", caption: "Portfolio overview", icon: ChartLineUp, keywords: "dashboard overview 总览" },
-  { path: "/stock-replay", label: "股票复盘", caption: "K 线与交易联动", icon: ChartLine, keywords: "stock replay 股票 kline" },
-  { path: "/backtests", label: "回测实验", caption: "Experiment comparison", icon: Flask, keywords: "backtest 回测 experiment" },
-  { path: "/factors", label: "因子中心", caption: "Factor intelligence", icon: Atom, keywords: "factor 因子 ic" },
-  { path: "/selection", label: "透明选股", caption: "Decision funnel", icon: Funnel, keywords: "selection ranking 选股" },
-  { path: "/models", label: "模型观测台", caption: "All model families", icon: Brain, keywords: "model rl ft transformer do t 模型" },
-  { path: "/risk", label: "风险中心", caption: "Exposure and controls", icon: ShieldCheck, keywords: "risk 风控 exposure" },
-  { path: "/runtime", label: "Runtime 管理", caption: "Artifacts and cleanup", icon: Database, keywords: "runtime cleanup 清理 artifact" },
-  { path: "/reports", label: "研究报告", caption: "Generated research briefs", icon: FileText, keywords: "report 报告" },
-  { path: "/settings", label: "控制中心", caption: "Launch research jobs", icon: Gear, keywords: "settings control job 启动" },
-] as const;
+import { workstationModules as commands } from "../workstation/modules";
 
 interface CommandPaletteProps {
   open: boolean;
