@@ -30,10 +30,11 @@ use([
 interface EChartProps {
   option: EChartsOption;
   className?: string;
+  ariaLabel?: string;
   onClick?: (params: unknown) => void;
 }
 
-export function EChart({ option, className, onClick }: EChartProps): JSX.Element {
+export function EChart({ option, className, ariaLabel, onClick }: EChartProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<EChartsType | null>(null);
 
@@ -68,5 +69,12 @@ export function EChart({ option, className, onClick }: EChartProps): JSX.Element
     };
   }, [onClick]);
 
-  return <div ref={containerRef} className={className ?? "chart"} role="img" />;
+  return (
+    <div
+      ref={containerRef}
+      className={className ?? "chart"}
+      role="img"
+      aria-label={ariaLabel ?? "QuantAgent 数据图表"}
+    />
+  );
 }
