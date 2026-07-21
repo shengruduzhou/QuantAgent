@@ -42,6 +42,8 @@ LOCK = REPO / "runtime/paper/fresh_blind/.u0_backfill.lock"
 TRACKF_LOCK = REPO / "runtime/paper/fresh_blind/.catchup_supervisor.lock"
 REPORTS = REPO / "runtime/reports/h030"
 BATCH = 25
+PAGE = 100                    # measured vendor page cap (bars per response)
+MAX_PAGES = 60                # 60 pages = ~6,000 bars = full A-share history
 REQ_INTERVAL_S = 6.2          # 10 req/min measured limit, with margin
 TRACKF_PROCS = ("catchup_panel_chunked", "fresh_blind_daily", "catchup_supervisor",
                 "coverage_guard", "forward_daily_inference")
@@ -77,6 +79,57 @@ def last_available() -> pd.Timestamp:
         else cst.normalize() - pd.Timedelta(days=1)
 
 
+def fetch_full_history(tf, sym: str, start: pd.Timestamp, end: pd.Timestamp, attempts: int = 3):
+    """Date-ranged FULL-history fetch.
+
+    The fresh-window repair helper uses count=40 (last 40 bars only), which
+    returns nothing for delisted names and no history for anyone — measured
+    25/25 failures before this was split out. Vendor timestamps are epoch-ms at
+    CST midnight, so they are converted via Asia/Shanghai (a naive UTC read
+    shifts every bar back one day).
+    """
+    def one_page(s_ms: int, e_ms: int):
+        for i in range(attempts):
+            try:
+                k = tf.klines.get(sym, period="1d", start_time=s_ms, end_time=e_ms,
+                                  adjust="none", as_dataframe=True)
+                if k is None or not len(k):
+                    return None
+                k = pd.DataFrame(k).copy()
+                if "trade_date" not in k.columns:
+                    tcol = "timestamp" if "timestamp" in k.columns else k.columns[0]
+                    k["trade_date"] = (pd.to_datetime(k[tcol], unit="ms", utc=True)
+                                       .dt.tz_convert("Asia/Shanghai").dt.normalize()
+                                       .dt.tz_localize(None))
+                else:
+                    k["trade_date"] = pd.to_datetime(k["trade_date"])
+                return k
+            except Exception:
+                if i < attempts - 1:
+                    time.sleep((2, 5, 10)[i])
+        return None
+
+    # The vendor caps a response at PAGE bars regardless of the requested range
+    # (measured 2026-07-22: a 1999->today request returns exactly 100), so full
+    # history must be paged backwards from `end` until a short page or `start`.
+    pages, cursor = [], end
+    for _ in range(MAX_PAGES):
+        k = one_page(int(start.timestamp() * 1000),
+                     int((cursor + pd.Timedelta(days=1)).timestamp() * 1000) - 1)
+        if k is None or not len(k):
+            break
+        pages.append(k)
+        oldest = k["trade_date"].min()
+        if len(k) < PAGE or oldest <= start:
+            break
+        cursor = oldest - pd.Timedelta(days=1)
+        time.sleep(REQ_INTERVAL_S)          # each page is a separate vendor call
+    if not pages:
+        return None
+    out = pd.concat(pages, ignore_index=True).drop_duplicates("trade_date")
+    return out.sort_values("trade_date").reset_index(drop=True)
+
+
 def cmd_fetch(args) -> int:
     import fcntl
     import repair_fresh_window_20260704 as rep
@@ -89,6 +142,7 @@ def cmd_fetch(args) -> int:
 
     STAGING.mkdir(parents=True, exist_ok=True)
     master = pd.read_parquet(MASTER)
+    master["listing_date"] = pd.to_datetime(master["listing_date"], errors="coerce")
     panel_syms = set(pd.read_parquet(PANEL_F, columns=["symbol"])["symbol"].astype(str).unique())
     done = set()
     for f in STAGING.glob("sym_*.parquet"):
@@ -123,7 +177,11 @@ def cmd_fetch(args) -> int:
                 break
         tick = time.time()
         try:
-            k = rep.fetch_with_retry(tf, sym)
+            hist_start = pd.Timestamp("1999-01-01")
+            ld = master.loc[master["symbol"].astype(str) == sym, "listing_date"]
+            if len(ld) and pd.notna(ld.iloc[0]):
+                hist_start = max(hist_start, pd.Timestamp(ld.iloc[0]) - pd.Timedelta(days=7))
+            k = fetch_full_history(tf, sym, hist_start, end)
             if k is None or not len(k):
                 fail_rows.append({"symbol": sym, "reason": "empty_or_unavailable",
                                   "ts": datetime.now().isoformat()})
