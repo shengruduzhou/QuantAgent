@@ -92,7 +92,7 @@ function CapabilityInspector({ capability }: { capability?: VnpyParityCapability
 
 export function VnpyParityPage(): JSX.Element {
   const [category, setCategory] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState<VnpyParityStatus | "">("");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -116,6 +116,9 @@ export function VnpyParityPage(): JSX.Element {
 
   if (parity.isLoading) return <StateView state="loading" />;
   if (parity.isError) return <StateView state="error" detail={parity.error.message} />;
+  if (parity.data?.status === "error") {
+    return <StateView state="error" detail={parity.data.issues[0]?.message ?? "VN.PY 能力注册表校验失败。"} />;
+  }
 
   return (
     <div className="page parity-page">
@@ -145,7 +148,7 @@ export function VnpyParityPage(): JSX.Element {
         </label>
         <label>
           <span>状态</span>
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+          <select value={status} onChange={(event) => setStatus(event.target.value as VnpyParityStatus | "")}>
             <option value="">全部状态</option>
             {(data?.statuses ?? []).map((item) => <option key={item} value={item}>{STATUS_LABELS[item]}</option>)}
           </select>
@@ -192,7 +195,11 @@ export function VnpyParityPage(): JSX.Element {
                       onClick={() => setSelectedId(item.id)}
                     >
                       <td className="mono">{item.category}</td>
-                      <td><strong>{item.name}</strong><small className="mono">{item.id}</small></td>
+                      <td>
+                        <button type="button" className="parity-row-button" onClick={() => setSelectedId(item.id)}>
+                          <strong>{item.name}</strong><small className="mono">{item.id}</small>
+                        </button>
+                      </td>
                       <td><span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span></td>
                       <td>{item.quantagent.modules[0] ?? item.quantagent.frontend[0] ?? "—"}</td>
                       <td>{item.gap}</td>
