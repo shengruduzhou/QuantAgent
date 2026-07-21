@@ -116,6 +116,18 @@ export interface JobSummary {
   error?: string | null;
 }
 
+export interface EventEnvelope {
+  schemaVersion: "quantagent.event.v1";
+  eventId: string;
+  eventType: string;
+  topic: string;
+  occurredAt: string;
+  source: string;
+  sequence: number;
+  correlationId?: string | null;
+  payload: Record<string, unknown>;
+}
+
 export interface BacktestSummary {
   id: string;
   name?: string | null;

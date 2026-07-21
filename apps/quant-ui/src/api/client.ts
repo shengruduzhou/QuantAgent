@@ -49,6 +49,20 @@ export async function apiPost<T>(
   return response.json() as Promise<ApiResponse<T>>;
 }
 
+export function apiWebSocketUrl(
+  path: string,
+  params?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  const url = new URL(`${API_BASE}${path}`, window.location.origin);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  Object.entries(params ?? {}).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  });
+  return url.toString();
+}
+
 export function downloadJson(filename: string, value: unknown): void {
   const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);

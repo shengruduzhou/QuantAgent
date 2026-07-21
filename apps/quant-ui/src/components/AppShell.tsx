@@ -14,6 +14,7 @@ import {
 } from "@phosphor-icons/react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
+import { useJobEvents } from "../hooks/useJobEvents";
 import type { JobSummary, SystemOverview } from "../api/types";
 import { moduleForPath, moduleGroups, workstationModules } from "../workstation/modules";
 import { useWorkspaceLayout } from "../workstation/useWorkspaceLayout";
@@ -29,6 +30,7 @@ export function AppShell(): JSX.Element {
   const navigate = useNavigate();
   const page = moduleForPath(location.pathname);
   const layout = useWorkspaceLayout();
+  const jobEvents = useJobEvents(layout.activityOpen);
   const overview = useApi<SystemOverview>(
     ["system-overview-shell"],
     "/system/overview",
@@ -39,7 +41,7 @@ export function AppShell(): JSX.Element {
     ["global-activity-jobs"],
     layout.activityOpen ? "/jobs" : null,
     undefined,
-    { refetchInterval: 5_000, staleTime: 2_000 },
+    { refetchInterval: jobEvents.status === "live" ? false : 5_000, staleTime: 2_000 },
   );
   const data = overview.data?.data;
   const activeJobs = useMemo(
@@ -162,7 +164,7 @@ export function AppShell(): JSX.Element {
 
       {layout.activityOpen ? (
         <aside className="activity-drawer" aria-label="全局任务与事件">
-          <header><span><Bell size={15} /> ACTIVITY / JOBS</span><small>5s live polling · persisted backend state</small><button onClick={layout.toggleActivity}><X size={14} /></button></header>
+          <header><span><Bell size={15} /> ACTIVITY / JOBS</span><small className={`activity-stream-status ${jobEvents.status}`}>{jobEvents.status === "live" ? "WebSocket live · typed events" : `${jobEvents.status} · 5s REST fallback`}</small><button onClick={layout.toggleActivity}><X size={14} /></button></header>
           {jobs.isLoading ? <StateView state="loading" /> : jobs.isError ? <StateView state="error" detail={jobs.error.message} /> : jobs.data?.data.length ? (
             <div className="activity-table-wrap">
               <table className="data-table activity-table">
