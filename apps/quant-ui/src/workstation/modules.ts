@@ -10,6 +10,7 @@ import {
   Flask,
   Funnel,
   Gear,
+  ListMagnifyingGlass,
   ShieldCheck,
 } from "@phosphor-icons/react";
 
@@ -42,6 +43,7 @@ export const workstationModules: WorkstationModule[] = [
   { path: "/t-plus-one", label: "T+1 做 T", caption: "Compliant Overlay", group: "execution", icon: ArrowsClockwise, keywords: "t+1 do t analysis 做T" },
   { path: "/risk", label: "风险监控", caption: "Risk Center", group: "execution", icon: ShieldCheck, keywords: "risk 风控 exposure kill switch" },
   { path: "/runtime", label: "Runtime / Data", caption: "Artifact Manager", group: "system", icon: Database, keywords: "runtime data artifact lineage catalog" },
+  { path: "/parity", label: "VN.PY 对齐", caption: "Capability Registry", group: "system", icon: ListMagnifyingGlass, keywords: "vnpy parity capability registry 对齐 能力" },
   { path: "/settings", label: "系统控制", caption: "Jobs & Settings", group: "system", icon: Gear, keywords: "settings control job system" },
 ];
 
