@@ -89,6 +89,12 @@ async def runtime_index(
     strategy: str | None = None,
     model: str | None = None,
     symbol: str | None = None,
+    trust_class: str | None = Query(None, alias="trustClass"),
+    validation_status: str | None = Query(None, alias="validationStatus"),
+    freshness_status: str | None = Query(None, alias="freshnessStatus"),
+    capability: str | None = None,
+    sort_by: str = Query("modifiedAt", alias="sortBy"),
+    sort_direction: str = Query("desc", alias="sortDirection"),
     page: int = 1,
     page_size: int = Query(100, alias="pageSize", le=1_000),
     refresh: bool = False,
@@ -107,8 +113,32 @@ async def runtime_index(
         strategy=strategy,
         model=model,
         symbol=symbol,
+        trust_class=trust_class,
+        validation_status=validation_status,
+        freshness_status=freshness_status,
+        capability=capability,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
     )
     return response(page_slice(items, page, page_size), status="ready" if items else "empty")
+
+
+@router.get("/system/runtime-catalog")
+async def runtime_catalog(request: Request, refresh: bool = False) -> dict:
+    svc = services(request)
+    if refresh:
+        svc.indexer.scan(force=True)
+    data = svc.indexer.catalog()
+    return response(data, status="ready" if data["summary"]["artifactCount"] else "empty")
+
+
+@router.get("/system/runtime-index/{artifact_id}/lineage")
+async def runtime_lineage(request: Request, artifact_id: str) -> dict:
+    data = services(request).indexer.lineage(artifact_id)
+    if data is None:
+        raise HTTPException(404, "artifact not found")
+    status = "ready" if data["status"] == "complete" else "partial"
+    return response(data, status=status, issues=data["issues"])
 
 
 @router.get("/system/runtime-index/{artifact_id}/preview")
