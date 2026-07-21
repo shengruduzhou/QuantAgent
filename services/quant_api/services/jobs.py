@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
+from services.quant_api.events import EventBroker
 
 
 @dataclass
@@ -66,8 +67,9 @@ COMMANDS: dict[str, dict[str, Any]] = {
 
 
 class JobManager:
-    def __init__(self, settings: ApiSettings) -> None:
+    def __init__(self, settings: ApiSettings, events: EventBroker | None = None) -> None:
         self.settings = settings
+        self.events = events
         self.state_path = settings.jobs_root / "jobs.json"
         self._lock = RLock()
         self._jobs: dict[str, JobRecord] = {}
@@ -101,6 +103,7 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = record
             self._persist()
+        self._emit(record)
         Thread(target=self._run, args=(job_id, command_id, normalized, spec, log_path), daemon=True).start()
         return self._public(record)
 
@@ -246,6 +249,18 @@ class JobManager:
             for key, value in changes.items():
                 setattr(record, key, value)
             self._persist()
+        self._emit(record)
+
+    def _emit(self, record: JobRecord) -> None:
+        if self.events is None:
+            return
+        self.events.publish(
+            topic=f"jobs:{record.id}",
+            event_type="job.status",
+            payload={"job": self._public(record)},
+            source="quant_api.jobs",
+            correlation_id=record.id,
+        )
 
     def _load(self) -> None:
         if not self.state_path.exists():

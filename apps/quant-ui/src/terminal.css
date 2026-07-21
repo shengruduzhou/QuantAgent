@@ -255,6 +255,16 @@
   color: #526b80;
 }
 
+.activity-drawer > header .activity-stream-status.live {
+  color: #4fc49a;
+}
+
+.activity-drawer > header .activity-stream-status.reconnecting,
+.activity-drawer > header .activity-stream-status.stale,
+.activity-drawer > header .activity-stream-status.unavailable {
+  color: #d9a85f;
+}
+
 .activity-drawer > header button {
   margin-left: auto;
   border: 0;
