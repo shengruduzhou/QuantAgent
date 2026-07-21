@@ -1,0 +1,454 @@
+.parity-page {
+  max-width: none;
+}
+
+.parity-commandbar,
+.parity-filterbar,
+.parity-stat-strip,
+.parity-workspace,
+.parity-governance-grid {
+  min-width: 0;
+}
+
+.parity-commandbar {
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: minmax(340px, 1fr) 230px auto;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: #08141e;
+}
+
+.parity-commandbar > div:first-child > span {
+  color: #5f7a8f;
+  font-size: 8px;
+  letter-spacing: .14em;
+}
+
+.parity-commandbar h1 {
+  margin: 3px 0 2px;
+  font-size: 15px;
+}
+
+.parity-commandbar p {
+  max-width: 920px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.parity-baseline,
+.parity-registry-meta {
+  min-width: 0;
+}
+
+.parity-baseline span,
+.parity-baseline strong,
+.parity-baseline small,
+.parity-registry-meta span,
+.parity-registry-meta strong,
+.parity-registry-meta small {
+  display: block;
+}
+
+.parity-baseline span,
+.parity-registry-meta span {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.parity-baseline strong,
+.parity-registry-meta strong {
+  margin-top: 3px;
+  font-size: 10px;
+}
+
+.parity-baseline small,
+.parity-registry-meta small {
+  margin-top: 3px;
+  color: var(--muted-2);
+  font: 8px "JetBrains Mono Variable", monospace;
+}
+
+.parity-filterbar {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 150px 150px minmax(260px, 1fr) 190px;
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: #07121b;
+}
+
+.parity-filterbar label > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.parity-filterbar select,
+.parity-search > div {
+  width: 100%;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: #071722;
+  color: var(--text);
+  font-size: 9px;
+}
+
+.parity-filterbar select {
+  padding: 0 7px;
+}
+
+.parity-search > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--muted);
+}
+
+.parity-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 9px;
+}
+
+.parity-registry-meta {
+  align-self: center;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.parity-stat-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(105px, .65fr)) minmax(300px, 2fr);
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  background: #06111a;
+}
+
+.parity-stat-strip > div {
+  min-height: 57px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.parity-stat-strip > div:last-child {
+  border-right: 0;
+}
+
+.parity-stat-strip span,
+.parity-stat-strip strong,
+.parity-stat-strip small {
+  display: block;
+}
+
+.parity-stat-strip span {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.parity-stat-strip strong {
+  margin-top: 3px;
+  font: 18px "JetBrains Mono Variable", monospace;
+}
+
+.parity-stat-strip small {
+  margin-top: 2px;
+  color: var(--muted-2);
+  font-size: 8px;
+}
+
+.parity-status-counts p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 7px 0 0;
+}
+
+.parity-status-counts b {
+  color: #9bb0c0;
+  font: 8px "JetBrains Mono Variable", monospace;
+}
+
+.parity-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 6px;
+  min-height: 570px;
+}
+
+.parity-table-panel {
+  min-width: 0;
+}
+
+.parity-table-wrap {
+  max-height: calc(100vh - 310px);
+  min-height: 520px;
+  overflow: auto;
+}
+
+.parity-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.parity-table th:nth-child(1) { width: 86px; }
+.parity-table th:nth-child(2) { width: 190px; }
+.parity-table th:nth-child(3) { width: 88px; }
+.parity-table th:nth-child(4) { width: 190px; }
+.parity-table th:nth-child(5) { width: 31%; }
+.parity-table th:nth-child(6) { width: 31%; }
+
+.parity-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0a1824;
+}
+
+.parity-table td {
+  vertical-align: top;
+  line-height: 1.4;
+}
+
+.parity-table tbody tr {
+  cursor: pointer;
+}
+
+.parity-table tbody tr:hover,
+.parity-table tbody tr.selected {
+  background: #0c2233;
+}
+
+.parity-table tbody tr.selected {
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+
+.parity-table td strong,
+.parity-table td small {
+  display: block;
+}
+
+.parity-table td strong {
+  color: #c4d4df;
+  font-size: 9px;
+}
+
+.parity-table td small {
+  margin-top: 3px;
+  color: var(--muted-2);
+  font-size: 7px;
+}
+
+.parity-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 19px;
+  padding: 0 6px;
+  border: 1px solid #2a465b;
+  border-radius: 2px;
+  color: #a8bdcc;
+  background: #0d1d29;
+  font: 8px "JetBrains Mono Variable", monospace;
+  white-space: nowrap;
+}
+
+.parity-status-verified {
+  border-color: #23624f;
+  background: rgba(42, 200, 159, .1);
+  color: #65d5b5;
+}
+
+.parity-status-implemented {
+  border-color: #315e8d;
+  background: rgba(63, 140, 255, .1);
+  color: #86b7ff;
+}
+
+.parity-status-partial,
+.parity-status-in-progress {
+  border-color: #6d5428;
+  background: rgba(231, 165, 58, .1);
+  color: #e4b660;
+}
+
+.parity-status-missing,
+.parity-status-blocked {
+  border-color: #71353b;
+  background: rgba(239, 92, 99, .1);
+  color: #f07d83;
+}
+
+.parity-status-not-audited,
+.parity-status-planned,
+.parity-status-not-applicable {
+  color: #8197a8;
+}
+
+.parity-inspector {
+  min-width: 0;
+  max-height: calc(100vh - 252px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: #08141e;
+}
+
+.parity-inspector-content > section,
+.parity-inspector-title {
+  padding: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.parity-inspector-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  background: #0a1925;
+}
+
+.parity-inspector-title > div {
+  min-width: 0;
+}
+
+.parity-inspector-title span.mono {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+}
+
+.parity-inspector-title h2 {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+
+.parity-inspector h3 {
+  margin: 0 0 8px;
+  color: #6f879a;
+  font-size: 8px;
+  letter-spacing: .1em;
+}
+
+.parity-inspector p {
+  margin: 7px 0 0;
+  color: #9db1c0;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.parity-inspector dl {
+  margin: 0;
+}
+
+.parity-inspector dl > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 7px;
+  padding: 5px 0;
+  border-bottom: 1px solid #102536;
+}
+
+.parity-inspector dl > div:last-child {
+  border-bottom: 0;
+}
+
+.parity-inspector dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.parity-inspector dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #aebfcb;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.parity-inspector a {
+  color: #7daeff;
+}
+
+.parity-inspector-gap {
+  background: rgba(231, 165, 58, .035);
+}
+
+.parity-next-action {
+  box-shadow: inset 2px 0 0 var(--blue);
+  background: rgba(63, 140, 255, .035);
+}
+
+.parity-governance-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.parity-governance-grid ol,
+.parity-governance-grid ul {
+  columns: 2;
+  gap: 28px;
+  margin: 0;
+  padding: 10px 10px 10px 30px;
+}
+
+.parity-governance-grid li {
+  break-inside: avoid;
+  margin-bottom: 5px;
+  color: #92a8b8;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+@media (max-width: 1250px) {
+  .parity-workspace {
+    grid-template-columns: minmax(0, 1fr) 310px;
+  }
+
+  .parity-filterbar {
+    grid-template-columns: 130px 130px minmax(220px, 1fr);
+  }
+
+  .parity-registry-meta {
+    display: none;
+  }
+}
+
+@media (max-width: 1000px) {
+  .parity-commandbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .parity-baseline {
+    display: none;
+  }
+
+  .parity-workspace,
+  .parity-governance-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .parity-inspector {
+    max-height: none;
+  }
+}
