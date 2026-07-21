@@ -12,6 +12,7 @@ const SelectionLogicPage = lazy(() => import("./pages/SelectionLogicPage").then(
 const ModelLabPage = lazy(() => import("./pages/ModelLabPage").then((module) => ({ default: module.ModelLabPage })));
 const RiskCenterPage = lazy(() => import("./pages/RiskCenterPage").then((module) => ({ default: module.RiskCenterPage })));
 const RuntimeExplorerPage = lazy(() => import("./pages/RuntimeExplorerPage").then((module) => ({ default: module.RuntimeExplorerPage })));
+const VnpyParityPage = lazy(() => import("./pages/VnpyParityPage").then((module) => ({ default: module.VnpyParityPage })));
 const ReportsPage = lazy(() => import("./pages/ReportsPage").then((module) => ({ default: module.ReportsPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 
@@ -29,6 +30,7 @@ export function App(): JSX.Element {
           <Route path="models" element={<ModelLabPage />} />
           <Route path="risk" element={<RiskCenterPage />} />
           <Route path="runtime" element={<RuntimeExplorerPage />} />
+          <Route path="parity" element={<VnpyParityPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "quantagent.vnpy-refactor-state.v1",
+  "updatedAt": "2026-07-22T09:10:00+09:00",
+  "repository": "shengruduzhou/QuantAgent",
+  "authority": {
+    "repository": "vnpy/vnpy",
+    "release": "4.4.0",
+    "commit": "0e8e5ba",
+    "releaseDate": "2026-05-14"
+  },
+  "baseline": {
+    "branch": "main",
+    "commit": "f43fbdd026f7f38476ef1efbf2ec619793a239e2"
+  },
+  "activeSlice": {
+    "id": "governance.vnpy-parity-control-plane",
+    "branch": "feat/vnpy-parity-registry-20260722",
+    "status": "implemented_pending_validation",
+    "scope": [
+      "machine-readable capability registry",
+      "strict schema validation",
+      "filtered REST API",
+      "Web Quant Workstation parity workspace",
+      "backend and frontend tests"
+    ],
+    "outOfScope": [
+      "training processes",
+      "checkpoint mutation",
+      "runtime artifact mutation",
+      "backtest engine changes",
+      "paper/live order commands"
+    ],
+    "validation": {
+      "staticReview": "complete",
+      "pythonTests": "pending_local_or_ci",
+      "frontendTests": "pending_local_or_ci",
+      "typecheck": "pending_local_or_ci",
+      "productionBuild": "pending_local_or_ci",
+      "browserVerification": "pending_local",
+      "performanceBaseline": "not_applicable_for_registry_slice"
+    }
+  },
+  "completedSlices": [
+    {
+      "id": "workstation.terminal-runtime",
+      "pullRequest": 8,
+      "status": "merged"
+    },
+    {
+      "id": "events.typed-realtime-jobs",
+      "pullRequest": 9,
+      "status": "merged"
+    },
+    {
+      "id": "chart.kline-workstation-v2",
+      "pullRequest": 10,
+      "status": "merged"
+    }
+  ],
+  "nextSlices": [
+    {
+      "priority": 1,
+      "id": "data.datamanager-query-download",
+      "reason": "Closes the highest-value Runtime/DataManager operational gap without creating a second data system."
+    },
+    {
+      "priority": 2,
+      "id": "experiment.canonical-schema",
+      "reason": "Unblocks web-configurable factor, model, backtest and optimization jobs."
+    },
+    {
+      "priority": 3,
+      "id": "paper.account-lifecycle",
+      "reason": "Connects OrderManager, RiskGate, positions, reconciliation and audit in paper-only mode."
+    }
+  ],
+  "safetyInvariants": [
+    "live trading disabled by default",
+    "QMT remains dry-run",
+    "agents and models cannot submit orders directly",
+    "OrderManager owns order intents",
+    "all orders pass RiskGate and KillSwitch",
+    "A-share execution constraints remain canonical",
+    "runtime and checkpoints are never silently rewritten",
+    "mock, stale, failed and unverified results remain explicit"
+  ]
+}

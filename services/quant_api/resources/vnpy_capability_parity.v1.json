@@ -1,0 +1,1233 @@
+{
+  "schemaVersion": "quantagent.vnpy-parity.v1",
+  "registryVersion": "2026.07.22.1",
+  "title": "QuantAgent × VeighNa Capability Parity Registry",
+  "generatedAt": "2026-07-22T08:30:00+09:00",
+  "sourceBaseline": {
+    "repo": "vnpy/vnpy",
+    "release": "4.4.0",
+    "commit": "0e8e5ba",
+    "releaseDate": "2026-05-14",
+    "notes": [
+      "Latest stable release at audit time",
+      "Official extension repositories are tracked per capability"
+    ]
+  },
+  "completeness": "partial",
+  "verificationPolicy": {
+    "verifiedRequires": [
+      "real backend capability",
+      "typed API or command contract",
+      "operable UI",
+      "real runtime/database state change",
+      "correct realtime feedback",
+      "visible error/empty/disconnected states",
+      "automated tests",
+      "browser verification",
+      "no fabricated mock result",
+      "reproducible evidence"
+    ]
+  },
+  "knownCoverageGaps": [
+    "Exact repository commit pins for independent vn.py extension repositories",
+    "Formula-level Alpha158/Alpha101 equivalence audit",
+    "Gateway-by-gateway compatibility inventory",
+    "Option/spread domain plugin schemas",
+    "Performance baselines and browser evidence for most partial capabilities"
+  ],
+  "capabilities": [
+    {
+      "id": "core.event_engine",
+      "category": "core",
+      "name": "EventEngine / typed event bus",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.event.engine.EventEngine",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Threaded event dispatch, timer events, handler registration and lifecycle.",
+      "quantagent": {
+        "modules": [
+          "services/quant_api/events"
+        ],
+        "api": [
+          "/api/events/ws"
+        ],
+        "events": [
+          "quantagent.event.v1"
+        ],
+        "artifacts": [],
+        "frontend": [
+          "Global Activity drawer"
+        ]
+      },
+      "gap": "Current EventBroker covers API/web job events but not all market, order, trade, position, account, risk and artifact topics.",
+      "adoption": "Adapt the event contract and lifecycle; do not clone vn.py MainEngine.",
+      "tests": [
+        "services/quant_api/events tests",
+        "WebSocket reconnect test"
+      ],
+      "evidence": [
+        "PR #9 typed job events"
+      ],
+      "limitations": [
+        "single-process broker",
+        "no durable replay across restart"
+      ],
+      "nextAction": "Add durable sequence checkpoint and topic projections for artifact/risk events."
+    },
+    {
+      "id": "core.main_engine",
+      "category": "core",
+      "name": "MainEngine / application orchestration",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.trader.engine.MainEngine",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Canonical engine registry, gateway/app loading and lifecycle coordination.",
+      "quantagent": {
+        "modules": [
+          "services/quant_api/services/container.py"
+        ],
+        "api": [],
+        "events": [
+          "service.started",
+          "service.stopping"
+        ],
+        "artifacts": [],
+        "frontend": [
+          "AppShell"
+        ]
+      },
+      "gap": "ServiceContainer wires API services but there is no domain-wide registry for research, backtest, paper and execution lifecycle.",
+      "adoption": "Create a narrow QuantAgent ApplicationRegistry around existing canonical services; avoid a second business engine.",
+      "tests": [],
+      "evidence": [
+        "ServiceContainer.create/start/stop"
+      ],
+      "limitations": [
+        "API-process scope only"
+      ],
+      "nextAction": "Define application registry interfaces and lifecycle ownership ADR."
+    },
+    {
+      "id": "core.oms_engine",
+      "category": "core",
+      "name": "OMS / order-trade-position cache",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.trader.engine.OmsEngine",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Standardized order, trade, position, account and contract state projections.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/execution/order_manager.py",
+          "src/quantagent/backtest/ashare_execution_simulator.py"
+        ],
+        "api": [
+          "/api/backtests/{id}/trades",
+          "/api/risk/*"
+        ],
+        "events": [],
+        "artifacts": [
+          "orders",
+          "trades",
+          "positions",
+          "risk_events"
+        ],
+        "frontend": [
+          "Stock Replay",
+          "Risk Center"
+        ]
+      },
+      "gap": "Persisted research/backtest objects exist, but one live/paper OMS projection and restart recovery contract is not verified.",
+      "adoption": "Unify existing order manager and paper state through adapters; do not bypass RiskGate.",
+      "tests": [
+        "A-share execution tests"
+      ],
+      "evidence": [
+        "OrderManager implementation"
+      ],
+      "limitations": [
+        "paper lifecycle incomplete"
+      ],
+      "nextAction": "Add paper OMS snapshot/reconciliation vertical slice."
+    },
+    {
+      "id": "core.standard_objects",
+      "category": "core",
+      "name": "Standard trader objects",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.trader.object",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Canonical contract, tick, bar, order, trade, position and account objects.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/v7/schemas.py",
+          "services/quant_api/schemas/models.py"
+        ],
+        "api": [
+          "typed REST responses"
+        ],
+        "events": [
+          "quantagent.event.v1"
+        ],
+        "artifacts": [
+          "bars",
+          "orders",
+          "trades",
+          "positions"
+        ],
+        "frontend": [
+          "typed API client"
+        ]
+      },
+      "gap": "Schemas are split by pipeline/API and some runtime payloads remain arbitrary dictionaries.",
+      "adoption": "Create canonical domain models and explicit API adapters with schema migration.",
+      "tests": [
+        "API contract tests"
+      ],
+      "evidence": [
+        "typed KlineBar and Trade models"
+      ],
+      "limitations": [
+        "cross-layer duplication"
+      ],
+      "nextAction": "Inventory duplicate order/trade/bar schemas and select canonical ownership."
+    },
+    {
+      "id": "core.gateway_app_lifecycle",
+      "category": "core",
+      "name": "Gateway and App lifecycle",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.trader.gateway.BaseGateway / BaseApp",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Discoverable modules, connection lifecycle, status and safe shutdown.",
+      "quantagent": {
+        "modules": [
+          "QMT dry-run adapters",
+          "services/quant_api/services/container.py"
+        ],
+        "api": [],
+        "events": [
+          "service.started",
+          "service.stopping"
+        ],
+        "artifacts": [],
+        "frontend": [
+          "Settings"
+        ]
+      },
+      "gap": "No unified plugin capability detection and connection-state contract.",
+      "adoption": "Use plugin adapters for data, broker and optional domain modules; live remains disabled.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "credentials and live access intentionally unavailable"
+      ],
+      "nextAction": "Define plugin manifest and unavailable-state schema."
+    },
+    {
+      "id": "core.database_datafeed",
+      "category": "core",
+      "name": "Database and datafeed abstraction",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.trader.database / datafeed",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Database/datafeed interfaces for historical bars and ticks.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/data",
+          "runtime data artifacts"
+        ],
+        "api": [
+          "/api/system/runtime-index",
+          "/api/system/runtime-index/{id}/preview"
+        ],
+        "events": [],
+        "artifacts": [
+          "PIT market panels",
+          "manifests"
+        ],
+        "frontend": [
+          "Runtime / Data"
+        ]
+      },
+      "gap": "Strong PIT data pipeline exists, but provider/database operations are not exposed as one DataManager command surface.",
+      "adoption": "Preserve QuantAgent PIT data as canonical and add provider/database adapters plus jobs.",
+      "tests": [
+        "PIT tests",
+        "runtime index tests"
+      ],
+      "evidence": [
+        "manifest-aware Runtime Catalog"
+      ],
+      "limitations": [
+        "download/update workflow incomplete"
+      ],
+      "nextAction": "Implement DataManager query/download job vertical slice."
+    },
+    {
+      "id": "core.rest_ws_rpc",
+      "category": "core",
+      "name": "REST, WebSocket and RPC clients",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy_rest / vnpy_websocket / vnpy.rpc",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Command/request transport, real-time events, reconnect and process isolation.",
+      "quantagent": {
+        "modules": [
+          "services/quant_api",
+          "services/quant_api/events"
+        ],
+        "api": [
+          "/api/*",
+          "/api/events/ws"
+        ],
+        "events": [
+          "quantagent.event.v1"
+        ],
+        "artifacts": [
+          "jobs.json"
+        ],
+        "frontend": [
+          "api client",
+          "useJobEvents"
+        ]
+      },
+      "gap": "REST and WebSocket exist; durable replay, authentication, backpressure and RPC process boundary remain incomplete.",
+      "adoption": "Keep REST commands and typed WebSocket events; add RPC only between isolated processes when justified.",
+      "tests": [
+        "WebSocket reconnect test",
+        "API smoke"
+      ],
+      "evidence": [
+        "PR #9"
+      ],
+      "limitations": [
+        "no auth/RBAC"
+      ],
+      "nextAction": "Add sequence resume and missed-event recovery contract."
+    },
+    {
+      "id": "core.logging_notification",
+      "category": "core",
+      "name": "Logging and notifications",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "LogEngine / EmailEngine / WeChat notification",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Structured logs and user notifications for operational events.",
+      "quantagent": {
+        "modules": [
+          "runtime logs",
+          "services/quant_api/events"
+        ],
+        "api": [
+          "/api/system/logs"
+        ],
+        "events": [
+          "job.status",
+          "service.*"
+        ],
+        "artifacts": [
+          "log"
+        ],
+        "frontend": [
+          "Activity drawer"
+        ]
+      },
+      "gap": "Logs are visible, but notification routing, severity policy and acknowledgement are not unified.",
+      "adoption": "Create notification adapters with safe configuration and no credentials in frontend.",
+      "tests": [
+        "log endpoint test"
+      ],
+      "evidence": [
+        "runtime log parser"
+      ],
+      "limitations": [
+        "WeChat/email unavailable"
+      ],
+      "nextAction": "Define notification event and adapter registry."
+    },
+    {
+      "id": "research.alpha_dataset",
+      "category": "research",
+      "name": "Alpha dataset and processors",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.alpha.dataset",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Feature expressions, data processors and train/validation/test dataset workflow.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/features",
+          "src/quantagent/v7",
+          "dataset build scripts"
+        ],
+        "api": [
+          "/api/factors",
+          "/api/models"
+        ],
+        "events": [],
+        "artifacts": [
+          "feature datasets",
+          "manifests"
+        ],
+        "frontend": [
+          "Factor Lab",
+          "Model Lab"
+        ]
+      },
+      "gap": "QuantAgent has richer PIT pipelines, but web-configurable processor graphs and a unified dataset registry are not complete.",
+      "adoption": "Map existing PIT-safe feature pipelines into a typed dataset experiment contract.",
+      "tests": [
+        "look-ahead tests",
+        "PIT tests"
+      ],
+      "evidence": [
+        "factor/model adapters"
+      ],
+      "limitations": [
+        "web experiment creation incomplete"
+      ],
+      "nextAction": "Add dataset artifact capabilities and build-dataset job form."
+    },
+    {
+      "id": "research.alpha158",
+      "category": "research",
+      "name": "Alpha158 compatibility",
+      "status": "not_audited",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.alpha.dataset.datasets.alpha_158.Alpha158",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Qlib-style 158 factor feature set.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "Repository-wide factor-name and formula mapping has not been completed.",
+      "adoption": "Provide compatibility mapping only where factors are PIT-safe and semantically equivalent.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "status intentionally not inferred from names"
+      ],
+      "nextAction": "Run exact factor inventory and formula equivalence audit."
+    },
+    {
+      "id": "research.alpha101",
+      "category": "research",
+      "name": "WorldQuant Alpha101 compatibility",
+      "status": "not_audited",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.alpha.dataset.datasets.alpha_101",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "WorldQuant Alpha101 feature dataset added in vn.py 4.3.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "QuantAgent references multiple factor libraries, but exact implemented formulas and tests require audit.",
+      "adoption": "Register formula-level mappings; never mark compatible by filename alone.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "formula equivalence unverified"
+      ],
+      "nextAction": "Generate factor formula/source/test inventory."
+    },
+    {
+      "id": "research.model_abstraction",
+      "category": "research",
+      "name": "Model abstraction and evaluation",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.alpha.model / strategy / evaluation",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Train/evaluate models and produce signals through a consistent workflow.",
+      "quantagent": {
+        "modules": [
+          "FT-Transformer pipeline",
+          "model adapters"
+        ],
+        "api": [
+          "/api/models",
+          "/api/models/{id}/observability"
+        ],
+        "events": [
+          "job.status"
+        ],
+        "artifacts": [
+          "checkpoints",
+          "metrics",
+          "predictions"
+        ],
+        "frontend": [
+          "Model Lab"
+        ]
+      },
+      "gap": "Existing model families are visible, but create/clone/run/cancel/resume experiment lifecycle is incomplete.",
+      "adoption": "Keep QuantAgent models and add a typed experiment service and acceptance gates.",
+      "tests": [
+        "model adapter tests"
+      ],
+      "evidence": [
+        "Model Lab observability"
+      ],
+      "limitations": [
+        "model registry is read-mostly"
+      ],
+      "nextAction": "Implement experiment schema and training job lifecycle."
+    },
+    {
+      "id": "research.alpha_lab",
+      "category": "research",
+      "name": "AlphaLab research workspace",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.alpha AlphaLab",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Interactive factor/model research workflow and signal-file management.",
+      "quantagent": {
+        "modules": [
+          "Factor Lab",
+          "Model Lab"
+        ],
+        "api": [
+          "/api/factors",
+          "/api/models"
+        ],
+        "events": [],
+        "artifacts": [
+          "factor reports",
+          "predictions"
+        ],
+        "frontend": [
+          "Factor Lab",
+          "Model Lab"
+        ]
+      },
+      "gap": "Analysis pages exist but cannot yet create and execute full experiments from the web.",
+      "adoption": "Merge into QuantAgent Factor/Model workspaces instead of adding a parallel AlphaLab.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "read-only workflow"
+      ],
+      "nextAction": "Add factor evaluation experiment vertical slice."
+    },
+    {
+      "id": "strategy.cta_strategy",
+      "category": "strategy",
+      "name": "CTA strategy lifecycle",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy_ctastrategy",
+        "module": "CtaEngine / CtaTemplate",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Strategy discovery, parameterization, init/start/stop and state monitoring.",
+      "quantagent": {
+        "modules": [
+          "strategy and target-weight pipelines"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [
+          "strategy configs"
+        ],
+        "frontend": []
+      },
+      "gap": "QuantAgent strategy logic is pipeline-oriented and lacks one lifecycle UI/API.",
+      "adoption": "Adapt lifecycle semantics while preserving target weights, OrderManager and RiskGate.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "no direct strategy start/stop UI"
+      ],
+      "nextAction": "Inventory strategy entrypoints and define StrategyInstance schema."
+    },
+    {
+      "id": "strategy.cta_backtester",
+      "category": "strategy",
+      "name": "CTA Backtester workflow",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_ctabacktester",
+        "module": "BacktesterEngine / BacktesterManager",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Configure, run, monitor and compare backtests with orders, trades and charts.",
+      "quantagent": {
+        "modules": [
+          "strict A-share backtester",
+          "Backtest Lab"
+        ],
+        "api": [
+          "/api/backtests",
+          "/api/jobs/backtest"
+        ],
+        "events": [
+          "job.status"
+        ],
+        "artifacts": [
+          "metrics",
+          "nav",
+          "orders",
+          "trades",
+          "failed_orders",
+          "risk_events"
+        ],
+        "frontend": [
+          "Backtest Lab",
+          "Stock Replay"
+        ]
+      },
+      "gap": "Result inspection is strong, but browser-side creation, parameter optimization and cancellation/reproduction are incomplete.",
+      "adoption": "Use vn.py workflow, never replace strict A-share execution semantics.",
+      "tests": [
+        "backtest regression",
+        "API tests"
+      ],
+      "evidence": [
+        "Backtest Lab and Stock Replay"
+      ],
+      "limitations": [
+        "experiment form incomplete"
+      ],
+      "nextAction": "Implement typed backtest experiment form and job progress."
+    },
+    {
+      "id": "strategy.portfolio_strategy",
+      "category": "strategy",
+      "name": "Portfolio strategy lifecycle",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_portfoliostrategy",
+        "module": "StrategyEngine",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Multi-symbol strategy lifecycle and parameter optimization.",
+      "quantagent": {
+        "modules": [
+          "target weights",
+          "portfolio construction"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [
+          "target_weights"
+        ],
+        "frontend": []
+      },
+      "gap": "Portfolio construction exists but lifecycle and state projection are not unified.",
+      "adoption": "Wrap target-weight producers as strategy instances; retain strict execution boundary.",
+      "tests": [],
+      "evidence": [
+        "target weight artifacts"
+      ],
+      "limitations": [
+        "no strategy workspace"
+      ],
+      "nextAction": "Define target-weight strategy adapter."
+    },
+    {
+      "id": "strategy.spread_trading",
+      "category": "strategy",
+      "name": "Spread trading plugin boundary",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy_spreadtrading",
+        "module": "SpreadEngine",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Synthetic spread definitions, algo execution and strategy workflow.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "No current A-share spread module.",
+      "adoption": "Keep as optional plugin capability with unavailable state; do not pollute core.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "domain-specific"
+      ],
+      "nextAction": "Define optional plugin contract and not-installed UI state."
+    },
+    {
+      "id": "strategy.script_trader",
+      "category": "strategy",
+      "name": "Script Trader",
+      "status": "missing",
+      "source": {
+        "repo": "vnpy/vnpy_scripttrader",
+        "module": "ScriptEngine",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Interactive scripted access to engine functions and state.",
+      "quantagent": {
+        "modules": [
+          "CLI scripts"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "Many scripts exist, but no governed script session with command allowlist and audit.",
+      "adoption": "Provide a restricted research command runner, never arbitrary shell execution.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "security-sensitive"
+      ],
+      "nextAction": "Design allowlisted command palette and audit contract."
+    },
+    {
+      "id": "execution.algo_trading",
+      "category": "execution",
+      "name": "Algo Trading (TWAP/VWAP/Iceberg/Sniper)",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy_algotrading",
+        "module": "AlgoEngine and templates",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Algorithmic execution templates with child orders and status.",
+      "quantagent": {
+        "modules": [
+          "execution simulators"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "A-share execution constraints exist, but algo scheduling and fill-quality workflow are absent.",
+      "adoption": "Implement paper/dry-run algorithms behind OrderManager and RiskGate.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "live disabled"
+      ],
+      "nextAction": "Implement TWAP paper simulation vertical slice."
+    },
+    {
+      "id": "execution.order_management",
+      "category": "execution",
+      "name": "Order management and conversion",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "converter / MainEngine order functions",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Order intents, conversion, active order control and cancellation.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/execution/order_manager.py",
+          "src/quantagent/execution/constraints.py"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [
+          "orders",
+          "failed_orders"
+        ],
+        "frontend": [
+          "Stock Replay",
+          "Risk Center"
+        ]
+      },
+      "gap": "Core logic exists; unified paper command API and real-time order monitor are incomplete.",
+      "adoption": "Expose canonical OrderManager through typed paper-only commands.",
+      "tests": [
+        "execution constraints tests"
+      ],
+      "evidence": [
+        "OrderManager and strict backtest"
+      ],
+      "limitations": [
+        "no live commands"
+      ],
+      "nextAction": "Add order monitor projection and paper command boundary."
+    },
+    {
+      "id": "execution.paper_account",
+      "category": "execution",
+      "name": "Paper Account",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_paperaccount",
+        "module": "PaperAccountApp",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Simulated matching, accounts, positions and restart recovery.",
+      "quantagent": {
+        "modules": [
+          "paper trading pipeline",
+          "audit/reconciliation"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [
+          "paper accounts",
+          "orders",
+          "trades",
+          "positions"
+        ],
+        "frontend": []
+      },
+      "gap": "Paper capabilities exist in the repository but web account lifecycle and restart-state verification are incomplete.",
+      "adoption": "Use existing VirtualBroker/paper logic and add account lifecycle UI.",
+      "tests": [
+        "paper workflow tests"
+      ],
+      "evidence": [],
+      "limitations": [
+        "not verified end-to-end"
+      ],
+      "nextAction": "Audit current paper paths and build account start/status/stop slice."
+    },
+    {
+      "id": "data.data_manager",
+      "category": "data",
+      "name": "DataManager",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_datamanager",
+        "module": "ManagerEngine / ManagerWidget",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Overview, query, import/export, download, delete and data maintenance.",
+      "quantagent": {
+        "modules": [
+          "RuntimeIndexer",
+          "RuntimeCleanupService"
+        ],
+        "api": [
+          "/api/system/runtime-catalog",
+          "/api/system/runtime-index",
+          "/api/system/runtime-cleanup"
+        ],
+        "events": [],
+        "artifacts": [
+          "runtime catalog",
+          "manifests"
+        ],
+        "frontend": [
+          "Runtime / Data"
+        ]
+      },
+      "gap": "Catalog, preview, lineage and cleanup exist; provider query/download/import/export jobs are incomplete.",
+      "adoption": "Extend the single Runtime/Data workspace, not a second data explorer.",
+      "tests": [
+        "runtime index tests",
+        "API tests"
+      ],
+      "evidence": [
+        "PR #8"
+      ],
+      "limitations": [
+        "read/cleanup biased"
+      ],
+      "nextAction": "Add provider/date/symbol query and download job slice."
+    },
+    {
+      "id": "data.data_recorder",
+      "category": "data",
+      "name": "DataRecorder",
+      "status": "missing",
+      "source": {
+        "repo": "vnpy/vnpy_datarecorder",
+        "module": "RecorderEngine",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Tick/bar subscription recording with configuration and logs.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "No unified streaming recorder lifecycle was identified.",
+      "adoption": "Implement optional recorder adapter for supported feeds with PIT metadata.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "requires live data provider"
+      ],
+      "nextAction": "Define recorder configuration and unavailable provider states."
+    },
+    {
+      "id": "portfolio.portfolio_manager",
+      "category": "portfolio",
+      "name": "Portfolio Manager",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_portfoliomanager",
+        "module": "PortfolioEngine / PortfolioManager",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Portfolio grouping, holdings, PnL, fees, slippage and history.",
+      "quantagent": {
+        "modules": [
+          "portfolio construction",
+          "backtest positions"
+        ],
+        "api": [
+          "/api/backtests/{id}/positions"
+        ],
+        "events": [],
+        "artifacts": [
+          "target_weights",
+          "positions",
+          "pnl"
+        ],
+        "frontend": [
+          "Backtest Lab",
+          "Stock Replay"
+        ]
+      },
+      "gap": "Historical projections exist but multi-portfolio paper state, contribution and reconciliation UI are incomplete.",
+      "adoption": "Build one Portfolio workspace over canonical target weights, positions and paper state.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "no account-level live projection"
+      ],
+      "nextAction": "Implement portfolio snapshot API and dense monitor."
+    },
+    {
+      "id": "risk.risk_manager",
+      "category": "risk",
+      "name": "Plugin-based RiskManager",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_riskmanager",
+        "module": "RiskEngine / rule plugins",
+        "version": "4.2+",
+        "commit": null
+      },
+      "description": "Discoverable rules, flow/order/cancel limits, interception logs and alerts.",
+      "quantagent": {
+        "modules": [
+          "src/quantagent/risk/risk_gate.py",
+          "KillSwitch",
+          "execution constraints"
+        ],
+        "api": [
+          "/api/risk/overview",
+          "/api/risk/events",
+          "/api/risk/rules"
+        ],
+        "events": [],
+        "artifacts": [
+          "risk_events"
+        ],
+        "frontend": [
+          "Risk Center"
+        ]
+      },
+      "gap": "Strong A-share rules exist, but plugin discovery, per-rule enable/config and real-time interception event projection are incomplete.",
+      "adoption": "Keep RiskGate canonical and add a rule registry/adapter layer.",
+      "tests": [
+        "RiskGate tests"
+      ],
+      "evidence": [
+        "Risk Center",
+        "RiskGate implementation"
+      ],
+      "limitations": [
+        "configuration UI limited"
+      ],
+      "nextAction": "Implement typed risk rule registry and paper interception events."
+    },
+    {
+      "id": "visualization.chart_core",
+      "category": "visualization",
+      "name": "Chart core",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "vnpy.chart",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "High-performance history/realtime charts, cursor and linked items.",
+      "quantagent": {
+        "modules": [
+          "ECharts adapter",
+          "CandlestickChart"
+        ],
+        "api": [
+          "stock replay endpoints"
+        ],
+        "events": [],
+        "artifacts": [
+          "bars",
+          "trades"
+        ],
+        "frontend": [
+          "Stock Replay"
+        ]
+      },
+      "gap": "Daily chart interaction improved; minute/tick, incremental realtime, brush, keyboard navigation and saved layouts remain incomplete.",
+      "adoption": "Continue ECharts behind one Chart Adapter unless benchmarks prove inadequate.",
+      "tests": [
+        "kline helper tests"
+      ],
+      "evidence": [
+        "PR #10"
+      ],
+      "limitations": [
+        "large-data benchmark absent"
+      ],
+      "nextAction": "Add chart adapter contract and 100k/500k point performance baseline."
+    },
+    {
+      "id": "visualization.chart_wizard",
+      "category": "visualization",
+      "name": "ChartWizard workflow",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_chartwizard",
+        "module": "ChartWizard",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Multi-tab symbol charts with historical/realtime continuity.",
+      "quantagent": {
+        "modules": [
+          "Stock Replay",
+          "workspace tabs"
+        ],
+        "api": [
+          "/api/backtests/{id}/stocks/{symbol}"
+        ],
+        "events": [],
+        "artifacts": [
+          "bars",
+          "trades",
+          "signals"
+        ],
+        "frontend": [
+          "Stock Replay"
+        ]
+      },
+      "gap": "Symbol/run linkage exists; multi-instance charts, realtime continuation and saved chart workspaces are incomplete.",
+      "adoption": "Extend Web workspace tabs and shared context rather than clone Qt tabs.",
+      "tests": [
+        "frontend tests"
+      ],
+      "evidence": [
+        "PR #10"
+      ],
+      "limitations": [
+        "single page instance per route"
+      ],
+      "nextAction": "Add multiple chart workspace instances and shared symbol context."
+    },
+    {
+      "id": "service.webtrader",
+      "category": "service",
+      "name": "WebTrader process boundary",
+      "status": "partial",
+      "source": {
+        "repo": "vnpy/vnpy_webtrader",
+        "module": "REST/WebSocket service",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Web command API, event push, connection state and multi-client service.",
+      "quantagent": {
+        "modules": [
+          "services/quant_api",
+          "quant-ui"
+        ],
+        "api": [
+          "/api/*",
+          "/api/events/ws"
+        ],
+        "events": [
+          "quantagent.event.v1"
+        ],
+        "artifacts": [
+          "jobs"
+        ],
+        "frontend": [
+          "AppShell",
+          "Activity drawer"
+        ]
+      },
+      "gap": "Web UI works, but auth, process isolation, replay/backpressure and multi-client state contracts are incomplete.",
+      "adoption": "Preserve separate Web/API process and keep computation in background jobs.",
+      "tests": [
+        "API smoke",
+        "WebSocket reconnect"
+      ],
+      "evidence": [
+        "PR #8/#9"
+      ],
+      "limitations": [
+        "loopback/internal only"
+      ],
+      "nextAction": "Add authenticated session boundary and durable event resume."
+    },
+    {
+      "id": "service.rpc_service",
+      "category": "service",
+      "name": "RPC Service",
+      "status": "missing",
+      "source": {
+        "repo": "vnpy/vnpy_rpcservice",
+        "module": "RpcServer / RpcClient",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Process-isolated request and publish/subscribe RPC.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "No verified internal RPC boundary between Web, jobs and paper/trading processes.",
+      "adoption": "Introduce only when process isolation requires it; keep typed schemas.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "not currently required for read-only API"
+      ],
+      "nextAction": "Write process-boundary ADR before implementation."
+    },
+    {
+      "id": "extension.option_master",
+      "category": "extension",
+      "name": "OptionMaster plugin boundary",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy_optionmaster",
+        "module": "OptionEngine",
+        "version": "4.x",
+        "commit": null
+      },
+      "description": "Option chain, pricing, Greeks and portfolio tools.",
+      "quantagent": {
+        "modules": [],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": []
+      },
+      "gap": "Options are not a current QuantAgent core workflow.",
+      "adoption": "Keep a typed optional plugin boundary and explicit unavailable state.",
+      "tests": [],
+      "evidence": [],
+      "limitations": [
+        "requires option market data and domain models"
+      ],
+      "nextAction": "Define extension manifest; no core implementation yet."
+    },
+    {
+      "id": "extension.plugin_discovery",
+      "category": "extension",
+      "name": "App/plugin discovery",
+      "status": "planned",
+      "source": {
+        "repo": "vnpy/vnpy",
+        "module": "BaseApp and module packages",
+        "version": "4.4.0",
+        "commit": "0e8e5ba"
+      },
+      "description": "Discover, load and report optional capabilities.",
+      "quantagent": {
+        "modules": [
+          "workstation module registry"
+        ],
+        "api": [],
+        "events": [],
+        "artifacts": [],
+        "frontend": [
+          "module launcher"
+        ]
+      },
+      "gap": "Frontend module registry exists but backend capability/plugin registry is not unified.",
+      "adoption": "Create one signed/typed plugin manifest registry shared by backend and UI.",
+      "tests": [],
+      "evidence": [
+        "workstation/modules.ts"
+      ],
+      "limitations": [
+        "static frontend registry"
+      ],
+      "nextAction": "Design canonical capability/plugin manifest after parity registry."
+    }
+  ]
+}
