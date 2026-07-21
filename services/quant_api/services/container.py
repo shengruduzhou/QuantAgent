@@ -13,6 +13,7 @@ from services.quant_api.events import EventBroker
 from services.quant_api.runtime_indexer import RuntimeIndexer
 from services.quant_api.services.jobs import JobManager
 from services.quant_api.services.runtime_cleanup import RuntimeCleanupService
+from services.quant_api.services.vnpy_parity import VnpyParityService
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ServiceContainer:
     events: EventBroker
     jobs: JobManager
     cleanup: RuntimeCleanupService
+    vnpy_parity: VnpyParityService
 
     @classmethod
     def create(cls, settings: ApiSettings | None = None) -> "ServiceContainer":
@@ -47,6 +49,7 @@ class ServiceContainer:
             events=events,
             jobs=JobManager(resolved, events),
             cleanup=RuntimeCleanupService(resolved),
+            vnpy_parity=VnpyParityService(),
         )
 
     def start(self) -> None:
