@@ -82,19 +82,38 @@ def ledger_append(record: dict) -> str:
     return record["record_hash"]
 
 
+TOPUP_BUDGET_S = 1800
+
+
 def step_update_data(dry: bool) -> dict:
+    """Bounded TOP-UP only — fetching is the supervisor's job.
+
+    Measured 2026-07-21: the vendor limit is 10 req/min, so a full-universe pass
+    takes ~6h. When this step owned the catch-up it consumed the runner's entire
+    budget and the process was killed before producing books (rc=124). Ownership
+    is now split: catchup_supervisor (06:00, multi-iteration) closes the backlog;
+    this step only tops up a small residual and never blocks the run. A top-up
+    timeout is NOT a failure — staging persists and the supervisor finishes it;
+    staleness is judged by step_freshness, which is the honest signal.
+    """
     if dry:
         return {"status": "SKIPPED_DRY_RUN"}
     try:
-        # chunked + resumable (2026-07-19): a timeout loses at most one 250-symbol
-        # chunk; the next run (or healthcheck remediation) continues from staging.
-        # Replaces the monolithic updater whose end-of-run persistence lost 3h of
-        # fetches under ~2s/call throttling (CATCHUP_FAILED rc=124, 2026-07-18).
+        panel_max = pd.to_datetime(pd.read_parquet(PANEL, columns=["trade_date"])["trade_date"]).max()
+        cst = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
+        last_avail = cst.normalize() if cst.hour * 60 + cst.minute >= 15 * 60 + 30 \
+            else cst.normalize() - pd.Timedelta(days=1)
+        if panel_max >= last_avail:
+            return {"status": "OK", "note": "panel already current (no fetch needed)"}
+    except Exception as e:
+        return {"status": "FAILED", "error": f"panel read failed: {str(e)[:120]}"}
+    try:
         r = subprocess.run([sys.executable, str(REPO / "scripts/catchup_panel_chunked.py")],
-                           capture_output=True, text=True, timeout=10800)
+                           capture_output=True, text=True, timeout=TOPUP_BUDGET_S)
     except subprocess.TimeoutExpired:
-        return {"status": "FAILED", "error": "TIMEOUT_10800S (chunked catch-up staged "
-                "partial progress; rerun continues from staging)"}
+        return {"status": "PARTIAL_STAGED",
+                "note": f"top-up exceeded {TOPUP_BUDGET_S}s; staging persists, "
+                        "supervisor completes the window (not a run failure)"}
     return {"status": "OK" if r.returncode == 0 else "FAILED",
             "returncode": r.returncode, "tail": r.stdout[-300:] + r.stderr[-200:]}
 
