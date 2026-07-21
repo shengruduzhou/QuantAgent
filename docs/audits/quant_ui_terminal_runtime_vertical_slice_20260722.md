@@ -101,8 +101,8 @@ vn.py 的参考边界：
 
 ```text
 tests/quant_ui:                         27 passed
-Full Python suite:                      1277 passed, 17 skipped, 3 failed
-Python compileall src services:         PASS
+Full Python suite:                      1280 passed, 17 skipped
+Python compileall src services scripts: PASS
 Frontend Vitest:                       4 passed
 Frontend TypeScript typecheck:         PASS
 Frontend production build:             PASS
@@ -113,7 +113,7 @@ HTTP filtered runtime-index:            PASS (explicit empty state)
 Vite /runtime HTML:                     PASS (QuantAgent Research Terminal)
 ```
 
-全量 Python 的 3 个失败与本纵切片无关，且与阶段前基线一致：两个测试依赖本隔离 worktree 不存在的 `runtime/paper/fresh_blind/shadow_day_registry.json`；一个测试硬编码父目录必须名为 `QuantAgent`，而隔离 worktree 名为 `QuantAgent-terminal`。未删除或弱化这些测试。
+CI 暴露的两个 shadow registry 测试原本读取未纳入版本控制的生产 runtime 文件。现已改为在 pytest `tmp_path` 内生成最小 append-only 哈希链、健康记录、市场覆盖率与订单/成交/加密文件，并调用真实 `shadow_day_registry.build()`；既保留 superseded-record 和 blinding 约束，又可在干净 checkout 中复现。另将 storage path 测试从硬编码仓库目录名改为校验当前仓库根目录下的 `runtime`，支持隔离 worktree。修复后全量测试无失败。
 
 HTTP smoke 显式设置 `QUANTAGENT_HOME` 到隔离 worktree runtime；其中只有 1 个未分类、未验证的真实仓库文档 artifact，API 正确未授予 production capability。
 
