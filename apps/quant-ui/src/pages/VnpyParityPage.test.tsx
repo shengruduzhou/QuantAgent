@@ -70,9 +70,9 @@ test("renders and inspects the machine-readable vn.py parity registry", async ()
     </QueryClientProvider>,
   );
 
-  expect(await screen.findByText("Plugin-based RiskManager")).toBeInTheDocument();
+  expect((await screen.findAllByText("Plugin-based RiskManager")).length).toBeGreaterThan(0);
   expect(screen.getByText("50.0%")).toBeInTheDocument();
-  fireEvent.click(screen.getByText("Plugin-based RiskManager"));
+  fireEvent.click(screen.getAllByText("Plugin-based RiskManager")[0]);
   expect(screen.getByText(/Per-rule configuration/)).toBeInTheDocument();
   expect(screen.getByText("Implement typed risk rule registry.")).toBeInTheDocument();
 });
