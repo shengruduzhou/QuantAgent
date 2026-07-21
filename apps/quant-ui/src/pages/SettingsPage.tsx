@@ -12,26 +12,12 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { apiPost } from "../api/client";
-import type { SystemOverview } from "../api/types";
+import type { JobSummary, SystemOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatBytes, formatDate } from "../utils/format";
-
-interface Job {
-  id: string;
-  type: string;
-  status: string;
-  commandId: string;
-  createdAt: string;
-  startedAt?: string | null;
-  finishedAt?: string | null;
-  progress?: number | null;
-  message?: string | null;
-  outputPaths: string[];
-  error?: string | null;
-}
 
 const jobTemplates = {
   backtest: {
@@ -70,12 +56,12 @@ type JobType = keyof typeof jobTemplates;
 
 export function SettingsPage(): JSX.Element {
   const overview = useApi<SystemOverview>(["settings-overview"], "/system/overview");
-  const jobs = useApi<Job[]>(["settings-jobs"], "/jobs");
+  const jobs = useApi<JobSummary[]>(["settings-jobs"], "/jobs");
   const [jobType, setJobType] = useState<JobType>("backtest");
   const [jobJson, setJobJson] = useState(() => JSON.stringify(jobTemplates.backtest, null, 2));
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState("");
-  const [launchedJob, setLaunchedJob] = useState<Job | null>(null);
+  const [launchedJob, setLaunchedJob] = useState<JobSummary | null>(null);
   const data = overview.data?.data;
 
   const activeJobs = useMemo(
@@ -96,7 +82,7 @@ export function SettingsPage(): JSX.Element {
     setLaunchError("");
     try {
       const payload = JSON.parse(jobJson) as { commandId: string; parameters: Record<string, unknown> };
-      const result = await apiPost<Job>(`/jobs/${jobType}`, payload);
+      const result = await apiPost<JobSummary>(`/jobs/${jobType}`, payload);
       setLaunchedJob(result.data);
       await jobs.refetch();
     } catch (error) {

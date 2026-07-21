@@ -37,6 +37,9 @@ export interface RuntimeArtifact {
   parser?: string | null;
   runId?: string | null;
   horizon?: string | null;
+  rows?: number | null;
+  dateStart?: string | null;
+  dateEnd?: string | null;
   tags: string[];
   schemaVersion?: string | null;
   trustClass: ArtifactTrustClass;
@@ -46,8 +49,71 @@ export interface RuntimeArtifact {
   sourceTime?: string | null;
   manifestPath?: string | null;
   contentHash?: string | null;
+  declaredKind?: string | null;
+  kindSource?: "manifest" | "path_heuristic";
+  runIdSource?: "manifest" | "path_heuristic" | null;
+  producer?: string | null;
+  qualityStatus?: string | null;
+  dataAsOf?: string | null;
+  upstreamPaths: string[];
   capabilities: string[];
   issues: DataIssue[];
+}
+
+export interface RuntimeRunSummary {
+  id: string;
+  artifactCount: number;
+  totalSizeBytes: number;
+  kinds: string[];
+  trustClasses: ArtifactTrustClass[];
+  validationStatuses: ArtifactValidationStatus[];
+  capabilities: string[];
+  issueCount: number;
+  latestModifiedAt: string;
+  dateStart?: string | null;
+  dateEnd?: string | null;
+}
+
+export interface RuntimeCatalogSummary {
+  artifactCount: number;
+  totalSizeBytes: number;
+  byKind: Record<string, number>;
+  byTrust: Record<string, number>;
+  byValidation: Record<string, number>;
+  byFreshness: Record<string, number>;
+  byCapability: Record<string, number>;
+  byStatus: Record<string, number>;
+  runCount: number;
+  manifestCoverage: number;
+  indexedAt: string;
+}
+
+export interface RuntimeCatalog {
+  summary: RuntimeCatalogSummary;
+  runs: RuntimeRunSummary[];
+  roots: string[];
+}
+
+export interface RuntimeLineage {
+  artifact: RuntimeArtifact;
+  upstream: Array<{ reference: string; artifact?: RuntimeArtifact | null }>;
+  downstream: RuntimeArtifact[];
+  status: "complete" | "partial" | "undeclared";
+  issues: DataIssue[];
+}
+
+export interface JobSummary {
+  id: string;
+  type: string;
+  status: string;
+  commandId: string;
+  createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  progress?: number | null;
+  message?: string | null;
+  outputPaths: string[];
+  error?: string | null;
 }
 
 export interface BacktestSummary {
@@ -312,6 +378,13 @@ export interface SystemOverview {
     artifactCount: number;
     totalSizeBytes: number;
     byKind: Record<string, number>;
+    byTrust?: Record<string, number>;
+    byValidation?: Record<string, number>;
+    byFreshness?: Record<string, number>;
+    byCapability?: Record<string, number>;
+    byStatus?: Record<string, number>;
+    runCount?: number;
+    manifestCoverage?: number;
     indexedAt: string;
   };
 }

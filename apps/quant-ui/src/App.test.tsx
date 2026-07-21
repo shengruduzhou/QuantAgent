@@ -112,12 +112,33 @@ test("runtime explorer distinguishes verified production artifacts", async () =>
     sourceTime: "2026-01-06T00:00:00+00:00",
     manifestPath: "runtime/reports/run-1/backtest/metrics.json.manifest.json",
     contentHash: "a".repeat(64),
+    upstreamPaths: ["runtime/data/v7/gold/dataset.parquet"],
     capabilities: ["metadata", "preview", "research_display", "production_display"],
     issues: [],
   };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const data = url.includes("/system/overview") ? overview
+      : url.includes("/system/runtime-catalog") ? {
+        summary: {
+          artifactCount: 1, totalSizeBytes: 128, byKind: { backtest: 1 },
+          byTrust: { production_ready: 1 }, byValidation: { verified: 1 },
+          byFreshness: { unknown: 1 }, byCapability: { production_display: 1 },
+          byStatus: { ready: 1 }, runCount: 1, manifestCoverage: 1,
+          indexedAt: "2026-01-06T00:00:00+00:00",
+        },
+        runs: [{
+          id: "run-1", artifactCount: 1, totalSizeBytes: 128, kinds: ["backtest"],
+          trustClasses: ["production_ready"], validationStatuses: ["verified"],
+          capabilities: ["production_display"], issueCount: 0,
+          latestModifiedAt: "2026-01-06T00:00:00+00:00",
+        }],
+        roots: ["runtime"],
+      }
+        : url.includes("/lineage") ? {
+          artifact, upstream: [{ reference: artifact.upstreamPaths[0], artifact: null }],
+          downstream: [], status: "partial", issues: [],
+        }
       : url.includes("/system/runtime-index/artifact_metrics/preview") ? { total_return: 0.12 }
         : url.includes("/system/runtime-index") ? {
           items: [artifact], total: 1, page: 1, pageSize: 100, hasNext: false,
@@ -132,9 +153,11 @@ test("runtime explorer distinguishes verified production artifacts", async () =>
   renderApp("/runtime");
 
   expect(await screen.findByText("metrics.json")).toBeInTheDocument();
-  expect(screen.getByText("production_ready")).toBeInTheDocument();
-  expect(screen.getByText("verified")).toBeInTheDocument();
+  expect(screen.getAllByText("production_ready").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("verified").length).toBeGreaterThan(0);
   fireEvent.click(screen.getByText("metrics.json"));
   expect(await screen.findByText("quantagent.backtest.metrics.1")).toBeInTheDocument();
-  expect(screen.getByText(/production_display/)).toBeInTheDocument();
+  expect(screen.getAllByText(/production_display/).length).toBeGreaterThan(0);
+  fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+  expect(await screen.findByText("run-1")).toBeInTheDocument();
 });

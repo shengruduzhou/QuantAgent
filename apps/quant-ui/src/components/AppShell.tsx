@@ -1,15 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
-  ArrowsClockwise,
-  Atom,
-  Brain,
-  ChartLine,
-  ChartLineUp,
+  Bell,
+  CaretDown,
   Database,
-  FileText,
-  Flask,
-  Funnel,
-  Gear,
   ListMagnifyingGlass,
   MagnifyingGlass,
   Pulse,
@@ -17,49 +10,42 @@ import {
   SidebarSimple,
   TrendUp,
   Warning,
+  X,
 } from "@phosphor-icons/react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
-import type { SystemOverview } from "../api/types";
-import { StatusBadge } from "./StatusBadge";
+import type { JobSummary, SystemOverview } from "../api/types";
+import { moduleForPath, moduleGroups, workstationModules } from "../workstation/modules";
+import { useWorkspaceLayout } from "../workstation/useWorkspaceLayout";
+import { formatDate } from "../utils/format";
 import { CommandPalette } from "./CommandPalette";
-
-const navItems = [
-  { to: "/", label: "工作台", caption: "Dashboard", icon: ChartLineUp },
-  { to: "/stock-replay", label: "股票复盘", caption: "Stock Replay", icon: ChartLine },
-  { to: "/backtests", label: "回测实验", caption: "Backtest Lab", icon: Flask },
-  { to: "/t-plus-one", label: "T+1 做 T", caption: "T+1 Analysis", icon: ArrowsClockwise },
-  { to: "/factors", label: "因子中心", caption: "Factor Center", icon: Atom },
-  { to: "/selection", label: "选股逻辑", caption: "Selection Logic", icon: Funnel },
-  { to: "/models", label: "模型中心", caption: "Model Lab", icon: Brain },
-  { to: "/risk", label: "风险中心", caption: "Risk Center", icon: ShieldCheck },
-  { to: "/runtime", label: "运行监控", caption: "Runtime Explorer", icon: Database },
-  { to: "/reports", label: "研究报告", caption: "Reports", icon: FileText },
-] as const;
-
-const pageLabels: Record<string, { title: string; caption: string }> = {
-  "/": { title: "量化工作台", caption: "Portfolio Command Center" },
-  "/stock-replay": { title: "股票复盘", caption: "Stock Replay Workbench" },
-  "/backtests": { title: "回测实验", caption: "Backtest Laboratory" },
-  "/t-plus-one": { title: "T+1 合规做 T", caption: "Intraday Overlay Analysis" },
-  "/factors": { title: "因子中心", caption: "Factor Research Library" },
-  "/selection": { title: "透明选股漏斗", caption: "Selection Decision Chain" },
-  "/models": { title: "模型中心", caption: "Training & Inference" },
-  "/risk": { title: "风险中心", caption: "Exposure & Control" },
-  "/runtime": { title: "运行监控", caption: "Runtime Artifact Explorer" },
-  "/reports": { title: "研究报告", caption: "Research Briefs" },
-  "/settings": { title: "系统设置", caption: "Terminal Preferences" },
-};
+import { StateView } from "./StateView";
+import { StatusBadge } from "./StatusBadge";
 
 export function AppShell(): JSX.Element {
-  const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
-  const page = pageLabels[location.pathname] ?? pageLabels["/"];
-  const overview = useApi<SystemOverview>(["system-overview-shell"], "/system/overview");
+  const page = moduleForPath(location.pathname);
+  const layout = useWorkspaceLayout();
+  const overview = useApi<SystemOverview>(
+    ["system-overview-shell"],
+    "/system/overview",
+    undefined,
+    { refetchInterval: 15_000, staleTime: 10_000 },
+  );
+  const jobs = useApi<JobSummary[]>(
+    ["global-activity-jobs"],
+    layout.activityOpen ? "/jobs" : null,
+    undefined,
+    { refetchInterval: 5_000, staleTime: 2_000 },
+  );
   const data = overview.data?.data;
+  const activeJobs = useMemo(
+    () => (jobs.data?.data ?? []).filter((job) => ["queued", "running"].includes(job.status)).length,
+    [jobs.data?.data],
+  );
   const closePalette = useCallback(() => setPaletteOpen(false), []);
 
   useEffect(() => {
@@ -73,105 +59,129 @@ export function AppShell(): JSX.Element {
     return () => window.removeEventListener("keydown", openPalette);
   }, []);
 
+  const submitSearch = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    const value = search.trim();
+    if (!value) {
+      setPaletteOpen(true);
+      return;
+    }
+    const stock = value.toUpperCase().match(/^(\d{6})(?:\.(SZ|SH|BJ))?$/);
+    if (stock) {
+      const suffix = stock[2] ?? (stock[1].startsWith("6") ? "SH" : "SZ");
+      navigate(`/stock-replay?symbol=${stock[1]}.${suffix}`);
+    } else {
+      navigate(`/runtime?query=${encodeURIComponent(value)}`);
+    }
+  };
+
   return (
-    <div className={`app-frame ${collapsed ? "sidebar-collapsed" : ""}`}>
-      <aside className="sidebar">
+    <div className={`app-frame terminal-frame ${layout.launcherCollapsed ? "sidebar-collapsed" : ""} ${layout.activityOpen ? "activity-open" : ""}`}>
+      <aside className="sidebar terminal-launcher">
         <div className="brand">
-          <div className="brand-mark"><TrendUp size={24} weight="bold" /></div>
-          <div>
-            <strong>QuantAgent</strong>
-            <span>AI 量化研究系统</span>
-          </div>
-          <button className="icon-button sidebar-toggle" onClick={() => setCollapsed((value) => !value)} aria-label="切换导航栏">
+          <div className="brand-mark"><TrendUp size={22} weight="bold" /></div>
+          <div><strong>QuantAgent</strong><span>QUANT WORKSTATION</span></div>
+          <button className="icon-button sidebar-toggle" onClick={layout.toggleLauncher} aria-label="切换模块启动器">
             <SidebarSimple size={18} />
           </button>
         </div>
-        <nav className="main-nav" aria-label="主导航">
-          {navItems.map(({ to, label, caption, icon: NavIcon }) => (
-            <NavLink key={to} to={to} end={to === "/"}>
-              <NavIcon size={21} weight="duotone" />
-              <span>
-                <strong>{label}</strong>
-                <small>{caption}</small>
-              </span>
-            </NavLink>
+        <nav className="main-nav module-nav" aria-label="模块启动器">
+          {moduleGroups.map((group) => (
+            <section key={group.id} className="module-group">
+              <span className="module-group-label">{group.label}</span>
+              {workstationModules.filter((item) => item.group === group.id).map(({ path, label, caption, icon: NavIcon }) => (
+                <NavLink key={path} to={path} end={path === "/"} title={`${label} · ${caption}`}>
+                  <NavIcon size={19} weight="duotone" />
+                  <span><strong>{label}</strong><small>{caption}</small></span>
+                </NavLink>
+              ))}
+            </section>
           ))}
         </nav>
-        <div className="sidebar-foot">
-          <NavLink to="/settings">
-            <Gear size={20} />
-            <span>
-              <strong>系统设置</strong>
-              <small>Settings</small>
-            </span>
-          </NavLink>
-          <div className="user-chip">
-            <div>QA</div>
-            <span>
-              <strong>Quant Research</strong>
-              <small>Read-only workspace</small>
-            </span>
-          </div>
+        <div className="launcher-security">
+          <ShieldCheck size={17} />
+          <span><strong>PAPER / READ ONLY</strong><small>Live trading disabled</small></span>
         </div>
       </aside>
 
-      <header className="topbar">
-        <div className="page-title">
-          <h1>{page.title}</h1>
-          <span>{page.caption}</span>
+      <header className="topbar terminal-topbar">
+        <div className="terminal-menu">
+          <button onClick={() => setPaletteOpen(true)}>模块 <CaretDown size={11} /></button>
+          <span>视图</span><span>数据</span><span>研究</span><span>帮助</span>
         </div>
-        <form
-          className="global-search"
-          onSubmit={(event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
-            const value = search.trim();
-            if (!value) {
-              setPaletteOpen(true);
-              return;
-            }
-            const stock = value.toUpperCase().match(/^(\d{6})(?:\.(SZ|SH|BJ))?$/);
-            if (stock) {
-              const suffix = stock[2] ?? (stock[1].startsWith("6") ? "SH" : "SZ");
-              navigate(`/stock-replay?symbol=${stock[1]}.${suffix}`);
-            } else {
-              navigate(`/runtime?query=${encodeURIComponent(value)}`);
-            }
-          }}
-        >
-          <MagnifyingGlass size={17} />
+        <form className="global-search" onSubmit={submitSearch}>
+          <MagnifyingGlass size={16} />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             onFocus={() => setPaletteOpen(true)}
-            placeholder="搜索股票 / 因子 / 模型 / 回测 ID"
+            placeholder="股票 / 因子 / 模型 / Run ID / 命令"
             aria-label="全局搜索"
           />
           <kbd>⌘K</kbd>
         </form>
         <div className="topbar-status">
-          <StatusBadge status={data?.modelStatus ?? "loading"} label={`模型 ${data?.modelStatus ?? "连接中"}`} />
-          <span className="topbar-stat"><Database size={15} /> {data?.runtime.artifactCount?.toLocaleString() ?? "—"} artifacts</span>
-          <span className="topbar-stat"><Pulse size={15} /> PIT Research</span>
-          {(data?.riskStatus ?? "") === "warning" ? <Warning size={18} className="tone-warning" /> : <ShieldCheck size={18} className="tone-positive" />}
+          <StatusBadge status={overview.isError ? "error" : overview.isLoading ? "loading" : "ready"} label={overview.isError ? "API OFFLINE" : "API CONNECTED"} />
+          <span className="topbar-stat"><Database size={14} /> {data?.runtime.artifactCount?.toLocaleString() ?? "—"}</span>
+          <span className="topbar-stat"><Pulse size={14} /> PIT</span>
+          {(data?.riskStatus ?? "") === "warning" ? <Warning size={17} className="tone-warning" /> : <ShieldCheck size={17} className="tone-positive" />}
         </div>
       </header>
 
-      <main className="workspace">
+      <nav className="workspace-tabs" aria-label="已打开工作区">
+        {layout.tabs.map((tab) => {
+          const Icon = tab.module.icon;
+          return (
+            <div key={tab.path} className={tab.path === layout.activePath ? "active" : ""}>
+              <button onClick={() => navigate(tab.path)} title={tab.path}>
+                <Icon size={14} />
+                <span>{tab.module.label}{tab.context ? ` · ${tab.context}` : ""}</span>
+              </button>
+              <button className="tab-close" onClick={() => layout.closeTab(tab.path)} aria-label={`关闭 ${tab.module.label}`}><X size={11} /></button>
+            </div>
+          );
+        })}
+      </nav>
+
+      <main className="workspace terminal-workspace">
+        <div className="workspace-context">
+          <span><strong>{page.label}</strong> / {page.caption}</span>
+          <span>Context: {location.search || "global"}</span>
+          <span>As-of: runtime snapshot</span>
+          <span className="context-trust">Research results ≠ executable orders</span>
+        </div>
         {overview.isError ? (
           <div className="api-banner">
             <Warning size={18} />
-            <span>Quant API 未连接；页面会保持空数据态，不使用模拟结果。</span>
+            <span>Quant API 未连接；页面保持真实空数据态，不使用模拟结果。</span>
             <code>python3 -m services.quant_api</code>
           </div>
         ) : null}
         <Outlet />
       </main>
 
-      <footer className="statusbar">
-        <span><i className="health-dot" /> 数据状态：{overview.isError ? "离线" : "已连接"}</span>
-        <span>数据延迟：runtime snapshot</span>
-        <span>安全模式：No live orders</span>
-        <span className="statusbar-right"><ListMagnifyingGlass size={14} /> 所有路径 repository-relative</span>
+      {layout.activityOpen ? (
+        <aside className="activity-drawer" aria-label="全局任务与事件">
+          <header><span><Bell size={15} /> ACTIVITY / JOBS</span><small>5s live polling · persisted backend state</small><button onClick={layout.toggleActivity}><X size={14} /></button></header>
+          {jobs.isLoading ? <StateView state="loading" /> : jobs.isError ? <StateView state="error" detail={jobs.error.message} /> : jobs.data?.data.length ? (
+            <div className="activity-table-wrap">
+              <table className="data-table activity-table">
+                <thead><tr><th>Status</th><th>Job</th><th>Command</th><th>Created</th><th>Message</th></tr></thead>
+                <tbody>{jobs.data.data.slice(0, 30).map((job) => (
+                  <tr key={job.id}><td><StatusBadge status={job.status} /></td><td className="mono">{job.id}</td><td>{job.commandId}</td><td>{formatDate(job.createdAt)}</td><td>{job.message ?? job.error ?? "—"}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <StateView state="empty" detail="当前没有持久化任务事件。" />}
+        </aside>
+      ) : null}
+
+      <footer className="statusbar terminal-statusbar">
+        <span><i className={`health-dot ${overview.isError ? "offline" : ""}`} /> API {overview.isError ? "offline" : "connected"}</span>
+        <span>Runtime {data?.runtime.indexedAt ? formatDate(data.runtime.indexedAt) : "unavailable"}</span>
+        <span>Artifacts {data?.runtime.artifactCount ?? 0}</span>
+        <span>Safety <strong>NO LIVE ORDERS</strong></span>
+        <button className={layout.activityOpen ? "active" : ""} onClick={layout.toggleActivity}><ListMagnifyingGlass size={14} /> Activity {activeJobs ? `(${activeJobs})` : ""}</button>
       </footer>
       <CommandPalette open={paletteOpen} initialQuery={search} onClose={closePalette} />
     </div>
