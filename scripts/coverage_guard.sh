@@ -34,6 +34,74 @@ echo "waiting for supervisor lock $(date -Is)"
 flock 9
 echo "lock acquired $(date -Is)"
 
+# --- value-level partial-bar probe (incident 2026-07-21) -------------------
+# Coverage and aggregate-volume checks CANNOT see partial intraday bars: the
+# corrupt 07-21 day had 100% coverage and 1.025x aggregate volume. The only
+# reliable detector is a direct re-fetch of a few symbols after the close.
+echo "--- partial-bar probe on trailing date $(date -Is)"
+$PY - <<'EOF'
+import sys, time
+import pandas as pd
+sys.path.insert(0, "scripts")
+from update_market_panel_daily import _tf_client
+PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
+p = pd.read_parquet(PANEL, columns=["symbol", "trade_date", "close", "volume"])
+p["trade_date"] = pd.to_datetime(p["trade_date"])
+last = p["trade_date"].max()
+day = p[p["trade_date"] == last].set_index("symbol")
+probe = sorted(day.index)[:4] + sorted(day.index)[len(day)//2:len(day)//2 + 2]
+tf = _tf_client()
+s = int((last - pd.Timedelta(days=5)).timestamp() * 1000)
+e = int((last + pd.Timedelta(days=1)).timestamp() * 1000) - 1
+bad = 0
+for sym in probe:
+    try:
+        k = pd.DataFrame(tf.klines.get(sym, period="1d", start_time=s, end_time=e, adjust="none"))
+        if k.empty:
+            continue
+        k["d"] = (pd.to_datetime(k["timestamp"], unit="ms", utc=True)
+                  .dt.tz_convert("Asia/Shanghai").dt.normalize().dt.tz_localize(None))
+        row = k[k["d"] == last]
+        if row.empty:
+            continue
+        vv = float(row.iloc[-1]["volume"]) * 100.0
+        pv = float(day.loc[sym, "volume"])
+        if vv > 0 and pv / vv < 0.95:
+            print(f"PARTIAL_BAR {sym}: panel {pv:,.0f} vs vendor {vv:,.0f} ratio {pv/vv:.3f}")
+            bad += 1
+    except Exception as ex:
+        print(f"probe error {sym}: {str(ex)[:60]}")
+    time.sleep(7)   # vendor limit is 10 req/min
+print(f"partial_bar_symbols={bad}/{len(probe)} on {last.date()}")
+sys.exit(9 if bad else 0)
+EOF
+probe_rc=$?
+if [ $probe_rc -eq 9 ]; then
+  echo "PARTIAL_BARS_DETECTED on trailing date -- dropping it (refetched post-close by next run)"
+  $PY - <<'EOF'
+import shutil
+import pandas as pd
+from pathlib import Path
+PANEL = Path("runtime/data/v7/silver/market_panel/market_panel.parquet")
+panel = pd.read_parquet(PANEL)
+panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+last = panel["trade_date"].max()
+shutil.copyfile(PANEL, PANEL.with_suffix(f".pre_partial_drop_{pd.Timestamp.now():%Y%m%d_%H%M%S}.parquet"))
+panel[panel["trade_date"] != last].to_parquet(PANEL, index=False)
+print(f"dropped {last.date()}")
+EOF
+  rm -f runtime/paper/fresh_blind/daily/composite_forward.parquet \
+        runtime/paper/fresh_blind/daily/sleeve_scores.parquet
+  timeout 10800 $PY scripts/forward_daily_inference.py \
+    --run-dir runtime/reports/v89_closed_loop/retrain_plus7_20260620_0300 \
+    --start 2026-05-08 --device cuda \
+    --output runtime/paper/fresh_blind/daily/composite_forward.parquet \
+    --sleeve-scores-output runtime/paper/fresh_blind/daily/sleeve_scores.parquet
+  echo "rescore rc=$?"
+  timeout 10800 $PY scripts/fresh_blind_daily.py
+  echo "runner rc=$?"
+fi
+
 dropped=$($PY - "$MIN_COV" <<'EOF'
 import shutil, sys
 import pandas as pd

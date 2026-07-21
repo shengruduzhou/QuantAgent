@@ -47,6 +47,18 @@ def main() -> int:
     pmax = panel["trade_date"].max()
     win_start = pmax + pd.Timedelta(days=1)
     win_end = pd.Timestamp(args.end) if args.end else pd.Timestamp.now().normalize()
+    # AVAILABILITY CLAMP (incident 2026-07-21): TickFlow serves an IN-PROGRESS
+    # daily bar during the session. A multi-hour pass that starts before 15:00
+    # CST therefore stages partial bars (measured: 000001.SZ volume 124.3M vs
+    # true close 175.5M, ratio 0.708) that are invisible to both coverage and
+    # aggregate-volume checks. Never request a day whose close is unpublished.
+    _cst = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
+    _last_available = _cst.normalize() if _cst.hour * 60 + _cst.minute >= 15 * 60 + 30 \
+        else _cst.normalize() - pd.Timedelta(days=1)
+    if win_end > _last_available:
+        print(f"clamping window end {win_end.date()} -> {_last_available.date()} "
+              f"(close not published yet at {_cst:%Y-%m-%d %H:%M} CST)", flush=True)
+        win_end = _last_available
     if win_start > win_end:
         print(json.dumps({"appended": 0, "note": "panel already current"}))
         return 0
