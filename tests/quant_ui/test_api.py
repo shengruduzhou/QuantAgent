@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+from pathlib import Path
 
 import httpx
 
 from services.quant_api.app import create_app
+from services.quant_api.config import ApiSettings
 
 
 def request(app, method: str, url: str, **kwargs):
@@ -148,3 +151,58 @@ def test_log_endpoint_returns_lines_without_nested_parser_envelope(quant_ui_sett
     assert result["status"] == "ready"
     assert result["data"] == ["first line", "last line"]
     assert result["provenance"]["parser"] == "log"
+
+
+def test_runtime_index_and_backtest_expose_verified_trust_contract(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+
+    index = request(
+        app,
+        "GET",
+        "/api/system/runtime-index",
+        params={"query": "metrics.json", "refresh": True},
+    ).json()
+    artifact = next(item for item in index["data"]["items"] if item["name"] == "metrics.json")
+
+    assert artifact["trustClass"] == "production_ready"
+    assert artifact["validationStatus"] == "verified"
+    assert artifact["schemaVersion"] == "quantagent.backtest.metrics.1"
+    assert artifact["sourceTime"] == "2026-01-06T00:00:00+00:00"
+    assert "production_display" in artifact["capabilities"]
+
+    backtest = request(app, "GET", "/api/backtests").json()["data"][0]
+    assert backtest["trustClass"] == "production_ready"
+    assert backtest["validationStatus"] == "verified"
+    assert backtest["capabilities"]["productionDisplay"] is True
+
+
+def test_api_reads_runtime_outside_repository(
+    quant_ui_settings,
+    tmp_path: Path,
+) -> None:
+    external_runtime = tmp_path / "external-runtime"
+    shutil.copytree(quant_ui_settings.runtime_root, external_runtime)
+    project_root = tmp_path / "checkout-without-runtime"
+    project_root.mkdir()
+    settings = ApiSettings(
+        project_root=project_root,
+        runtime_root=external_runtime,
+        cache_root=external_runtime / "cache" / "quant_ui_external",
+        jobs_root=external_runtime / "jobs" / "quant_ui_external",
+        index_ttl_seconds=0,
+    ).ensure()
+
+    app = create_app(settings)
+    backtests = request(app, "GET", "/api/backtests").json()
+    runtime_index = request(
+        app,
+        "GET",
+        "/api/system/runtime-index",
+        params={"query": "metrics.json", "refresh": True},
+    ).json()
+
+    assert backtests["status"] == "ready"
+    assert backtests["data"][0]["path"].startswith("runtime/")
+    artifact = next(item for item in runtime_index["data"]["items"] if item["name"] == "metrics.json")
+    assert artifact["path"].startswith("runtime/")
+    assert artifact["validationStatus"] == "verified"

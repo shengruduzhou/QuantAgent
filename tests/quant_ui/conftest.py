@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import polars as pl
@@ -42,7 +43,8 @@ def _write_runtime_fixture(settings: ApiSettings) -> None:
     runtime = settings.runtime_root
     backtest = runtime / "reports" / "v8" / "deep" / "fixture_run" / "short_5d" / "backtest"
     backtest.mkdir(parents=True)
-    (backtest / "metrics.json").write_text(
+    metrics_path = backtest / "metrics.json"
+    metrics_path.write_text(
         json.dumps({
             "total_return": 0.12,
             "annualized_return": 0.18,
@@ -56,6 +58,16 @@ def _write_runtime_fixture(settings: ApiSettings) -> None:
             "n_fills": 2,
             "start_date": "2026-01-02",
             "end_date": "2026-01-05",
+        }),
+        encoding="utf-8",
+    )
+    (backtest / "metrics.json.manifest.json").write_text(
+        json.dumps({
+            "schema_version": "quantagent.backtest.metrics.1",
+            "created_at": "2026-01-06T00:00:00+00:00",
+            "trust_class": "production_ready",
+            "output": str(metrics_path),
+            "output_sha256": sha256(metrics_path.read_bytes()).hexdigest(),
         }),
         encoding="utf-8",
     )

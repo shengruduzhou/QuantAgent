@@ -6,7 +6,12 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 
-DataStatus = Literal["ready", "partial", "empty", "error"]
+DataStatus = Literal["ready", "partial", "empty", "error", "stale", "unavailable"]
+ArtifactTrustClass = Literal[
+    "production_ready", "paper_only", "research_only", "contaminated", "unclassified",
+]
+ArtifactValidationStatus = Literal["verified", "declared", "unverified", "invalid"]
+ArtifactFreshnessStatus = Literal["current", "stale", "unknown"]
 T = TypeVar("T")
 
 
@@ -61,6 +66,15 @@ class RuntimeArtifact(ApiModel):
     date_start: str | None = Field(None, alias="dateStart")
     date_end: str | None = Field(None, alias="dateEnd")
     tags: list[str] = Field(default_factory=list)
+    schema_version: str | None = Field(None, alias="schemaVersion")
+    trust_class: ArtifactTrustClass = Field("unclassified", alias="trustClass")
+    validation_status: ArtifactValidationStatus = Field("unverified", alias="validationStatus")
+    freshness_status: ArtifactFreshnessStatus = Field("unknown", alias="freshnessStatus")
+    stale_reason: str | None = Field(None, alias="staleReason")
+    source_time: str | None = Field(None, alias="sourceTime")
+    manifest_path: str | None = Field(None, alias="manifestPath")
+    content_hash: str | None = Field(None, alias="contentHash")
+    capabilities: list[str] = Field(default_factory=list)
     issues: list[DataIssue] = Field(default_factory=list)
 
 
@@ -158,6 +172,9 @@ class BacktestSummary(ApiModel):
     status: DataStatus = "ready"
     path: str
     tags: list[str] = Field(default_factory=list)
+    trust_class: ArtifactTrustClass = Field("unclassified", alias="trustClass")
+    validation_status: ArtifactValidationStatus = Field("unverified", alias="validationStatus")
+    manifest_path: str | None = Field(None, alias="manifestPath")
     capabilities: dict[str, bool | str | None] = Field(default_factory=dict)
 
 

@@ -59,6 +59,10 @@ export function RuntimeExplorerPage(): JSX.Element {
     tab === "cleanup" ? "/system/runtime-cleanup" : null,
   );
   const data = artifacts.data?.data;
+  const selectedArtifact = useMemo(
+    () => data?.items.find((artifact) => artifact.id === selectedId) ?? null,
+    [data?.items, selectedId],
+  );
 
   useEffect(() => {
     const defaults = cleanup.data?.data.candidates.filter((item) => item.safeDefault).map((item) => item.id);
@@ -131,7 +135,7 @@ export function RuntimeExplorerPage(): JSX.Element {
                 <>
                   <div className="table-scroll">
                     <table className="data-table">
-                      <thead><tr><th>类型</th><th>文件</th><th>Run / Horizon</th><th className="numeric">大小</th><th>修改时间</th><th>状态</th></tr></thead>
+                      <thead><tr><th>类型</th><th>文件</th><th>Run / Horizon</th><th>Trust / Validation</th><th className="numeric">大小</th><th>来源时间</th><th>状态</th></tr></thead>
                       <tbody>
                         {data.items.map((artifact) => (
                           <tr
@@ -146,8 +150,12 @@ export function RuntimeExplorerPage(): JSX.Element {
                             <td><span className={`artifact-kind kind-${artifact.kind}`}>{artifact.kind}</span></td>
                             <td className="artifact-path"><strong>{artifact.name}</strong><span>{artifact.path}</span></td>
                             <td><strong>{artifact.runId ?? "—"}</strong><span>{artifact.horizon ?? artifact.extension}</span></td>
+                            <td className="artifact-trust-cell">
+                              <StatusBadge status={trustBadgeStatus(artifact.trustClass)} label={artifact.trustClass} />
+                              <span>{artifact.validationStatus}</span>
+                            </td>
                             <td className="numeric mono">{formatBytes(artifact.sizeBytes)}</td>
-                            <td className="mono">{formatDate(artifact.modifiedAt)}</td>
+                            <td className="mono"><strong>{formatDate(artifact.sourceTime ?? artifact.modifiedAt)}</strong><span>{artifact.sourceTime ? "manifest" : "filesystem"}</span></td>
                             <td><StatusBadge status={artifact.status} /></td>
                           </tr>
                         ))}
@@ -160,10 +168,30 @@ export function RuntimeExplorerPage(): JSX.Element {
                     <button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button>
                   </div>
                 </>
-              ) : <StateView state={artifacts.isLoading ? "loading" : "empty"} />}
+              ) : <StateView state={artifacts.isLoading ? "loading" : artifacts.isError ? "error" : "empty"} detail={artifacts.error?.message} />}
             </Panel>
 
-            <Panel title="Artifact Preview" eyebrow="Safe parser · binary metadata only" className="runtime-preview-panel">
+            <Panel title="Artifact Contract & Preview" eyebrow="Manifest-aware · fail-closed capabilities" className="runtime-preview-panel">
+              {selectedArtifact ? (
+                <section className="artifact-contract">
+                  <div className="artifact-contract-badges">
+                    <StatusBadge status={trustBadgeStatus(selectedArtifact.trustClass)} label={selectedArtifact.trustClass} />
+                    <StatusBadge status={validationBadgeStatus(selectedArtifact.validationStatus)} label={selectedArtifact.validationStatus} />
+                    <StatusBadge status={selectedArtifact.freshnessStatus} label={selectedArtifact.freshnessStatus} />
+                  </div>
+                  <dl>
+                    <div><dt>Schema</dt><dd>{selectedArtifact.schemaVersion ?? "undeclared"}</dd></div>
+                    <div><dt>Manifest</dt><dd>{selectedArtifact.manifestPath ?? "none"}</dd></div>
+                    <div><dt>Source time</dt><dd>{formatDate(selectedArtifact.sourceTime ?? selectedArtifact.modifiedAt)}</dd></div>
+                    <div><dt>Capabilities</dt><dd>{selectedArtifact.capabilities.join(" · ") || "metadata"}</dd></div>
+                  </dl>
+                  {selectedArtifact.issues.length ? (
+                    <div className="artifact-contract-issues">
+                      {selectedArtifact.issues.map((issue) => <span key={`${issue.code}-${issue.path ?? ""}`}><WarningCircle size={13} />{issue.code}: {issue.message}</span>)}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
               {selectedId ? (
                 preview.isLoading ? <StateView state="loading" /> :
                   preview.data ? <pre className="json-view">{JSON.stringify(preview.data.data, null, 2)}</pre> :
@@ -254,4 +282,17 @@ export function RuntimeExplorerPage(): JSX.Element {
       ) : null}
     </div>
   );
+}
+
+function trustBadgeStatus(trustClass: RuntimeArtifact["trustClass"]): string {
+  if (trustClass === "production_ready") return "ready";
+  if (trustClass === "contaminated") return "error";
+  if (trustClass === "paper_only" || trustClass === "research_only") return "warning";
+  return "unavailable";
+}
+
+function validationBadgeStatus(status: RuntimeArtifact["validationStatus"]): string {
+  if (status === "verified") return "ready";
+  if (status === "invalid") return "error";
+  return status === "declared" ? "partial" : "unavailable";
 }

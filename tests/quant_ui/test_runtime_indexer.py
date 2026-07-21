@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from hashlib import sha256
+
 from services.quant_api.runtime_indexer import RuntimeIndexer
 from services.quant_api.runtime_indexer.parsers import parse_log
 
@@ -15,6 +18,14 @@ def test_runtime_indexer_classifies_and_excludes_internal_cache(quant_ui_setting
     assert all("runtime/cache/quant_ui" not in item["path"] for item in artifacts)
     assert all("/feature_cache/" not in item["path"] for item in artifacts)
     assert all(item["path"].startswith("runtime/") for item in artifacts)
+
+    metrics = next(item for item in artifacts if item["name"] == "metrics.json")
+    assert metrics["schemaVersion"] == "quantagent.backtest.metrics.1"
+    assert metrics["trustClass"] == "production_ready"
+    assert metrics["validationStatus"] == "verified"
+    assert metrics["manifestPath"].endswith("metrics.json.manifest.json")
+    assert "production_display" in metrics["capabilities"]
+    assert "paper_execution" in metrics["capabilities"]
 
     second = indexer.scan()
     assert [item["id"] for item in second] == [item["id"] for item in artifacts]
@@ -38,3 +49,57 @@ def test_log_parser_reads_tail_without_returning_entire_file(tmp_path) -> None:
     result = parse_log(path, limit=3)
 
     assert result["data"] == ["line-9997", "line-9998", "line-9999"]
+
+
+def test_unclassified_and_contaminated_artifacts_are_not_production_capable(quant_ui_settings) -> None:
+    root = quant_ui_settings.runtime_root / "reports" / "trust_contracts"
+    root.mkdir(parents=True)
+    unclassified = root / "legacy.json"
+    unclassified.write_text('{"value": 1}', encoding="utf-8")
+
+    contaminated = root / "forensics.json"
+    contaminated.write_text('{"value": 2}', encoding="utf-8")
+    (root / "forensics.json.manifest.json").write_text(
+        json.dumps({
+            "schema_version": "quantagent.forensics.1",
+            "trust_class": "contaminated_holdout_forensics",
+            "output_sha256": sha256(contaminated.read_bytes()).hexdigest(),
+        }),
+        encoding="utf-8",
+    )
+
+    artifacts = RuntimeIndexer(quant_ui_settings).scan(force=True)
+    legacy_row = next(item for item in artifacts if item["path"].endswith("legacy.json"))
+    contaminated_row = next(item for item in artifacts if item["path"].endswith("forensics.json"))
+
+    assert legacy_row["trustClass"] == "unclassified"
+    assert legacy_row["validationStatus"] == "unverified"
+    assert "production_display" not in legacy_row["capabilities"]
+    assert contaminated_row["trustClass"] == "contaminated"
+    assert contaminated_row["validationStatus"] == "verified"
+    assert "production_display" not in contaminated_row["capabilities"]
+
+
+def test_hash_mismatch_fails_closed(quant_ui_settings) -> None:
+    root = quant_ui_settings.runtime_root / "reports" / "broken_contract"
+    root.mkdir(parents=True)
+    artifact = root / "result.json"
+    artifact.write_text('{"value": 1}', encoding="utf-8")
+    (root / "result.json.manifest.json").write_text(
+        json.dumps({
+            "schema_version": "quantagent.result.1",
+            "trust_class": "production_ready",
+            "output_sha256": "0" * 64,
+        }),
+        encoding="utf-8",
+    )
+
+    row = next(
+        item for item in RuntimeIndexer(quant_ui_settings).scan(force=True)
+        if item["path"].endswith("result.json")
+    )
+
+    assert row["status"] == "error"
+    assert row["validationStatus"] == "invalid"
+    assert "production_display" not in row["capabilities"]
+    assert row["issues"][0]["code"] == "content_hash_mismatch"

@@ -17,7 +17,7 @@ from services.quant_api.adapters.utils import (
     read_parquet_rows,
     require_relative_path,
 )
-from services.quant_api.config import ApiSettings, stable_id
+from services.quant_api.config import ApiSettings, safe_project_path, stable_id
 from services.quant_api.runtime_indexer import RuntimeIndexer
 
 
@@ -37,7 +37,7 @@ class BacktestAdapter:
             if item["name"] == "metrics.json"
         ]
         for artifact in metric_artifacts:
-            metrics_path = self.settings.project_root / artifact["path"]
+            metrics_path = safe_project_path(self.settings, artifact["path"])
             directory = metrics_path.parent
             if not ((directory / "nav.csv").exists() or (directory / "trades.csv").exists()):
                 continue
@@ -50,6 +50,8 @@ class BacktestAdapter:
             initial_cash = self._metric(run_config, "initial_cash")
             name = directory.parent.parent.name if directory.name == "backtest" else directory.name
             horizon = directory.parent.name if directory.name == "backtest" else None
+            capabilities = self._capabilities(directory)
+            capabilities.update(self._trust_capabilities(artifact))
             summaries.append({
                 "id": backtest_id,
                 "name": name,
@@ -78,7 +80,10 @@ class BacktestAdapter:
                 "status": "ready",
                 "path": relative,
                 "tags": [item for item in (horizon, "strict-v8" if "risk_events.json" in {p.name for p in directory.iterdir()} else None) if item],
-                "capabilities": self._capabilities(directory),
+                "trustClass": artifact.get("trustClass", "unclassified"),
+                "validationStatus": artifact.get("validationStatus", "unverified"),
+                "manifestPath": artifact.get("manifestPath"),
+                "capabilities": capabilities,
             })
         summaries.extend(self._discover_summary_backtests(seen_directories))
         summaries.sort(key=lambda row: row.get("endDate") or "", reverse=True)
@@ -475,7 +480,7 @@ class BacktestAdapter:
             if item.get("name") == "summary.json" and item.get("status") != "error"
         ]
         for artifact in summary_artifacts:
-            summary_path = self.settings.project_root / artifact["path"]
+            summary_path = safe_project_path(self.settings, artifact["path"])
             directory = summary_path.parent
             if directory.resolve() in seen_directories:
                 continue
@@ -491,6 +496,8 @@ class BacktestAdapter:
             self._runs[backtest_id] = directory
             start_date, end_date = _window_dates(payload.get("window"))
             config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+            capabilities = self._capabilities(directory)
+            capabilities.update(self._trust_capabilities(artifact))
             summaries.append({
                 "id": backtest_id,
                 "name": directory.name,
@@ -519,9 +526,21 @@ class BacktestAdapter:
                 "status": "ready",
                 "path": relative,
                 "tags": ["summary-backed", "paper" if "paper" in relative else "research"],
-                "capabilities": self._capabilities(directory),
+                "trustClass": artifact.get("trustClass", "unclassified"),
+                "validationStatus": artifact.get("validationStatus", "unverified"),
+                "manifestPath": artifact.get("manifestPath"),
+                "capabilities": capabilities,
             })
         return summaries
+
+    @staticmethod
+    def _trust_capabilities(artifact: dict[str, Any]) -> dict[str, bool]:
+        capabilities = set(artifact.get("capabilities") or [])
+        return {
+            "productionDisplay": "production_display" in capabilities,
+            "paperExecution": "paper_execution" in capabilities,
+            "auditReplay": "audit_replay" in capabilities,
+        }
 
     def _capabilities(self, directory: Path) -> dict[str, bool | str | None]:
         trade_columns = set(read_csv_columns(directory / "trades.csv"))

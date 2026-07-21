@@ -27,7 +27,11 @@ class ApiSettings:
 
 
 def default_settings() -> ApiSettings:
-    paths = quant_paths(home=PROJECT_ROOT / "runtime")
+    # Respect the canonical QuantAgent storage resolver, including
+    # QUANTAGENT_HOME.  The Web control plane must inspect the same runtime
+    # that research/training jobs write instead of silently falling back to a
+    # repository-local directory.
+    paths = quant_paths()
     return ApiSettings(
         project_root=PROJECT_ROOT,
         runtime_root=paths.home,
@@ -39,16 +43,28 @@ def default_settings() -> ApiSettings:
 def safe_project_path(settings: ApiSettings, value: str | Path) -> Path:
     candidate = Path(value)
     if not candidate.is_absolute():
-        candidate = settings.project_root / candidate
+        parts = candidate.parts
+        if parts and parts[0] == "runtime":
+            candidate = settings.runtime_root.joinpath(*parts[1:])
+        else:
+            candidate = settings.project_root / candidate
     resolved = candidate.resolve()
-    root = settings.project_root.resolve()
-    if resolved != root and root not in resolved.parents:
-        raise ValueError("path is outside the QuantAgent project")
+    allowed_roots = {
+        settings.project_root.resolve(),
+        settings.runtime_root.resolve(),
+    }
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError("path is outside the QuantAgent project and runtime roots")
     return resolved
 
 
 def project_relative(settings: ApiSettings, path: str | Path) -> str:
     resolved = safe_project_path(settings, path)
+    runtime_root = settings.runtime_root.resolve()
+    if resolved == runtime_root:
+        return "runtime"
+    if runtime_root in resolved.parents:
+        return (Path("runtime") / resolved.relative_to(runtime_root)).as_posix()
     return resolved.relative_to(settings.project_root.resolve()).as_posix()
 
 
