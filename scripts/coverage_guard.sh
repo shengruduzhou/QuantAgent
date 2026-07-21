@@ -152,4 +152,13 @@ fi
 
 $PY scripts/fresh_blind_healthcheck.py
 echo "healthcheck rc=$?"
+
+# disk-growth control: every catch-up/drop writes a ~480MB panel backup.
+# Keep the 3 most recent; older ones are redundant (git + ledger carry lineage).
+KEPT=3
+ls -1t runtime/data/v7/silver/market_panel/market_panel.pre_*.parquet 2>/dev/null \
+  | tail -n +$((KEPT + 1)) | while read -r old; do
+      echo "pruning stale panel backup: $(basename "$old")"; rm -f "$old"
+  done
+echo "panel backups retained: $(ls -1 runtime/data/v7/silver/market_panel/market_panel.pre_*.parquet 2>/dev/null | wc -l)"
 echo "=== coverage guard end $(date -Is) ==="

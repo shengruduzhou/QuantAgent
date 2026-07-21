@@ -53,7 +53,7 @@ def main() -> int:
     # true close 175.5M, ratio 0.708) that are invisible to both coverage and
     # aggregate-volume checks. Never request a day whose close is unpublished.
     _cst = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
-    _last_available = _cst.normalize() if _cst.hour * 60 + _cst.minute >= 15 * 60 + 30 \
+    _last_available = _cst.normalize() if _cst.hour * 60 + _cst.minute >= 16 * 60 \
         else _cst.normalize() - pd.Timedelta(days=1)
     if win_end > _last_available:
         print(f"clamping window end {win_end.date()} -> {_last_available.date()} "

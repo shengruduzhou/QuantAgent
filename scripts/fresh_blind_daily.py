@@ -101,7 +101,7 @@ def step_update_data(dry: bool) -> dict:
     try:
         panel_max = pd.to_datetime(pd.read_parquet(PANEL, columns=["trade_date"])["trade_date"]).max()
         cst = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
-        last_avail = cst.normalize() if cst.hour * 60 + cst.minute >= 15 * 60 + 30 \
+        last_avail = cst.normalize() if cst.hour * 60 + cst.minute >= 16 * 60 \
             else cst.normalize() - pd.Timedelta(days=1)
         if panel_max >= last_avail:
             return {"status": "OK", "note": "panel already current (no fetch needed)"}

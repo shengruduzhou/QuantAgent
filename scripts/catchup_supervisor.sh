@@ -40,18 +40,19 @@ from datetime import datetime, timedelta, timezone
 panel = pd.read_parquet("runtime/data/v7/silver/market_panel/market_panel.parquet",
                         columns=["trade_date"])
 pmax = pd.to_datetime(panel["trade_date"]).max().normalize()
-# China close 15:00 CST; treat a day's close as available from 15:30 CST
+# China close 15:00 CST; a close counts as published from 16:00 CST (1h margin:
+# 15:30 sat exactly on the 16:30 JST runner boundary — INC-P1 follow-up)
 cst = datetime.now(timezone.utc) + timedelta(hours=8)
 try:
     import akshare as ak
     cal = pd.to_datetime(ak.tool_trade_date_hist_sina()["trade_date"]).sort_values()
     days = cal[cal <= pd.Timestamp(cst.date())]
     target = days.iloc[-1].normalize()
-    if target.date() == cst.date() and (cst.hour * 60 + cst.minute) < 15 * 60 + 30:
+    if target.date() == cst.date() and (cst.hour * 60 + cst.minute) < 16 * 60:
         target = days.iloc[-2].normalize()   # today's close not out yet
 except Exception:                            # calendar unavailable -> weekday fallback
     d = pd.Timestamp(cst.date())
-    if (cst.hour * 60 + cst.minute) < 15 * 60 + 30:
+    if (cst.hour * 60 + cst.minute) < 16 * 60:
         d -= pd.Timedelta(days=1)
     while d.weekday() >= 5:
         d -= pd.Timedelta(days=1)
