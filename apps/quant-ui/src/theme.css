@@ -19,6 +19,15 @@
   --state-verified: #2ac89f;
   --state-stale: #a47b43;
   --state-unavailable: #71879a;
+
+  --bg: var(--terminal-canvas);
+  --surface: var(--terminal-panel);
+  --surface-2: var(--terminal-panel-raised);
+  --border: var(--terminal-border);
+  --blue: var(--market-up);
+  --green: var(--state-verified);
+  --red: var(--state-critical);
+  --amber: var(--state-warning);
 }
 
 :focus-visible {
