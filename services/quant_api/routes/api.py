@@ -27,6 +27,13 @@ def response(data: Any, *, issues: list[dict] | None = None, status: str | None 
     return payload
 
 
+
+@router.get("/data/providers")
+async def data_providers(request: Request) -> dict:
+    data = services(request).data_manager.overview()
+    return response(data, status="ready")
+
+
 @router.get("/system/overview")
 async def system_overview(request: Request) -> dict:
     svc = services(request)
@@ -556,6 +563,12 @@ async def do_t_analysis(request: Request, source_id: str | None = Query(None, al
         raise HTTPException(404, "Do-T source not found")
 
 
+
+@router.post("/jobs/data")
+async def create_data_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "data", body)
+
+
 @router.post("/jobs/backtest")
 async def create_backtest_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "backtest", body)
@@ -575,6 +588,17 @@ async def create_infer_job(request: Request, body: JobRequest) -> dict:
 async def list_jobs(request: Request) -> dict:
     data = services(request).jobs.list()
     return response(data, status="ready" if data else "empty")
+
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(request: Request, job_id: str) -> dict:
+    try:
+        return response(services(request).jobs.cancel(job_id))
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
 @router.get("/jobs/{job_id}")

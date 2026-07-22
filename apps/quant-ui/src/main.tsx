@@ -12,6 +12,7 @@ import "./parity.css";
 import "./ux-depth.css";
 import "./ux-depth-fixes.css";
 import "./control-depth.css";
+import "./data-manager.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

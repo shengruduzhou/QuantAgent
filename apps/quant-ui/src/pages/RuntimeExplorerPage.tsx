@@ -7,6 +7,7 @@ import {
   Database,
   File,
   FlowArrow,
+  HardDrives,
   MagnifyingGlass,
   ShieldCheck,
   Stack,
@@ -14,6 +15,7 @@ import {
 } from "@phosphor-icons/react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { Page, RuntimeArtifact, RuntimeCatalog, RuntimeLineage, RuntimeRunSummary } from "../api/types";
+import { DataManagerWorkspace } from "../components/runtime_manager/DataManagerWorkspace";
 import { RuntimeCleanupWorkspace } from "../components/runtime_manager/RuntimeCleanupWorkspace";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
@@ -26,10 +28,10 @@ const trustClasses = ["", "production_ready", "paper_only", "research_only", "co
 const validations = ["", "verified", "declared", "unverified", "invalid"];
 const capabilities = ["", "preview", "research_display", "production_display", "paper_execution", "audit_replay"];
 
-type RuntimeTab = "catalog" | "runs" | "lineage" | "cleanup";
+type RuntimeTab = "catalog" | "data" | "runs" | "lineage" | "cleanup";
 
 function requestedRuntimeTab(value: string | null): RuntimeTab | null {
-  return value === "catalog" || value === "runs" || value === "lineage" || value === "cleanup" ? value : null;
+  return value === "catalog" || value === "data" || value === "runs" || value === "lineage" || value === "cleanup" ? value : null;
 }
 
 export function RuntimeExplorerPage(): JSX.Element {
@@ -114,10 +116,11 @@ export function RuntimeExplorerPage(): JSX.Element {
       <section className="runtime-commandbar">
         <div>
           <span className="page-kicker">RUNTIME / DATA MANAGER</span>
-          <h2>Artifact Catalog · Runs · Lineage</h2>
+          <h2>Data Ops · Artifact Catalog · Runs · Lineage</h2>
           <p>唯一 RuntimeIndexer 投影；manifest 声明优先，未声明关系不推断。</p>
         </div>
         <div className="runtime-tabs terminal-segments">
+          <button className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><HardDrives size={15} /> Data Ops</button>
           <button className={tab === "catalog" ? "active" : ""} onClick={() => setTab("catalog")}><Database size={15} /> Catalog</button>
           <button className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}><Stack size={15} /> Runs</button>
           <button className={tab === "lineage" ? "active" : ""} onClick={() => setTab("lineage")}><FlowArrow size={15} /> Lineage</button>
@@ -134,6 +137,8 @@ export function RuntimeExplorerPage(): JSX.Element {
         <RuntimeStat label="Contaminated" value={(summary?.byTrust.contaminated ?? 0).toLocaleString()} detail="not production-ready" tone={(summary?.byTrust.contaminated ?? 0) ? "warning" : "neutral"} />
         <RuntimeStat label="Indexed" value={summary?.indexedAt ? formatDate(summary.indexedAt) : "—"} detail={catalog.data?.data.roots?.join(" · ") || "runtime unavailable"} />
       </section>
+
+      {tab === "data" ? <DataManagerWorkspace /> : null}
 
       {tab === "catalog" ? (
         <>

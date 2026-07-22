@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 from threading import RLock, Thread
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
@@ -63,16 +63,57 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_inputs": {"model_dir", "feature_dataset"},
         "path_outputs": {"output"},
     },
+    "build-akshare-market-panel-v7": {
+        "type": "data",
+        "required": {"start_date", "end_date", "output", "allow_network"},
+        "required_any": (("symbols", "symbols_file"),),
+        "allowed": {
+            "symbols", "symbols_file", "start_date", "end_date", "output_root", "output",
+            "allow_network", "adjust", "provider_uri_for_range", "as_of_date",
+        },
+        "path_inputs": {"symbols_file", "provider_uri_for_range"},
+        "path_outputs": {"output_root", "output"},
+    },
+    "build-market-panel-v7": {
+        "type": "data",
+        "required": {"provider_uri", "start_date", "end_date", "output_root"},
+        "required_any": (("symbols", "symbols_file", "universe"),),
+        "allowed": {
+            "provider_uri", "start_date", "end_date", "output_root", "symbols",
+            "symbols_file", "universe", "region", "require_optional_flags",
+        },
+        "path_inputs": {"provider_uri", "symbols_file"},
+        "path_outputs": {"output_root"},
+    },
+    "build-fundamentals-v7": {
+        "type": "data",
+        "required": {"start_date", "end_date", "provider", "fundamentals_root", "allow_network"},
+        "required_any": (("symbols", "symbols_file"),),
+        "allowed": {
+            "symbols", "symbols_file", "start_date", "end_date", "provider",
+            "fundamentals_root", "allow_network", "token_env",
+        },
+        "path_inputs": {"symbols_file"},
+        "path_outputs": {"fundamentals_root"},
+    },
 }
 
 
 class JobManager:
-    def __init__(self, settings: ApiSettings, events: EventBroker | None = None) -> None:
+    def __init__(
+        self,
+        settings: ApiSettings,
+        events: EventBroker | None = None,
+        on_success: Callable[[], None] | None = None,
+    ) -> None:
         self.settings = settings
         self.events = events
+        self.on_success = on_success
         self.state_path = settings.jobs_root / "jobs.json"
         self._lock = RLock()
         self._jobs: dict[str, JobRecord] = {}
+        self._processes: dict[str, subprocess.Popen] = {}
+        self._cancel_requested: set[str] = set()
         self._load()
 
     def submit(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +129,9 @@ class JobManager:
         }
         if missing:
             raise ValueError(f"missing required parameters: {sorted(missing)}")
+        for group in spec.get("required_any", ()):
+            if not any(parameters.get(key) not in (None, "", []) for key in group):
+                raise ValueError(f"one of {sorted(group)} is required")
         normalized = self._normalize_parameters(spec, parameters)
         job_id = f"job_{uuid4().hex[:16]}"
         log_path = self.settings.jobs_root / f"{job_id}.log"
@@ -118,6 +162,34 @@ class JobManager:
         with self._lock:
             record = self._jobs.get(job_id)
             return self._public(record) if record else None
+
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        terminal = {"succeeded", "failed", "cancelled"}
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                raise KeyError(job_id)
+            if record.status in terminal:
+                raise ValueError(f"job {job_id} already finished with status {record.status}")
+            self._cancel_requested.add(job_id)
+            process = self._processes.get(job_id)
+            if process is None:
+                record.status = "cancelled"
+                record.message = "cancelled before process start"
+                record.finishedAt = _now()
+            else:
+                record.status = "cancelling"
+                record.message = "termination requested"
+            self._persist()
+            public = self._public(record)
+        self._emit(record)
+        if process is not None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        return public
 
     def logs(self, job_id: str, limit: int = 500) -> list[str]:
         with self._lock:
@@ -171,7 +243,10 @@ class JobManager:
         spec: dict[str, Any],
         log_path: Path,
     ) -> None:
-        self._update(job_id, status="running", startedAt=_now(), message="running")
+        with self._lock:
+            if job_id in self._cancel_requested or self._jobs[job_id].status == "cancelled":
+                return
+        self._update(job_id, status="running", startedAt=_now(), progress=0.0, message="running")
         command = [sys.executable, "-m", "quantagent.cli", command_id]
         for key, value in parameters.items():
             if value is None:
@@ -198,16 +273,34 @@ class JobManager:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
+                with self._lock:
+                    self._processes[job_id] = process
+                    cancel_requested = job_id in self._cancel_requested
+                if cancel_requested:
+                    process.terminate()
                 code = process.wait()
+            with self._lock:
+                self._processes.pop(job_id, None)
+                cancelled = job_id in self._cancel_requested
             outputs = [
                 project_relative(self.settings, value)
                 for key, value in parameters.items()
                 if key in spec["path_outputs"] and value is not None
             ]
-            if code == 0:
+            if cancelled:
+                self._update(
+                    job_id, status="cancelled", finishedAt=_now(),
+                    message="cancelled", outputPaths=outputs,
+                )
+            elif code == 0:
+                if self.on_success is not None:
+                    try:
+                        self.on_success()
+                    except Exception:
+                        pass
                 self._update(
                     job_id, status="succeeded", finishedAt=_now(), progress=1.0,
-                    message="completed", outputPaths=outputs,
+                    message="completed; runtime catalog invalidated", outputPaths=outputs,
                 )
             else:
                 self._update(
@@ -215,10 +308,16 @@ class JobManager:
                     error=f"command exited with code {code}",
                 )
         except OSError as exc:
-            self._update(
-                job_id, status="failed", finishedAt=_now(), message="failed to start",
-                error=str(exc),
-            )
+            with self._lock:
+                self._processes.pop(job_id, None)
+                cancelled = job_id in self._cancel_requested
+            if cancelled:
+                self._update(job_id, status="cancelled", finishedAt=_now(), message="cancelled")
+            else:
+                self._update(
+                    job_id, status="failed", finishedAt=_now(), message="failed to start",
+                    error=str(exc),
+                )
 
     def _normalize_parameters(self, spec: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
         normalized: dict[str, Any] = {}
@@ -269,7 +368,7 @@ class JobManager:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._jobs = {item["id"]: JobRecord(**item) for item in payload}
             for record in self._jobs.values():
-                if record.status in {"queued", "running"}:
+                if record.status in {"queued", "running", "cancelling"}:
                     record.status = "failed"
                     record.finishedAt = _now()
                     record.error = "API process restarted before job completed"

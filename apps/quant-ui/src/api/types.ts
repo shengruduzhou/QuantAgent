@@ -102,6 +102,31 @@ export interface RuntimeLineage {
   issues: DataIssue[];
 }
 
+
+export interface DataProvider {
+  id: string;
+  label: string;
+  module: string | null;
+  commandId: string | null;
+  assetClasses: string[];
+  intervals: string[];
+  operations: string[];
+  requires: string[];
+  note: string;
+  installed: boolean;
+  configured: boolean;
+  status: "ready" | "needs_configuration" | "unavailable";
+  missingRequirements: string[];
+}
+
+export interface DataManagerOverview {
+  providers: DataProvider[];
+  constraints: string[];
+  jobEndpoint: string;
+  supportsCancellation: boolean;
+  runtimeRoot: string;
+}
+
 export interface JobSummary {
   id: string;
   type: string;
