@@ -2,7 +2,7 @@ import {
   ArrowRight,
   BookOpenText,
   Broom,
-  ChartCandlestick,
+  ChartLine,
   Database,
   Flask,
   Keyboard,
@@ -84,7 +84,7 @@ export function HelpCenterPage(): JSX.Element {
 
         <Panel title="K 线操作" eyebrow="Human-scale chart interaction" className="help-chart-panel">
           <div className="help-guide-list">
-            <div><ChartCandlestick size={17} /><span><strong>滚轮</strong><small>只负责以鼠标位置为中心缩放，不同时平移。</small></span></div>
+            <div><ChartLine size={17} /><span><strong>滚轮</strong><small>只负责以鼠标位置为中心缩放，不同时平移。</small></span></div>
             <div><Keyboard size={17} /><span><strong>左键拖拽</strong><small>平移时间窗口；不会改变缩放比例。</small></span></div>
             <div><BookOpenText size={17} /><span><strong>信号与详情</strong><small>点击买卖、做 T 或风控标记，联动当前交易记录。</small></span></div>
           </div>
