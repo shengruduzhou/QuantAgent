@@ -6,6 +6,7 @@ import { App } from "./App";
 import "./styles.css";
 import "./theme.css";
 import "./terminal.css";
+import "./monitor-table.css";
 import "./kline-workstation.css";
 import "./parity.css";
 
