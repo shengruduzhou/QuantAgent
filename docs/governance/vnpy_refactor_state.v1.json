@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T09:10:00+09:00",
+  "updatedAt": "2026-07-22T09:48:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -10,34 +10,41 @@
   },
   "baseline": {
     "branch": "main",
-    "commit": "f43fbdd026f7f38476ef1efbf2ec619793a239e2"
+    "commit": "cfb17ba03b613a1c79d25012ad7f5c599da47c45"
   },
   "activeSlice": {
-    "id": "governance.vnpy-parity-control-plane",
-    "branch": "feat/vnpy-parity-registry-20260722",
-    "status": "implemented_pending_validation",
+    "id": "ui.vnpy-source-alignment-bugfix",
+    "branch": "feat/vnpy-ui-parity-bugfix-20260722",
+    "status": "implemented_pending_ci_and_browser_validation",
     "scope": [
-      "machine-readable capability registry",
-      "strict schema validation",
-      "filtered REST API",
-      "Web Quant Workstation parity workspace",
-      "backend and frontend tests"
+      "repair parity frontend test scoping",
+      "repair ECharts TypeScript contracts",
+      "enforce typed production builds and supported Node versions",
+      "add vn.py-style K-line keyboard navigation and latest/reset controls",
+      "centralize terminal and market color semantics",
+      "make terminal menus operational",
+      "add default workspace layout restore",
+      "clarify repository-root API startup guidance",
+      "record source-level vn.py UI and interaction audit"
     ],
     "outOfScope": [
       "training processes",
       "checkpoint mutation",
       "runtime artifact mutation",
-      "backtest engine changes",
-      "paper/live order commands"
+      "backtest engine behavior",
+      "paper/live order commands",
+      "multi-dock drag and drop",
+      "DataManager download jobs",
+      "paper OMS recovery"
     ],
     "validation": {
       "staticReview": "complete",
-      "pythonTests": "pending_local_or_ci",
-      "frontendTests": "pending_local_or_ci",
-      "typecheck": "pending_local_or_ci",
-      "productionBuild": "pending_local_or_ci",
+      "userReportedBackendTests": "11_passed_before_this_slice",
+      "frontendTests": "pending_ci",
+      "typecheck": "pending_ci",
+      "productionBuild": "pending_ci",
       "browserVerification": "pending_local",
-      "performanceBaseline": "not_applicable_for_registry_slice"
+      "performanceBaseline": "pending_for_chart_large_data"
     }
   },
   "completedSlices": [
@@ -55,21 +62,31 @@
       "id": "chart.kline-workstation-v2",
       "pullRequest": 10,
       "status": "merged"
+    },
+    {
+      "id": "governance.vnpy-parity-control-plane",
+      "pullRequest": 11,
+      "status": "merged_with_followup_frontend_fixes_required"
     }
   ],
   "nextSlices": [
     {
       "priority": 1,
+      "id": "table.canonical-monitor-adapter",
+      "reason": "Aligns QuantAgent tables with vn.py BaseMonitor semantics: keyed event updates, stable sorting, column persistence, resize/export and explicit connection state."
+    },
+    {
+      "priority": 2,
       "id": "data.datamanager-query-download",
       "reason": "Closes the highest-value Runtime/DataManager operational gap without creating a second data system."
     },
     {
-      "priority": 2,
-      "id": "experiment.canonical-schema",
-      "reason": "Unblocks web-configurable factor, model, backtest and optimization jobs."
+      "priority": 3,
+      "id": "chart.visible-range-synchronization",
+      "reason": "Connects viewport changes to trade/stat tables, brush selection and incremental chart updates."
     },
     {
-      "priority": 3,
+      "priority": 4,
       "id": "paper.account-lifecycle",
       "reason": "Connects OrderManager, RiskGate, positions, reconciliation and audit in paper-only mode."
     }
