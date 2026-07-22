@@ -15,7 +15,9 @@ Changed areas:
 - semantic market/terminal color tokens;
 - parity registry keyboard inspection and filter feedback;
 - workstation menu actions and default-layout restore;
-- local startup guidance shown by the API-offline banner.
+- local startup guidance shown by the API-offline banner;
+- GitHub Actions frontend validation;
+- removal of developer-specific npm cache configuration.
 
 Not changed:
 
@@ -166,9 +168,11 @@ QuantAgent decision:
 1. `VnpyParityPage.test.tsx` used an unscoped text query even though the same gap appears in the matrix and inspector. The test now scopes assertions to the labelled detail inspector.
 2. `CandlestickChart.tsx` used an unsupported ECharts `triggerOn` literal and inferred mark-point label positions as generic strings. Series and mark-point data now use explicit ECharts option types.
 3. `vite build` previously succeeded while `tsc --noEmit` failed. The production build now runs typecheck first.
-4. Node `22.6.0` was accepted by npm installation but is below `@vitejs/plugin-react`'s supported `22.12.0` floor. `package.json` now declares the supported engine range.
+4. Node `22.6.0` is below `@vitejs/plugin-react`'s supported `22.12.0` floor. Local development is pinned with `.nvmrc`; GitHub Actions uses Node `22.12.0`.
 5. The API-offline banner previously showed a command without saying it must run from the repository root. The banner now states the required context.
 6. Top-level `视图 / 数据 / 研究 / 帮助` labels looked interactive but were inert. They are now real actions.
+7. `.npmrc` hard-coded `/home/shanhefu/QuantAgent/apps/quant-ui/.npm-cache`, which broke `npm ci` on GitHub-hosted runners. The developer-specific absolute cache path was removed and CI caching is owned by `actions/setup-node`.
+8. The repository CI previously ran only Python. A separate frontend job now executes dependency installation, typecheck, unit/component tests and production build.
 
 ## Semantic color policy
 
@@ -182,7 +186,7 @@ VeighNa desktop uses semantic cell colors for long/short, bid/ask and PnL. Quant
 - verified/stale/unavailable;
 - focus and selected state.
 
-Pages and charts should consume these tokens instead of introducing new hard-coded colors.
+Legacy `--bg`, `--surface`, `--blue`, `--green`, `--red` and `--amber` variables are routed through the semantic source so new modules do not introduce a parallel theme.
 
 ## Required validation
 
@@ -199,7 +203,7 @@ Frontend:
 
 ```bash
 cd /home/shanhefu/QuantAgent/apps/quant-ui
-node --version   # must satisfy ^20.19.0 or >=22.12.0
+nvm use
 npm ci
 npm run check
 ```
