@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T09:48:00+09:00",
+  "updatedAt": "2026-07-22T10:05:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -15,7 +15,7 @@
   "activeSlice": {
     "id": "ui.vnpy-source-alignment-bugfix",
     "branch": "feat/vnpy-ui-parity-bugfix-20260722",
-    "status": "implemented_pending_ci_and_browser_validation",
+    "status": "implemented_frontend_ci_passed_pending_browser_and_python_suite",
     "scope": [
       "repair parity frontend test scoping",
       "repair ECharts TypeScript contracts",
@@ -25,7 +25,13 @@
       "make terminal menus operational",
       "add default workspace layout restore",
       "clarify repository-root API startup guidance",
-      "record source-level vn.py UI and interaction audit"
+      "remove developer-specific npm cache path",
+      "add dedicated frontend CI quality gates",
+      "implement canonical MonitorTable with stable sorting",
+      "persist and resize monitor columns",
+      "add monitor CSV export, autofit and keyboard row selection",
+      "migrate Activity jobs and risk-stock ranking to MonitorTable",
+      "record source-level vn.py UI, BaseMonitor, DataManager, RiskManager and WebTrader audit"
     ],
     "outOfScope": [
       "training processes",
@@ -35,16 +41,22 @@
       "paper/live order commands",
       "multi-dock drag and drop",
       "DataManager download jobs",
-      "paper OMS recovery"
+      "paper OMS recovery",
+      "full migration of every legacy data-table",
+      "durable market/order/trade monitor event projections"
     ],
     "validation": {
       "staticReview": "complete",
       "userReportedBackendTests": "11_passed_before_this_slice",
-      "frontendTests": "pending_ci",
-      "typecheck": "pending_ci",
-      "productionBuild": "pending_ci",
+      "frontendInstall": "passed_github_actions",
+      "frontendTypecheck": "passed_github_actions",
+      "monitorTableComponentTests": "passed_github_actions",
+      "frontendTests": "passed_github_actions",
+      "productionBuild": "passed_github_actions",
+      "pythonCompile": "passed_github_actions",
+      "fullPythonSuite": "in_progress",
       "browserVerification": "pending_local",
-      "performanceBaseline": "pending_for_chart_large_data"
+      "performanceBaseline": "pending_for_chart_and_large_monitors"
     }
   },
   "completedSlices": [
@@ -66,19 +78,24 @@
     {
       "id": "governance.vnpy-parity-control-plane",
       "pullRequest": 11,
-      "status": "merged_with_followup_frontend_fixes_required"
+      "status": "merged"
+    },
+    {
+      "id": "table.canonical-monitor-adapter-foundation",
+      "pullRequest": 12,
+      "status": "implemented_in_draft_pr_pending_browser_and_full_migration"
     }
   ],
   "nextSlices": [
     {
       "priority": 1,
-      "id": "table.canonical-monitor-adapter",
-      "reason": "Aligns QuantAgent tables with vn.py BaseMonitor semantics: keyed event updates, stable sorting, column persistence, resize/export and explicit connection state."
+      "id": "data.datamanager-query-download",
+      "reason": "Closes the highest-value Runtime/DataManager operational gap without creating a second data system."
     },
     {
       "priority": 2,
-      "id": "data.datamanager-query-download",
-      "reason": "Closes the highest-value Runtime/DataManager operational gap without creating a second data system."
+      "id": "table.monitor-event-projections",
+      "reason": "Adds vn.py BaseMonitor-style keyed updates and explicit live/stale/disconnected state for orders, trades, positions, accounts, logs and risk events."
     },
     {
       "priority": 3,
@@ -87,6 +104,11 @@
     },
     {
       "priority": 4,
+      "id": "risk.plugin-rule-registry",
+      "reason": "Adds discoverable per-rule configuration and real pre-order interception event evidence while keeping QuantAgent RiskGate canonical."
+    },
+    {
+      "priority": 5,
       "id": "paper.account-lifecycle",
       "reason": "Connects OrderManager, RiskGate, positions, reconciliation and audit in paper-only mode."
     }
