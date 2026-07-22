@@ -9,6 +9,7 @@ import "./terminal.css";
 import "./monitor-table.css";
 import "./kline-workstation.css";
 import "./parity.css";
+import "./ux-depth.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {
