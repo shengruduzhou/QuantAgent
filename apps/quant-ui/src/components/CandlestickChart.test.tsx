@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { EChartsOption } from "echarts";
 import type { KeyboardEventHandler } from "react";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KlineBar, Trade } from "../api/types";
 import { CandlestickChart } from "./CandlestickChart";
 
@@ -40,12 +40,26 @@ function createBars(count: number): KlineBar[] {
   });
 }
 
-function getZoom(): { startValue?: string; endValue?: string } {
+function getZoom(): {
+  startValue?: string;
+  endValue?: string;
+  zoomOnMouseWheel?: boolean;
+  moveOnMouseMove?: boolean;
+  moveOnMouseWheel?: boolean;
+} {
   const zoom = Array.isArray(latestOption.dataZoom) ? latestOption.dataZoom[0] : latestOption.dataZoom;
-  return (zoom ?? {}) as { startValue?: string; endValue?: string };
+  return (zoom ?? {}) as {
+    startValue?: string;
+    endValue?: string;
+    zoomOnMouseWheel?: boolean;
+    moveOnMouseMove?: boolean;
+    moveOnMouseWheel?: boolean;
+  };
 }
 
-describe("CandlestickChart keyboard parity", () => {
+afterEach(() => cleanup());
+
+describe("CandlestickChart workstation interaction", () => {
   test("moves to latest and expands to all history", async () => {
     const bars = createBars(300);
     const trade: Trade = {
@@ -71,5 +85,31 @@ describe("CandlestickChart keyboard parity", () => {
       expect(getZoom().startValue).toBe(firstDate);
       expect(getZoom().endValue).toBe(lastDate);
     });
+  });
+
+  test("uses wheel for zoom and pointer drag for pan without wheel-pan conflict", () => {
+    const bars = createBars(180);
+    render(<CandlestickChart bars={bars} trades={[]} />);
+
+    expect(getZoom()).toMatchObject({
+      zoomOnMouseWheel: true,
+      moveOnMouseMove: true,
+      moveOnMouseWheel: false,
+    });
+    expect(screen.getByText(/滚轮只缩放/)).toBeInTheDocument();
+    expect(screen.getByText(/左键拖拽只平移/)).toBeInTheDocument();
+  });
+
+  test("moves by human-scale keyboard steps instead of one bar", async () => {
+    const bars = createBars(300);
+    render(<CandlestickChart bars={bars} trades={[]} />);
+    const chart = screen.getByRole("application", { name: /000001.SZ K 线/ });
+    const before = getZoom().endValue;
+
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    await waitFor(() => expect(getZoom().endValue).not.toBe(before));
+
+    const expected = bars[294].datetime.slice(0, 10);
+    expect(getZoom().endValue).toBe(expected);
   });
 });
