@@ -35,6 +35,11 @@ const RANGE_OPTIONS: Array<{ value: KlineViewRange; label: string }> = [
 ];
 
 const RANGE_ORDER: KlineViewRange[] = ["60D", "120D", "1Y", "ALL"];
+const RANGE_SIZE: Record<Exclude<KlineViewRange, "ALL">, number> = {
+  "60D": 60,
+  "120D": 120,
+  "1Y": 250,
+};
 const KEYBOARD_PAN_STEP = 5;
 const KEYBOARD_PAGE_STEP = 20;
 
@@ -355,25 +360,29 @@ export function CandlestickChart({
     setRange(RANGE_ORDER[nextIndex]);
   };
 
-  const moveAnchor = (delta: number): void => {
-    const current = effectiveAnchor >= 0 ? effectiveAnchor : dates.length - 1;
-    setViewAnchorIndex(Math.min(dates.length - 1, Math.max(0, current + delta)));
+  const moveWindow = (delta: number): void => {
+    if (!dates.length || range === "ALL") return;
+    const windowSize = Math.min(RANGE_SIZE[range], dates.length);
+    const lookAhead = Math.floor(windowSize * 0.2);
+    const targetEnd = Math.min(dates.length - 1, Math.max(windowSize - 1, derived.window.endIndex + delta));
+    const targetAnchor = targetEnd >= dates.length - 1 ? dates.length - 1 : Math.max(0, targetEnd - lookAhead);
+    setViewAnchorIndex(targetAnchor);
   };
 
   const handleKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (!dates.length) return;
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      moveAnchor(-KEYBOARD_PAN_STEP);
+      moveWindow(-KEYBOARD_PAN_STEP);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      moveAnchor(KEYBOARD_PAN_STEP);
+      moveWindow(KEYBOARD_PAN_STEP);
     } else if (event.key === "PageUp") {
       event.preventDefault();
-      moveAnchor(-KEYBOARD_PAGE_STEP);
+      moveWindow(-KEYBOARD_PAGE_STEP);
     } else if (event.key === "PageDown") {
       event.preventDefault();
-      moveAnchor(KEYBOARD_PAGE_STEP);
+      moveWindow(KEYBOARD_PAGE_STEP);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       changeRange(-1);
