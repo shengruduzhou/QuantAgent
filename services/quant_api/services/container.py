@@ -11,6 +11,7 @@ from services.quant_api.adapters.selection import SelectionAdapter
 from services.quant_api.config import ApiSettings, default_settings
 from services.quant_api.events import EventBroker
 from services.quant_api.runtime_indexer import RuntimeIndexer
+from services.quant_api.services.data_manager import DataManagerService
 from services.quant_api.services.jobs import JobManager
 from services.quant_api.services.runtime_cleanup import RuntimeCleanupService
 from services.quant_api.services.vnpy_parity import VnpyParityService
@@ -27,6 +28,7 @@ class ServiceContainer:
     do_t: DoTAdapter
     risk: RiskAdapter
     events: EventBroker
+    data_manager: DataManagerService
     jobs: JobManager
     cleanup: RuntimeCleanupService
     vnpy_parity: VnpyParityService
@@ -47,7 +49,8 @@ class ServiceContainer:
             do_t=DoTAdapter(resolved),
             risk=RiskAdapter(backtests),
             events=events,
-            jobs=JobManager(resolved, events),
+            data_manager=DataManagerService(resolved),
+            jobs=JobManager(resolved, events, indexer.invalidate),
             cleanup=RuntimeCleanupService(resolved),
             vnpy_parity=VnpyParityService(),
         )
