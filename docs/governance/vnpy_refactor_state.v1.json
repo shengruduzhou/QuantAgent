@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T21:05:00+09:00",
+  "updatedAt": "2026-07-22T20:22:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -15,7 +15,7 @@
   "activeSlice": {
     "id": "data.datamanager-query-download-update",
     "branch": "agent/datamanager-control-loop",
-    "status": "implemented_static_validation_pending_ci_browser_and_real_provider_runs",
+    "status": "implemented_ci_passed_browser_and_real_provider_runs_pending",
     "scope": [
       "provider capability registry without credential disclosure",
       "allowlisted AkShare, Qlib and TuShare data jobs",
@@ -41,11 +41,11 @@
     "validation": {
       "staticReview": "complete",
       "pythonSyntax": "passed_remote_branch_ast_parse",
-      "frontendTypecheck": "pending_github_actions",
-      "focusedTests": "pending_github_actions",
-      "fullFrontendTests": "pending_github_actions",
-      "fullPythonSuite": "pending_github_actions",
-      "productionBuild": "pending_github_actions",
+      "frontendTypecheck": "passed_github_actions_run_269",
+      "focusedTests": "passed_github_actions_run_269",
+      "fullFrontendTests": "passed_github_actions_run_269",
+      "fullPythonSuite": "passed_github_actions_run_269",
+      "productionBuild": "passed_github_actions_run_269",
       "browserVerification": "pending_local",
       "realProviderRuns": "pending_operator_environment",
       "frontendSyntax": "passed_esbuild_syntax_bundle"
