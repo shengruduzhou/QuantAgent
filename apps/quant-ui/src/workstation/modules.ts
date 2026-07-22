@@ -11,6 +11,7 @@ import {
   Funnel,
   Gear,
   ListMagnifyingGlass,
+  Question,
   ShieldCheck,
 } from "@phosphor-icons/react";
 
@@ -45,6 +46,7 @@ export const workstationModules: WorkstationModule[] = [
   { path: "/runtime", label: "Runtime / Data", caption: "Artifact Manager", group: "system", icon: Database, keywords: "runtime data artifact lineage catalog" },
   { path: "/parity", label: "VN.PY 对齐", caption: "Capability Registry", group: "system", icon: ListMagnifyingGlass, keywords: "vnpy parity capability registry 对齐 能力" },
   { path: "/settings", label: "系统控制", caption: "Jobs & Settings", group: "system", icon: Gear, keywords: "settings control job system" },
+  { path: "/help", label: "帮助中心", caption: "Workstation Guide", group: "system", icon: Question, keywords: "help shortcut guide 帮助 快捷键 操作" },
 ];
 
 export function moduleForPath(pathname: string): WorkstationModule {

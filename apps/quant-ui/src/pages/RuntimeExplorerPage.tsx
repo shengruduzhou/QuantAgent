@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   ArrowClockwise,
   ArrowRight,
@@ -28,10 +28,15 @@ const capabilities = ["", "preview", "research_display", "production_display", "
 
 type RuntimeTab = "catalog" | "runs" | "lineage" | "cleanup";
 
+function requestedRuntimeTab(value: string | null): RuntimeTab | null {
+  return value === "catalog" || value === "runs" || value === "lineage" || value === "cleanup" ? value : null;
+}
+
 export function RuntimeExplorerPage(): JSX.Element {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<RuntimeTab>("catalog");
+  const requestedView = searchParams.get("view");
+  const [tab, setTab] = useState<RuntimeTab>(() => requestedRuntimeTab(requestedView) ?? "catalog");
   const [kind, setKind] = useState("");
   const [trustClass, setTrustClass] = useState("");
   const [validationStatus, setValidationStatus] = useState("");
@@ -44,6 +49,11 @@ export function RuntimeExplorerPage(): JSX.Element {
   const [selectedId, setSelectedId] = useState("");
   const [refreshToken, setRefreshToken] = useState(false);
   const deferredQuery = useDeferredValue(query);
+
+  useEffect(() => {
+    const next = requestedRuntimeTab(requestedView);
+    if (next) setTab(next);
+  }, [requestedView]);
 
   const catalog = useApi<RuntimeCatalog>(["runtime-catalog", refreshToken], "/system/runtime-catalog", { refresh: refreshToken });
   const artifacts = useApi<Page<RuntimeArtifact>>(

@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T10:05:00+09:00",
+  "updatedAt": "2026-07-22T13:10:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -10,52 +10,55 @@
   },
   "baseline": {
     "branch": "main",
-    "commit": "cfb17ba03b613a1c79d25012ad7f5c599da47c45"
+    "commit": "c47f35546965c1018e8d585913bfb5335fec94b1"
   },
   "activeSlice": {
-    "id": "ui.vnpy-source-alignment-bugfix",
-    "branch": "feat/vnpy-ui-parity-bugfix-20260722",
-    "status": "implemented_frontend_ci_passed_pending_browser_and_python_suite",
+    "id": "ui.vnpy-workstation-ux-depth",
+    "branch": "feat/vnpy-workstation-ux-depth-20260722",
+    "pullRequest": 13,
+    "status": "implemented_automated_tests_passed_pending_browser_verification",
     "scope": [
-      "repair parity frontend test scoping",
-      "repair ECharts TypeScript contracts",
-      "enforce typed production builds and supported Node versions",
-      "add vn.py-style K-line keyboard navigation and latest/reset controls",
-      "centralize terminal and market color semantics",
-      "make terminal menus operational",
-      "add default workspace layout restore",
-      "clarify repository-root API startup guidance",
-      "remove developer-specific npm cache path",
-      "add dedicated frontend CI quality gates",
-      "implement canonical MonitorTable with stable sorting",
-      "persist and resize monitor columns",
-      "add monitor CSV export, autofit and keyboard row selection",
-      "migrate Activity jobs and risk-stock ranking to MonitorTable",
-      "record source-level vn.py UI, BaseMonitor, DataManager, RiskManager and WebTrader audit"
+      "redesign capability matrix to prevent gap and next-action text collision",
+      "add quick status filters and persistent capability inspector",
+      "route Help to an internal QuantAgent workstation guide",
+      "replace implicit multi-backtest selection with one active experiment",
+      "separate K-line wheel zoom from pointer drag pan",
+      "move chart windows by exact human-scale keyboard steps",
+      "classify factors as active, useful candidate, excluded or unevaluated",
+      "add explicit missing-artifact states to factor research",
+      "expose controlled all-symbol training through the existing allowlisted JobManager command",
+      "deep-link factor and Help workflows to protected Runtime Cleanup",
+      "add focused TypeScript and workstation interaction diagnostics",
+      "record screenshot-driven source alignment and continuation plan"
     ],
     "outOfScope": [
-      "training processes",
+      "training algorithm changes",
       "checkpoint mutation",
-      "runtime artifact mutation",
-      "backtest engine behavior",
-      "paper/live order commands",
-      "multi-dock drag and drop",
-      "DataManager download jobs",
-      "paper OMS recovery",
-      "full migration of every legacy data-table",
-      "durable market/order/trade monitor event projections"
+      "runtime artifact mutation during development",
+      "backtest engine semantics",
+      "paper or live order commands",
+      "arbitrary shell command execution",
+      "arbitrary filesystem deletion",
+      "DataManager provider download or update jobs",
+      "plugin-based RiskManager settings and interception events",
+      "paper OMS restart recovery",
+      "authenticated RPC or execution-capable WebTrader",
+      "formula-level Alpha101 or Alpha158 equivalence audit",
+      "complete migration of every legacy table",
+      "large-chart browser performance benchmark"
     ],
     "validation": {
       "staticReview": "complete",
-      "userReportedBackendTests": "11_passed_before_this_slice",
       "frontendInstall": "passed_github_actions",
       "frontendTypecheck": "passed_github_actions",
       "monitorTableComponentTests": "passed_github_actions",
-      "frontendTests": "passed_github_actions",
+      "focusedWorkstationUxTests": "passed_github_actions",
+      "fullFrontendTests": "passed_github_actions",
       "productionBuild": "passed_github_actions",
       "pythonCompile": "passed_github_actions",
-      "fullPythonSuite": "in_progress",
+      "fullPythonSuite": "passed_github_actions",
       "browserVerification": "pending_local",
+      "responsiveVisualVerification": "pending_1920_1440_1280",
       "performanceBaseline": "pending_for_chart_and_large_monitors"
     }
   },
@@ -81,36 +84,46 @@
       "status": "merged"
     },
     {
-      "id": "table.canonical-monitor-adapter-foundation",
+      "id": "ui.vnpy-source-alignment-and-monitor-foundation",
       "pullRequest": 12,
-      "status": "implemented_in_draft_pr_pending_browser_and_full_migration"
+      "status": "merged"
     }
   ],
   "nextSlices": [
     {
       "priority": 1,
-      "id": "data.datamanager-query-download",
-      "reason": "Closes the highest-value Runtime/DataManager operational gap without creating a second data system."
+      "id": "data.datamanager-query-download-update",
+      "reason": "Implements the highest-value missing vn.py operational loop through existing JobManager, PIT validation, manifests and Runtime Catalog rather than creating a second data system."
     },
     {
       "priority": 2,
-      "id": "table.monitor-event-projections",
-      "reason": "Adds vn.py BaseMonitor-style keyed updates and explicit live/stale/disconnected state for orders, trades, positions, accounts, logs and risk events."
+      "id": "risk.plugin-rule-registry",
+      "reason": "Adds discoverable per-rule configuration, persistence and real paper pre-order interception evidence while keeping QuantAgent RiskGate canonical."
     },
     {
       "priority": 3,
-      "id": "chart.visible-range-synchronization",
-      "reason": "Connects viewport changes to trade/stat tables, brush selection and incremental chart updates."
+      "id": "table.monitor-event-projections",
+      "reason": "Adds BaseMonitor-style keyed updates and explicit live, stale, disconnected and replay-gap state for orders, trades, positions, accounts, logs and risk events."
     },
     {
       "priority": 4,
-      "id": "risk.plugin-rule-registry",
-      "reason": "Adds discoverable per-rule configuration and real pre-order interception event evidence while keeping QuantAgent RiskGate canonical."
+      "id": "paper.oms-snapshot-recovery",
+      "reason": "Connects OrderManager, RiskGate, orders, trades, positions, accounts, reconciliation and restart recovery in paper-only mode."
     },
     {
       "priority": 5,
-      "id": "paper.account-lifecycle",
-      "reason": "Connects OrderManager, RiskGate, positions, reconciliation and audit in paper-only mode."
+      "id": "chart.visible-range-sync-performance",
+      "reason": "Connects viewport changes to trade and statistic tables, adds incremental updates and establishes 100k and 500k point browser baselines."
+    },
+    {
+      "priority": 6,
+      "id": "service.scripttrader-rpc-boundary",
+      "reason": "Introduces governed script commands first and authenticated process RPC only where isolation is required."
+    },
+    {
+      "priority": 7,
+      "id": "research.alpha-formula-equivalence",
+      "reason": "Audits Alpha101 and Alpha158 formulas, source columns, PIT behavior, numeric equivalence and accepted or rejected factor assignment."
     }
   ],
   "safetyInvariants": [
@@ -120,6 +133,9 @@
     "OrderManager owns order intents",
     "all orders pass RiskGate and KillSwitch",
     "A-share execution constraints remain canonical",
+    "Web jobs accept allowlisted structured commands only",
+    "all Web job outputs remain inside Runtime",
+    "cleanup accepts backend-approved candidates only",
     "runtime and checkpoints are never silently rewritten",
     "mock, stale, failed and unverified results remain explicit"
   ]

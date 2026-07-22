@@ -115,10 +115,6 @@ export function AppShell(): JSX.Element {
     }
   };
 
-  const openVnpyDocs = (): void => {
-    window.open("https://www.vnpy.com/docs/cn/index.html", "_blank", "noopener,noreferrer");
-  };
-
   return (
     <div className={`app-frame terminal-frame ${layout.launcherCollapsed ? "sidebar-collapsed" : ""} ${layout.activityOpen ? "activity-open" : ""}`}>
       <aside className="sidebar terminal-launcher">
@@ -154,7 +150,7 @@ export function AppShell(): JSX.Element {
           <button onClick={layout.resetLayout} title="恢复默认工作区布局">还原布局</button>
           <button onClick={() => navigate("/runtime")} title="打开 Runtime / DataManager">数据</button>
           <button onClick={() => navigate("/factors")} title="打开因子研究工作区">研究</button>
-          <button onClick={openVnpyDocs} title="打开 VeighNa 官方文档">帮助</button>
+          <button onClick={() => navigate("/help")} title="打开 QuantAgent 帮助中心">帮助</button>
         </div>
         <form className="global-search" onSubmit={submitSearch}>
           <MagnifyingGlass size={16} />

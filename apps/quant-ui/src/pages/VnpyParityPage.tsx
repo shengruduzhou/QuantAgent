@@ -21,6 +21,8 @@ const STATUS_LABELS: Record<VnpyParityStatus, string> = {
   not_applicable: "不适用",
 };
 
+const QUICK_STATUSES: Array<VnpyParityStatus | ""> = ["", "not_audited", "missing", "partial", "planned"];
+
 function listOrDash(items: string[]): string {
   return items.length ? items.join(" · ") : "—";
 }
@@ -148,12 +150,12 @@ export function VnpyParityPage(): JSX.Element {
   }
 
   return (
-    <div className="page parity-page">
+    <div className="page parity-page parity-page-v2">
       <section className="parity-commandbar">
         <div>
           <span className="mono">GOVERNANCE / VN.PY PARITY</span>
           <h1>Capability Registry</h1>
-          <p>页面存在不等于能力完成；只有后端、API、UI、真实状态变化、实时反馈、测试和浏览器证据完整时才可标记 verified。</p>
+          <p>页面存在不等于能力完成。矩阵只显示摘要，完整差距、采用方案、测试和下一步统一在右侧检查器中，避免长文本挤压重叠。</p>
         </div>
         <div className="parity-baseline">
           <span>Authority</span>
@@ -199,6 +201,15 @@ export function VnpyParityPage(): JSX.Element {
         </div>
       </section>
 
+      <section className="parity-quick-filters" aria-label="快速状态筛选">
+        {QUICK_STATUSES.map((item) => (
+          <button key={item || "all"} type="button" className={status === item ? "active" : ""} onClick={() => setStatus(item)}>
+            {item ? STATUS_LABELS[item] : "全部能力"}
+            <span>{item ? data?.summary.byStatus[item] ?? 0 : data?.summary.total ?? 0}</span>
+          </button>
+        ))}
+      </section>
+
       <section className="parity-stat-strip" role="status" aria-live="polite">
         <div><span>当前结果</span><strong>{data?.summary.total ?? 0}</strong><small>capabilities</small></div>
         <div><span>加权完成度</span><strong>{completion}</strong><small>verified 权重最高</small></div>
@@ -213,42 +224,48 @@ export function VnpyParityPage(): JSX.Element {
       <div className="parity-workspace">
         <Panel
           title="能力对齐矩阵"
-          eyebrow={`${capabilities.length} rows · machine-readable single source`}
+          eyebrow={`${capabilities.length} rows · summary matrix · details on the right`}
           className="parity-table-panel"
         >
           {capabilities.length ? (
             <div className="parity-table-wrap">
-              <table className="data-table parity-table">
+              <table className="data-table parity-table parity-table-v2">
                 <caption className="sr-only">vn.py 与 QuantAgent 能力对齐矩阵</caption>
                 <thead>
-                  <tr><th>Category</th><th>Capability</th><th>Status</th><th>QuantAgent mapping</th><th>Current gap</th><th>Next action</th></tr>
+                  <tr><th>Category</th><th>Capability</th><th>Status</th><th>QuantAgent mapping</th><th>补全路径</th></tr>
                 </thead>
                 <tbody>
-                  {capabilities.map((item) => (
-                    <tr
-                      key={item.id}
-                      className={selected?.id === item.id ? "selected" : ""}
-                      aria-selected={selected?.id === item.id}
-                    >
-                      <td className="mono">{item.category}</td>
-                      <td>
-                        <button
-                          type="button"
-                          aria-label={`查看 ${item.name}`}
-                          aria-current={selected?.id === item.id ? "true" : undefined}
-                          onClick={() => setSelectedId(item.id)}
-                          onKeyDown={(event) => selectAdjacent(event, item.id)}
-                          style={{ width: "100%", padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left" }}
-                        >
-                          <strong>{item.name}</strong><small className="mono">{item.id}</small>
-                        </button>
-                      </td>
-                      <td><span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span></td>
-                      <td>{item.quantagent.modules[0] ?? item.quantagent.frontend[0] ?? "—"}</td>
-                      <td>{item.gap}</td>
-                      <td>{item.nextAction}</td>
-                    </tr>
-                  ))}
+                  {capabilities.map((item) => {
+                    const mapping = item.quantagent.modules[0] ?? item.quantagent.frontend[0] ?? "—";
+                    return (
+                      <tr
+                        key={item.id}
+                        className={selected?.id === item.id ? "selected" : ""}
+                        aria-selected={selected?.id === item.id}
+                        onClick={() => setSelectedId(item.id)}
+                      >
+                        <td className="mono parity-category-cell">{item.category}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="parity-capability-button"
+                            aria-label={`查看 ${item.name}`}
+                            aria-current={selected?.id === item.id ? "true" : undefined}
+                            onClick={() => setSelectedId(item.id)}
+                            onKeyDown={(event) => selectAdjacent(event, item.id)}
+                          >
+                            <strong>{item.name}</strong><small className="mono">{item.id}</small>
+                          </button>
+                        </td>
+                        <td><span className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</span></td>
+                        <td className="parity-mapping-cell" title={mapping}>{mapping}</td>
+                        <td className="parity-delivery-cell">
+                          <span title={item.gap}><b>Gap</b>{item.gap}</span>
+                          <span title={item.nextAction}><b>Next</b>{item.nextAction}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

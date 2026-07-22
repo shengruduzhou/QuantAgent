@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
   Database,
   DesktopTower,
   Flask,
+  GlobeHemisphereEast,
   HardDrives,
   Lock,
   Play,
@@ -11,6 +12,7 @@ import {
   TerminalWindow,
   WarningCircle,
 } from "@phosphor-icons/react";
+import { useSearchParams } from "react-router-dom";
 import { apiPost } from "../api/client";
 import type { JobSummary, SystemOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
@@ -33,11 +35,12 @@ const jobTemplates = {
   train: {
     commandId: "train-v8-deep",
     parameters: {
-      horizon_class: "short",
+      horizon_class: "short_5d",
       dataset_path: "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus8.parquet",
       silver_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
-      output_dir: "runtime/reports/quant_ui_jobs/web_train",
+      output_dir: "runtime/reports/quant_ui_jobs/web_train_all_symbols",
       max_epochs: 20,
+      feature_policy: "judgment",
       require_gpu: true,
     },
   },
@@ -54,11 +57,23 @@ const jobTemplates = {
 
 type JobType = keyof typeof jobTemplates;
 
+function isJobType(value: string | null): value is JobType {
+  return value === "backtest" || value === "train" || value === "infer";
+}
+
+function templateJson(type: JobType): string {
+  return JSON.stringify(jobTemplates[type], null, 2);
+}
+
 export function SettingsPage(): JSX.Element {
+  const [searchParams] = useSearchParams();
+  const requestedJob = searchParams.get("job");
+  const requestedUniverse = searchParams.get("universe");
+  const initialType: JobType = isJobType(requestedJob) ? requestedJob : "backtest";
   const overview = useApi<SystemOverview>(["settings-overview"], "/system/overview");
   const jobs = useApi<JobSummary[]>(["settings-jobs"], "/jobs");
-  const [jobType, setJobType] = useState<JobType>("backtest");
-  const [jobJson, setJobJson] = useState(() => JSON.stringify(jobTemplates.backtest, null, 2));
+  const [jobType, setJobType] = useState<JobType>(initialType);
+  const [jobJson, setJobJson] = useState(() => templateJson(initialType));
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState("");
   const [launchedJob, setLaunchedJob] = useState<JobSummary | null>(null);
@@ -69,13 +84,19 @@ export function SettingsPage(): JSX.Element {
     [jobs.data?.data],
   );
 
-  if (overview.isLoading) return <StateView state="loading" />;
-
   const selectTemplate = (type: JobType): void => {
     setJobType(type);
-    setJobJson(JSON.stringify(jobTemplates[type], null, 2));
+    setJobJson(templateJson(type));
     setLaunchError("");
+    setLaunchedJob(null);
   };
+
+  useEffect(() => {
+    if (!isJobType(requestedJob)) return;
+    selectTemplate(requestedJob);
+  }, [requestedJob, requestedUniverse]);
+
+  if (overview.isLoading) return <StateView state="loading" />;
 
   const launch = async (): Promise<void> => {
     setLaunching(true);
@@ -93,12 +114,12 @@ export function SettingsPage(): JSX.Element {
   };
 
   return (
-    <div className="page control-center-page">
+    <div className="page control-center-page control-center-v2">
       <section className="control-hero">
         <div>
           <span className="page-kicker">QUANTAGENT CONTROL PLANE</span>
           <h2>控制中心</h2>
-          <p>一个进程启动 Web 与 API；在页面内启动 allowlisted research jobs、查看状态与输出。</p>
+          <p>从网页提交经过 allowlist、参数和路径校验的研究任务。训练、推理和回测都由后台任务执行，不在浏览器线程中运行。</p>
         </div>
         <div className="control-health">
           <span><i className="health-dot" /> API ready</span>
@@ -122,19 +143,31 @@ export function SettingsPage(): JSX.Element {
           </div>
         </Panel>
 
-        <Panel title="网页启动研究任务" eyebrow="Allowlisted CLI adapter · edit before launch" className="job-launcher-panel">
+        <Panel title="网页启动研究任务" eyebrow="Allowlisted CLI adapter · validate before launch" className="job-launcher-panel">
           <div className="job-type-tabs">
             <button className={jobType === "backtest" ? "active" : ""} onClick={() => selectTemplate("backtest")}><Flask size={16} /> 回测</button>
             <button className={jobType === "train" ? "active" : ""} onClick={() => selectTemplate("train")}><HardDrives size={16} /> 训练</button>
             <button className={jobType === "infer" ? "active" : ""} onClick={() => selectTemplate("infer")}><Play size={16} /> 推理</button>
           </div>
+
+          {jobType === "train" ? (
+            <div className="training-scope-banner" role="status">
+              <GlobeHemisphereEast size={21} weight="duotone" />
+              <span>
+                <strong>全宇宙训练 · ALL SYMBOLS IN DATASET</strong>
+                <small>模板不传 `symbols` 或 `symbols_file`，因此训练数据集中的全部股票都会参与。`feature_policy: judgment` 只采用已生成判断清单中的接受因子；清单缺失时任务会失败关闭，而不是回退并伪装成功。</small>
+              </span>
+              <StatusBadge status="warning" label="GPU / HIGH COST" />
+            </div>
+          ) : null}
+
           <textarea className="job-json-editor mono" value={jobJson} onChange={(event) => setJobJson(event.target.value)} spellCheck={false} />
           <div className="job-launch-footer">
             <div>
               <ShieldCheck size={17} />
-              <span>不接受 shell command；backend 会验证 command ID、参数和路径。</span>
+              <span>不接受 shell command；backend 会验证 command ID、参数、输入存在性和 runtime 输出范围。</span>
             </div>
-            <button className="primary-button" disabled={launching} onClick={launch}><Play size={16} weight="fill" /> {launching ? "提交中…" : "启动任务"}</button>
+            <button className="primary-button" disabled={launching} onClick={launch}><Play size={16} weight="fill" /> {launching ? "提交中…" : jobType === "train" ? "确认并启动全宇宙训练" : "启动任务"}</button>
           </div>
           {launchError ? <div className="launch-message launch-error"><WarningCircle size={18} /><span>{launchError}</span></div> : null}
           {launchedJob ? <div className="launch-message launch-success"><CheckCircle size={18} /><span>已提交 {launchedJob.commandId} · {launchedJob.id}</span></div> : null}

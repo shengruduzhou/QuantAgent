@@ -1,0 +1,64 @@
+.control-center-v2 .control-grid {
+  align-items: stretch;
+}
+
+.control-center-v2 .job-launcher-panel {
+  min-height: 510px;
+}
+
+.training-scope-banner {
+  min-height: 66px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px solid #655126;
+  border-left: 3px solid var(--state-warning);
+  background: rgba(231, 165, 58, .055);
+  color: #d3a956;
+}
+
+.training-scope-banner > span,
+.training-scope-banner strong,
+.training-scope-banner small {
+  display: block;
+}
+
+.training-scope-banner strong {
+  font: 10px "JetBrains Mono Variable", monospace;
+  letter-spacing: .02em;
+}
+
+.training-scope-banner small {
+  margin-top: 5px;
+  color: #98835a;
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+.control-center-v2 .job-json-editor {
+  min-height: 260px;
+  resize: vertical;
+}
+
+.control-center-v2 .job-launch-footer {
+  min-height: 54px;
+}
+
+.control-center-v2 .settings-jobs td {
+  max-width: 360px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .training-scope-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .training-scope-banner .status-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+}

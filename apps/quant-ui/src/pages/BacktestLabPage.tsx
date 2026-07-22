@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckSquare, DownloadSimple, Square } from "@phosphor-icons/react";
+import { DownloadSimple } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
 import type { BacktestSummary, EquityPoint } from "../api/types";
 import { downloadJson } from "../api/client";
@@ -13,16 +13,16 @@ import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 
 export function BacktestLabPage(): JSX.Element {
   const backtests = useApi<BacktestSummary[]>(["backtest-lab"], "/backtests");
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectedId, setSelectedId] = useState("");
   const runs = backtests.data?.data ?? [];
 
   useEffect(() => {
-    if (!selectedIds.length && runs.length) {
-      setSelectedIds(runs.slice(0, 4).map((run) => run.id));
+    if ((!selectedId || !runs.some((run) => run.id === selectedId)) && runs[0]) {
+      setSelectedId(runs[0].id);
     }
-  }, [runs, selectedIds.length]);
+  }, [runs, selectedId]);
 
-  const primary = runs.find((run) => run.id === selectedIds[0]) ?? runs[0];
+  const primary = runs.find((run) => run.id === selectedId) ?? runs[0];
   const equity = useApi<EquityPoint[]>(
     ["backtest-lab-equity", primary?.id],
     primary ? `/backtests/${primary.id}/equity` : null,
@@ -57,10 +57,8 @@ export function BacktestLabPage(): JSX.Element {
   if (backtests.isLoading) return <StateView state="loading" />;
   if (!runs.length) return <StateView state="empty" />;
 
-  const selectedRuns = runs.filter((run) => selectedIds.includes(run.id));
-
   return (
-    <div className="page backtest-page">
+    <div className="page backtest-page backtest-page-v2">
       <section className="metric-grid metric-grid-6">
         <MetricCard label="总收益" value={formatPercent(primary?.totalReturn)} delta={primary?.totalReturn} />
         <MetricCard label="年化收益" value={formatPercent(primary?.annualReturn)} delta={primary?.annualReturn} />
@@ -90,16 +88,17 @@ export function BacktestLabPage(): JSX.Element {
         </Panel>
 
         <Panel
-          title="实验对比"
-          eyebrow={`${selectedRuns.length} selected · 真实 runtime metrics`}
+          title="实验浏览"
+          eyebrow={`单一活动实验 · ${runs.length} runtime runs`}
           className="backtest-table-panel"
-          actions={<button className="secondary-button" onClick={() => downloadJson("backtest-comparison.json", selectedRuns)}><DownloadSimple size={15} /> 导出</button>}
+          actions={<button className="secondary-button" onClick={() => primary && downloadJson("backtest-experiment.json", primary)}><DownloadSimple size={15} /> 导出当前</button>}
         >
+          <div className="backtest-context-note">选择一行会替换当前实验上下文；不再通过复选框同时激活多个实验。多实验统计对比应使用独立 Compare 工作区，避免主图、指标卡和详情来源不一致。</div>
           <div className="table-scroll">
-            <table className="data-table comparison-table">
+            <table className="data-table comparison-table single-select-table">
               <thead>
                 <tr>
-                  <th>对比</th>
+                  <th>当前</th>
                   <th>实验 / Horizon</th>
                   <th>区间</th>
                   <th className="numeric">总收益</th>
@@ -114,26 +113,22 @@ export function BacktestLabPage(): JSX.Element {
               </thead>
               <tbody>
                 {runs.map((run) => {
-                  const selected = selectedIds.includes(run.id);
+                  const selected = run.id === primary?.id;
                   return (
                     <tr
                       key={run.id}
-                      className={run.id === primary?.id ? "row-selected" : ""}
+                      className={selected ? "row-selected" : ""}
+                      aria-selected={selected}
                       tabIndex={0}
-                      onClick={() => {
-                        setSelectedIds((current) => selected
-                          ? current.filter((id) => id !== run.id)
-                          : [...current.slice(0, 5), run.id]);
-                      }}
+                      onClick={() => setSelectedId(run.id)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
-                          setSelectedIds((current) => selected
-                            ? current.filter((id) => id !== run.id)
-                            : [...current.slice(0, 5), run.id]);
+                          event.preventDefault();
+                          setSelectedId(run.id);
                         }
                       }}
                     >
-                      <td>{selected ? <CheckSquare size={17} weight="fill" className="tone-positive" /> : <Square size={17} />}</td>
+                      <td><input type="radio" name="active-backtest" checked={selected} readOnly aria-label={`选择实验 ${run.name ?? run.id}`} /></td>
                       <td><strong>{run.name}</strong><span>{run.horizon ?? "research"}</span></td>
                       <td className="mono">{run.startDate?.slice(0, 10) ?? "—"} → {run.endDate?.slice(0, 10) ?? "—"}</td>
                       <td className={`numeric ${tone(run.totalReturn)}`}>{formatPercent(run.totalReturn)}</td>

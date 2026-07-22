@@ -35,6 +35,13 @@ const RANGE_OPTIONS: Array<{ value: KlineViewRange; label: string }> = [
 ];
 
 const RANGE_ORDER: KlineViewRange[] = ["60D", "120D", "1Y", "ALL"];
+const RANGE_SIZE: Record<Exclude<KlineViewRange, "ALL">, number> = {
+  "60D": 60,
+  "120D": 120,
+  "1Y": 250,
+};
+const KEYBOARD_PAN_STEP = 5;
+const KEYBOARD_PAGE_STEP = 20;
 
 const MA_OPTIONS: Array<{ key: LayerKey; label: string; period: number; color: string }> = [
   { key: "ma5", label: "MA5", period: 5, color: marketPalette.ma5 },
@@ -234,7 +241,7 @@ export function CandlestickChart({
       legend: { show: false },
       tooltip: {
         trigger: "axis",
-        triggerOn: "mousemove|click|mousewheel",
+        triggerOn: "mousemove",
         axisPointer: { type: "cross", snap: true },
         confine: true,
         enterable: true,
@@ -305,9 +312,10 @@ export function CandlestickChart({
           startValue: dates[window.startIndex],
           endValue: dates[window.endIndex],
           zoomOnMouseWheel: true,
-          moveOnMouseMove: false,
-          moveOnMouseWheel: true,
+          moveOnMouseMove: true,
+          moveOnMouseWheel: false,
           preventDefaultMouseMove: true,
+          throttle: 24,
         },
         {
           type: "slider",
@@ -315,13 +323,15 @@ export function CandlestickChart({
           startValue: dates[window.startIndex],
           endValue: dates[window.endIndex],
           bottom: 0,
-          height: 16,
+          height: 20,
           borderColor: marketPalette.grid,
           backgroundColor: "#0b1722",
           fillerColor: "rgba(63,140,255,.16)",
           handleStyle: { color: marketPalette.up, borderColor: "#85b5ff" },
           moveHandleStyle: { color: "#315f8e" },
           textStyle: { color: marketPalette.axis, fontSize: 9 },
+          showDetail: false,
+          realtime: true,
           brushSelect: false,
         },
       ],
@@ -350,15 +360,29 @@ export function CandlestickChart({
     setRange(RANGE_ORDER[nextIndex]);
   };
 
+  const moveWindow = (delta: number): void => {
+    if (!dates.length || range === "ALL") return;
+    const windowSize = Math.min(RANGE_SIZE[range], dates.length);
+    const lookAhead = Math.floor(windowSize * 0.2);
+    const targetEnd = Math.min(dates.length - 1, Math.max(windowSize - 1, derived.window.endIndex + delta));
+    const targetAnchor = targetEnd >= dates.length - 1 ? dates.length - 1 : Math.max(0, targetEnd - lookAhead);
+    setViewAnchorIndex(targetAnchor);
+  };
+
   const handleKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (!dates.length) return;
-    const current = effectiveAnchor >= 0 ? effectiveAnchor : dates.length - 1;
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      setViewAnchorIndex(Math.max(0, current - 1));
+      moveWindow(-KEYBOARD_PAN_STEP);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      setViewAnchorIndex(Math.min(dates.length - 1, current + 1));
+      moveWindow(KEYBOARD_PAN_STEP);
+    } else if (event.key === "PageUp") {
+      event.preventDefault();
+      moveWindow(-KEYBOARD_PAGE_STEP);
+    } else if (event.key === "PageDown") {
+      event.preventDefault();
+      moveWindow(KEYBOARD_PAGE_STEP);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       changeRange(-1);
@@ -376,7 +400,7 @@ export function CandlestickChart({
   };
 
   return (
-    <div className="kline-workstation">
+    <div className="kline-workstation kline-workstation-v3">
       <div className="kline-controlbar" aria-label="K 线图层与时间窗口">
         <div className="kline-control-group kline-range-group">
           <span>窗口</span>
@@ -438,7 +462,7 @@ export function CandlestickChart({
           <em>{derived.markerCount} 个可见事件</em>
         </div>
       </div>
-      <div className="kline-gesture-hint">滚轮缩放 · 拖动平移 · ←/→ 移动 · ↑/↓ 缩放 · End 最新 · Home 全部 · 点击信号联动交易记录</div>
+      <div className="kline-gesture-hint">滚轮只缩放 · 左键拖拽只平移 · ←/→ 每次 5 根 · PageUp/PageDown 每次 20 根 · ↑/↓ 改变窗口 · End 最新 · Home 全部</div>
       <EChart
         option={derived.option}
         className="chart chart-kline chart-kline-workstation"
