@@ -20,6 +20,7 @@ import { moduleForPath, moduleGroups, workstationModules } from "../workstation/
 import { useWorkspaceLayout } from "../workstation/useWorkspaceLayout";
 import { formatDate } from "../utils/format";
 import { CommandPalette } from "./CommandPalette";
+import { MonitorTable, type MonitorColumn } from "./MonitorTable";
 import { StateView } from "./StateView";
 import { StatusBadge } from "./StatusBadge";
 
@@ -48,6 +49,43 @@ export function AppShell(): JSX.Element {
     () => (jobs.data?.data ?? []).filter((job) => ["queued", "running"].includes(job.status)).length,
     [jobs.data?.data],
   );
+  const jobColumns = useMemo<MonitorColumn<JobSummary>[]>(() => [
+    {
+      id: "status",
+      header: "Status",
+      value: (job) => job.status,
+      render: (job) => <StatusBadge status={job.status} />,
+      width: 92,
+    },
+    {
+      id: "id",
+      header: "Job",
+      value: (job) => job.id,
+      render: (job) => <span className="mono">{job.id}</span>,
+      width: 190,
+    },
+    {
+      id: "command",
+      header: "Command",
+      value: (job) => job.commandId,
+      width: 190,
+    },
+    {
+      id: "created",
+      header: "Created",
+      value: (job) => job.createdAt,
+      render: (job) => <time>{formatDate(job.createdAt)}</time>,
+      csvValue: (job) => job.createdAt,
+      width: 150,
+    },
+    {
+      id: "message",
+      header: "Message",
+      value: (job) => job.message ?? job.error ?? "—",
+      width: 360,
+      maxWidth: 620,
+    },
+  ], []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
 
   useEffect(() => {
@@ -75,6 +113,10 @@ export function AppShell(): JSX.Element {
     } else {
       navigate(`/runtime?query=${encodeURIComponent(value)}`);
     }
+  };
+
+  const openVnpyDocs = (): void => {
+    window.open("https://www.vnpy.com/docs/cn/index.html", "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -107,9 +149,12 @@ export function AppShell(): JSX.Element {
       </aside>
 
       <header className="topbar terminal-topbar">
-        <div className="terminal-menu">
-          <button onClick={() => setPaletteOpen(true)}>模块 <CaretDown size={11} /></button>
-          <span>视图</span><span>数据</span><span>研究</span><span>帮助</span>
+        <div className="terminal-menu" aria-label="终端菜单">
+          <button onClick={() => setPaletteOpen(true)} title="打开模块启动器">模块 <CaretDown size={11} /></button>
+          <button onClick={layout.resetLayout} title="恢复默认工作区布局">还原布局</button>
+          <button onClick={() => navigate("/runtime")} title="打开 Runtime / DataManager">数据</button>
+          <button onClick={() => navigate("/factors")} title="打开因子研究工作区">研究</button>
+          <button onClick={openVnpyDocs} title="打开 VeighNa 官方文档">帮助</button>
         </div>
         <form className="global-search" onSubmit={submitSearch}>
           <MagnifyingGlass size={16} />
@@ -156,7 +201,7 @@ export function AppShell(): JSX.Element {
           <div className="api-banner">
             <Warning size={18} />
             <span>Quant API 未连接；页面保持真实空数据态，不使用模拟结果。</span>
-            <code>python3 -m services.quant_api</code>
+            <code>在仓库根目录执行：python -m services.quant_api</code>
           </div>
         ) : null}
         <Outlet />
@@ -165,16 +210,18 @@ export function AppShell(): JSX.Element {
       {layout.activityOpen ? (
         <aside className="activity-drawer" aria-label="全局任务与事件">
           <header><span><Bell size={15} /> ACTIVITY / JOBS</span><small className={`activity-stream-status ${jobEvents.status}`}>{jobEvents.status === "live" ? "WebSocket live · typed events" : `${jobEvents.status} · 5s REST fallback`}</small><button onClick={layout.toggleActivity}><X size={14} /></button></header>
-          {jobs.isLoading ? <StateView state="loading" /> : jobs.isError ? <StateView state="error" detail={jobs.error.message} /> : jobs.data?.data.length ? (
-            <div className="activity-table-wrap">
-              <table className="data-table activity-table">
-                <thead><tr><th>Status</th><th>Job</th><th>Command</th><th>Created</th><th>Message</th></tr></thead>
-                <tbody>{jobs.data.data.slice(0, 30).map((job) => (
-                  <tr key={job.id}><td><StatusBadge status={job.status} /></td><td className="mono">{job.id}</td><td>{job.commandId}</td><td>{formatDate(job.createdAt)}</td><td>{job.message ?? job.error ?? "—"}</td></tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : <StateView state="empty" detail="当前没有持久化任务事件。" />}
+          {jobs.isLoading ? <StateView state="loading" /> : jobs.isError ? <StateView state="error" detail={jobs.error.message} /> : (
+            <MonitorTable
+              monitorId="global-jobs"
+              ariaLabel="全局任务监控"
+              rows={jobs.data?.data ?? []}
+              columns={jobColumns}
+              rowKey={(job) => job.id}
+              maxRows={30}
+              exportFilename="quantagent-jobs.csv"
+              emptyDetail="当前没有持久化任务事件。"
+            />
+          )}
         </aside>
       ) : null}
 

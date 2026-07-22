@@ -70,11 +70,19 @@ export function useWorkspaceLayout() {
     });
   }, [activePath, navigate]);
 
+  const resetLayout = useCallback(() => {
+    setLayout(defaultLayout);
+    if (activePath !== "/") {
+      window.setTimeout(() => navigate("/"), 0);
+    }
+  }, [activePath, navigate]);
+
   return {
     ...layout,
     activePath,
     tabs,
     closeTab,
+    resetLayout,
     toggleLauncher: () => setLayout((current) => ({ ...current, launcherCollapsed: !current.launcherCollapsed })),
     toggleActivity: () => setLayout((current) => ({ ...current, activityOpen: !current.activityOpen })),
   };

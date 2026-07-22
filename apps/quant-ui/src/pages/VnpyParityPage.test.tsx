@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 import { VnpyParityPage } from "./VnpyParityPage";
@@ -73,6 +73,8 @@ test("renders and inspects the machine-readable vn.py parity registry", async ()
   expect((await screen.findAllByText("Plugin-based RiskManager")).length).toBeGreaterThan(0);
   expect(screen.getByText("50.0%")).toBeInTheDocument();
   fireEvent.click(screen.getAllByText("Plugin-based RiskManager")[0]);
-  expect(screen.getByText(/Per-rule configuration/)).toBeInTheDocument();
-  expect(screen.getByText("Implement typed risk rule registry.")).toBeInTheDocument();
+
+  const inspector = screen.getByRole("complementary", { name: "能力详情" });
+  expect(within(inspector).getByText(/Per-rule configuration/)).toBeInTheDocument();
+  expect(within(inspector).getByText("Implement typed risk rule registry.")).toBeInTheDocument();
 });

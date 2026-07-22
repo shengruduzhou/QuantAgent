@@ -1,0 +1,153 @@
+.monitor-table {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border-soft);
+  background: var(--terminal-panel);
+}
+
+.monitor-toolbar {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border-soft);
+  background: #07131d;
+  color: var(--muted);
+  font: 8px "JetBrains Mono Variable", monospace;
+}
+
+.monitor-toolbar > span:first-child {
+  min-width: 95px;
+}
+
+.monitor-toolbar strong {
+  color: var(--text);
+}
+
+.monitor-sort-state {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-toolbar button {
+  min-height: 21px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: #8ca2b5;
+  font-size: 8px;
+}
+
+.monitor-toolbar button:hover {
+  border-color: var(--border);
+  background: var(--terminal-panel-raised);
+  color: var(--text);
+}
+
+.monitor-table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.monitor-table table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.monitor-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0;
+  background: #091722;
+}
+
+.monitor-table th,
+.monitor-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, .012);
+}
+
+.monitor-table tbody tr:hover,
+.monitor-table tbody tr[aria-selected="true"] {
+  background: var(--terminal-selection);
+}
+
+.monitor-table tbody tr:focus-visible {
+  outline: 1px solid var(--terminal-focus);
+  outline-offset: -1px;
+}
+
+.monitor-header-button {
+  width: calc(100% - 6px);
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: #7f95a7;
+  font: 8px "JetBrains Mono Variable", monospace;
+  text-align: inherit;
+}
+
+.monitor-header-button:not(:disabled):hover {
+  color: var(--text);
+  background: rgba(63, 140, 255, .05);
+}
+
+.monitor-header-button:disabled {
+  cursor: default;
+}
+
+.monitor-header-button small {
+  color: var(--market-up);
+  font-size: 7px;
+}
+
+.monitor-resize-handle {
+  position: absolute;
+  top: 3px;
+  right: -1px;
+  bottom: 3px;
+  width: 6px;
+  cursor: col-resize;
+  border-right: 1px solid transparent;
+}
+
+.monitor-resize-handle:hover {
+  border-right-color: var(--terminal-focus);
+}
+
+.monitor-table td.center {
+  text-align: center;
+}
+
+.activity-drawer .monitor-table {
+  height: calc(100% - 29px);
+  border: 0;
+}
+
+.activity-drawer .monitor-table-scroll {
+  height: calc(100% - 28px);
+}
+
+.risk-stock-panel .monitor-table-scroll {
+  max-height: 360px;
+}

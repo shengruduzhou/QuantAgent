@@ -41,3 +41,41 @@ jobs:
             pytest.log
           if-no-files-found: error
           retention-days: 14
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/quant-ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.12.0"
+          cache: "npm"
+          cache-dependency-path: apps/quant-ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: MonitorTable component tests
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test -- --run src/components/MonitorTable.test.tsx 2>&1 | tee monitor-table-test.log
+      - name: Upload MonitorTable diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-table-test-diagnostics
+          path: apps/quant-ui/monitor-table-test.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Unit and component tests
+        run: npm test -- --run
+      - name: Production build
+        run: npm run build:vite

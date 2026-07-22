@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
+import type { BarSeriesOption, CandlestickSeriesOption, LineSeriesOption } from "echarts/charts";
 import type { KlineBar, Trade } from "../api/types";
 import {
   layoutTradeMarkers,
@@ -8,6 +9,7 @@ import {
   type KlineViewRange,
   type TradeMarkerLayout,
 } from "../charting/kline";
+import { marketPalette } from "../theme/marketPalette";
 import { EChart } from "./EChart";
 
 interface CandlestickChartProps {
@@ -19,6 +21,7 @@ interface CandlestickChartProps {
 }
 
 type LayerKey = "ma5" | "ma10" | "ma20" | "ma60" | "trades" | "tTrades" | "risk";
+type MarkPointData = NonNullable<NonNullable<CandlestickSeriesOption["markPoint"]>["data"]>;
 
 interface TooltipParam {
   axisValue?: string | number;
@@ -31,11 +34,13 @@ const RANGE_OPTIONS: Array<{ value: KlineViewRange; label: string }> = [
   { value: "ALL", label: "全部" },
 ];
 
+const RANGE_ORDER: KlineViewRange[] = ["60D", "120D", "1Y", "ALL"];
+
 const MA_OPTIONS: Array<{ key: LayerKey; label: string; period: number; color: string }> = [
-  { key: "ma5", label: "MA5", period: 5, color: "#d7b95b" },
-  { key: "ma10", label: "MA10", period: 10, color: "#72a7ff" },
-  { key: "ma20", label: "MA20", period: 20, color: "#b28cff" },
-  { key: "ma60", label: "MA60", period: 60, color: "#7f96a8" },
+  { key: "ma5", label: "MA5", period: 5, color: marketPalette.ma5 },
+  { key: "ma10", label: "MA10", period: 10, color: marketPalette.ma10 },
+  { key: "ma20", label: "MA20", period: 20, color: marketPalette.ma20 },
+  { key: "ma60", label: "MA60", period: 60, color: marketPalette.ma60 },
 ];
 
 const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
@@ -69,9 +74,9 @@ function markerVisible(marker: TradeMarkerLayout, layers: Record<LayerKey, boole
 }
 
 function markerColor(marker: TradeMarkerLayout): string {
-  if (marker.category === "risk") return "#e7a53a";
-  if (marker.category === "t_trade") return marker.side === "buy" ? "#3f8cff" : "#b779ff";
-  return marker.side === "buy" ? "#2ac89f" : "#ef5c63";
+  if (marker.category === "risk") return marketPalette.risk;
+  if (marker.category === "t_trade") return marker.side === "buy" ? marketPalette.tBuy : marketPalette.tSell;
+  return marker.side === "buy" ? marketPalette.buy : marketPalette.sell;
 }
 
 function markerLabel(marker: TradeMarkerLayout): string {
@@ -89,15 +94,28 @@ export function CandlestickChart({
 }: CandlestickChartProps): JSX.Element {
   const [range, setRange] = useState<KlineViewRange>("120D");
   const [layers, setLayers] = useState<Record<LayerKey, boolean>>(DEFAULT_LAYERS);
+  const [viewAnchorIndex, setViewAnchorIndex] = useState<number | null>(null);
 
+  const dates = useMemo(() => bars.map((bar) => bar.datetime.slice(0, 10)), [bars]);
   const selectedTrade = trades.find((trade) => trade.id === selectedTradeId) ?? trades[0];
   const selectedDate = selectedTrade?.datetime.slice(0, 10);
+  const selectedIndex = selectedDate ? dates.indexOf(selectedDate) : -1;
+  const effectiveAnchor = viewAnchorIndex ?? (selectedIndex >= 0 ? selectedIndex : dates.length - 1);
+
+  useEffect(() => {
+    setViewAnchorIndex(null);
+  }, [selectedDate]);
+
+  useEffect(() => {
+    setViewAnchorIndex((current) => {
+      if (current === null) return null;
+      return Math.min(Math.max(0, current), Math.max(0, dates.length - 1));
+    });
+  }, [dates.length]);
 
   const derived = useMemo(() => {
-    const dates = bars.map((bar) => bar.datetime.slice(0, 10));
     const dateSet = new Set(dates);
-    const selectedIndex = selectedDate ? dates.indexOf(selectedDate) : -1;
-    const window = resolveKlineWindow(dates.length, range, selectedIndex);
+    const window = resolveKlineWindow(dates.length, range, effectiveAnchor);
     const markerLayouts = layoutTradeMarkers(trades, dateSet).filter((marker) => markerVisible(marker, layers));
     const markersByDate = new Map<string, TradeMarkerLayout[]>();
 
@@ -114,15 +132,15 @@ export function CandlestickChart({
       return {
         name: marker.trade.action,
         value: marker.trade.price,
-        coord: [marker.date, marker.trade.price],
+        coord: [marker.date, marker.trade.price] as [string, number],
         tradeId: marker.trade.id,
         symbol: marker.category === "risk" ? "diamond" : marker.side === "buy" ? "triangle" : "pin",
         symbolRotate: marker.side === "sell" && marker.category !== "risk" ? 180 : 0,
         symbolSize: isSelected ? 20 : marker.category === "risk" ? 14 : 13,
-        symbolOffset: [0, offsetDirection * laneDistance],
+        symbolOffset: [0, offsetDirection * laneDistance] as [number, number],
         itemStyle: {
           color: markerColor(marker),
-          borderColor: isSelected ? "#ffffff" : "#07131e",
+          borderColor: isSelected ? marketPalette.selected : marketPalette.canvas,
           borderWidth: isSelected ? 2 : 1,
         },
         label: {
@@ -131,17 +149,17 @@ export function CandlestickChart({
           color: markerColor(marker),
           fontSize: isSelected ? 10 : 9,
           fontWeight: isSelected ? 700 : 500,
-          position: marker.side === "buy" ? "bottom" : "top",
+          position: marker.side === "buy" ? "bottom" as const : "top" as const,
           distance: 5,
         },
       };
-    });
+    }) as MarkPointData;
 
-    const maSeries = MA_OPTIONS
+    const maSeries: LineSeriesOption[] = MA_OPTIONS
       .filter((item) => layers[item.key])
       .map((item) => ({
         name: item.label,
-        type: "line" as const,
+        type: "line",
         data: movingAverage(bars, item.period),
         xAxisIndex: 0,
         yAxisIndex: 0,
@@ -181,22 +199,51 @@ export function CandlestickChart({
       ].join("");
     };
 
+    const klineSeries: CandlestickSeriesOption = {
+      name: "Kline",
+      type: "candlestick",
+      data: bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
+      itemStyle: {
+        color: marketPalette.up,
+        color0: marketPalette.down,
+        borderColor: marketPalette.up,
+        borderColor0: marketPalette.down,
+      },
+      markPoint: {
+        silent: false,
+        symbolKeepAspect: true,
+        data: tradePoints,
+      },
+    };
+
+    const volumeSeries: BarSeriesOption = {
+      name: "Volume",
+      type: "bar",
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      barMaxWidth: 8,
+      data: bars.map((bar) => ({
+        value: bar.volume ?? 0,
+        itemStyle: { color: bar.close >= bar.open ? `${marketPalette.up}ad` : `${marketPalette.down}a8` },
+      })),
+    };
+
     const option: EChartsOption = {
       animation: false,
       backgroundColor: "transparent",
       legend: { show: false },
       tooltip: {
         trigger: "axis",
-        triggerOn: "mousemove|click",
+        triggerOn: "mousemove|click|mousewheel",
         axisPointer: { type: "cross", snap: true },
         confine: true,
         enterable: true,
         appendToBody: false,
         backgroundColor: "rgba(7, 19, 30, .97)",
-        borderColor: "#29475f",
+        borderColor: marketPalette.border,
         borderWidth: 1,
         padding: 10,
-        textStyle: { color: "#d8e5ef", fontSize: 11 },
+        textStyle: { color: marketPalette.text, fontSize: 11 },
         formatter: tooltipFormatter,
       },
       axisPointer: {
@@ -214,7 +261,7 @@ export function CandlestickChart({
           boundaryGap: true,
           axisLabel: { show: false },
           axisTick: { show: false },
-          axisLine: { lineStyle: { color: "#20364a" } },
+          axisLine: { lineStyle: { color: marketPalette.grid } },
           splitLine: { show: false },
         },
         {
@@ -222,9 +269,9 @@ export function CandlestickChart({
           gridIndex: 1,
           data: dates,
           boundaryGap: true,
-          axisLabel: { color: "#71879a", fontSize: 10, hideOverlap: true },
+          axisLabel: { color: marketPalette.axis, fontSize: 10, hideOverlap: true },
           axisTick: { show: false },
-          axisLine: { lineStyle: { color: "#20364a" } },
+          axisLine: { lineStyle: { color: marketPalette.grid } },
           splitLine: { show: false },
         },
       ],
@@ -233,20 +280,20 @@ export function CandlestickChart({
           scale: true,
           position: "right",
           axisLabel: {
-            color: "#71879a",
+            color: marketPalette.axis,
             fontSize: 10,
             formatter: (value: string | number) => Number(value).toFixed(2),
           },
-          axisLine: { show: true, lineStyle: { color: "#20364a" } },
+          axisLine: { show: true, lineStyle: { color: marketPalette.grid } },
           axisTick: { show: false },
-          splitLine: { lineStyle: { color: "#13283a", type: "dashed" } },
+          splitLine: { lineStyle: { color: marketPalette.grid, type: "dashed" } },
         },
         {
           scale: true,
           gridIndex: 1,
           position: "right",
-          axisLabel: { color: "#71879a", fontSize: 9 },
-          axisLine: { show: true, lineStyle: { color: "#20364a" } },
+          axisLabel: { color: marketPalette.axis, fontSize: 9 },
+          axisLine: { show: true, lineStyle: { color: marketPalette.grid } },
           axisTick: { show: false },
           splitLine: { show: false },
         },
@@ -269,52 +316,63 @@ export function CandlestickChart({
           endValue: dates[window.endIndex],
           bottom: 0,
           height: 16,
-          borderColor: "#20364a",
+          borderColor: marketPalette.grid,
           backgroundColor: "#0b1722",
           fillerColor: "rgba(63,140,255,.16)",
-          handleStyle: { color: "#3f8cff", borderColor: "#85b5ff" },
+          handleStyle: { color: marketPalette.up, borderColor: "#85b5ff" },
           moveHandleStyle: { color: "#315f8e" },
-          textStyle: { color: "#71879a", fontSize: 9 },
+          textStyle: { color: marketPalette.axis, fontSize: 9 },
           brushSelect: false,
         },
       ],
-      series: [
-        {
-          name: "Kline",
-          type: "candlestick",
-          data: bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
-          itemStyle: {
-            color: "#3f8cff",
-            color0: "#ef5c63",
-            borderColor: "#3f8cff",
-            borderColor0: "#ef5c63",
-          },
-          markPoint: {
-            silent: false,
-            symbolKeepAspect: true,
-            data: tradePoints,
-          },
-        },
-        ...maSeries,
-        {
-          name: "Volume",
-          type: "bar",
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          barMaxWidth: 8,
-          data: bars.map((bar) => ({
-            value: bar.volume ?? 0,
-            itemStyle: { color: bar.close >= bar.open ? "rgba(63,140,255,.68)" : "rgba(239,92,99,.66)" },
-          })),
-        },
-      ],
+      series: [klineSeries, ...maSeries, volumeSeries],
     };
 
-    return { option, markerCount: markerLayouts.length };
-  }, [bars, layers, range, selectedDate, selectedTradeId, symbol, trades]);
+    return { option, markerCount: markerLayouts.length, window };
+  }, [bars, dates, effectiveAnchor, layers, range, selectedTradeId, symbol, trades]);
 
   const toggleLayer = (key: LayerKey): void => {
     setLayers((current) => ({ ...current, [key]: !current[key] }));
+  };
+
+  const resetView = (): void => {
+    setRange("120D");
+    setViewAnchorIndex(null);
+  };
+
+  const jumpLatest = (): void => {
+    setViewAnchorIndex(Math.max(0, dates.length - 1));
+  };
+
+  const changeRange = (direction: -1 | 1): void => {
+    const currentIndex = RANGE_ORDER.indexOf(range);
+    const nextIndex = Math.min(RANGE_ORDER.length - 1, Math.max(0, currentIndex + direction));
+    setRange(RANGE_ORDER[nextIndex]);
+  };
+
+  const handleKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (!dates.length) return;
+    const current = effectiveAnchor >= 0 ? effectiveAnchor : dates.length - 1;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setViewAnchorIndex(Math.max(0, current - 1));
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setViewAnchorIndex(Math.min(dates.length - 1, current + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      changeRange(-1);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      changeRange(1);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      jumpLatest();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setRange("ALL");
+      setViewAnchorIndex(null);
+    }
   };
 
   return (
@@ -333,6 +391,8 @@ export function CandlestickChart({
               {item.label}
             </button>
           ))}
+          <button type="button" onClick={resetView}>复位</button>
+          <button type="button" onClick={jumpLatest}>最新</button>
         </div>
         <div className="kline-control-group kline-layer-group">
           <span>指标</span>
@@ -378,11 +438,13 @@ export function CandlestickChart({
           <em>{derived.markerCount} 个可见事件</em>
         </div>
       </div>
-      <div className="kline-gesture-hint">滚轮缩放 · 拖动平移 · 十字光标查看 OHLCV · 点击信号联动交易记录</div>
+      <div className="kline-gesture-hint">滚轮缩放 · 拖动平移 · ←/→ 移动 · ↑/↓ 缩放 · End 最新 · Home 全部 · 点击信号联动交易记录</div>
       <EChart
         option={derived.option}
         className="chart chart-kline chart-kline-workstation"
         ariaLabel={`${symbol ?? bars[0]?.symbol ?? "股票"} K 线、成交量、均线与交易事件图`}
+        interactive
+        onKeyDown={handleKeyboard}
         onClick={(params) => {
           const value = params as { data?: { tradeId?: string } };
           if (value.data?.tradeId) onTradeSelect?.(value.data.tradeId);
