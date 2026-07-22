@@ -89,7 +89,7 @@ export function SettingsPage(): JSX.Element {
         <Panel title="一键启动" eyebrow="Single process · integrated static UI" className="startup-panel">
           <div className="startup-command">
             <TerminalWindow size={24} weight="duotone" />
-            <div><span>项目根目录执行</span><code>./scripts/run_quant_ui.sh</code></div>
+            <div><span>项目根目录执行</span><code>./scripts/run_quant_ui.sh --runtime /path/to/runtime</code></div>
             <StatusBadge status="ready" label="localhost:8000" />
           </div>
           <div className="settings-list compact-settings">

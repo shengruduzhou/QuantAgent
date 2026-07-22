@@ -1,6 +1,6 @@
 # ADR-001: Institutional Workstation Shell
 
-Status: accepted  
+Status: superseded by ADR-002
 Date: 2026-07-23
 
 ## Decision

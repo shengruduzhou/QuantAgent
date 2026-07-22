@@ -19,14 +19,22 @@ function createId(): string {
     : `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function canonicalPath(path: string): string {
+  const url = new URL(path, window.location.origin);
+  url.searchParams.delete("ui");
+  const search = url.searchParams.toString();
+  return `${url.pathname}${search ? `?${search}` : ""}`;
+}
+
 function createTab(path: string, pinned = false): WorkspaceTab {
-  const module = moduleForVNextPath(path);
+  const normalizedPath = canonicalPath(path);
+  const module = moduleForVNextPath(normalizedPath);
   return {
     id: createId(),
     moduleId: module.id,
-    path,
+    path: normalizedPath,
     title: module.label,
-    context: contextForPath(path),
+    context: contextForPath(normalizedPath),
     pinned,
     dirty: false,
     status: "idle",
@@ -58,12 +66,14 @@ function isTab(value: unknown): value is WorkspaceTab {
 }
 
 function normalizeTab(tab: WorkspaceTab): WorkspaceTab {
-  const module = moduleForVNextPath(tab.path);
+  const path = canonicalPath(tab.path);
+  const module = moduleForVNextPath(path);
   return {
     ...tab,
+    path,
     moduleId: module.id,
     title: module.label,
-    context: contextForPath(tab.path),
+    context: contextForPath(path),
     pinned: Boolean(tab.pinned),
     dirty: Boolean(tab.dirty),
     status: ["idle", "loading", "error"].includes(tab.status) ? tab.status : "idle",
@@ -116,7 +126,7 @@ function loadState(path: string): SavedWorkspaceState {
 }
 
 function withInstance(path: string): string {
-  const url = new URL(path, window.location.origin);
+  const url = new URL(canonicalPath(path), window.location.origin);
   url.searchParams.set("workspaceInstance", createId());
   return `${url.pathname}${url.search}`;
 }
@@ -124,7 +134,7 @@ function withInstance(path: string): string {
 export function useWorkspaceStore() {
   const location = useLocation();
   const navigate = useNavigate();
-  const routePath = `${location.pathname}${location.search}`;
+  const routePath = canonicalPath(`${location.pathname}${location.search}`);
   const [state, setState] = useState<SavedWorkspaceState>(() => loadState(routePath));
 
   useEffect(() => {

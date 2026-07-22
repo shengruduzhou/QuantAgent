@@ -2,7 +2,6 @@ import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
 import { StateView } from "../../components/StateView";
 
-const LegacyDashboard = lazy(() => import("../../pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const VNextDashboard = lazy(() => import("../dashboard/VNextDashboard").then((module) => ({ default: module.VNextDashboard })));
 const TrainingLab = lazy(() => import("../training/TrainingLabPage").then((module) => ({ default: module.TrainingLabPage })));
 const StockReplay = lazy(() => import("../../pages/StockReplayPage").then((module) => ({ default: module.StockReplayPage })));
@@ -23,7 +22,6 @@ export function WorkspaceRoutes({ location }: { location: string }): JSX.Element
     <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}>
       <Routes location={location}>
         <Route path="/" element={<VNextDashboard />} />
-        <Route path="/legacy-dashboard" element={<LegacyDashboard />} />
         <Route path="/training" element={<TrainingLab />} />
         <Route path="/stock-replay" element={<StockReplay />} />
         <Route path="/backtests" element={<Backtests />} />

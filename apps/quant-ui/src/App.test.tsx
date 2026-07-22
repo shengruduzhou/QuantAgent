@@ -1,9 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App";
-import { CommandPalette } from "./components/CommandPalette";
 
 vi.mock("./components/EChart", () => ({
   EChart: () => <div data-testid="chart" />,
@@ -91,12 +90,12 @@ test("VNext dashboard separates decision states from the primary canvas", async 
   expect(portfolio).toHaveAttribute("aria-pressed", "false");
 });
 
-test("keeps the legacy dashboard available behind an explicit feature flag", async () => {
+test("keeps the institutional workstation active when a retired legacy query is present", async () => {
   installFetchMock();
   renderApp("/?ui=legacy");
 
-  expect(await screen.findByText("QuantAgent")).toBeInTheDocument();
-  expect(screen.getByText("T+1 做 T")).toBeInTheDocument();
+  expect(await screen.findByLabelText("QuantAgent 模块栏")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "今日决策总览" })).toBeInTheDocument();
 });
 
 test("opens QuantAgent help internally from the VNext command bar", async () => {
@@ -149,23 +148,16 @@ test("renders explicit empty state without fabricated data", async () => {
   expect(screen.getAllByText(/只展示已持久化的真实 QuantAgent artifact/).length).toBeGreaterThan(0);
 });
 
-test("command palette routes a stock code to stock replay", () => {
-  function LocationProbe(): JSX.Element {
-    return <div data-testid="location">{useLocation().pathname}{useLocation().search}</div>;
-  }
+test("VNext command palette routes an exact stock code to Chart Workstation", async () => {
+  installFetchMock();
+  renderApp("/");
 
-  render(
-    <MemoryRouter>
-      <CommandPalette open onClose={() => undefined} />
-      <LocationProbe />
-    </MemoryRouter>,
-  );
-
-  const input = screen.getByPlaceholderText("输入页面、股票代码、因子、模型或功能");
+  fireEvent.click(await screen.findByRole("button", { name: "打开全局实体与命令搜索" }));
+  const input = screen.getByRole("textbox", { name: "搜索 QuantAgent 实体和命令" });
   fireEvent.change(input, { target: { value: "000001.SZ" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
-  expect(screen.getByTestId("location")).toHaveTextContent("/stock-replay?symbol=000001.SZ");
+  expect(await screen.findByTitle("/stock-replay?symbol=000001.SZ")).toBeInTheDocument();
 });
 
 test("runtime explorer distinguishes verified production artifacts", async () => {
