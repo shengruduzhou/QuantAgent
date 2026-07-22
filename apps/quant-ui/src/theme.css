@@ -1,0 +1,47 @@
+:root {
+  --terminal-canvas: #050c13;
+  --terminal-panel: #08141e;
+  --terminal-panel-raised: #0a1925;
+  --terminal-border: #1c3448;
+  --terminal-border-strong: #2a4b63;
+  --terminal-selection: #102b40;
+  --terminal-focus: #8bb8ff;
+  --market-up: #3f8cff;
+  --market-down: #ef5c63;
+  --trade-buy: #2ac89f;
+  --trade-sell: #ef5c63;
+  --trade-t-buy: #6f9dff;
+  --trade-t-sell: #b779ff;
+  --market-bid: #f0a7c2;
+  --market-ask: #8ad9a3;
+  --state-warning: #e7a53a;
+  --state-critical: #ef5c63;
+  --state-verified: #2ac89f;
+  --state-stale: #a47b43;
+  --state-unavailable: #71879a;
+}
+
+:focus-visible {
+  outline: 1px solid var(--terminal-focus);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.parity-table tr[aria-selected="true"] {
+  background: var(--terminal-selection);
+}
+
+.parity-table td button:focus-visible {
+  outline-offset: 3px;
+}
