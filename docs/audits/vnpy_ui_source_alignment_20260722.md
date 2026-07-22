@@ -16,8 +16,10 @@ Changed areas:
 - parity registry keyboard inspection and filter feedback;
 - workstation menu actions and default-layout restore;
 - local startup guidance shown by the API-offline banner;
-- GitHub Actions frontend validation;
-- removal of developer-specific npm cache configuration.
+- GitHub Actions frontend validation and diagnostics;
+- removal of developer-specific npm cache configuration;
+- canonical Web `MonitorTable` foundation;
+- Activity Jobs and single-stock risk monitor migrations.
 
 Not changed:
 
@@ -63,10 +65,34 @@ Observed behavior:
 - column state is persisted;
 - direction, bid/ask and PnL cells use semantic presentation rather than arbitrary per-page colors.
 
+Implemented in this slice:
+
+- one generic `MonitorTable` component and one column contract;
+- deterministic stable sorting with a third click returning to source order;
+- keyboard row navigation and explicit selected state;
+- drag-resizable columns;
+- browser-local column-width persistence;
+- data-driven auto-fit and default-width restore;
+- UTF-8 CSV export from the current visible/sorted monitor;
+- dense alternating-row terminal presentation;
+- explicit empty state and ARIA column sort state;
+- migration of the global Activity Jobs monitor;
+- migration of the Risk Center single-stock ranking monitor;
+- targeted component tests plus full frontend regression tests.
+
+Remaining monitor gaps:
+
+- all legacy `data-table` instances are not yet migrated;
+- keyed market/order/trade/position/account updates are not yet projected into the shared monitor contract;
+- virtualization and million-row performance are not implemented;
+- column order and hidden-column persistence are not implemented;
+- context menus are represented by visible toolbar actions rather than a full right-click menu;
+- stale, disconnected and replay-gap states still need typed monitor-level status.
+
 QuantAgent decision:
 
-- introduce semantic terminal/market tokens now;
-- keep current tables operational while planning one canonical Web `MonitorTable` adapter for sorting, virtualization, column persistence, CSV export and event-driven keyed updates;
+- continue migrating existing tables into this canonical adapter;
+- add event-driven row reconciliation as a separate vertical slice;
 - do not create page-specific table frameworks.
 
 ### 3. Chart behavior
@@ -163,6 +189,27 @@ QuantAgent decision:
 - outputs must produce PIT/data-quality manifests and refresh the canonical Runtime Catalog;
 - destructive operations remain cleanup plans with confirmation and audit evidence.
 
+### 7. Plugin-based RiskManager
+
+Source: `vnpy/vnpy_riskmanager`, `vnpy_riskmanager/engine.py`.
+
+Observed behavior:
+
+- rule classes are discovered from both package and user `rules` directories;
+- rules declare parameters, variables and event callbacks;
+- only required Tick/Order/Trade/Timer callbacks are registered;
+- the engine intercepts the canonical `send_order` path before forwarding an order;
+- active rules are evaluated in order and can reject a request;
+- interceptions emit log and notification events;
+- per-rule settings are updated in memory, emitted to UI and persisted.
+
+QuantAgent decision:
+
+- keep QuantAgent `RiskGate`, `KillSwitch` and A-share constraints canonical;
+- add a typed rule registry and adapters rather than replacing them with vn.py rule implementations;
+- expose per-rule enable/configuration only after update validation, audit persistence and paper interception evidence are implemented;
+- do not add Web-configurable live risk settings in this UI slice.
+
 ## Confirmed bugs fixed
 
 1. `VnpyParityPage.test.tsx` used an unscoped text query even though the same gap appears in the matrix and inspector. The test now scopes assertions to the labelled detail inspector.
@@ -172,7 +219,9 @@ QuantAgent decision:
 5. The API-offline banner previously showed a command without saying it must run from the repository root. The banner now states the required context.
 6. Top-level `视图 / 数据 / 研究 / 帮助` labels looked interactive but were inert. They are now real actions.
 7. `.npmrc` hard-coded `/home/shanhefu/QuantAgent/apps/quant-ui/.npm-cache`, which broke `npm ci` on GitHub-hosted runners. The developer-specific absolute cache path was removed and CI caching is owned by `actions/setup-node`.
-8. The repository CI previously ran only Python. A separate frontend job now executes dependency installation, typecheck, unit/component tests and production build.
+8. The repository CI previously ran only Python. A separate frontend job now executes dependency installation, typecheck, focused monitor tests, full unit/component tests and production build.
+9. The first `MonitorTable` test run leaked rendered DOM between tests. Explicit cleanup and monitor-scoped queries now make failures deterministic.
+10. `aria-sort` was initially attached to a button. It now belongs to the column-header cell, matching the table accessibility contract.
 
 ## Semantic color policy
 
@@ -188,7 +237,17 @@ VeighNa desktop uses semantic cell colors for long/short, bid/ask and PnL. Quant
 
 Legacy `--bg`, `--surface`, `--blue`, `--green`, `--red` and `--amber` variables are routed through the semantic source so new modules do not introduce a parallel theme.
 
-## Required validation
+## Validation evidence
+
+GitHub Actions frontend gate currently covers:
+
+- Node 22.12.0;
+- reproducible `npm ci`;
+- TypeScript `tsc --noEmit`;
+- focused `MonitorTable` component tests;
+- full Vitest suite;
+- Vite production build;
+- persisted diagnostic artifacts for the focused monitor test.
 
 Backend:
 
@@ -215,12 +274,15 @@ Browser:
 - open `/parity`, filter, clear filters and navigate capability rows with Up/Down;
 - open `/stock-replay`, focus the chart, use Left/Right/Up/Down/Home/End;
 - test wheel zoom, drag pan, signal selection and latest/reset controls;
+- open the Activity drawer, sort columns, resize/autofit/reset and export CSV;
+- open Risk Center and repeat monitor sorting/export operations;
 - inspect console, failed network requests, focus visibility, text overlap and chart overlap.
 
 ## Next vertical slices
 
-1. Canonical Web `MonitorTable`: keyed event updates, stable sorting, column persistence, resize/export, virtualization and explicit stale/disconnected states.
-2. Runtime/DataManager query-download loop: validated job, typed progress, cancellation, PIT/data-quality manifest and catalog refresh.
+1. Runtime/DataManager query-download loop: validated job, typed progress, cancellation, PIT/data-quality manifest and catalog refresh.
+2. Monitor event projections: keyed updates and explicit live/stale/disconnected state for orders, trades, positions, accounts, logs and risk events.
 3. Chart visible-range synchronization: chart viewport to trade/stat tables, brush selection and incremental updates.
-4. Paper OMS snapshot/recovery: orders, trades, positions, account, reconciliation and restart recovery.
-5. WebTrader process boundary: authenticated RPC, heartbeat, sequence/replay, idempotency and backpressure.
+4. RiskManager rule registry: discoverable rules, per-rule enable/configuration, persisted audit and paper interception evidence.
+5. Paper OMS snapshot/recovery: orders, trades, positions, account, reconciliation and restart recovery.
+6. WebTrader process boundary: authenticated RPC, heartbeat, sequence/replay, idempotency and backpressure.
