@@ -60,5 +60,9 @@ jobs:
           cache-dependency-path: apps/quant-ui/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
-      - name: Typecheck, test and build
-        run: npm run check
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit and component tests
+        run: npm test -- --run
+      - name: Production build
+        run: npm run build:vite
