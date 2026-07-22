@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { MonitorTable, type MonitorColumn } from "./MonitorTable";
 
 interface Row {
@@ -19,14 +19,23 @@ const columns: MonitorColumn<Row>[] = [
   { id: "value", header: "Value", value: (row) => row.value, align: "right", width: 80 },
 ];
 
+function currentMonitor(): HTMLElement {
+  return screen.getByRole("region", { name: "测试监控" });
+}
+
 function rowNames(): string[] {
-  const table = screen.getByRole("table", { name: "测试监控" });
+  const table = within(currentMonitor()).getByRole("table", { name: "测试监控" });
   return within(table).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell")[0].textContent ?? "");
 }
 
 describe("MonitorTable", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
   });
 
   test("sorts stably and restores source order on the third click", () => {
@@ -40,7 +49,7 @@ describe("MonitorTable", () => {
       />,
     );
 
-    const valueHeader = screen.getByRole("button", { name: "Value" });
+    const valueHeader = within(currentMonitor()).getByRole("button", { name: "Value" });
     fireEvent.click(valueHeader);
     expect(rowNames()).toEqual(["Gamma", "Beta", "Alpha"]);
 
@@ -64,7 +73,8 @@ describe("MonitorTable", () => {
       />,
     );
 
-    const tableRows = screen.getAllByRole("row").slice(1);
+    const table = within(currentMonitor()).getByRole("table", { name: "测试监控" });
+    const tableRows = within(table).getAllByRole("row").slice(1);
     fireEvent.keyDown(tableRows[0], { key: "ArrowDown" });
     expect(onSelect).toHaveBeenLastCalledWith(rows[1]);
   });
@@ -87,10 +97,9 @@ describe("MonitorTable", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /CSV/ }));
+    fireEvent.click(within(currentMonitor()).getByRole("button", { name: /CSV/ }));
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(click).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:monitor");
-    click.mockRestore();
   });
 });
