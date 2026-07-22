@@ -10,6 +10,7 @@ import "./monitor-table.css";
 import "./kline-workstation.css";
 import "./parity.css";
 import "./ux-depth.css";
+import "./ux-depth-fixes.css";
 import "./control-depth.css";
 
 const queryClient = new QueryClient({
