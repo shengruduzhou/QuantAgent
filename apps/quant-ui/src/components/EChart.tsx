@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
 import { BarChart, CandlestickChart, LineChart, RadarChart, ScatterChart } from "echarts/charts";
 import {
@@ -31,17 +31,34 @@ interface EChartProps {
   option: EChartsOption;
   className?: string;
   ariaLabel?: string;
+  interactive?: boolean;
   onClick?: (params: unknown) => void;
+  onReady?: (chart: EChartsType) => void;
+  onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
 
-export function EChart({ option, className, ariaLabel, onClick }: EChartProps): JSX.Element {
+export function EChart({
+  option,
+  className,
+  ariaLabel,
+  interactive = false,
+  onClick,
+  onReady,
+  onKeyDown,
+}: EChartProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const onReadyRef = useRef(onReady);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
     const chart = init(containerRef.current, undefined, { renderer: "canvas" });
     chartRef.current = chart;
+    onReadyRef.current?.(chart);
     const observer = new ResizeObserver(() => chart.resize());
     observer.observe(containerRef.current);
     return () => {
@@ -73,8 +90,10 @@ export function EChart({ option, className, ariaLabel, onClick }: EChartProps): 
     <div
       ref={containerRef}
       className={className ?? "chart"}
-      role="img"
+      role={interactive ? "application" : "img"}
+      tabIndex={interactive ? 0 : undefined}
       aria-label={ariaLabel ?? "QuantAgent 数据图表"}
+      onKeyDown={onKeyDown}
     />
   );
 }
