@@ -1,0 +1,197 @@
+.vnext-shell {
+  --vnx-canvas: #070b0f;
+  --vnx-canvas-top: #0a1219;
+  --vnx-shell: #0a1015;
+  --vnx-command: #0a1015;
+  --vnx-surface-1: #0d141a;
+  --vnx-surface-2: #111a21;
+  --vnx-surface-3: #16212a;
+  --vnx-surface-selected: #17273a;
+  --vnx-input: #080e13;
+  --vnx-code: #05090d;
+  --vnx-elevated: #111a21;
+  --vnx-backdrop: rgba(1, 4, 7, .72);
+  --vnx-shadow: rgba(0, 0, 0, .5);
+  --vnx-line: #26333d;
+  --vnx-line-soft: #1a252d;
+  --vnx-line-strong: #3a4c5a;
+  --vnx-text: #e5edf1;
+  --vnx-text-bright: #f1f5f7;
+  --vnx-text-soft: #b9c6cd;
+  --vnx-muted: #83939d;
+  --vnx-muted-2: #657681;
+  --vnx-primary: #6ea6ff;
+  --vnx-primary-strong: #a9c8ff;
+  --vnx-primary-surface: #1a3554;
+  --vnx-realtime: #43c1ce;
+  --vnx-positive: #d95864;
+  --vnx-negative: #30ad83;
+  --vnx-success: #38b58e;
+  --vnx-warning: #d9a441;
+  --vnx-danger: #e7656e;
+  --vnx-info: #6d9fe8;
+  --terminal-canvas: var(--vnx-canvas);
+  --terminal-panel: var(--vnx-surface-1);
+  --terminal-panel-raised: var(--vnx-surface-2);
+  --terminal-border: var(--vnx-line);
+  --terminal-border-strong: var(--vnx-line-strong);
+  --terminal-selection: var(--vnx-surface-selected);
+  --vnx-font-sans: "Inter Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --vnx-font-mono: "JetBrains Mono Variable", "Noto Sans CJK SC", "Microsoft YaHei", ui-monospace, monospace;
+  --vnx-radius-sm: 3px;
+  --vnx-radius: 5px;
+  --vnx-space-1: 4px;
+  --vnx-space-2: 8px;
+  --vnx-space-3: 12px;
+  --vnx-space-4: 16px;
+  --vnx-space-5: 20px;
+  --vnx-row: 38px;
+  color: var(--vnx-text);
+  font: 13px/1.45 var(--vnx-font-sans);
+  color-scheme: dark;
+}
+
+.vnext-shell.theme-dawn {
+  --vnx-canvas: #0f1820;
+  --vnx-canvas-top: #172632;
+  --vnx-shell: #13202a;
+  --vnx-command: #14232d;
+  --vnx-surface-1: #17252f;
+  --vnx-surface-2: #1c2d38;
+  --vnx-surface-3: #233743;
+  --vnx-surface-selected: #213b50;
+  --vnx-input: #111d25;
+  --vnx-code: #0e1920;
+  --vnx-elevated: #1c2d38;
+  --vnx-backdrop: rgba(5, 12, 17, .68);
+  --vnx-shadow: rgba(0, 0, 0, .38);
+  --vnx-line: #344955;
+  --vnx-line-soft: #263945;
+  --vnx-line-strong: #4a6572;
+  --vnx-text: #edf5f7;
+  --vnx-text-bright: #f7fbfc;
+  --vnx-text-soft: #c8d6dc;
+  --vnx-muted: #96a9b3;
+  --vnx-muted-2: #748b97;
+  --vnx-primary: #67b5ff;
+  --vnx-primary-strong: #b5d9ff;
+  --vnx-primary-surface: #1f4664;
+  --vnx-realtime: #4fd0c8;
+}
+
+.vnext-shell.theme-day {
+  --vnx-canvas: #e9f0f3;
+  --vnx-canvas-top: #f6fafb;
+  --vnx-shell: #f7fafb;
+  --vnx-command: #ffffff;
+  --vnx-surface-1: #ffffff;
+  --vnx-surface-2: #f1f6f8;
+  --vnx-surface-3: #e5eef2;
+  --vnx-surface-selected: #dcecf8;
+  --vnx-input: #f4f8fa;
+  --vnx-code: #14232c;
+  --vnx-elevated: #ffffff;
+  --vnx-backdrop: rgba(25, 43, 53, .32);
+  --vnx-shadow: rgba(31, 58, 71, .2);
+  --vnx-line: #c4d3da;
+  --vnx-line-soft: #d9e4e9;
+  --vnx-line-strong: #9fb5bf;
+  --vnx-text: #172832;
+  --vnx-text-bright: #0b1b23;
+  --vnx-text-soft: #344b56;
+  --vnx-muted: #607681;
+  --vnx-muted-2: #768c96;
+  --vnx-primary: #176bc2;
+  --vnx-primary-strong: #124f91;
+  --vnx-primary-surface: #dbeaf7;
+  --vnx-realtime: #087e88;
+  --vnx-positive: #c63c4a;
+  --vnx-negative: #168166;
+  --vnx-success: #168166;
+  --vnx-warning: #9a6812;
+  --vnx-danger: #c63c4a;
+  --vnx-info: #286eb5;
+  --terminal-focus: #176bc2;
+  --state-warning: #9a6812;
+  --state-critical: #c63c4a;
+  --state-verified: #168166;
+  --state-stale: #8d6c32;
+  --state-unavailable: #70838c;
+  color-scheme: light;
+}
+
+.vnext-shell.density-compact {
+  --vnx-space-2: 6px;
+  --vnx-space-3: 9px;
+  --vnx-space-4: 12px;
+  --vnx-space-5: 16px;
+  --vnx-row: 32px;
+}
+
+.vnext-shell *,
+.vnext-shell *::before,
+.vnext-shell *::after {
+  box-sizing: border-box;
+}
+
+.vnext-shell button,
+.vnext-shell input,
+.vnext-shell select,
+.vnext-shell textarea {
+  font: inherit;
+}
+
+.vnext-shell,
+.vnext-shell .vnext-module-rail,
+.vnext-shell .vnext-commandbar,
+.vnext-shell .vnext-workspace,
+.vnext-shell .vnext-workspace-tabs,
+.vnext-shell .vnext-operations-dock {
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.vnext-shell button,
+.vnext-shell a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.vnext-shell button:focus-visible,
+.vnext-shell a:focus-visible,
+.vnext-shell input:focus-visible,
+.vnext-shell select:focus-visible,
+.vnext-shell textarea:focus-visible {
+  outline: 2px solid var(--vnx-primary);
+  outline-offset: 1px;
+}
+
+.vnext-shell .mono {
+  font-family: var(--vnx-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.vnext-shell .tone-positive {
+  color: var(--vnx-positive) !important;
+}
+
+.vnext-shell .tone-negative {
+  color: var(--vnx-negative) !important;
+}
+
+.vnext-shell .spin {
+  animation: vnext-spin .9s linear infinite;
+}
+
+@keyframes vnext-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vnext-shell *,
+  .vnext-shell *::before,
+  .vnext-shell *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

@@ -6,12 +6,13 @@
 .kline-controlbar {
   min-height: 36px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 4px 7px;
   border-bottom: 1px solid var(--border-soft);
   background: #08141e;
-  overflow-x: auto;
+  overflow-x: hidden;
 }
 
 .kline-control-group {
@@ -66,6 +67,7 @@
   min-width: max-content;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   margin-left: auto;
   padding-left: 10px;

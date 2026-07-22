@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from services.quant_api.app import create_app
-from services.quant_api.services.jobs import JobManager, JobRecord
+from services.quant_api.services.jobs import JobManager, JobRecord, _progress_from_line
 
 
 def request(app, method: str, url: str, **kwargs):
@@ -116,6 +116,87 @@ def test_quarantine_import_streams_deduplicates_and_writes_manifest(quant_ui_set
     assert manifest["duplicates_removed"] == 1
     assert manifest["rows_written"] == 2
     assert len(manifest["sha256"]) == 64
+
+
+def test_runtime_export_filters_symbols_dates_and_writes_manifest(quant_ui_settings) -> None:
+    source = quant_ui_settings.runtime_root / "data" / "source.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "symbol,trade_date,close\n"
+        "000001.SZ,2026-01-02,10\n"
+        "000001.SZ,2026-02-02,11\n"
+        "600519.SH,2026-01-05,1500\n",
+        encoding="utf-8",
+    )
+    output = quant_ui_settings.runtime_root / "exports" / "filtered.csv"
+    env = {**os.environ, "QUANTAGENT_HOME": str(quant_ui_settings.runtime_root)}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[2] / "scripts" / "data_manager_transfer.py"),
+            "--operation", "export",
+            "--source", str(source),
+            "--output", str(output),
+            "--symbols", "000001.SZ",
+            "--start-date", "2026-01-01",
+            "--end-date", "2026-01-31",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    exported = __import__("pandas").read_csv(output)
+    assert exported[["symbol", "trade_date"]].to_dict("records") == [
+        {"symbol": "000001.SZ", "trade_date": "2026-01-02"}
+    ]
+    manifest = json.loads(output.with_suffix(".csv.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["operation"] == "export"
+    assert manifest["filters"]["symbols"] == ["000001.SZ"]
+    assert manifest["rows_written"] == 1
+
+
+def test_tickflow_recorder_accepts_server_symbol_file_and_requires_network_confirmation(quant_ui_settings) -> None:
+    symbols = quant_ui_settings.runtime_root / "universes" / "held.txt"
+    symbols.parent.mkdir(parents=True, exist_ok=True)
+    symbols.write_text("000001.SZ\n600519.SH\n", encoding="utf-8")
+    manager = JobManager(quant_ui_settings)
+
+    validated = manager.validate(
+        "data",
+        "record-tickflow-quotes",
+        {
+            "symbols_file": "runtime/universes/held.txt",
+            "loop_seconds": 30,
+            "max_iterations": 120,
+            "allow_network": True,
+        },
+    )
+
+    assert validated["valid"] is True
+    assert validated["outputPaths"] == ["runtime/data/v7/silver/tick_snapshots"]
+    with pytest.raises(ValueError, match="allow_network must be explicitly confirmed"):
+        manager.validate(
+            "data",
+            "record-tickflow-quotes",
+            {"symbols": "000001.SZ", "allow_network": False},
+        )
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('{"progress": 0.42, "rows": 200}', 0.42),
+        ('{"batch": 3, "total_batches": 10}', 0.3),
+        ('{"iteration": 9, "total_iterations": 12}', 0.75),
+        ("[7/20] 600519.SH persisted", 0.35),
+    ],
+)
+def test_provider_progress_is_parsed_from_structured_and_legacy_output(line: str, expected: float) -> None:
+    assert _progress_from_line(line) == pytest.approx(expected)
 
 
 def test_data_job_requires_allowlisted_command_and_explicit_universe(quant_ui_settings) -> None:

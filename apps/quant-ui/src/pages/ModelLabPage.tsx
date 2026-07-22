@@ -16,7 +16,9 @@ import {
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
+import { useSearchParams } from "react-router-dom";
 import type {
+  ModelComparison,
   ModelMetric,
   ModelObservability,
   ModelSummary,
@@ -51,19 +53,6 @@ interface Prediction {
   rank?: number | null;
 }
 
-interface ModelComparison {
-  models: Array<{
-    id: string;
-    version?: string | null;
-    modelType?: string | null;
-    modelFamily?: string | null;
-    verdict?: string | null;
-    status: string;
-    metrics: Record<string, number>;
-  }>;
-  metricKeys: string[];
-}
-
 const familyLabels: Record<string, string> = {
   all: "全部模型",
   deep_alpha: "Deep Alpha",
@@ -83,8 +72,9 @@ const modelTabs: Array<{ key: ModelTab; label: string; icon: Icon }> = [
 ];
 
 export function ModelLabPage(): JSX.Element {
+  const [searchParams, setSearchParams] = useSearchParams();
   const models = useApi<ModelSummary[]>(["models"], "/models");
-  const [modelId, setModelId] = useState("");
+  const [modelId, setModelId] = useState(searchParams.get("modelId") ?? "");
   const [family, setFamily] = useState("all");
   const [query, setQuery] = useState("");
   const [compareIds, setCompareIds] = useState<string[]>([]);
@@ -146,6 +136,12 @@ export function ModelLabPage(): JSX.Element {
   );
   const selected = list.find((model) => model.id === modelId);
   const observed = detail.data?.data;
+  const selectModel = (id: string): void => {
+    setModelId(id);
+    const next = new URLSearchParams(searchParams);
+    next.set("modelId", id);
+    setSearchParams(next, { replace: true });
+  };
 
   const familyCounts = useMemo(() => {
     const counts: Record<string, number> = { all: list.length };
@@ -261,7 +257,7 @@ export function ModelLabPage(): JSX.Element {
               const selectedModel = model.id === modelId;
               const compared = compareIds.includes(model.id);
               return (
-                <button key={model.id} className={selectedModel ? "active" : ""} onClick={() => setModelId(model.id)}>
+                <button key={model.id} className={selectedModel ? "active" : ""} onClick={() => selectModel(model.id)}>
                   <span className={`model-family-icon family-${model.modelFamily ?? "generic_artifact"}`}>
                     {model.modelFamily === "reinforcement_learning" ? <Brain size={18} /> :
                       model.modelFamily === "intraday_t_plus_one" ? <FunnelSimple size={18} /> :

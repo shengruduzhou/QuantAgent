@@ -233,6 +233,27 @@ class JobRequest(ApiModel):
     parameters: dict[str, str | int | float | bool | list[str] | None] = Field(default_factory=dict)
 
 
+class SearchEntity(ApiModel):
+    id: str
+    kind: str
+    label: str
+    detail: str
+    path: str
+    status: str = "ready"
+    source: str
+
+
+class SearchGroup(ApiModel):
+    type: str
+    label: str
+    items: list[SearchEntity] = Field(default_factory=list)
+
+
+class GlobalSearchResult(ApiModel):
+    query: str
+    groups: list[SearchGroup] = Field(default_factory=list)
+
+
 class CleanupRequest(ApiModel):
     candidate_ids: list[str] = Field(default_factory=list, alias="candidateIds")
     confirmation: str

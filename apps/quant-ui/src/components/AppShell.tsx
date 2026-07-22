@@ -186,7 +186,7 @@ export function AppShell(): JSX.Element {
         })}
       </nav>
 
-      <main className="workspace terminal-workspace">
+      <main className={`workspace terminal-workspace ${location.pathname === "/" ? "dashboard-workspace" : ""}`}>
         <div className="workspace-context">
           <span><strong>{page.label}</strong> / {page.caption}</span>
           <span>Context: {location.search || "global"}</span>

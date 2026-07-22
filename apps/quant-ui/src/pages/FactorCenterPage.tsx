@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Broom, Code, MagnifyingGlass, Play, ShieldCheck } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type { Factor } from "../api/types";
 import { useApi } from "../hooks/useApi";
 import { EChart } from "../components/EChart";
@@ -74,8 +74,9 @@ function utilityStatus(factor: Factor): { label: string; status: string } {
 
 export function FactorCenterPage(): JSX.Element {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
-  const [selectedName, setSelectedName] = useState("");
+  const [selectedName, setSelectedName] = useState(searchParams.get("factor") ?? "");
   const [utilityFilter, setUtilityFilter] = useState<UtilityFilter>("all");
   const deferredQuery = useDeferredValue(query);
   const factors = useApi<Factor[]>(["factors", deferredQuery], "/factors", { query: deferredQuery });
@@ -108,6 +109,12 @@ export function FactorCenterPage(): JSX.Element {
   const factor = detail.data?.data;
   const metrics = backtest.data?.data;
   const selectedUtility = factor ? utilityStatus(factor) : null;
+  const selectFactor = (name: string): void => {
+    setSelectedName(name);
+    const next = new URLSearchParams(searchParams);
+    next.set("factor", name);
+    setSearchParams(next, { replace: true });
+  };
 
   const icOption = useMemo<EChartsOption>(() => ({
     animation: false,
@@ -149,7 +156,7 @@ export function FactorCenterPage(): JSX.Element {
           {visibleList.map((item) => {
             const utility = utilityStatus(item);
             return (
-              <button key={item.name} className={item.name === selectedName ? "active" : ""} onClick={() => setSelectedName(item.name)}>
+              <button key={item.name} className={item.name === selectedName ? "active" : ""} onClick={() => selectFactor(item.name)}>
                 <div><strong>{item.displayName ?? item.name}</strong><span>{item.category ?? item.sourceKind}</span></div>
                 <StatusBadge status={utility.status} label={utility.label} />
               </button>

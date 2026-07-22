@@ -2,6 +2,8 @@ import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { StateView } from "./components/StateView";
+import { resolveUiVersion } from "./vnext/featureFlags";
+import { InstitutionalShell } from "./vnext/shell/InstitutionalShell";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const StockReplayPage = lazy(() => import("./pages/StockReplayPage").then((module) => ({ default: module.StockReplayPage })));
@@ -17,7 +19,7 @@ const ReportsPage = lazy(() => import("./pages/ReportsPage").then((module) => ({
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const HelpCenterPage = lazy(() => import("./pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
 
-export function App(): JSX.Element {
+function LegacyApp(): JSX.Element {
   return (
     <Suspense fallback={<div className="route-loading"><StateView state="loading" /></div>}>
       <Routes>
@@ -38,6 +40,15 @@ export function App(): JSX.Element {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
+    </Suspense>
+  );
+}
+
+export function App(): JSX.Element {
+  if (resolveUiVersion() === "legacy") return <LegacyApp />;
+  return (
+    <Suspense fallback={<div className="route-loading"><StateView state="loading" /></div>}>
+      <Routes><Route path="*" element={<InstitutionalShell />} /></Routes>
     </Suspense>
   );
 }

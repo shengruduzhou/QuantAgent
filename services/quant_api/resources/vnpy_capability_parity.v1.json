@@ -1,8 +1,8 @@
 {
   "schemaVersion": "quantagent.vnpy-parity.v1",
-  "registryVersion": "2026.07.22.2",
+  "registryVersion": "2026.07.23.1",
   "title": "QuantAgent × VeighNa Capability Parity Registry",
-  "generatedAt": "2026-07-22T20:20:00+09:00",
+  "generatedAt": "2026-07-23T05:20:00+09:00",
   "sourceBaseline": {
     "repo": "vnpy/vnpy",
     "release": "4.4.0",
@@ -33,7 +33,7 @@
     "Formula-level Alpha158/Alpha101 equivalence audit",
     "Gateway-by-gateway compatibility inventory",
     "Option/spread domain plugin schemas",
-    "Performance baselines and browser evidence for most partial capabilities"
+    "Authenticated operator smoke runs for network providers and large-scale 100k/500k chart/data benchmarks"
   ],
   "capabilities": [
     {
@@ -258,11 +258,16 @@
       "quantagent": {
         "modules": [
           "src/quantagent/data",
+          "services/quant_api/services/data_manager.py",
+          "services/quant_api/services/jobs.py",
           "runtime data artifacts"
         ],
         "api": [
           "/api/system/runtime-index",
-          "/api/system/runtime-index/{id}/preview"
+          "/api/system/runtime-index/{id}/preview",
+          "/api/data/providers",
+          "/api/data/coverage",
+          "/api/jobs/data"
         ],
         "events": [],
         "artifacts": [
@@ -273,19 +278,22 @@
           "Runtime / Data"
         ]
       },
-      "gap": "Strong PIT data pipeline exists, but provider/database operations are not exposed as one DataManager command surface.",
-      "adoption": "Preserve QuantAgent PIT data as canonical and add provider/database adapters plus jobs.",
+      "gap": "PIT data, provider jobs, Runtime catalog, coverage inspection and transfer workflows share one command surface; a generic third-party database plugin SPI is still not defined.",
+      "adoption": "Preserve QuantAgent PIT data as canonical and expose providers through allowlisted jobs rather than duplicating vn.py's Qt engine.",
       "tests": [
         "PIT tests",
-        "runtime index tests"
+        "runtime index tests",
+        "tests/quant_ui/test_datamanager.py"
       ],
       "evidence": [
-        "manifest-aware Runtime Catalog"
+        "manifest-aware Runtime Catalog",
+        "Data Ops browser verification 2026-07-23"
       ],
       "limitations": [
-        "download/update workflow incomplete"
+        "provider availability depends on installed packages and operator credentials",
+        "exchange-holiday coverage still delegates to the canonical trading calendar"
       ],
-      "nextAction": "Implement DataManager query/download job vertical slice."
+      "nextAction": "Define the optional database/datafeed plugin SPI and run authenticated provider scale benchmarks."
     },
     {
       "id": "core.rest_ws_rpc",
@@ -854,7 +862,7 @@
       "id": "data.data_manager",
       "category": "data",
       "name": "DataManager",
-      "status": "partial",
+      "status": "implemented",
       "source": {
         "repo": "vnpy/vnpy_datamanager",
         "module": "ManagerEngine / ManagerWidget",
@@ -866,10 +874,15 @@
         "modules": [
           "services/quant_api/services/data_manager.py",
           "services/quant_api/services/jobs.py",
-          "services/quant_api/runtime_indexer"
+          "services/quant_api/runtime_indexer",
+          "scripts/data_manager_transfer.py",
+          "scripts/fetch_tickflow_daily_klines.py",
+          "scripts/fetch_tickflow_minute_history.py"
         ],
         "api": [
           "/api/data/providers",
+          "/api/data/quarantine",
+          "/api/data/coverage",
           "/api/jobs/data",
           "/api/jobs/{id}/cancel",
           "/api/system/runtime-index",
@@ -880,57 +893,85 @@
         ],
         "artifacts": [
           "runtime catalog",
-          "manifests"
+          "import/export manifests",
+          "TickFlow daily and minute partitions"
         ],
         "frontend": [
           "Runtime / Data · Data Ops"
         ]
       },
-      "gap": "Allowlisted provider query/download/update, cancellation and catalog invalidation now exist; import/export quarantine, duplicate/range coverage, byte-level progress and DataRecorder lifecycle remain incomplete.",
+      "gap": "The requested import/export quarantine, exact duplicate/date coverage inspection, provider-specific TickFlow daily/minute forms, parsed provider progress, cancellation and Runtime refresh are implemented. Authenticated scale smoke runs remain operator-environment verification, not an absent product path.",
       "adoption": "Extend the single Runtime/Data workspace, not a second data explorer.",
       "tests": [
         "tests/quant_ui/test_datamanager.py",
         "DataManagerWorkspace component test",
-        "RuntimeIndexer and cleanup tests"
+        "RuntimeIndexer and cleanup tests",
+        "provider progress parser regression tests"
       ],
       "evidence": [
         "docs/audits/vnpy_datamanager_control_loop_20260722.md",
-        "agent/datamanager-control-loop"
+        "docs/audits/quant_ui_vnext_phase0_20260723.md",
+        "browser verification: Runtime/Data Ops 2026-07-23"
       ],
       "limitations": [
-        "daily A-share and PIT financial adapters only",
-        "provider progress is indeterminate until provider command exits",
-        "real provider and browser verification pending"
+        "real network execution requires explicit operator confirmation and provider credentials",
+        "business-day gap candidates require canonical exchange-calendar confirmation",
+        "100k/500k dataset browser and provider throughput baselines remain to be recorded"
       ],
-      "nextAction": "Add quarantined import/export plus duplicate-key and date-range coverage inspection without creating another catalog."
+      "nextAction": "Run authenticated TickFlow/AkShare/TuShare smoke and scale benchmarks in the operator environment; retain fail-loud provider errors."
     },
     {
       "id": "data.data_recorder",
       "category": "data",
       "name": "DataRecorder",
-      "status": "missing",
+      "status": "implemented",
       "source": {
         "repo": "vnpy/vnpy_datarecorder",
         "module": "RecorderEngine",
         "version": "4.x",
         "commit": null
       },
-      "description": "Tick/bar subscription recording with configuration and logs.",
+      "description": "Forward Tick/Level-2 subscription recording with configuration, progress, cancellation and logs.",
       "quantagent": {
-        "modules": [],
-        "api": [],
-        "events": [],
-        "artifacts": [],
-        "frontend": []
+        "modules": [
+          "scripts/record_tickflow_quotes.py",
+          "scripts/collect_tickflow_depth.py",
+          "services/quant_api/services/jobs.py"
+        ],
+        "api": [
+          "/api/jobs/data",
+          "/api/jobs/{id}/cancel",
+          "/api/jobs/{id}/logs"
+        ],
+        "events": [
+          "job.status"
+        ],
+        "artifacts": [
+          "runtime/data/v7/silver/tick_snapshots",
+          "runtime/data/v7/silver/depth_snapshots",
+          "per-partition manifests"
+        ],
+        "frontend": [
+          "Runtime / Data · 实时录制"
+        ]
       },
-      "gap": "No unified streaming recorder lifecycle was identified.",
-      "adoption": "Implement optional recorder adapter for supported feeds with PIT metadata.",
-      "tests": [],
-      "evidence": [],
-      "limitations": [
-        "requires live data provider"
+      "gap": "TickFlow quote and Level-2 forward recording are implemented as bounded, cancellable jobs. A gateway-neutral tick/bar subscription engine and automatic restart policy are not yet generalized.",
+      "adoption": "Keep TickFlow recording provider-specific and manifest-backed; generalize only behind a typed recorder adapter so historical ticks are never fabricated.",
+      "tests": [
+        "tests/quant_ui/test_datamanager.py recorder validation",
+        "DataManagerWorkspace exclusive-mode component test",
+        "provider progress parser regression tests"
       ],
-      "nextAction": "Define recorder configuration and unavailable provider states."
+      "evidence": [
+        "Data Ops browser verification 2026-07-23",
+        "TickFlow quote/depth scripts and Runtime output contracts"
+      ],
+      "limitations": [
+        "requires TickFlow credentials and entitlement",
+        "records forward snapshots only; does not invent historical trade ticks",
+        "restart recovery remains an operator/scheduler responsibility"
+      ],
+      "nextAction": "Add a typed recorder adapter and persisted restart policy after an authenticated TickFlow operator smoke run."
     },
     {
       "id": "portfolio.portfolio_manager",

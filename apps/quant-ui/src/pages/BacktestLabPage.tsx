@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { DownloadSimple } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
+import { useSearchParams } from "react-router-dom";
 import type { BacktestSummary, EquityPoint } from "../api/types";
 import { downloadJson } from "../api/client";
 import { useApi } from "../hooks/useApi";
@@ -12,8 +13,9 @@ import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 
 export function BacktestLabPage(): JSX.Element {
+  const [searchParams, setSearchParams] = useSearchParams();
   const backtests = useApi<BacktestSummary[]>(["backtest-lab"], "/backtests");
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(searchParams.get("run") ?? "");
   const runs = backtests.data?.data ?? [];
 
   useEffect(() => {
@@ -23,6 +25,12 @@ export function BacktestLabPage(): JSX.Element {
   }, [runs, selectedId]);
 
   const primary = runs.find((run) => run.id === selectedId) ?? runs[0];
+  const selectRun = (id: string): void => {
+    setSelectedId(id);
+    const next = new URLSearchParams(searchParams);
+    next.set("run", id);
+    setSearchParams(next, { replace: true });
+  };
   const equity = useApi<EquityPoint[]>(
     ["backtest-lab-equity", primary?.id],
     primary ? `/backtests/${primary.id}/equity` : null,
@@ -120,11 +128,11 @@ export function BacktestLabPage(): JSX.Element {
                       className={selected ? "row-selected" : ""}
                       aria-selected={selected}
                       tabIndex={0}
-                      onClick={() => setSelectedId(run.id)}
+                      onClick={() => selectRun(run.id)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          setSelectedId(run.id);
+                          selectRun(run.id);
                         }
                       }}
                     >

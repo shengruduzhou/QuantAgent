@@ -1,0 +1,55 @@
+export const jobTemplates = {
+  backtest: {
+    commandId: "run-strict-a-share-backtest-v8",
+    parameters: {
+      target_weights_path: "runtime/reports/v8/deep/v89_rankfix_20260613_1044/short_5d/target_weights.parquet",
+      market_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
+      output_dir: "runtime/reports/quant_ui_jobs/web_backtest",
+      initial_cash: 1_000_000,
+      slippage_bps: 8,
+    },
+  },
+  train: {
+    commandId: "train-v8-deep",
+    parameters: {
+      horizon_class: "short_5d",
+      dataset_path: "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus8.parquet",
+      silver_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
+      output_dir: "runtime/reports/quant_ui_jobs/web_train_all_symbols",
+      max_epochs: 20,
+      batch_size: 512,
+      learning_rate: 0.0003,
+      early_stopping_patience: 5,
+      feature_policy: "judgment",
+      require_gpu: true,
+    },
+  },
+  infer: {
+    commandId: "predict-alpha-v7",
+    parameters: {
+      model_dir: "runtime/reports/v8/deep/v89_rankfix_20260613_1044/short_5d/ft",
+      feature_dataset: "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus8.parquet",
+      output: "runtime/predictions/quant_ui_web_predictions.parquet",
+      primary_horizon: 5,
+    },
+  },
+} as const;
+
+export type JobType = keyof typeof jobTemplates;
+
+export interface JobLaunchPayload {
+  commandId: string;
+  parameters: Record<string, string | number | boolean | string[] | null>;
+}
+
+export function isJobType(value: string | null): value is JobType {
+  return value === "backtest" || value === "train" || value === "infer";
+}
+
+export function templateJson(type: JobType): string {
+  return JSON.stringify(jobTemplates[type], null, 2);
+}
+
+export function mutableTemplate(type: JobType): JobLaunchPayload {
+  return JSON.parse(templateJson(type)) as JobLaunchPayload;
+}

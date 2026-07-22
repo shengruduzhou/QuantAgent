@@ -67,7 +67,8 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "record-tickflow-quotes": {
         "type": "data",
         "entrypoint": "scripts/record_tickflow_quotes.py",
-        "required": {"symbols", "allow_network"},
+        "required": {"allow_network"},
+        "required_any": (("symbols", "symbols_file"),),
         "allowed": {"symbols", "symbols_file", "loop_seconds", "max_iterations", "allow_network"},
         "path_inputs": {"symbols_file"},
         "path_outputs": set(),
@@ -169,6 +170,48 @@ class JobManager:
         self._load()
 
     def submit(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        spec, normalized = self._validate(job_type, command_id, parameters)
+        job_id = f"job_{uuid4().hex[:16]}"
+        log_path = self.settings.jobs_root / f"{job_id}.log"
+        record = JobRecord(
+            id=job_id,
+            type=job_type,
+            status="queued",
+            commandId=command_id,
+            createdAt=_now(),
+            message="queued",
+            logPath=project_relative(self.settings, log_path),
+        )
+        with self._lock:
+            self._jobs[job_id] = record
+            self._persist()
+        self._emit(record)
+        Thread(target=self._run, args=(job_id, command_id, normalized, spec, log_path), daemon=True).start()
+        return self._public(record)
+
+    def validate(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        spec, _ = self._validate(job_type, command_id, parameters)
+        outputs = [
+            str(parameters[key])
+            for key in spec["path_outputs"]
+            if parameters.get(key) not in (None, "")
+        ]
+        outputs.extend(spec.get("fixed_outputs", ()))
+        return {
+            "valid": True,
+            "type": job_type,
+            "commandId": command_id,
+            "entrypoint": spec.get("entrypoint") or "quantagent.cli",
+            "outputPaths": outputs,
+            "warnings": ["GPU availability is checked by the training process"] if parameters.get("require_gpu") else [],
+        }
+
+    def _validate(
+        self,
+        job_type: str,
+        command_id: str,
+        parameters: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         spec = COMMANDS.get(command_id)
         if spec is None or spec["type"] != job_type:
             raise ValueError(f"command {command_id!r} is not allowed for {job_type}")
@@ -190,23 +233,7 @@ class JobManager:
             if not any(parameters.get(key) not in (None, "", []) for key in group):
                 raise ValueError(f"one of {sorted(group)} is required")
         normalized = self._normalize_parameters(spec, parameters)
-        job_id = f"job_{uuid4().hex[:16]}"
-        log_path = self.settings.jobs_root / f"{job_id}.log"
-        record = JobRecord(
-            id=job_id,
-            type=job_type,
-            status="queued",
-            commandId=command_id,
-            createdAt=_now(),
-            message="queued",
-            logPath=project_relative(self.settings, log_path),
-        )
-        with self._lock:
-            self._jobs[job_id] = record
-            self._persist()
-        self._emit(record)
-        Thread(target=self._run, args=(job_id, command_id, normalized, spec, log_path), daemon=True).start()
-        return self._public(record)
+        return spec, normalized
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -482,7 +509,12 @@ def _progress_from_line(line: str) -> float | None:
     value = payload.get("progress")
     if isinstance(value, (int, float)):
         return min(0.99, max(0.0, float(value)))
-    batch, total = payload.get("batch"), payload.get("total_batches")
-    if isinstance(batch, int) and isinstance(total, int) and total > 0:
-        return min(0.99, batch / total)
+    for current_key, total_key in (
+        ("batch", "total_batches"),
+        ("iteration", "total_iterations"),
+        ("rows_written", "total_rows"),
+    ):
+        current, total = payload.get(current_key), payload.get(total_key)
+        if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+            return min(0.99, max(0.0, float(current) / float(total)))
     return None

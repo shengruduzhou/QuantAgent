@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, type CSSProperties, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
 import { BarChart, CandlestickChart, LineChart, RadarChart, ScatterChart } from "echarts/charts";
 import {
@@ -36,6 +36,7 @@ interface EChartProps {
   onDataZoom?: (params: unknown, chart: EChartsType) => void;
   onReady?: (chart: EChartsType) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
+  style?: CSSProperties;
 }
 
 export function EChart({
@@ -47,6 +48,7 @@ export function EChart({
   onDataZoom,
   onReady,
   onKeyDown,
+  style,
 }: EChartProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -73,7 +75,7 @@ export function EChart({
   useEffect(() => {
     chartRef.current?.setOption({
       textStyle: {
-        fontFamily: '"Noto Sans SC", "Inter Variable", sans-serif',
+        fontFamily: '"Inter Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif',
       },
       ...option,
     } as EChartsCoreOption, { notMerge: true });
@@ -106,6 +108,7 @@ export function EChart({
       tabIndex={interactive ? 0 : undefined}
       aria-label={ariaLabel ?? "QuantAgent 数据图表"}
       onKeyDown={onKeyDown}
+      style={style}
     />
   );
 }

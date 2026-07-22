@@ -13,3 +13,8 @@ When implementing from a selected generated mock, treat that image as the source
 - Integrate the risk radar, system health, transparent selection funnel, and top-contributor modules from concept 3.
 - All intraday overlay language must say `T+1 合规做 T` or `T+1 Analysis`; never label the feature `T+0`.
 - The product is a full-interactivity research terminal backed by real QuantAgent API/runtime data. Missing artifacts must show explicit empty or unavailable states.
+- The Command Center must read as a professional quant cockpit: one dominant portfolio narrative, explicit secondary risk/health layers, restrained electric-blue/cyan accents, and A-share red-up/green-down market semantics. Avoid equal-weight KPI walls, tiny terminal copy, decorative border overload, and low-contrast metadata.
+- VNext separates Dashboard from Workstation: Dashboard answers system/data/model/portfolio/risk/next-action questions, while configuration and execution live in dedicated workstations.
+- VNext uses one Global Command Bar, one grouped Module Rail, true context-carrying Workspace Tabs, and a collapsible Operations Dock. Do not duplicate those actions in a second menu.
+- Risk radar is never the primary risk decision view. Prefer rules, limits, threshold bars, violations, and actionable queues.
+- Keep legacy pages behind an explicit UI feature flag until the corresponding VNext workflow passes browser and regression QA. Scope new styles under modular `vnext/styles/*`; do not add another monolithic stylesheet.

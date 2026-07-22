@@ -289,14 +289,15 @@ Existing QuantAgent strengths:
 - preview, quality, trust, validation and lineage;
 - protected cleanup with audit.
 
-Still missing:
+VNext completion update (2026-07-23):
 
-- provider/exchange/symbol/interval/date query form;
-- download/update/import job adapters;
-- progress and cancellation;
-- duplicate/range coverage analysis;
-- post-write manifest generation and catalog refresh;
-- DataRecorder subscription lifecycle.
+- provider/symbol/interval/date forms now cover TickFlow daily, minute, quote and Level-2 workflows plus AkShare, Qlib and TuShare adapters;
+- allowlisted download/update/import/export jobs expose parsed progress and cancellation;
+- server-side duplicate/date coverage supports an exact disk-bounded mode;
+- imports/exports emit manifests and successful jobs invalidate the Runtime catalog;
+- TickFlow quote/depth DataRecorder jobs are forward-only, bounded and cancellable.
+
+Remaining: authenticated provider scale smoke, generic gateway-neutral recorder restart orchestration and exchange-calendar confirmation of candidate business-day gaps.
 
 ### 3.6 RiskManager
 
