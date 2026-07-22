@@ -236,7 +236,7 @@ export function CandlestickChart({
       legend: { show: false },
       tooltip: {
         trigger: "axis",
-        triggerOn: "mousemove|click",
+        triggerOn: "mousemove",
         axisPointer: { type: "cross", snap: true },
         confine: true,
         enterable: true,
