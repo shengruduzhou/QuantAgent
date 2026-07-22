@@ -221,13 +221,17 @@ export function MonitorTable<T>({
               <tr>
                 {columns.map((column) => {
                   const active = sort?.columnId === column.id;
+                  const sortState = active ? (sort?.direction === "asc" ? "ascending" : "descending") : "none";
                   return (
-                    <th key={column.id} className={column.align === "right" ? "numeric" : ""}>
+                    <th
+                      key={column.id}
+                      className={column.align === "right" ? "numeric" : ""}
+                      aria-sort={sortState}
+                    >
                       <button
                         type="button"
                         className="monitor-header-button"
                         onClick={() => toggleSort(column)}
-                        aria-sort={active ? (sort?.direction === "asc" ? "ascending" : "descending") : "none"}
                         disabled={column.sortable === false}
                       >
                         <span>{column.header}</span>
