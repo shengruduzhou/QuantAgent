@@ -1,23 +1,28 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { EChartsOption } from "echarts";
+import type { EChartsType } from "echarts/core";
 import type { KeyboardEventHandler } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KlineBar, Trade } from "../api/types";
 import { CandlestickChart } from "./CandlestickChart";
 
 let latestOption: EChartsOption = {};
+let latestDataZoom: ((params: unknown, chart: EChartsType) => void) | undefined;
 
 vi.mock("./EChart", () => ({
   EChart: ({
     option,
     ariaLabel,
     onKeyDown,
+    onDataZoom,
   }: {
     option: EChartsOption;
     ariaLabel?: string;
     onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
+    onDataZoom?: (params: unknown, chart: EChartsType) => void;
   }) => {
     latestOption = option;
+    latestDataZoom = onDataZoom;
     return <div role="application" aria-label={ariaLabel} tabIndex={0} onKeyDown={onKeyDown} />;
   },
 }));
@@ -98,6 +103,22 @@ describe("CandlestickChart workstation interaction", () => {
     });
     expect(screen.getByText(/滚轮只缩放/)).toBeInTheDocument();
     expect(screen.getByText(/左键拖拽只平移/)).toBeInTheDocument();
+  });
+
+  test("persists a pointer-dragged dataZoom window across React re-renders", async () => {
+    const bars = createBars(180);
+    render(<CandlestickChart bars={bars} trades={[]} />);
+
+    act(() => latestDataZoom?.({}, {
+      getOption: () => ({ dataZoom: [{ startValue: bars[20].datetime.slice(0, 10), endValue: bars[75].datetime.slice(0, 10) }] }),
+    } as unknown as EChartsType));
+
+    await waitFor(() => {
+      expect(getZoom().startValue).toBe(bars[20].datetime.slice(0, 10));
+      expect(getZoom().endValue).toBe(bars[75].datetime.slice(0, 10));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "向右平移" }));
+    await waitFor(() => expect(getZoom().startValue).toBe(bars[25].datetime.slice(0, 10)));
   });
 
   test("moves by human-scale keyboard steps instead of one bar", async () => {

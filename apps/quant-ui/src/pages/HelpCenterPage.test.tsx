@@ -5,7 +5,7 @@ import { HelpCenterPage } from "./HelpCenterPage";
 
 afterEach(() => cleanup());
 
-test("renders QuantAgent help before optional external references", () => {
+test("keeps all help navigation inside QuantAgent", () => {
   render(
     <MemoryRouter>
       <HelpCenterPage />
@@ -16,5 +16,6 @@ test("renders QuantAgent help before optional external references", () => {
   expect(screen.getByText(/这里是 QuantAgent 的操作说明/)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /全宇宙训练/ })).toHaveAttribute("href", "/settings?job=train&universe=all");
   expect(screen.getByRole("link", { name: /数据与删除/ })).toHaveAttribute("href", "/runtime?view=cleanup");
-  expect(screen.getByRole("link", { name: /VeighNa 社区版文档/ })).toHaveAttribute("target", "_blank");
+  expect(screen.queryByRole("link", { name: /VeighNa/ })).not.toBeInTheDocument();
+  expect(document.querySelector('a[href^="http"]')).toBeNull();
 });

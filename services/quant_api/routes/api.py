@@ -34,6 +34,33 @@ async def data_providers(request: Request) -> dict:
     return response(data, status="ready")
 
 
+@router.get("/data/quarantine")
+async def data_quarantine(request: Request) -> dict:
+    data = services(request).data_manager.quarantine_files()
+    return response(data, status="ready" if data else "empty")
+
+
+@router.get("/data/coverage")
+async def data_coverage(
+    request: Request,
+    path: str,
+    date_column: str = Query("trade_date", alias="dateColumn"),
+    symbol_column: str = Query("symbol", alias="symbolColumn"),
+    deep: bool = False,
+) -> dict:
+    try:
+        data = services(request).data_manager.inspect_dataset(
+            path,
+            date_column=date_column,
+            symbol_column=symbol_column,
+            deep=deep,
+        )
+        status = "partial" if data["duplicateKeys"] or data["missingBusinessDayCount"] else "ready"
+        return response(data, status=status)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, str(exc))
+
+
 @router.get("/system/overview")
 async def system_overview(request: Request) -> dict:
     svc = services(request)

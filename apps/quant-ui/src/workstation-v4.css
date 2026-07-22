@@ -1,0 +1,492 @@
+:root {
+  --terminal-canvas: #050c14;
+  --terminal-panel: #081522;
+  --terminal-panel-raised: #0b1b2a;
+  --terminal-border: #203a50;
+  --terminal-border-strong: #315a76;
+  --terminal-selection: #102e49;
+  --terminal-focus: #71b7ff;
+  --text: #dce9f3;
+  --muted: #8aa1b3;
+  --muted-2: #647e92;
+  --cyan: #43d5e6;
+}
+
+/* V4 readability floor: workstation metadata must remain legible at 100% zoom. */
+.app-frame,
+.page,
+.panel,
+.data-table,
+button,
+input,
+select,
+textarea {
+  font-size: 13px;
+}
+
+.panel {
+  border-color: #244258;
+  background: linear-gradient(145deg, rgba(10, 26, 39, .98), rgba(6, 17, 27, .98));
+  box-shadow: inset 0 1px 0 rgba(116, 204, 255, .035), 0 12px 32px rgba(0, 0, 0, .18);
+}
+
+.panel-header {
+  min-height: 48px;
+  padding: 0 14px;
+}
+
+.panel-header h2 {
+  font-size: 15px;
+  letter-spacing: .015em;
+}
+
+.panel-header span,
+.panel-header small,
+.data-table td > span,
+.data-table td > small {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.data-table th {
+  min-height: 42px;
+  padding: 10px 12px;
+  color: #91aabc;
+  font-size: 11px;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.data-table td {
+  min-width: 0;
+  padding: 11px 12px;
+  color: #bdceda;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.secondary-button,
+.primary-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.primary-button {
+  border-color: #3e84bd;
+  background: linear-gradient(180deg, #25689f, #174a75);
+  color: #f4faff;
+  box-shadow: 0 0 0 1px rgba(99, 191, 255, .08), 0 5px 18px rgba(22, 106, 168, .16);
+}
+
+.data-manager-workspace {
+  gap: 10px;
+}
+
+.data-manager-toolbar {
+  min-height: 56px;
+  padding: 9px 12px;
+  border-color: #28485f;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #091a28, #07131e);
+}
+
+.data-manager-toolbar strong {
+  color: #d7e7f1;
+  font-size: 12px;
+}
+
+.data-manager-toolbar small {
+  color: #7892a6;
+  font-size: 11px;
+}
+
+.data-manager-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  padding: 3px;
+  border: 1px solid #203d52;
+  border-radius: 5px;
+  background: #06121c;
+}
+
+.data-manager-tabs button {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #849caf;
+}
+
+.data-manager-tabs button:hover {
+  background: #0d2232;
+  color: #c4d7e3;
+}
+
+.data-manager-tabs button.active {
+  border-bottom-color: #51cfe1;
+  background: linear-gradient(180deg, rgba(31, 105, 150, .24), rgba(14, 52, 78, .18));
+  color: #e0f5fb;
+}
+
+.data-manager-tabs small {
+  color: #638196;
+  font: 11px "JetBrains Mono Variable", monospace;
+}
+
+.data-manager-grid {
+  grid-template-columns: minmax(320px, .8fr) minmax(0, 2fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.data-provider-list > button {
+  min-height: 86px;
+  gap: 7px 10px;
+  padding: 12px 13px;
+  border-left-width: 3px;
+}
+
+.data-provider-list > button:hover,
+.data-provider-list > button.selected {
+  border-left-color: #48cfe1;
+  background: linear-gradient(90deg, rgba(20, 74, 106, .45), rgba(11, 31, 45, .18));
+}
+
+.data-provider-list strong {
+  color: #d2e0e9;
+  font-size: 13px;
+}
+
+.data-provider-list small,
+.data-provider-list p {
+  color: #7891a4;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.data-manager-v4 .status-badge,
+.data-manager-v4 .state-view span {
+  font-size: 11px;
+}
+
+.data-operation-panel .panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.6fr) repeat(2, minmax(150px, .7fr));
+  gap: 10px;
+}
+
+.field-grid.compact {
+  grid-template-columns: minmax(220px, 1.3fr) repeat(2, minmax(145px, .7fr));
+}
+
+.field-row,
+.field-grid label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #8ca5b7;
+  font-size: 11px;
+}
+
+.field-row input,
+.field-grid input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #29475d;
+  border-radius: 4px;
+  outline: none;
+  background: #050f18;
+  color: #d4e3ed;
+  font: 12px "JetBrains Mono Variable", monospace;
+}
+
+.field-row input:focus,
+.field-grid input:focus {
+  border-color: #4c99ca;
+  box-shadow: 0 0 0 3px rgba(53, 147, 207, .13);
+}
+
+.field-row small,
+.field-grid small {
+  color: #698396;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmented-control {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 3px;
+  border: 1px solid #27465d;
+  border-radius: 5px;
+  background: #06111a;
+}
+
+.segmented-control label {
+  position: relative;
+  min-width: 112px;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: #7991a3;
+  cursor: pointer;
+}
+
+.segmented-control label.active {
+  background: #173c57;
+  color: #e1f1fa;
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+}
+
+.check-row,
+.network-confirmation {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #594824;
+  border-radius: 4px;
+  background: rgba(210, 151, 48, .06);
+}
+
+.check-row input {
+  width: 17px;
+  height: 17px;
+  accent-color: #48cfe1;
+}
+
+.check-row strong,
+.check-row small {
+  display: block;
+}
+
+.check-row strong {
+  color: #d6c08c;
+  font-size: 12px;
+}
+
+.check-row small {
+  margin-top: 3px;
+  color: #8d7e5d;
+  font-size: 11px;
+}
+
+.data-notice,
+.local-provider-notice {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid #28536b;
+  border-radius: 4px;
+  background: rgba(43, 145, 195, .08);
+  color: #9bc8de;
+  font-size: 12px;
+}
+
+.data-notice.warning {
+  border-color: #624a24;
+  background: rgba(221, 151, 35, .08);
+  color: #d6b46f;
+}
+
+.data-job-actions {
+  min-height: 50px;
+  margin-top: 0;
+  padding-top: 12px;
+  border-top: 1px solid #173044;
+}
+
+.data-job-actions > span,
+.data-job-queue-footer {
+  color: #7691a4;
+  font-size: 11px;
+}
+
+.coverage-result {
+  padding: 12px;
+  border: 1px solid #27526a;
+  border-radius: 5px;
+  background: #071824;
+}
+
+.coverage-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.coverage-metrics > div {
+  min-height: 62px;
+  padding: 9px;
+  border: 1px solid #203d50;
+  background: #091d2b;
+}
+
+.coverage-metrics span,
+.coverage-metrics strong {
+  display: block;
+}
+
+.coverage-metrics span {
+  color: #708ba0;
+  font-size: 10px;
+}
+
+.coverage-metrics strong {
+  margin-top: 7px;
+  color: #d7e7f1;
+  font: 13px "JetBrains Mono Variable", monospace;
+  overflow-wrap: anywhere;
+}
+
+.coverage-result p,
+.coverage-result details {
+  color: #7e96a7;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.coverage-result code {
+  display: block;
+  max-height: 92px;
+  margin-top: 8px;
+  overflow: auto;
+  color: #9cb4c4;
+  white-space: normal;
+}
+
+.job-progress {
+  position: relative;
+  width: 132px;
+  height: 26px;
+  overflow: hidden;
+  border: 1px solid #27445a;
+  border-radius: 3px;
+  background: #06121b;
+}
+
+.job-progress > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, #17638e, #2bb7bd);
+  transition: width 220ms ease;
+}
+
+.job-progress > b {
+  position: relative;
+  z-index: 1;
+  display: block;
+  padding: 5px 7px;
+  color: #d6e6ef;
+  font: 10px "JetBrains Mono Variable", monospace;
+}
+
+.kline-controlbar {
+  min-height: 48px;
+  gap: 12px;
+  padding: 6px 10px;
+}
+
+.kline-control-group > span,
+.kline-control-group button,
+.kline-current-state,
+.kline-current-state strong {
+  font-size: 11px;
+}
+
+.kline-control-group button {
+  min-width: 34px;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 3px;
+}
+
+.kline-navigation-group button {
+  font: 600 15px "JetBrains Mono Variable", monospace;
+}
+
+.kline-gesture-hint {
+  min-height: 30px;
+  height: auto;
+  padding: 6px 11px;
+  color: #718a9d;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.qa-tooltip-title,
+.qa-tooltip-grid,
+.qa-tooltip-trade,
+.qa-tooltip-muted {
+  font-size: 11px;
+}
+
+.tone-positive {
+  color: var(--market-up) !important;
+}
+
+.tone-negative {
+  color: var(--market-down) !important;
+}
+
+/* Retire the legacy 7–10px terminal typography that caused overlap and eye strain. */
+#root .app-frame :where(p, small, label, button, input, select, textarea, td, th, kbd, code),
+#root .app-frame :where(.status-badge, .state-view span, .runtime-stat span, .runtime-stat small, .terminal-statusbar span, .terminal-statusbar button),
+#root .app-frame .sidebar :where(strong, small, span) {
+  font-size: 11px;
+}
+
+@media (max-width: 1180px) {
+  .data-manager-grid,
+  .field-grid,
+  .field-grid.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .data-manager-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .data-manager-toolbar,
+  .data-job-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

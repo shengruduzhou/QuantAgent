@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -27,12 +32,90 @@ def test_data_provider_registry_is_explicit_and_never_exposes_credentials(quant_
     assert result.status_code == 200
     payload = result.json()["data"]
     assert payload["supportsCancellation"] is True
+    assert payload["providers"][0]["id"] == "tickflow"
+    assert payload["coverageEndpoint"] == "/api/data/coverage"
     assert any(provider["id"] == "runtime_catalog" for provider in payload["providers"])
     tushare = next(provider for provider in payload["providers"] if provider["id"] == "tushare_fundamentals")
     assert tushare["configured"] is True
     assert tushare["missingRequirements"] == []
     assert "do-not-expose-this-token" not in result.text
     assert "tokenValue" not in result.text
+
+
+def test_server_side_coverage_reports_duplicates_and_date_range(quant_ui_settings) -> None:
+    source = quant_ui_settings.runtime_root / "import_quarantine" / "bars.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "symbol,trade_date,close\n"
+        "000001.SZ,2026-01-02,10\n"
+        "000001.SZ,2026-01-02,10\n"
+        "000001.SZ,2026-01-05,11\n",
+        encoding="utf-8",
+    )
+
+    result = request(
+        create_app(quant_ui_settings),
+        "GET",
+        "/api/data/coverage",
+        params={"path": "runtime/import_quarantine/bars.csv", "deep": "true"},
+    )
+
+    assert result.status_code == 200
+    payload = result.json()["data"]
+    assert payload["duplicateKeys"] == 1
+    assert payload["dateStart"] == "2026-01-02"
+    assert payload["dateEnd"] == "2026-01-05"
+    assert payload["symbolCount"] == 1
+
+
+def test_coverage_rejects_files_outside_runtime(quant_ui_settings) -> None:
+    outside = quant_ui_settings.project_root / "outside.csv"
+    outside.write_text("symbol,trade_date\n000001.SZ,2026-01-02\n", encoding="utf-8")
+
+    result = request(
+        create_app(quant_ui_settings),
+        "GET",
+        "/api/data/coverage",
+        params={"path": "outside.csv"},
+    )
+
+    assert result.status_code == 422
+    assert "inside Runtime" in result.json()["detail"]
+
+
+def test_quarantine_import_streams_deduplicates_and_writes_manifest(quant_ui_settings) -> None:
+    source = quant_ui_settings.runtime_root / "import_quarantine" / "incoming.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "symbol,trade_date,close\n"
+        "000001.SZ,2026-01-02,10\n"
+        "000001.SZ,2026-01-02,10\n"
+        "600519.SH,2026-01-05,1500\n",
+        encoding="utf-8",
+    )
+    output = quant_ui_settings.runtime_root / "data" / "imported" / "validated.parquet"
+    env = {**os.environ, "QUANTAGENT_HOME": str(quant_ui_settings.runtime_root)}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[2] / "scripts" / "data_manager_transfer.py"),
+            "--operation", "import",
+            "--source", str(source),
+            "--output", str(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert len(__import__("pandas").read_parquet(output)) == 2
+    manifest = json.loads(output.with_suffix(".parquet.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["duplicates_removed"] == 1
+    assert manifest["rows_written"] == 2
+    assert len(manifest["sha256"]) == 64
 
 
 def test_data_job_requires_allowlisted_command_and_explicit_universe(quant_ui_settings) -> None:

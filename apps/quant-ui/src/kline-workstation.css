@@ -154,11 +154,11 @@
 }
 
 .qa-tooltip-grid b.positive {
-  color: #2ac89f;
+  color: var(--market-up);
 }
 
 .qa-tooltip-grid b.negative {
-  color: #ef5c63;
+  color: var(--market-down);
 }
 
 .qa-tooltip-events {

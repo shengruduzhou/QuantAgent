@@ -11,7 +11,7 @@ toward a future L2 do-T training set.
 Run it on an intraday schedule (e.g. every 30-60s via systemd/cron during
 09:30-15:00 CST), or with ``--loop-seconds N`` to self-poll.  Output:
 
-    runtime/data/v7/silver/depth_snapshots/{YYYY-MM-DD}.parquet  (appended)
+    runtime/data/v7/silver/depth_snapshots/{YYYY-MM-DD}/{timestamp}.parquet
 
 Derived features per snapshot (the LEVEL2_FEATURE_COLUMNS the EV engine already
 knows how to consume): order_book_imbalance, bid_depth, ask_depth,
@@ -27,7 +27,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-OUT_DIR = Path("runtime/data/v7/silver/depth_snapshots")
+from quantagent.config.paths import quant_paths
+from quantagent.data.manifest import build_manifest_for_frame
+
+OUT_DIR = quant_paths().home / "data/v7/silver/depth_snapshots"
 
 
 def _client():
@@ -74,6 +77,8 @@ def _depth_features(d) -> dict | None:
 
 
 def _load_symbols(args) -> list[str]:
+    if args.symbols:
+        return [token.strip() for token in args.symbols.split(",") if token.strip()]
     if args.book_csv and Path(args.book_csv).exists():
         df = pd.read_csv(args.book_csv)
         if "symbol" in df.columns:
@@ -101,6 +106,7 @@ def snapshot_once(tf, symbols: list[str], sleep_s: float = 0.05) -> pd.DataFrame
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--symbols", default="", help="comma-separated canonical symbols")
     ap.add_argument("--book-csv", default="runtime/paper/forward/A_default/targets_latest.csv")
     ap.add_argument("--symbols-file", default="")
     ap.add_argument("--loop-seconds", type=int, default=0, help="0 = single snapshot; >0 = poll every N s")
@@ -131,12 +137,25 @@ def main() -> int:
     def _persist(df: pd.DataFrame) -> None:
         if df.empty:
             return
-        day = pd.Timestamp.now(tz="Asia/Shanghai").strftime("%Y-%m-%d")
-        path = OUT_DIR / f"{day}.parquet"
-        if path.exists():
-            df = pd.concat([pd.read_parquet(path), df], ignore_index=True)
+        now = pd.Timestamp.now(tz="Asia/Shanghai")
+        day = now.strftime("%Y-%m-%d")
+        day_root = OUT_DIR / day
+        day_root.mkdir(parents=True, exist_ok=True)
+        path = day_root / f"{now.strftime('%H%M%S_%f')}.parquet"
         df.to_parquet(path, index=False)
-        print(f"{pd.Timestamp.now()}: +{len(df)} rows -> {path}", flush=True)
+        manifest = build_manifest_for_frame(
+            dataset_name="tickflow_depth_snapshots",
+            vendor="tickflow.depth",
+            frame=df,
+            output_paths=(path,),
+            start_date=day,
+            end_date=day,
+            symbols=df["symbol"].astype(str).unique(),
+            required_columns=("symbol", "snapshot_time", "best_bid", "best_ask"),
+            warnings=("forward-only realtime snapshot; not historical tick data",),
+        )
+        manifest.write(path.with_suffix(".manifest.json"))
+        print(f"{now}: +{len(df)} rows -> {path}", flush=True)
 
     if args.loop_seconds <= 0:
         _persist(snapshot_once(tf, symbols, args.sleep))

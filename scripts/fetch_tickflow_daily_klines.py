@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -44,12 +45,13 @@ def main() -> int:
         raise SystemExit("provide --symbols or --symbols-file")
     provider = TickflowProvider(allow_network=True, allow_free_daily=True)
     frames = []
+    total_batches = math.ceil(len(symbols) / args.batch_size)
     for i in range(0, len(symbols), args.batch_size):
         batch = symbols[i:i + args.batch_size]
         result = provider.daily_ohlcv(ProviderRequest(args.start_date, args.end_date, tuple(batch)))
         if not result.frame.empty:
             frames.append(result.frame)
-        print(json.dumps({"batch": i // args.batch_size + 1, "symbols": len(batch), "rows": len(result.frame)}, ensure_ascii=False))
+        print(json.dumps({"batch": i // args.batch_size + 1, "total_batches": total_batches, "symbols": len(batch), "rows": len(result.frame)}, ensure_ascii=False), flush=True)
     if not frames:
         raise SystemExit("tickflow returned no daily K-line rows")
     out = pd.concat(frames, ignore_index=True).drop_duplicates(["symbol", "trade_date"]).sort_values(["trade_date", "symbol"])

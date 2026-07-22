@@ -32,6 +32,58 @@ class JobRecord:
 
 
 COMMANDS: dict[str, dict[str, Any]] = {
+    "fetch-tickflow-daily": {
+        "type": "data",
+        "entrypoint": "scripts/fetch_tickflow_daily_klines.py",
+        "required": {"start_date", "end_date", "output", "allow_network"},
+        "required_any": (("symbols", "symbols_file"),),
+        "allowed": {"symbols", "symbols_file", "start_date", "end_date", "batch_size", "output", "allow_network"},
+        "path_inputs": {"symbols_file"},
+        "path_outputs": {"output"},
+        "control": {"allow_network"},
+    },
+    "fetch-tickflow-minute": {
+        "type": "data",
+        "entrypoint": "scripts/fetch_tickflow_minute_history.py",
+        "required": {"start", "end", "allow_network"},
+        "required_any": (("symbols", "symbols_file", "holdings_csv"),),
+        "allowed": {"symbols", "symbols_file", "holdings_csv", "start", "end", "sleep", "limit", "allow_network"},
+        "path_inputs": {"symbols_file", "holdings_csv"},
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/v7/silver/minute_bars",),
+        "control": {"allow_network"},
+    },
+    "record-tickflow-depth": {
+        "type": "data",
+        "entrypoint": "scripts/collect_tickflow_depth.py",
+        "required": {"allow_network"},
+        "required_any": (("symbols", "symbols_file", "book_csv"),),
+        "allowed": {"symbols", "symbols_file", "book_csv", "loop_seconds", "max_iterations", "sleep", "allow_network"},
+        "path_inputs": {"symbols_file", "book_csv"},
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/v7/silver/depth_snapshots",),
+        "control": {"allow_network"},
+    },
+    "record-tickflow-quotes": {
+        "type": "data",
+        "entrypoint": "scripts/record_tickflow_quotes.py",
+        "required": {"symbols", "allow_network"},
+        "allowed": {"symbols", "symbols_file", "loop_seconds", "max_iterations", "allow_network"},
+        "path_inputs": {"symbols_file"},
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/v7/silver/tick_snapshots",),
+        "control": {"allow_network"},
+    },
+    "data-manager-transfer": {
+        "type": "data",
+        "entrypoint": "scripts/data_manager_transfer.py",
+        "required": {"operation", "source", "output"},
+        "allowed": {"operation", "source", "output", "date_column", "symbol_column", "start_date", "end_date", "symbols"},
+        "path_inputs": {"source"},
+        "path_outputs": {"output"},
+        "control": set(),
+        "choices": {"operation": {"import", "export"}},
+    },
     "run-strict-a-share-backtest-v8": {
         "type": "backtest",
         "required": {"target_weights_path", "market_panel_path", "output_dir"},
@@ -129,6 +181,11 @@ class JobManager:
         }
         if missing:
             raise ValueError(f"missing required parameters: {sorted(missing)}")
+        for key, choices in spec.get("choices", {}).items():
+            if parameters.get(key) not in choices:
+                raise ValueError(f"{key} must be one of {sorted(choices)}")
+        if "allow_network" in spec.get("control", set()) and parameters.get("allow_network") is not True:
+            raise ValueError("allow_network must be explicitly confirmed")
         for group in spec.get("required_any", ()):
             if not any(parameters.get(key) not in (None, "", []) for key in group):
                 raise ValueError(f"one of {sorted(group)} is required")
@@ -247,9 +304,14 @@ class JobManager:
             if job_id in self._cancel_requested or self._jobs[job_id].status == "cancelled":
                 return
         self._update(job_id, status="running", startedAt=_now(), progress=0.0, message="running")
-        command = [sys.executable, "-m", "quantagent.cli", command_id]
+        entrypoint = spec.get("entrypoint")
+        command = (
+            [sys.executable, str(self.settings.project_root / entrypoint)]
+            if entrypoint
+            else [sys.executable, "-m", "quantagent.cli", command_id]
+        )
         for key, value in parameters.items():
-            if value is None:
+            if value is None or key in spec.get("control", set()):
                 continue
             option = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):
@@ -269,15 +331,27 @@ class JobManager:
                 process = subprocess.Popen(
                     command,
                     cwd=self.settings.project_root,
-                    stdout=handle,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    bufsize=1,
                 )
                 with self._lock:
                     self._processes[job_id] = process
                     cancel_requested = job_id in self._cancel_requested
                 if cancel_requested:
                     process.terminate()
+                assert process.stdout is not None
+                for line in process.stdout:
+                    handle.write(line)
+                    handle.flush()
+                    progress = _progress_from_line(line)
+                    if progress is not None:
+                        self._update(
+                            job_id,
+                            progress=progress,
+                            message=line.strip()[:240] or "running",
+                        )
                 code = process.wait()
             with self._lock:
                 self._processes.pop(job_id, None)
@@ -287,6 +361,7 @@ class JobManager:
                 for key, value in parameters.items()
                 if key in spec["path_outputs"] and value is not None
             ]
+            outputs.extend(spec.get("fixed_outputs", ()))
             if cancelled:
                 self._update(
                     job_id, status="cancelled", finishedAt=_now(),
@@ -335,7 +410,7 @@ class JobManager:
                     runtime = self.settings.runtime_root.resolve()
                     if path != runtime and runtime not in path.parents:
                         raise ValueError(f"output path must be inside runtime: {key}")
-                normalized[key] = project_relative(self.settings, path)
+                normalized[key] = str(path)
             else:
                 if isinstance(value, str) and not re.fullmatch(r"[\w.,:+/ -]*", value):
                     raise ValueError(f"unsupported characters in {key}")
@@ -393,3 +468,21 @@ class JobManager:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _progress_from_line(line: str) -> float | None:
+    """Parse provider progress without requiring a provider-specific protocol."""
+    match = re.search(r"\[(\d+)\s*/\s*(\d+)\]", line)
+    if match and int(match.group(2)) > 0:
+        return min(0.99, int(match.group(1)) / int(match.group(2)))
+    try:
+        payload = json.loads(line)
+    except (TypeError, ValueError):
+        return None
+    value = payload.get("progress")
+    if isinstance(value, (int, float)):
+        return min(0.99, max(0.0, float(value)))
+    batch, total = payload.get("batch"), payload.get("total_batches")
+    if isinstance(batch, int) and isinstance(total, int) and total > 0:
+        return min(0.99, batch / total)
+    return None

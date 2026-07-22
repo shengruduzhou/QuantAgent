@@ -98,13 +98,12 @@ export function HelpCenterPage(): JSX.Element {
           </div>
         </Panel>
 
-        <Panel title="外部参考" eyebrow="Optional source material" className="help-reference-panel">
-          <div className="help-reference-links">
-            <a href="https://www.vnpy.com/docs/cn/community/index.html" target="_blank" rel="noreferrer">VeighNa 社区版文档 <ArrowRight size={13} /></a>
-            <a href="https://github.com/vnpy/vnpy" target="_blank" rel="noreferrer">vn.py 官方源码 <ArrowRight size={13} /></a>
-            <a href="https://www.vnpy.com/portal/" target="_blank" rel="noreferrer">VeighNa 生态门户 <ArrowRight size={13} /></a>
+        <Panel title="设计来源" eyebrow="Internal documentation only" className="help-reference-panel">
+          <div className="help-guide-list">
+            <div><BookOpenText size={17} /><span><strong>VeighNa / vn.py 对齐</strong><small>DataManager、DataRecorder、事件引擎和交易对象只作为实现依据；帮助入口始终停留在 QuantAgent 内。</small></span></div>
+            <div><ListChecks size={17} /><span><strong>能力状态</strong><small>已实现、部分实现、未审计和缺失均以产品内 Capability Registry 的机器可读状态为准。</small></span></div>
           </div>
-          <p>这些链接只用于理解来源与扩展模块。QuantAgent 的可用功能、状态和操作以当前页面与 Capability Registry 为准。</p>
+          <p>本页没有外部跳转。需要核对实现来源时，由开发审计流程记录具体版本与代码位置。</p>
         </Panel>
       </section>
     </div>
