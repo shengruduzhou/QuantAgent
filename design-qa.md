@@ -1,38 +1,46 @@
-# QuantAgent Dashboard V5 — Design QA
+# QuantAgent Institutional Workstation — Design QA
 
-Status: **PASSED**
+## Scope and sources
 
-## Visual truth and verification state
+- Product baseline: the existing Decision Dashboard and Training Lab anatomy in this repository.
+- User references: the supplied Decision Dashboard, Training Lab and Model Registry captures retained in the private review session; they are intentionally not copied into the public repository.
+- Reported defects also include the supplied factor-page empty canvas and VN.PY parity table text-collision captures from the same review session.
+- Captured implementation state: Factor Intelligence Studio in the cloud browser at 1363 × 936, night theme, expanded rail, open Operations Dock. The verified final tab remains open for inspection.
 
-- Reference: `docs/quant_ui_design_concepts/03-signal-observatory.png`
-- User-reported baseline: `upload/a103a3cd-561e-4472-9023-85811d9be979.png`
-- Browser capture: `/workspace/scratch/quantagent-dashboard-v5-final.jpg`
-- Verified viewport: 1363 × 936 (desktop); responsive breakpoints also covered by CSS and production build.
-- Browser data state: deterministic visual-only API fixture matching the typed production contracts. The fixture was removed before final verification and is not shipped.
+## Visual contract
 
-## Comparison result
+- Shared page anatomy: Workbench header → no more than six source-backed metrics → primary canvas → evidence/operations inspector → global Operations Dock.
+- Shared semantic colors: information blue, research cyan/violet, verified mint, warning amber and risk coral. Night, dawn and day use the same meanings.
+- Dense surfaces use bounded columns, truncation, expandable detail and inspectors instead of allowing table text to overlap.
+- Empty states state the missing artifact, the safety implication and a real next action. No fabricated data fills gaps.
+- The visible system remains research/paper-only; LLM, network, registry promotion, training and execution remain distinct gates.
 
-| Area | Result | Notes |
-| --- | --- | --- |
-| Shell hierarchy | Pass | Primary navigation, workspace tabs and content no longer compete at equal visual weight. |
-| Dashboard hierarchy | Pass | One portfolio narrative dominates; risk, health, funnel and execution are secondary. |
-| KPI layout | Pass | All six KPI blocks share one baseline at the verified desktop width; no empty second row. |
-| Color system | Pass | Restrained blue/cyan command palette with amber warning and red drawdown states. |
-| Typography | Pass | Dashboard supporting labels increased to 10px minimum where practical; no overlapping labels. |
-| Chart interaction | Pass | Range buttons are single-select; wheel zoom, drag pan and slider zoom are enabled. |
-| Responsive containment | Pass | `documentElement.scrollWidth === innerWidth`; no page-level horizontal overflow. |
-| Empty/loading trust | Pass | Production code keeps explicit real-data unavailable states and does not ship mock fallbacks. |
+## Browser verification
 
-## Interaction and console checks
+| Area | State and interaction checked | Result |
+|---|---|---|
+| Factor Intelligence | Empty and populated anatomy; six metrics; five utility filters; 12-stage evidence-to-registry chain; discovery drawer; explicit LLM then network confirmation; append-only human review | Passed |
+| Theme | Deep Space, Dawn and Day menu options update `data-theme` without changing semantic status meaning | Passed |
+| Backtest | One active experiment uses radio semantics; comparison is separated and capped at four; NAV/drawdown chart has slider and concise dates | Passed |
+| Chart Workstation | Wheel zoom contract, pointer-pan configuration, slider, range buttons, left/right controls and Home/End/arrow keys; visible window survives React re-render in component regression | Passed |
+| Data Lab | Catalog, provider jobs, quarantine import/export, exact duplicate/date coverage and DataRecorder tick/depth controls; all large paths remain server-side | Passed |
+| Selection and T+1 | Actionable evidence chain replaces blank canvas; no fabricated values | Passed |
+| Risk | Six-metric strip and evidence panels render with missing event pages; previous undefined-page crash fixed | Passed |
+| VN.PY parity | Summary columns plus inspector prevent the reported Current gap / Next action collision | Passed |
+| Help | All links are internal QuantAgent routes; external link count is zero | Passed |
+| Console | Fresh final browser session contains zero application-level warning/error entries; browser-extension metadata noise excluded | Passed |
 
-- `近3月` was selected in the browser and became the only `aria-pressed=true` range control.
-- `全部` restored the full time range.
-- Help remains an internal `/help` route.
-- Backtest experiment selection remains a radio/single-active-context interaction.
-- Browser console had no application warnings or errors. Chrome extension metadata messages were excluded as environment noise.
+## Comparison and iteration history
 
-## Defects
+1. Round 1 — matched the Decision Dashboard / Training Lab density and hierarchy, then introduced the shared Workbench components and semantic chart adapter.
+2. Round 2 — replaced the factor page's unused space with the governed discovery cockpit; converted selection and T+1 empty areas into evidence-driven actions; split dense parity detail into an inspector.
+3. Round 3 — fixed the Risk event-page crash, restored the legacy truthfulness copy required by regression tests, exercised all three themes and verified K-line controls in the browser.
 
-- P0: none
-- P1: none
-- P2: none
+## Automated verification
+
+- Frontend: 31 tests passed; TypeScript passed; Vite production build passed.
+- Quant UI backend: 52 tests passed.
+- Full repository: 1305 tests passed, 17 environment-dependent tests skipped.
+- Python bytecode compilation and `git diff --check` passed.
+
+final result: passed

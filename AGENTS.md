@@ -39,6 +39,18 @@ V7 覆盖：
 - 所有 silver / gold artifact 必须伴随一份 `<lake_root>/manifests/<dataset>.json`（`quantagent.data.manifest.DataManifest`）。
 - 大数据/模型/报告默认写入 `E:\Project\QuantAgent\runtime\`（Windows）或 `~/AI_quant`（POSIX），通过 `QUANTAGENT_HOME` 环境变量覆盖。`quantagent.config.paths.quant_paths` 是单一来源。
 
+## Institutional Workstation VNext / 一体式工作站
+
+- Web product 只维护 `apps/quant-ui/src/vnext` shell 与其注册页面；禁止恢复 legacy shell、第二套路由或第二套 backend/schema。
+- 决策总览与训练实验室是所有 domain page 的结构基线：`WorkbenchHeader`、最多 6 项的 `WorkbenchMetricStrip`、可审计主画布、右侧 evidence/operation inspector、底部全局 Operations Dock。
+- Night / dawn / day 必须共享同一 semantic token；图表统一经过 `EChart` theme adapter，禁止页面写死只在深色模式可读的轴线、tooltip 或 dataZoom 配色。
+- Empty state 必须解释缺少的 artifact、保持的安全状态和下一步操作；不得留下大面积无说明空白，也不得用 mock/fabricated metric 填空。
+- 回测主上下文只能单选；多实验进入独立 Compare，最多 4 项。模型/因子比较最多 4 项，避免视觉拥挤和指标来源混合。
+- 因子发现沿用现有 `synthesize-factors-v7` 与统一 JobRunner：证据 → 受限 DSL → schema → PIT/leakage → compute → IC/decay/correlation/regime → portfolio impact → human review → registry gate。LLM 与 network 均需显式、分离确认。
+- K 线和时序图遵循人类操作契约：滚轮只缩放、左键拖拽只平移、slider 可直接调整窗口，键盘提供 pan/zoom/latest/all；React rerender 后保留手动窗口。
+- Help 永远留在 QuantAgent 内；vn.py / VeighNa 仅作为 version-pinned design and capability audit source，不把产品帮助入口跳到外部网站。
+- 大型 TickFlow/runtime 文件保持服务器侧：网页只提交受限 Runtime 路径；coverage/duplicate scan、quarantine transfer、DataRecorder 与 cleanup 都必须内存有界、可取消、可审计。
+
 ## Real-Data Commands / 真实数据命令
 
 ```powershell

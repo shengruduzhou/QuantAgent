@@ -30,7 +30,7 @@ export function ReportsPage(): JSX.Element {
   };
 
   return (
-    <div className="page reports-page">
+    <div className="page institutional-workbench reports-page">
       <section className="report-hero panel">
         <div>
           <span className="report-kicker"><FileText size={17} /> QuantAgent Research Brief</span>

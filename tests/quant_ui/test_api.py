@@ -174,6 +174,65 @@ def test_job_validation_is_read_only_and_checks_real_inputs(quant_ui_settings) -
     assert invalid.status_code == 422
 
 
+def test_factor_discovery_job_requires_network_only_when_llm_is_enabled(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    base = {
+        "market_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+        "output_dir": "runtime/reports/v7/factor_synthesis_ui",
+        "rd_agent": True,
+        "rounds": 2,
+        "factors_per_round": 2,
+        "use_llm": False,
+        "allow_network": False,
+    }
+
+    safe = request(
+        app,
+        "POST",
+        "/api/jobs/factor-discovery/validate",
+        json={"commandId": "synthesize-factors-v7", "parameters": base},
+    )
+    assert safe.status_code == 200
+    assert safe.json()["data"]["type"] == "factor-discovery"
+    assert "research candidates only" in safe.json()["data"]["warnings"][0]
+
+    blocked = request(
+        app,
+        "POST",
+        "/api/jobs/factor-discovery/validate",
+        json={"commandId": "synthesize-factors-v7", "parameters": {**base, "use_llm": True}},
+    )
+    assert blocked.status_code == 422
+    assert "allow_network must be explicitly confirmed" in blocked.json()["detail"]
+
+    armed = request(
+        app,
+        "POST",
+        "/api/jobs/factor-discovery/validate",
+        json={"commandId": "synthesize-factors-v7", "parameters": {**base, "use_llm": True, "allow_network": True}},
+    )
+    assert armed.status_code == 200
+    assert any("LLM network execution" in warning for warning in armed.json()["data"]["warnings"])
+
+
+def test_factor_review_is_append_only_and_never_mutates_registry(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    before = request(app, "GET", "/api/factors/alpha001").json()["data"]
+    result = request(
+        app,
+        "POST",
+        "/api/factors/alpha001/reviews",
+        json={"action": "approve", "note": "PIT and IC evidence reviewed for research."},
+    )
+
+    assert result.status_code == 200
+    assert result.json()["data"]["scope"] == "research_review"
+    assert result.json()["data"]["registryMutation"] is False
+    reviews = request(app, "GET", "/api/factors/alpha001/reviews").json()["data"]
+    assert reviews[0]["action"] == "approve"
+    assert request(app, "GET", "/api/factors/alpha001").json()["data"] == before
+
+
 def test_global_search_returns_typed_drill_down_entities(quant_ui_settings) -> None:
     app = create_app(quant_ui_settings)
 

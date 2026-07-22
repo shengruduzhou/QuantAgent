@@ -24,6 +24,26 @@ export const jobTemplates = {
       require_gpu: true,
     },
   },
+  "factor-discovery": {
+    commandId: "synthesize-factors-v7",
+    parameters: {
+      market_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
+      labels_path: null,
+      output_dir: "runtime/reports/v7/factor_synthesis_ui",
+      rd_agent: true,
+      label_column: "forward_return_5d",
+      rounds: 4,
+      factors_per_round: 3,
+      top_k: 20,
+      validation_fraction: 0.25,
+      min_validation_rank_ic: 0.0,
+      max_reference_correlation: 0.7,
+      max_sota_correlation: 0.99,
+      use_llm: false,
+      allow_network: false,
+      exclude_st: true,
+    },
+  },
   infer: {
     commandId: "predict-alpha-v7",
     parameters: {
@@ -43,7 +63,7 @@ export interface JobLaunchPayload {
 }
 
 export function isJobType(value: string | null): value is JobType {
-  return value === "backtest" || value === "train" || value === "infer";
+  return value === "backtest" || value === "train" || value === "infer" || value === "factor-discovery";
 }
 
 export function templateJson(type: JobType): string {

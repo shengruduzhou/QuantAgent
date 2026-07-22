@@ -1,10 +1,9 @@
 import { useMemo } from "react";
-import { ShieldWarning } from "@phosphor-icons/react";
+import { ChartLineDown, Drop, ShieldCheck, ShieldWarning, TrendDown, WarningCircle } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
 import type { Page, RiskOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
 import { EChart } from "../components/EChart";
-import { MetricCard } from "../components/MetricCard";
 import { MonitorTable, type MonitorColumn } from "../components/MonitorTable";
 import { Panel } from "../components/Panel";
 import { RiskRadar } from "../components/RiskRadar";
@@ -12,6 +11,7 @@ import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 import { marketPalette } from "../theme/marketPalette";
+import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface RiskEvent {
   id: string;
@@ -48,6 +48,9 @@ export function RiskCenterPage(): JSX.Element {
   const stocks = useApi<RiskStock[]>(["risk-stocks"], "/risk/stocks");
   const rules = useApi<RiskRule[]>(["risk-rules"], "/risk/rules");
   const risk = overview.data?.data;
+  const eventPage = events.data?.data;
+  const eventItems = eventPage?.items ?? [];
+  const eventTotal = eventPage?.total ?? 0;
 
   const eventOption = useMemo<EChartsOption>(() => {
     const entries = Object.entries(risk?.eventCounts ?? {}).sort((left, right) => right[1] - left[1]).slice(0, 12);
@@ -111,19 +114,19 @@ export function RiskCenterPage(): JSX.Element {
   ], []);
 
   if (overview.isLoading) return <StateView state="loading" />;
-  if (!risk) return <StateView state="empty" />;
+  if (!risk) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="规则、阈值、事件、单票暴露与审计回放。" context="kill locked" /><ActionableState title="没有风险概览" detail="风险数据缺失时系统保持 fail-closed；请检查 risk event 与回测产物。" icon={ShieldWarning} tone="danger" /></div>;
 
   return (
-    <div className="page risk-page">
-      <section className="metric-grid metric-grid-7">
-        <MetricCard label="最大回撤" value={formatPercent(risk.maxDrawdown)} tone="negative" />
-        <MetricCard label="单票最大亏损" value={formatNumber(risk.maxSingleStockLoss)} tone="negative" />
-        <MetricCard label="单日最大亏损" value={formatPercent(risk.maxDailyLoss)} tone="negative" />
-        <MetricCard label="连续亏损天数" value={formatCompact(risk.consecutiveLossDays)} tone="warning" />
-        <MetricCard label="流动性风险" value={formatPercent(risk.liquidityRisk)} />
-        <MetricCard label="跌停风险" value={formatPercent(risk.limitDownRisk)} />
-        <MetricCard label="停牌风险" value={formatPercent(risk.suspensionRisk)} />
-      </section>
+    <div className="page institutional-workbench risk-page">
+      <WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="硬约束、阈值、风险事件和人工处置队列共享同一证据链；雷达图仅作辅助。" asOf={eventItems[0]?.datetime?.slice(0, 10) ?? "as-of unavailable"} context={`${eventTotal} persisted events`} actions={<><span className="status-badge status-warning"><WarningCircle size={12} />{eventTotal} alerts</span><span className="status-badge status-success"><ShieldCheck size={12} />KILL LOCKED</span></>} />
+      <WorkbenchMetricStrip metrics={[
+        { label: "最大回撤", value: formatPercent(risk.maxDrawdown), detail: "portfolio NAV", tone: "danger", icon: ChartLineDown },
+        { label: "单票最大亏损", value: formatNumber(risk.maxSingleStockLoss), detail: "realized PnL", tone: "danger", icon: TrendDown },
+        { label: "单日最大亏损", value: formatPercent(risk.maxDailyLoss), detail: "daily threshold", tone: "danger", icon: TrendDown },
+        { label: "连续亏损", value: formatCompact(risk.consecutiveLossDays), detail: "trading days", tone: "warning", icon: WarningCircle },
+        { label: "流动性风险", value: formatPercent(risk.liquidityRisk), detail: `跌停 ${formatPercent(risk.limitDownRisk)} · 停牌 ${formatPercent(risk.suspensionRisk)}`, tone: "warning", icon: Drop },
+        { label: "风险事件", value: formatCompact(eventTotal), detail: "persisted evidence", tone: eventTotal ? "warning" : "positive", icon: ShieldWarning },
+      ]} />
 
       <section className="risk-grid">
         <Panel title="风险雷达" eyebrow="Risk Radar · relative thresholds" className="risk-radar-panel">
@@ -156,10 +159,10 @@ export function RiskCenterPage(): JSX.Element {
             emptyDetail="profit_by_stock.csv 不存在。"
           />
         </Panel>
-        <Panel title="风控事件时间线" eyebrow={`${events.data?.data.total ?? 0}+ indexed events`} className="risk-timeline-panel">
-          {(events.data?.data.items ?? []).length ? (
+        <Panel title="风控事件时间线" eyebrow={`${eventTotal} indexed events`} className="risk-timeline-panel">
+          {eventItems.length ? (
             <div className="risk-timeline">
-              {events.data?.data.items.slice(0, 60).map((event) => (
+              {eventItems.slice(0, 60).map((event) => (
                 <div key={event.id} className={`risk-timeline-item severity-${event.severity}`}>
                   <i />
                   <div><strong>{event.type}</strong><span>{event.symbol ?? "portfolio"} · {event.reason ?? "reason unavailable"}</span></div>

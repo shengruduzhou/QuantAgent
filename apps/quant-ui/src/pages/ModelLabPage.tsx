@@ -16,7 +16,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type {
   ModelComparison,
   ModelMetric,
@@ -30,6 +30,7 @@ import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatBytes, formatCompact, formatDate, formatNumber, formatPercent } from "../utils/format";
+import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface TrainingPoint {
   epoch: number;
@@ -72,6 +73,7 @@ const modelTabs: Array<{ key: ModelTab; label: string; icon: Icon }> = [
 ];
 
 export function ModelLabPage(): JSX.Element {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const models = useApi<ModelSummary[]>(["models"], "/models");
   const [modelId, setModelId] = useState(searchParams.get("modelId") ?? "");
@@ -222,12 +224,21 @@ export function ModelLabPage(): JSX.Element {
   }, [observed?.metrics]);
 
   if (models.isLoading) return <StateView state="loading" />;
-  if (!list.length) return <StateView state="empty" detail="没有发现可识别的模型 artifact。" />;
+  if (!list.length) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="MODEL REGISTRY / OBSERVABILITY" title="模型注册表" description="版本、训练证据、评估、血缘与人工 Gate 的统一模型资产视图。" context="source-backed only" /><ActionableState title="没有可识别模型" detail="先从训练实验室验证并运行研究任务；成功产物会由现有 RuntimeIndexer 自动进入注册表。" icon={Brain} primary={{ label: "打开训练实验室", onClick: () => navigate("/training") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime") }} /></div>;
 
   const keyMetrics = selectKeyMetrics(observed?.metrics ?? []);
 
   return (
-    <div className="page model-observatory-page">
+    <div className="page institutional-workbench model-observatory-page">
+      <WorkbenchHeader eyebrow="MODEL REGISTRY / OBSERVABILITY" title="模型注册表" description="比较版本、检查训练与验证证据、追踪 lineage；promotion 与实盘始终由独立 Gate 控制。" asOf={formatDate(selected?.createdAt)} context="research registry" actions={<button type="button" className="primary" onClick={() => navigate("/training")}><HardDrives size={14} />打开训练实验室</button>} />
+      <WorkbenchMetricStrip metrics={[
+        { label: "模型资产", value: String(list.length), detail: `${visibleModels.length} visible`, tone: "info", icon: Database },
+        { label: "Deep Alpha", value: String(familyCounts.deep_alpha ?? 0), detail: "registered family", tone: "ai", icon: Brain },
+        { label: "Production ready", value: String(list.filter((item) => item.productionReady).length), detail: "explicit metadata", tone: "positive", icon: ShieldCheck },
+        { label: "待评估", value: String(list.filter((item) => !item.verdict).length), detail: "missing verdict", tone: "warning", icon: WarningCircle },
+        { label: "比较篮", value: `${compareIds.length}/4`, detail: "normalized metrics", tone: compareIds.length >= 2 ? "info" : "neutral", icon: ArrowsLeftRight },
+        { label: "当前能力", value: `${Object.values(observed?.availability ?? {}).filter(Boolean).length}/${Object.keys(observed?.availability ?? {}).length || 6}`, detail: "visual evidence", tone: "info", icon: ChartScatter },
+      ]} />
       <section className="model-commandbar">
         <div className="model-search">
           <MagnifyingGlass size={17} />
@@ -242,7 +253,7 @@ export function ModelLabPage(): JSX.Element {
         </div>
         <div className="compare-status">
           <ArrowsLeftRight size={17} />
-          <span>{compareIds.length}/6 对比</span>
+          <span>{compareIds.length}/4 对比</span>
         </div>
       </section>
 
@@ -276,7 +287,7 @@ export function ModelLabPage(): JSX.Element {
                     onClick={(event) => {
                       event.stopPropagation();
                       setCompareIds((current) =>
-                        compared ? current.filter((id) => id !== model.id) : [...current.slice(0, 5), model.id],
+                        compared ? current.filter((id) => id !== model.id) : current.length >= 4 ? current : [...current, model.id],
                       );
                     }}
                     onKeyDown={(event) => {
@@ -284,7 +295,7 @@ export function ModelLabPage(): JSX.Element {
                         event.preventDefault();
                         event.stopPropagation();
                         setCompareIds((current) =>
-                          compared ? current.filter((id) => id !== model.id) : [...current.slice(0, 5), model.id],
+                          compared ? current.filter((id) => id !== model.id) : current.length >= 4 ? current : [...current, model.id],
                         );
                       }
                     }}

@@ -22,6 +22,7 @@ import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { useApi } from "../hooks/useApi";
 import { formatBytes, formatDate, formatNumber } from "../utils/format";
+import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 const kinds = ["", "backtest", "model", "prediction", "target_weights", "factor", "selection", "risk", "do_t", "log", "dataset", "report", "manifest", "unknown"];
 const trustClasses = ["", "production_ready", "paper_only", "research_only", "contaminated", "unclassified"];
@@ -112,14 +113,10 @@ export function RuntimeExplorerPage(): JSX.Element {
   };
 
   return (
-    <div className="page runtime-page runtime-manager-page">
-      <section className="runtime-commandbar">
-        <div>
-          <span className="page-kicker">RUNTIME / DATA MANAGER</span>
-          <h2>Data Ops · Artifact Catalog · Runs · Lineage</h2>
-          <p>唯一 RuntimeIndexer 投影；manifest 声明优先，未声明关系不推断。</p>
-        </div>
-        <div className="runtime-tabs terminal-segments">
+    <div className="page institutional-workbench runtime-page runtime-manager-page">
+      <WorkbenchHeader eyebrow="RUNTIME INTELLIGENCE / DATA OPS" title="Runtime 数据与产物工作站" description="唯一 RuntimeIndexer 投影；manifest 声明优先，未声明关系不推断。" asOf={summary?.indexedAt ? formatDate(summary.indexedAt) : "index unavailable"} context={`${summary?.artifactCount ?? 0} source-backed artifacts`} actions={<button type="button" onClick={rebuildIndex}><ArrowClockwise size={14} />重建索引</button>} />
+      <section className="runtime-commandbar runtime-commandbar-v2">
+        <div className="runtime-tabs terminal-segments" aria-label="Runtime 工作区">
           <button className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><HardDrives size={15} /> Data Ops</button>
           <button className={tab === "catalog" ? "active" : ""} onClick={() => setTab("catalog")}><Database size={15} /> Catalog</button>
           <button className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}><Stack size={15} /> Runs</button>
@@ -128,15 +125,14 @@ export function RuntimeExplorerPage(): JSX.Element {
         </div>
       </section>
 
-      <section className="runtime-stat-strip" aria-label="Runtime catalog summary">
-        <RuntimeStat label="Artifacts" value={summary?.artifactCount.toLocaleString() ?? "—"} detail={formatBytes(summary?.totalSizeBytes)} />
-        <RuntimeStat label="Runs" value={summary?.runCount.toLocaleString() ?? "—"} detail="declared path groups" />
-        <RuntimeStat label="Manifest" value={summary ? `${(summary.manifestCoverage * 100).toFixed(1)}%` : "—"} detail="contract coverage" />
-        <RuntimeStat label="Verified" value={(summary?.byValidation.verified ?? 0).toLocaleString()} detail="hash / declared checks" tone="positive" />
-        <RuntimeStat label="Invalid" value={(summary?.byValidation.invalid ?? 0).toLocaleString()} detail="fail-closed" tone={(summary?.byValidation.invalid ?? 0) ? "negative" : "neutral"} />
-        <RuntimeStat label="Contaminated" value={(summary?.byTrust.contaminated ?? 0).toLocaleString()} detail="not production-ready" tone={(summary?.byTrust.contaminated ?? 0) ? "warning" : "neutral"} />
-        <RuntimeStat label="Indexed" value={summary?.indexedAt ? formatDate(summary.indexedAt) : "—"} detail={catalog.data?.data.roots?.join(" · ") || "runtime unavailable"} />
-      </section>
+      <WorkbenchMetricStrip metrics={[
+        { label: "Artifacts", value: summary?.artifactCount.toLocaleString() ?? "—", detail: formatBytes(summary?.totalSizeBytes), tone: "info", icon: Database },
+        { label: "Runs", value: summary?.runCount.toLocaleString() ?? "—", detail: "declared path groups", tone: "neutral", icon: Stack },
+        { label: "Manifest", value: summary ? `${(summary.manifestCoverage * 100).toFixed(1)}%` : "—", detail: "contract coverage", tone: (summary?.manifestCoverage ?? 0) >= .8 ? "positive" : "warning", icon: File },
+        { label: "Verified", value: (summary?.byValidation.verified ?? 0).toLocaleString(), detail: "hash / declared checks", tone: "positive", icon: ShieldCheck },
+        { label: "Invalid", value: (summary?.byValidation.invalid ?? 0).toLocaleString(), detail: "fail-closed", tone: (summary?.byValidation.invalid ?? 0) ? "danger" : "neutral", icon: WarningCircle },
+        { label: "Contaminated", value: (summary?.byTrust.contaminated ?? 0).toLocaleString(), detail: "not production-ready", tone: (summary?.byTrust.contaminated ?? 0) ? "warning" : "neutral", icon: Broom },
+      ]} />
 
       {tab === "data" ? <DataManagerWorkspace /> : null}
 
@@ -174,7 +170,7 @@ export function RuntimeExplorerPage(): JSX.Element {
                   </table></div>
                   <div className="pagination"><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>{page} / {Math.max(1, Math.ceil(data.total / data.pageSize))}</span><button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button></div>
                 </>
-              ) : <StateView state={artifacts.isLoading ? "loading" : artifacts.isError ? "error" : "empty"} detail={artifacts.error?.message} />}
+              ) : artifacts.isLoading ? <StateView state="loading" /> : <ActionableState title={artifacts.isError ? "Runtime 索引读取失败" : "当前过滤没有产物"} detail={artifacts.error?.message ?? "清除过滤或重建索引；系统不会把未声明文件猜测成生产产物。"} icon={artifacts.isError ? WarningCircle : Database} tone={artifacts.isError ? "danger" : "neutral"} primary={{ label: "重建索引", onClick: rebuildIndex }} />}
             </Panel>
 
             <Panel title="Artifact Inspector" eyebrow="contract · preview · operations" className="runtime-inspector-panel">
@@ -203,10 +199,6 @@ export function RuntimeExplorerPage(): JSX.Element {
       {tab === "cleanup" ? <RuntimeCleanupWorkspace refreshToken={refreshToken} onChanged={rebuildIndex} /> : null}
     </div>
   );
-}
-
-function RuntimeStat({ label, value, detail, tone = "neutral" }: { label: string; value: string; detail: string; tone?: string }): JSX.Element {
-  return <div className={`runtime-stat tone-${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
 }
 
 function FilterSelect({ label, value, values, onChange }: { label: string; value: string; values: string[]; onChange: (value: string) => void }): JSX.Element {

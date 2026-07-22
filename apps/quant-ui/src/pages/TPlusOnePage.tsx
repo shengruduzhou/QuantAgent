@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowsClockwise, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, ArrowsClockwise, CheckCircle, ClockCounterClockwise, Database, ShieldCheck, TrendDown, WarningCircle } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
+import { useNavigate } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
 import { EChart } from "../components/EChart";
-import { MetricCard } from "../components/MetricCard";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface DoTSource {
   id: string;
@@ -63,6 +64,7 @@ interface DoTAnalysis {
 }
 
 export function TPlusOnePage(): JSX.Element {
+  const navigate = useNavigate();
   const sources = useApi<DoTSource[]>(["t1-sources"], "/do-t/sources");
   const [sourceId, setSourceId] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -91,12 +93,12 @@ export function TPlusOnePage(): JSX.Element {
 
   const waterfall = useMemo<EChartsOption>(() => ({
     animation: false,
-    grid: { left: 52, right: 16, top: 20, bottom: 54 },
+    grid: { left: 52, right: 16, top: 20, bottom: 50 },
     tooltip: { trigger: "axis", backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
     xAxis: {
       type: "category",
       data: (data?.pairs ?? []).slice(0, 80).map((pair) => `${pair.tradeDate?.slice(5, 10)} ${pair.symbol.slice(0, 6)}`),
-      axisLabel: { color: "#71879a", fontSize: 9, rotate: 45 },
+      axisLabel: { color: "#71879a", fontSize: 9, hideOverlap: true, formatter: (value: string) => value.slice(0, 5) },
       axisLine: { lineStyle: { color: "#20364a" } },
     },
     yAxis: {
@@ -104,6 +106,10 @@ export function TPlusOnePage(): JSX.Element {
       axisLabel: { color: "#71879a", fontSize: 10 },
       splitLine: { lineStyle: { color: "#14283a" } },
     },
+    dataZoom: [
+      { type: "inside", zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false, start: (data?.pairs.length ?? 0) > 40 ? 50 : 0, end: 100 },
+      { type: "slider", bottom: 3, height: 14, showDetail: false, brushSelect: false, start: (data?.pairs.length ?? 0) > 40 ? 50 : 0, end: 100 },
+    ],
     series: [{
       type: "bar",
       data: (data?.pairs ?? []).slice(0, 80).map((pair) => ({
@@ -115,10 +121,11 @@ export function TPlusOnePage(): JSX.Element {
   }), [data?.pairs]);
 
   if (sources.isLoading) return <StateView state="loading" />;
-  if (!sources.data?.data.length) return <StateView state="empty" detail="runtime 中没有可识别的 T+1 做 T artifact。" />;
+  if (!sources.data?.data.length) return <EmptyTPlusOneWorkspace navigate={navigate} />;
 
   return (
-    <div className="page t1-page">
+    <div className="page institutional-workbench t1-page">
+      <WorkbenchHeader eyebrow="T+1 COMPLIANT OVERLAY / FAILURE CONTROL" title="T+1 分析工作站" description="卖出只使用昨仓 sellable inventory；逐笔证据、失败类型与风险阈值共享同一运行上下文。" asOf={data?.pairs[0]?.tradeDate?.slice(0, 10) ?? "as-of unavailable"} context={data?.verdict ?? "research verdict"} />
       <section className="workbench-toolbar">
         <label>
           <span>研究数据源</span>
@@ -140,15 +147,14 @@ export function TPlusOnePage(): JSX.Element {
         <StatusBadge status={data?.verdict ?? "partial"} label={data?.verdict ?? "读取中"} />
       </section>
 
-      <section className="metric-grid metric-grid-7">
-        <MetricCard label="做 T 对数" value={formatCompact(data?.summary.pairCount)} />
-        <MetricCard label="成功率" value={formatPercent(data?.summary.successRate)} tone="positive" />
-        <MetricCard label="失败率" value={formatPercent(data?.summary.failureRate)} tone="negative" />
-        <MetricCard label="高抛失败率" value={formatPercent(data?.summary.highSellFailureRate)} tone="warning" />
-        <MetricCard label="低吸失败率" value={formatPercent(data?.summary.lowBuyFailureRate)} tone="warning" />
-        <MetricCard label="收益贡献" value={formatPercent(data?.summary.returnContribution)} />
-        <MetricCard label="信号质量" value={formatNumber(data?.summary.qualityScore)} />
-      </section>
+      <WorkbenchMetricStrip metrics={[
+        { label: "做 T 对数", value: formatCompact(data?.summary.pairCount), detail: "persisted pairs", tone: "info", icon: ArrowsClockwise },
+        { label: "成功率", value: formatPercent(data?.summary.successRate), detail: "pair-level", tone: "positive", icon: CheckCircle },
+        { label: "失败率", value: formatPercent(data?.summary.failureRate), detail: "failure control", tone: "danger", icon: WarningCircle },
+        { label: "高抛失败", value: formatPercent(data?.summary.highSellFailureRate), detail: "threshold 15%", tone: "warning", icon: TrendDown },
+        { label: "低吸失败", value: formatPercent(data?.summary.lowBuyFailureRate), detail: "threshold 15%", tone: "warning", icon: TrendDown },
+        { label: "信号质量", value: formatNumber(data?.summary.qualityScore), detail: `return ${formatPercent(data?.summary.returnContribution)}`, tone: "info", icon: ShieldCheck },
+      ]} />
 
       <section className="t1-grid">
         <Panel title="每笔 T+1 做 T 收益" eyebrow="Pair-level waterfall · only persisted fills" className="t1-waterfall">
@@ -208,6 +214,32 @@ export function TPlusOnePage(): JSX.Element {
       </section>
     </div>
   );
+}
+
+function EmptyTPlusOneWorkspace({ navigate }: { navigate: ReturnType<typeof useNavigate> }): JSX.Element {
+  return <div className="institutional-workbench t1-page t1-empty-page">
+    <WorkbenchHeader eyebrow="T+1 COMPLIANT OVERLAY / FAILURE CONTROL" title="T+1 分析工作站" description="卖出只使用昨仓 sellable inventory；缺失成交证据时展示准备路径，不从日线收益伪造分钟成交。" context="paper / research only" />
+    <WorkbenchMetricStrip metrics={[
+      { label: "交易对", value: "0", detail: "persisted fills only", tone: "neutral", icon: ArrowsClockwise },
+      { label: "昨仓库存", value: "—", detail: "sellable inventory required", tone: "warning", icon: Database },
+      { label: "分钟成交", value: "—", detail: "entry / exit required", tone: "warning", icon: ClockCounterClockwise },
+      { label: "失败控制", value: "LOCKED", detail: "thresholds unavailable", tone: "warning", icon: WarningCircle },
+      { label: "收益贡献", value: "—", detail: "never inferred", tone: "neutral", icon: TrendDown },
+      { label: "实盘", value: "DISABLED", detail: "research evidence only", tone: "positive", icon: ShieldCheck },
+    ]} />
+    <section className="t1-empty-grid">
+      <WorkbenchPanel eyebrow="EVIDENCE CONTRACT" title="T+1 成交证据链" meta="fail closed">
+        <div className="t1-empty-timeline"><article><span>01</span><strong>昨仓快照</strong><small>sellable inventory · as-of open</small></article><ArrowRight /><article><span>02</span><strong>低吸成交</strong><small>minute/tick fill + quantity</small></article><ArrowRight /><article><span>03</span><strong>高抛成交</strong><small>prior inventory only</small></article><ArrowRight /><article><span>04</span><strong>失败归因</strong><small>adverse move / missed upside</small></article></div>
+        <TruthNotice tone="warning">缺少任一成交、时间或库存字段时不计算 pair PnL，也不显示可启用结论。</TruthNotice>
+      </WorkbenchPanel>
+      <WorkbenchPanel eyebrow="PAIR FAILURE CONTROL" title="风险阈值" meta="awaiting artifacts">
+        <div className="t1-empty-thresholds"><span>高抛后继续上涨<i>≤ 15%</i></span><span>低吸后继续下跌<i>≤ 15%</i></span><span>整体失败率<i>≤ 50%</i></span><span>回撤控制贡献<i>source-backed</i></span></div>
+      </WorkbenchPanel>
+      <WorkbenchPanel eyebrow="NEXT ACTION" title="恢复工作上下文" meta="runtime source">
+        <ActionableState compact title="没有 T+1 做 T artifact" detail="先检查 do_t 成交与库存产物，再从受治理 overlay 生成逐对证据。" icon={ArrowsClockwise} primary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=do_t") }} secondary={{ label: "检查任务", onClick: () => navigate("/settings?view=jobs") }} />
+      </WorkbenchPanel>
+    </section>
+  </div>;
 }
 
 function FailureControl({ label, value, threshold }: { label: string; value: number | null | undefined; threshold: number }): JSX.Element {

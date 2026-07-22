@@ -179,7 +179,7 @@ export function StockReplayPage(): JSX.Element {
   };
 
   return (
-    <div className="page stock-replay-page">
+    <div className="page institutional-workbench stock-replay-page">
       <section className="workbench-toolbar">
         <label>
           <span>回测引擎</span>

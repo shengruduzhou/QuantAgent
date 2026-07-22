@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 import inspect
+import json
 from pathlib import Path
 import textwrap
+from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from services.quant_api.adapters.utils import read_csv_rows, read_json
 from services.quant_api.config import ApiSettings
@@ -15,6 +19,7 @@ class FactorAdapter:
         self.settings = settings
         self._catalog: dict[str, dict[str, Any]] | None = None
         self._metrics: dict[str, dict[str, Any]] | None = None
+        self._review_lock = RLock()
 
     def list(self, query: str | None = None) -> list[dict[str, Any]]:
         catalog = list(self._build_catalog().values())
@@ -30,6 +35,44 @@ class FactorAdapter:
 
     def get(self, name: str) -> dict[str, Any] | None:
         return self._build_catalog().get(name)
+
+    def reviews(self, name: str) -> list[dict[str, Any]]:
+        if self.get(name) is None:
+            raise KeyError(name)
+        path = self.settings.runtime_root / "governance" / "factor_reviews.jsonl"
+        if not path.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        with self._review_lock, path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("factorName") == name:
+                    records.append(record)
+        return sorted(records, key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+
+    def record_review(self, name: str, action: str, note: str) -> dict[str, Any]:
+        if self.get(name) is None:
+            raise KeyError(name)
+        record = {
+            "id": f"factor_review_{uuid4().hex[:16]}",
+            "factorName": name,
+            "action": action,
+            "note": note.strip(),
+            "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "scope": "research_review",
+            "registryMutation": False,
+            "liveExecution": False,
+        }
+        path = self.settings.runtime_root / "governance" / "factor_reviews.jsonl"
+        with self._review_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+        return record
 
     def explanation(self, name: str) -> dict[str, Any] | None:
         factor = self.get(name)

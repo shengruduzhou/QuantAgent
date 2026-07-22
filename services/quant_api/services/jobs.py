@@ -109,6 +109,26 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_inputs": {"dataset_path", "silver_panel_path", "symbols_file"},
         "path_outputs": {"output_dir"},
     },
+    "synthesize-factors-v7": {
+        "type": "factor-discovery",
+        "required": {"market_panel_path", "output_dir"},
+        "allowed": {
+            "market_panel_path", "labels_path", "output_dir", "rd_agent",
+            "label_column", "rounds", "factors_per_round", "population",
+            "generations", "top_k", "max_depth", "validation_fraction",
+            "min_validation_rank_ic", "fitness_sample_dates",
+            "fitness_sample_symbols", "seed", "warm_start_fraction",
+            "icir_weight", "reference_columns", "max_reference_correlation",
+            "max_sota_correlation", "use_llm", "allow_network", "llm_model",
+            "llm_start_round", "llm_candidates_per_round",
+            "rag_escalation_round", "llm_timeout_seconds", "memory_path",
+            "train_end", "exclude_st", "min_validation_icir",
+        },
+        "path_inputs": {"market_panel_path", "labels_path", "memory_path"},
+        "path_outputs": {"output_dir"},
+        "control": {"allow_network"},
+        "conditional_controls": {"allow_network": "use_llm"},
+    },
     "predict-alpha-v7": {
         "type": "infer",
         "required": {"model_dir", "feature_dataset", "output"},
@@ -197,13 +217,18 @@ class JobManager:
             if parameters.get(key) not in (None, "")
         ]
         outputs.extend(spec.get("fixed_outputs", ()))
+        warnings = ["GPU availability is checked by the training process"] if parameters.get("require_gpu") else []
+        if command_id == "synthesize-factors-v7":
+            warnings.append("Factor discovery writes research candidates only; registration and training remain separate human-gated steps")
+            if parameters.get("use_llm"):
+                warnings.append("LLM network execution is armed for this research job")
         return {
             "valid": True,
             "type": job_type,
             "commandId": command_id,
             "entrypoint": spec.get("entrypoint") or "quantagent.cli",
             "outputPaths": outputs,
-            "warnings": ["GPU availability is checked by the training process"] if parameters.get("require_gpu") else [],
+            "warnings": warnings,
         }
 
     def _validate(
@@ -227,8 +252,12 @@ class JobManager:
         for key, choices in spec.get("choices", {}).items():
             if parameters.get(key) not in choices:
                 raise ValueError(f"{key} must be one of {sorted(choices)}")
-        if "allow_network" in spec.get("control", set()) and parameters.get("allow_network") is not True:
-            raise ValueError("allow_network must be explicitly confirmed")
+        conditional_controls = spec.get("conditional_controls", {})
+        for control_key in spec.get("control", set()):
+            trigger_key = conditional_controls.get(control_key)
+            required = trigger_key is None or parameters.get(trigger_key) is True
+            if required and parameters.get(control_key) is not True:
+                raise ValueError(f"{control_key} must be explicitly confirmed")
         for group in spec.get("required_any", ()):
             if not any(parameters.get(key) not in (None, "", []) for key in group):
                 raise ValueError(f"one of {sorted(group)} is required")
@@ -338,7 +367,7 @@ class JobManager:
             else [sys.executable, "-m", "quantagent.cli", command_id]
         )
         for key, value in parameters.items():
-            if value is None or key in spec.get("control", set()):
+            if value is None:
                 continue
             option = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):

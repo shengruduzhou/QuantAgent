@@ -1072,7 +1072,8 @@
       "description": "High-performance history/realtime charts, cursor and linked items.",
       "quantagent": {
         "modules": [
-          "ECharts adapter",
+          "EChart semantic adapter",
+          "EquityChart",
           "CandlestickChart"
         ],
         "api": [
@@ -1087,18 +1088,22 @@
           "Stock Replay"
         ]
       },
-      "gap": "Daily chart interaction improved; minute/tick, incremental realtime, brush, keyboard navigation and saved layouts remain incomplete.",
+      "gap": "Wheel-only zoom, drag-only pan, keyboard navigation, explicit range actions, the overview slider and per-workspace viewport persistence are implemented for daily history and backtest equity. Minute/tick incremental realtime continuity and a certified 100k/500k browser performance baseline remain incomplete.",
       "adoption": "Continue ECharts behind one Chart Adapter unless benchmarks prove inadequate.",
       "tests": [
-        "kline helper tests"
+        "kline helper tests",
+        "CandlestickChart interaction tests",
+        "browser wheel, drag, keyboard and range-control verification"
       ],
       "evidence": [
-        "PR #10"
+        "PR #10",
+        "Stock Replay browser verification",
+        "Backtest equity and drawdown workspace"
       ],
       "limitations": [
         "large-data benchmark absent"
       ],
-      "nextAction": "Add chart adapter contract and 100k/500k point performance baseline."
+      "nextAction": "Add incremental minute/tick updates and certify 100k/500k point browser performance without changing the established interaction contract."
     },
     {
       "id": "visualization.chart_wizard",
