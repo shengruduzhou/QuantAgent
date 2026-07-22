@@ -15,6 +15,7 @@ const RuntimeExplorerPage = lazy(() => import("./pages/RuntimeExplorerPage").the
 const VnpyParityPage = lazy(() => import("./pages/VnpyParityPage").then((module) => ({ default: module.VnpyParityPage })));
 const ReportsPage = lazy(() => import("./pages/ReportsPage").then((module) => ({ default: module.ReportsPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const HelpCenterPage = lazy(() => import("./pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
 
 export function App(): JSX.Element {
   return (
@@ -33,6 +34,7 @@ export function App(): JSX.Element {
           <Route path="parity" element={<VnpyParityPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="help" element={<HelpCenterPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
