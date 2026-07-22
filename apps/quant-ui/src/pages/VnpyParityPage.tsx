@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ArrowsClockwise, MagnifyingGlass } from "@phosphor-icons/react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { ArrowsClockwise, MagnifyingGlass, X } from "@phosphor-icons/react";
 import { useApi } from "../hooks/useApi";
 import type {
   VnpyParityCapability,
@@ -108,11 +108,38 @@ export function VnpyParityPage(): JSX.Element {
   );
 
   const data = parity.data?.data;
+  const capabilities = data?.capabilities ?? [];
   const selected = useMemo(
-    () => data?.capabilities.find((item) => item.id === selectedId) ?? data?.capabilities[0],
-    [data?.capabilities, selectedId],
+    () => capabilities.find((item) => item.id === selectedId) ?? capabilities[0],
+    [capabilities, selectedId],
   );
   const completion = data ? `${(data.summary.completionRatio * 100).toFixed(1)}%` : "—";
+  const hasFilters = Boolean(category || status || query);
+
+  useEffect(() => {
+    if (!capabilities.length) {
+      setSelectedId(null);
+      return;
+    }
+    if (!selectedId || !capabilities.some((item) => item.id === selectedId)) {
+      setSelectedId(capabilities[0].id);
+    }
+  }, [capabilities, selectedId]);
+
+  const clearFilters = (): void => {
+    setCategory("");
+    setStatus("");
+    setQuery("");
+  };
+
+  const selectAdjacent = (event: KeyboardEvent<HTMLButtonElement>, currentId: string): void => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const currentIndex = capabilities.findIndex((item) => item.id === currentId);
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = Math.min(capabilities.length - 1, Math.max(0, currentIndex + direction));
+    setSelectedId(capabilities[nextIndex]?.id ?? currentId);
+  };
 
   if (parity.isLoading) return <StateView state="loading" />;
   if (parity.isError) return <StateView state="error" detail={parity.error.message} />;
@@ -155,7 +182,15 @@ export function VnpyParityPage(): JSX.Element {
         </label>
         <label className="parity-search">
           <span>搜索</span>
-          <div><MagnifyingGlass size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="能力、模块、API、差距或下一步" /></div>
+          <div>
+            <MagnifyingGlass size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="能力、模块、API、差距或下一步" />
+            {hasFilters ? (
+              <button type="button" className="icon-button" aria-label="清除筛选" title="清除筛选" onClick={clearFilters}>
+                <X size={13} />
+              </button>
+            ) : null}
+          </div>
         </label>
         <div className="parity-registry-meta">
           <span>Registry</span>
@@ -164,7 +199,7 @@ export function VnpyParityPage(): JSX.Element {
         </div>
       </section>
 
-      <section className="parity-stat-strip">
+      <section className="parity-stat-strip" role="status" aria-live="polite">
         <div><span>当前结果</span><strong>{data?.summary.total ?? 0}</strong><small>capabilities</small></div>
         <div><span>加权完成度</span><strong>{completion}</strong><small>verified 权重最高</small></div>
         <div><span>已验证</span><strong>{data?.summary.verified ?? 0}</strong><small>严格门禁</small></div>
@@ -178,27 +213,31 @@ export function VnpyParityPage(): JSX.Element {
       <div className="parity-workspace">
         <Panel
           title="能力对齐矩阵"
-          eyebrow={`${data?.capabilities.length ?? 0} rows · machine-readable single source`}
+          eyebrow={`${capabilities.length} rows · machine-readable single source`}
           className="parity-table-panel"
         >
-          {data?.capabilities.length ? (
+          {capabilities.length ? (
             <div className="parity-table-wrap">
               <table className="data-table parity-table">
+                <caption className="sr-only">vn.py 与 QuantAgent 能力对齐矩阵</caption>
                 <thead>
                   <tr><th>Category</th><th>Capability</th><th>Status</th><th>QuantAgent mapping</th><th>Current gap</th><th>Next action</th></tr>
                 </thead>
                 <tbody>
-                  {data.capabilities.map((item) => (
+                  {capabilities.map((item) => (
                     <tr
                       key={item.id}
                       className={selected?.id === item.id ? "selected" : ""}
-                      onClick={() => setSelectedId(item.id)}
+                      aria-selected={selected?.id === item.id}
                     >
                       <td className="mono">{item.category}</td>
                       <td>
                         <button
                           type="button"
+                          aria-label={`查看 ${item.name}`}
+                          aria-current={selected?.id === item.id ? "true" : undefined}
                           onClick={() => setSelectedId(item.id)}
+                          onKeyDown={(event) => selectAdjacent(event, item.id)}
                           style={{ width: "100%", padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left" }}
                         >
                           <strong>{item.name}</strong><small className="mono">{item.id}</small>
@@ -216,7 +255,7 @@ export function VnpyParityPage(): JSX.Element {
           ) : <StateView state="empty" detail="当前筛选条件没有能力项；注册表本身不会使用 mock 数据填充。" />}
         </Panel>
 
-        <aside className="parity-inspector">
+        <aside className="parity-inspector" aria-label="能力详情">
           <CapabilityInspector capability={selected} />
         </aside>
       </div>
