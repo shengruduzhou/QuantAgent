@@ -1,0 +1,1215 @@
+.vnext-shell {
+  width: 100vw;
+  min-width: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  grid-template-rows: 48px 38px minmax(0, 1fr) var(--vnext-dock-height);
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--vnx-canvas-top), var(--vnx-canvas) 180px);
+}
+
+.vnext-shell.rail-collapsed {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
+
+.vnext-module-rail {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--vnx-line);
+  background: var(--vnx-shell);
+}
+
+.vnext-rail-brand {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-rail-brand > span {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-primary-surface);
+  color: var(--vnx-primary-strong);
+  font: 700 12px var(--vnx-font-mono);
+}
+
+.vnext-rail-brand strong {
+  color: var(--vnx-text-soft);
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.vnext-module-rail nav {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 8px 7px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vnx-line-strong) transparent;
+}
+
+.vnext-module-rail nav section + section {
+  margin-top: 10px;
+}
+
+.vnext-module-rail h2 {
+  margin: 0;
+  padding: 6px 9px 5px;
+  color: var(--vnx-muted-2);
+  font: 700 10px/12px var(--vnx-font-mono);
+  letter-spacing: .12em;
+}
+
+.vnext-module-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: var(--vnx-radius-sm);
+}
+
+.vnext-module-row + .vnext-module-row {
+  margin-top: 2px;
+}
+
+.vnext-module-row.active {
+  background: var(--vnx-surface-selected);
+  box-shadow: inset 2px 0 var(--vnx-primary);
+}
+
+.vnext-module-row:hover {
+  background: var(--vnx-surface-2);
+}
+
+.vnext-module-link {
+  min-width: 0;
+  min-height: 41px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-module-row.active .vnext-module-link {
+  color: var(--vnx-text);
+}
+
+.vnext-module-icon {
+  position: relative;
+  width: 23px;
+  height: 25px;
+  flex: 0 0 23px;
+  display: grid;
+  place-items: center;
+}
+
+.vnext-module-icon em {
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  min-width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--vnx-warning);
+  color: #17120a;
+  font: 700 8px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-module-link > span:last-child {
+  min-width: 0;
+}
+
+.vnext-module-link strong,
+.vnext-module-link small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-module-link strong {
+  font-size: 12px;
+  line-height: 15px;
+}
+
+.vnext-module-link small {
+  margin-top: 2px;
+  color: var(--vnx-muted-2);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.vnext-favorite {
+  width: 24px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  margin-right: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-muted-2);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.vnext-module-row:hover .vnext-favorite,
+.vnext-favorite.active {
+  opacity: 1;
+}
+
+.vnext-favorite.active {
+  color: var(--vnx-warning);
+}
+
+.vnext-module-rail footer {
+  padding: 8px;
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-module-rail footer button {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
+  cursor: pointer;
+}
+
+.vnext-module-rail footer small {
+  display: block;
+  margin-top: 7px;
+  color: var(--vnx-success);
+  font: 700 9px var(--vnx-font-mono);
+  text-align: center;
+}
+
+.rail-collapsed .vnext-rail-brand {
+  justify-content: center;
+  padding: 0;
+}
+
+.rail-collapsed .vnext-module-rail h2 {
+  display: none;
+}
+
+.rail-collapsed .vnext-module-link {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.rail-collapsed .vnext-module-rail nav section + section {
+  margin-top: 8px;
+}
+
+.rail-collapsed .vnext-module-icon em {
+  right: -3px;
+}
+
+.vnext-commandbar {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--vnx-line);
+  background: color-mix(in srgb, var(--vnx-command) 96%, transparent);
+  box-shadow: inset 0 -1px color-mix(in srgb, var(--vnx-primary) 10%, transparent);
+}
+
+.vnext-brand-cluster,
+.vnext-system-strip,
+.vnext-context-strip {
+  display: flex;
+  align-items: center;
+}
+
+.vnext-brand-cluster {
+  gap: 5px;
+}
+
+.vnext-icon-button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--vnx-radius-sm);
+  background: transparent;
+  color: var(--vnx-muted);
+  cursor: pointer;
+}
+
+.vnext-icon-button:hover {
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text);
+}
+
+.vnext-workspace-name {
+  min-width: 126px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0 8px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-workspace-name span {
+  grid-column: 1;
+  color: var(--vnx-muted-2);
+  font: 700 8px var(--vnx-font-mono);
+  letter-spacing: .12em;
+}
+
+.vnext-workspace-name strong {
+  grid-column: 1;
+  font-size: 12px;
+}
+
+.vnext-workspace-name svg {
+  grid-column: 2;
+  grid-row: 1 / 3;
+}
+
+.vnext-global-search {
+  width: min(470px, 33vw);
+  min-width: 230px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-input);
+  color: var(--vnx-muted);
+  cursor: pointer;
+}
+
+.vnext-global-search:hover {
+  border-color: var(--vnx-line-strong);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-global-search span {
+  overflow: hidden;
+  flex: 1;
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-global-search kbd,
+.vnext-command-palette kbd {
+  padding: 2px 6px;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
+  font: 10px var(--vnx-font-mono);
+}
+
+.vnext-context-strip {
+  min-width: 0;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.vnext-context-strip > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 2px 9px;
+  border-left: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-context-strip small {
+  color: var(--vnx-muted-2);
+  font: 8px var(--vnx-font-mono);
+  text-transform: uppercase;
+}
+
+.vnext-context-strip strong {
+  max-width: 112px;
+  overflow: hidden;
+  color: var(--vnx-text-soft);
+  font: 10px var(--vnx-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-system-strip {
+  flex: 0 0 auto;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.vnext-theme-switcher {
+  position: relative;
+}
+
+.vnext-theme-menu {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  z-index: 80;
+  width: 252px;
+  overflow: hidden;
+  padding: 5px;
+  border: 1px solid var(--vnx-line-strong);
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-elevated);
+  box-shadow: 0 20px 58px var(--vnx-shadow);
+}
+
+.vnext-theme-menu > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 7px 8px 8px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-theme-menu > header span {
+  color: var(--vnx-primary);
+  font: 700 8px var(--vnx-font-mono);
+  letter-spacing: .14em;
+}
+
+.vnext-theme-menu > header strong {
+  color: var(--vnx-text-soft);
+  font-size: 11px;
+}
+
+.vnext-theme-menu > button {
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--vnx-radius-sm);
+  background: transparent;
+  color: var(--vnx-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-theme-menu > button:hover,
+.vnext-theme-menu > button.active {
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-primary);
+}
+
+.vnext-theme-menu > button strong,
+.vnext-theme-menu > button small {
+  display: block;
+}
+
+.vnext-theme-menu > button strong {
+  color: var(--vnx-text);
+  font-size: 11px;
+}
+
+.vnext-theme-menu > button small {
+  margin-top: 2px;
+  color: var(--vnx-muted);
+  font-size: 9px;
+}
+
+.vnext-status-chip,
+.vnext-status-button {
+  min-height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
+  font: 700 9px var(--vnx-font-mono);
+  white-space: nowrap;
+}
+
+.vnext-status-button {
+  cursor: pointer;
+}
+
+.vnext-status-button:hover {
+  background: var(--vnx-surface-3);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-status-chip.state-ready,
+.vnext-status-button.safe {
+  color: var(--vnx-success);
+}
+
+.vnext-status-chip.state-warning,
+.vnext-status-button.warning {
+  color: var(--vnx-warning);
+}
+
+.vnext-status-chip.state-error {
+  color: var(--vnx-danger);
+}
+
+.vnext-workspace-tabs {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  display: flex;
+  border-bottom: 1px solid var(--vnx-line);
+  background: var(--vnx-input);
+}
+
+.vnext-tab-strip {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.vnext-workspace-tab {
+  position: relative;
+  min-width: 130px;
+  max-width: 230px;
+  display: flex;
+  border-right: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-muted);
+}
+
+.vnext-workspace-tab.active {
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text);
+  box-shadow: inset 0 -2px var(--vnx-primary);
+}
+
+.vnext-workspace-tab.split::after {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--vnx-realtime);
+  content: "";
+}
+
+.vnext-tab-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-tab-main > span {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.vnext-tab-main strong,
+.vnext-tab-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-tab-main strong {
+  font-size: 11px;
+}
+
+.vnext-tab-main small {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+}
+
+.vnext-tab-main > i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--vnx-warning);
+}
+
+.vnext-tab-main > em {
+  color: var(--vnx-warning);
+  font: 8px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-tab-menu-button,
+.vnext-tab-close,
+.vnext-tab-actions button {
+  width: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-muted-2);
+  cursor: pointer;
+}
+
+.vnext-tab-menu-button:hover,
+.vnext-tab-close:hover,
+.vnext-tab-actions button:hover:not(:disabled) {
+  color: var(--vnx-text);
+}
+
+.vnext-tab-menu-button {
+  opacity: 0;
+}
+
+.vnext-workspace-tab:hover .vnext-tab-menu-button,
+.vnext-workspace-tab.active .vnext-tab-menu-button {
+  opacity: 1;
+}
+
+.vnext-tab-menu {
+  position: absolute;
+  z-index: 80;
+  top: 34px;
+  right: 4px;
+  width: 170px;
+  padding: 5px;
+  border: 1px solid var(--vnx-line-strong);
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-elevated);
+  box-shadow: 0 18px 50px var(--vnx-shadow);
+}
+
+.vnext-tab-menu button {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vnx-text-soft);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-tab-menu button:hover {
+  background: var(--vnx-surface-selected);
+}
+
+.vnext-tab-actions {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 0 5px;
+}
+
+.vnext-tab-actions button {
+  width: 28px;
+}
+
+.vnext-workspace {
+  grid-column: 2;
+  grid-row: 3;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
+  background: var(--vnx-canvas);
+}
+
+.vnext-workspace.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.vnext-workspace.split-right {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
+}
+
+.vnext-workspace.split-bottom {
+  grid-template-rows: minmax(0, 1fr) minmax(260px, 42%);
+}
+
+.vnext-workspace-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vnx-line-strong) transparent;
+}
+
+.vnext-workspace-pane.secondary {
+  position: relative;
+  border-left: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-input);
+}
+
+.split-bottom .vnext-workspace-pane.secondary {
+  border-top: 1px solid var(--vnx-line-strong);
+  border-left: 0;
+}
+
+.vnext-split-header {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--vnx-line);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-split-header code {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--vnx-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-split-header button {
+  border: 0;
+  background: transparent;
+  color: var(--vnx-muted);
+  cursor: pointer;
+}
+
+.vnext-api-banner {
+  position: absolute;
+  z-index: 60;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: var(--vnx-radius);
+  background: #34231a;
+  color: #f2c47b;
+  box-shadow: 0 12px 30px var(--vnx-shadow);
+  font-size: 11px;
+}
+
+.vnext-operations-dock {
+  grid-column: 2;
+  grid-row: 4;
+  position: relative;
+  min-width: 0;
+  border-top: 1px solid var(--vnx-line);
+  background: var(--vnx-input);
+}
+
+.vnext-dock-resizer {
+  position: absolute;
+  z-index: 10;
+  top: -3px;
+  left: 0;
+  width: 100%;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.vnext-operations-dock > header {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 7px 0 9px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-dock-tabs,
+.vnext-dock-summary {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.vnext-dock-tabs button,
+.vnext-dock-summary button {
+  min-height: 25px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vnx-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.vnext-dock-tabs button.active {
+  background: var(--vnx-surface-3);
+  color: var(--vnx-text);
+}
+
+.vnext-dock-tabs em {
+  min-width: 15px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  background: var(--vnx-line-strong);
+  color: var(--vnx-text-soft);
+  font: 8px var(--vnx-font-mono);
+  font-style: normal;
+  text-align: center;
+}
+
+.vnext-dock-tabs em.warning {
+  background: #4a3518;
+  color: #f0c06d;
+}
+
+.vnext-dock-summary {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+}
+
+.vnext-dock-summary span {
+  padding: 0 7px;
+  border-left: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-dock-summary .state-ready,
+.vnext-dock-summary strong {
+  color: var(--vnx-success);
+}
+
+.vnext-dock-summary .state-warning {
+  color: var(--vnx-warning);
+}
+
+.vnext-dock-body {
+  height: calc(100% - 32px);
+  overflow: auto;
+}
+
+.vnext-task-list,
+.vnext-alert-list {
+  padding: 5px 9px;
+}
+
+.vnext-task-row {
+  width: 100%;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  align-items: center;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  background: transparent;
+}
+
+.vnext-task-main {
+  min-width: 0;
+  min-height: 35px;
+  display: grid;
+  grid-template-columns: 10px minmax(220px, 1fr) 54px 80px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 7px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-task-row:hover,
+.vnext-task-row.active {
+  background: var(--vnx-surface-2);
+}
+
+.vnext-job-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vnx-muted);
+}
+
+.vnext-job-state.state-running,
+.vnext-job-state.state-succeeded {
+  background: var(--vnx-success);
+}
+
+.vnext-job-state.state-failed {
+  background: var(--vnx-danger);
+}
+
+.vnext-task-list strong,
+.vnext-task-list small {
+  display: block;
+}
+
+.vnext-task-list strong {
+  font-size: 11px;
+}
+
+.vnext-task-list small {
+  color: var(--vnx-muted-2);
+  font: 9px var(--vnx-font-mono);
+}
+
+.vnext-task-list em,
+.vnext-task-list b {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-cancel-job {
+  min-height: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-danger);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.vnext-log-viewer {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+}
+
+.vnext-log-viewer aside {
+  overflow: auto;
+  border-right: 1px solid var(--vnx-line);
+}
+
+.vnext-log-viewer aside button {
+  width: 100%;
+  display: block;
+  padding: 6px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  background: transparent;
+  color: var(--vnx-text-soft);
+  font-size: 10px;
+  text-align: left;
+}
+
+.vnext-log-viewer aside button.active {
+  background: var(--vnx-surface-selected);
+}
+
+.vnext-log-viewer aside small {
+  display: block;
+  color: var(--vnx-muted-2);
+}
+
+.vnext-log-viewer pre {
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--vnx-code);
+  color: #aebfc8;
+  font: 10px/1.6 var(--vnx-font-mono);
+  white-space: pre-wrap;
+}
+
+.vnext-alert-list > button {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 20px 1fr 70px;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  background: transparent;
+  color: var(--vnx-warning);
+  text-align: left;
+}
+
+.vnext-alert-list strong,
+.vnext-alert-list small {
+  display: block;
+}
+
+.vnext-alert-list small {
+  color: var(--vnx-muted);
+}
+
+.vnext-event-state,
+.vnext-resource-grid {
+  padding: 18px;
+}
+
+.vnext-event-state {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  color: var(--vnx-realtime);
+}
+
+.vnext-event-state strong,
+.vnext-event-state small {
+  display: block;
+}
+
+.vnext-event-state small {
+  margin-top: 3px;
+  color: var(--vnx-muted);
+}
+
+.vnext-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 16px;
+}
+
+.vnext-resource-grid small,
+.vnext-resource-grid strong {
+  display: block;
+}
+
+.vnext-resource-grid small {
+  color: var(--vnx-muted);
+}
+
+.vnext-resource-grid strong {
+  margin-top: 5px;
+  font: 600 17px var(--vnx-font-mono);
+}
+
+.vnext-resource-grid p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--vnx-muted);
+}
+
+.vnext-dock-empty,
+.vnext-dock-error {
+  margin: 20px;
+  color: var(--vnx-muted);
+}
+
+.vnext-dock-error {
+  color: var(--vnx-danger);
+}
+
+.vnext-command-overlay {
+  position: fixed;
+  z-index: 500;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  padding-top: min(13vh, 120px);
+  background: var(--vnx-backdrop);
+  backdrop-filter: blur(5px);
+}
+
+.vnext-command-palette {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(720px, 76vh);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--vnx-line-strong);
+  border-radius: 8px;
+  background: var(--vnx-elevated);
+  box-shadow: 0 28px 90px var(--vnx-shadow);
+}
+
+.vnext-command-palette > header {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--vnx-line);
+}
+
+.vnext-command-palette > header > svg {
+  color: var(--vnx-primary);
+}
+
+.vnext-command-palette input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-text);
+  font-size: 14px;
+  outline: 0;
+}
+
+.vnext-command-palette > header button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--vnx-muted);
+}
+
+.vnext-command-results {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.vnext-command-results h3 {
+  margin: 8px 6px 4px;
+  color: var(--vnx-muted-2);
+  font: 700 9px var(--vnx-font-mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.vnext-command-results section > button {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 1fr auto 20px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: var(--vnx-radius);
+  background: transparent;
+  color: var(--vnx-text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnext-command-results section > button:hover,
+.vnext-command-results section > button.active {
+  background: var(--vnx-surface-selected);
+}
+
+.vnext-command-results strong,
+.vnext-command-results small {
+  display: block;
+}
+
+.vnext-command-results strong {
+  font-size: 12px;
+}
+
+.vnext-command-results small {
+  margin-top: 2px;
+  color: var(--vnx-muted);
+  font-size: 10px;
+}
+
+.vnext-command-results em {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-command-empty {
+  padding: 28px 12px;
+  color: var(--vnx-muted);
+  text-align: center;
+}
+
+.vnext-command-palette > footer {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  border-top: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-muted-2);
+  font-size: 9px;
+}
+
+.vnext-command-palette > footer span:last-child {
+  margin-left: auto;
+}
+
+@media (max-width: 1700px) {
+  .vnext-context-strip > span:not(:last-child) { display: none; }
+  .vnext-global-search { width: min(430px, 31vw); }
+}
+
+@media (max-width: 1400px) {
+  .vnext-shell,
+  .vnext-shell.rail-expanded { grid-template-columns: 58px minmax(0, 1fr); }
+  .vnext-shell.rail-expanded .vnext-rail-brand { justify-content: center; padding: 0; }
+  .vnext-shell.rail-expanded .vnext-rail-brand strong,
+  .vnext-shell.rail-expanded .vnext-module-link > span:last-child,
+  .vnext-shell.rail-expanded .vnext-favorite,
+  .vnext-shell.rail-expanded .vnext-module-rail footer span,
+  .vnext-shell.rail-expanded .vnext-module-rail footer small { display: none; }
+  .vnext-shell.rail-expanded .vnext-module-rail h2 { display: none; }
+  .vnext-shell.rail-expanded .vnext-module-rail nav section + section { margin-top: 8px; }
+  .vnext-shell.rail-expanded .vnext-module-icon em { right: -3px; }
+  .vnext-shell.rail-expanded .vnext-module-link { justify-content: center; padding-inline: 0; }
+  .vnext-workspace-name { min-width: 108px; }
+  .vnext-status-chip:nth-child(1),
+  .vnext-status-chip:nth-child(2) { padding-inline: 5px; }
+}
+
+@media (max-width: 1100px) {
+  .vnext-context-strip,
+  .vnext-system-strip .vnext-status-chip:last-of-type,
+  .vnext-system-strip .vnext-status-button:nth-of-type(2) { display: none; }
+  .vnext-global-search { width: 42vw; }
+  .vnext-workspace.split-right { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(260px, 42%); }
+  .vnext-workspace.split-right .vnext-workspace-pane.secondary { border-top: 1px solid var(--vnx-line-strong); border-left: 0; }
+}
+
+@media (max-width: 760px) {
+  .vnext-shell { min-width: 680px; }
+  .vnext-workspace-name { display: none; }
+}

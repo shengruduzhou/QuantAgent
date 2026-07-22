@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T20:22:00+09:00",
+  "updatedAt": "2026-07-23T05:20:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -13,9 +13,9 @@
     "commit": "2e3b2fc07044c7ae640a723bd7306c5294d079ed"
   },
   "activeSlice": {
-    "id": "data.datamanager-query-download-update",
-    "branch": "agent/datamanager-control-loop",
-    "status": "implemented_ci_passed_browser_and_real_provider_runs_pending",
+    "id": "ui.institutional-workstation-vnext-and-data-operations",
+    "branch": "agent/institutional-workstation-vnext",
+    "status": "implemented_automated_tests_passed_browser_verified_operator_provider_smoke_pending",
     "scope": [
       "provider capability registry without credential disclosure",
       "allowlisted AkShare, Qlib and TuShare data jobs",
@@ -24,31 +24,37 @@
       "queued and running job cancellation",
       "RuntimeIndexer invalidation after successful data jobs",
       "Data Ops integration inside the existing Runtime workspace",
+      "quarantined import and filtered export with SHA-256 manifests",
+      "chunked duplicate/date coverage with optional exact disk-bounded scan",
+      "TickFlow daily, minute, quote and Level-2 provider-specific forms",
+      "DataRecorder forward streaming jobs with progress and cancellation",
+      "institutional command rail, typed workspace tabs and operations dock",
+      "internal QuantAgent help route without external vn.py redirect",
+      "single-select backtest context and factor usefulness lifecycle filters",
+      "wheel zoom, drag pan and keyboard chart navigation",
       "backend and frontend regression tests",
+      "browser visual and interaction verification",
       "source-alignment audit and parity registry update"
     ],
     "outOfScope": [
       "arbitrary shell commands or URLs",
       "implicit full-market AkShare crawl",
       "live trading or broker changes",
-      "data import/export and upload quarantine",
-      "duplicate/date-range coverage inspector",
-      "DataRecorder streaming subscriptions",
-      "byte-level provider progress",
-      "real provider network execution",
-      "browser visual verification"
+      "credential-free real network smoke where the operator provider requires credentials",
+      "gateway-neutral recorder restart orchestration",
+      "100k/500k browser and provider throughput certification"
     ],
     "validation": {
       "staticReview": "complete",
-      "pythonSyntax": "passed_remote_branch_ast_parse",
-      "frontendTypecheck": "passed_github_actions_run_269",
-      "focusedTests": "passed_github_actions_run_269",
-      "fullFrontendTests": "passed_github_actions_run_269",
-      "fullPythonSuite": "passed_github_actions_run_269",
-      "productionBuild": "passed_github_actions_run_269",
-      "browserVerification": "pending_local",
-      "realProviderRuns": "pending_operator_environment",
-      "frontendSyntax": "passed_esbuild_syntax_bundle"
+      "pythonSyntax": "passed_local_pytest_collection_and_execution",
+      "frontendTypecheck": "passed_local_2026_07_23",
+      "focusedTests": "passed_local_2026_07_23",
+      "fullFrontendTests": "32_passed_local_2026_07_23",
+      "quantUiPythonSuite": "47_passed_local_2026_07_23",
+      "productionBuild": "passed_local_vite_2026_07_23",
+      "browserVerification": "passed_dashboard_training_backtest_chart_help_operations_dock_and_data_ops",
+      "realProviderRuns": "allowlisted_execution_path_implemented_authenticated_operator_smoke_pending",
+      "frontendSyntax": "passed_typescript_and_vite"
     }
   },
   "completedSlices": [
@@ -81,6 +87,11 @@
       "id": "ui.vnpy-workstation-ux-depth",
       "pullRequest": 13,
       "status": "merged_automated_tests_passed_browser_verification_pending"
+    },
+    {
+      "id": "data.datamanager-import-export-coverage-recorder",
+      "pullRequest": null,
+      "status": "implemented_in_active_vnext_branch"
     }
   ],
   "nextSlices": [
@@ -116,8 +127,8 @@
     },
     {
       "priority": 7,
-      "id": "data.datamanager-import-export-coverage",
-      "reason": "Completes quarantined import/export, duplicate/range coverage and richer provider progress after the governed query/download loop."
+      "id": "data.provider-scale-certification",
+      "reason": "Runs authenticated TickFlow/AkShare/TuShare smoke tests and records large-data throughput without reopening the completed DataManager interaction slice."
     }
   ],
   "safetyInvariants": [

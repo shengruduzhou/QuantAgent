@@ -69,14 +69,15 @@ QuantAgent adapts these boundaries instead of copying Qt or creating a `MainEngi
 - Queued job cancellation and terminal-state protection.
 - Frontend launch contract for AkShare with explicit symbols, network approval and Runtime output.
 
-## Remaining gaps
+## 2026-07-23 completion update
 
-- Import/export adapters and upload quarantine.
-- Duplicate-key and date-range coverage API/UI.
-- Byte/row progress parsed from provider output; current provider work is indeterminate until completion.
-- Running-process cancellation escalation and Windows process-group behavior.
-- DataRecorder subscription lifecycle.
-- Provider-specific exchange and minute/tick support.
-- Real browser verification and real-provider network runs.
+The VNext continuation closes the product gaps that were intentionally left in the first control-loop slice:
 
-These gaps keep `data.data_manager` at `partial`; this slice does not claim full VeighNa parity or production data readiness.
+- Runtime-only quarantine discovery plus streamed import/export with exact import de-duplication, filters and SHA-256 manifests;
+- chunked date/symbol coverage inspection, with optional disk-bounded exact duplicate scanning for large TickFlow files;
+- parsed JSON, batch/total and legacy `[current/total]` provider progress;
+- TickFlow-specific daily, minute, quote-snapshot and Level-2 forms;
+- bounded, cancellable forward DataRecorder jobs for TickFlow quotes and depth snapshots;
+- browser verification of Data Ops layout, exclusive controls, overflow and disabled/unavailable states.
+
+`data.data_manager` is now `implemented` in the capability registry. It is not marked `verified` because authenticated provider smoke/scale runs still require the operator's TickFlow/TuShare entitlements and network confirmation. Remaining engineering work is limited to gateway-neutral recorder restart orchestration, exchange-calendar confirmation of candidate date gaps, Windows process-group escalation and 100k/500k throughput baselines. These are recorded as verification/scale follow-ups, not as missing UI workflows.

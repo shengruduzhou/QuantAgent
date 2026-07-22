@@ -1,124 +1,38 @@
-# Quant UI Design QA
+# QuantAgent Dashboard V5 — Design QA
 
-## Evidence
+Status: **PASSED**
 
-- Source visual truth path: `docs/quant_ui_design_concepts/03-signal-observatory.png`
-- Implementation screenshot path: `runtime/reports/quant_ui/qa/model-lab-final-1440x1024.png`
-- Full-view comparison evidence: `runtime/reports/quant_ui/qa/model-lab-side-by-side-1800x760.png`
-- Mobile evidence:
-  - `runtime/reports/quant_ui/qa/model-lab-mobile-390x844.png`
-  - `runtime/reports/quant_ui/qa/stock-replay-mobile-390x844.png`
-- Viewport: desktop 1440 × 1024；mobile 390 × 844
-- State: real runtime snapshot；Deep Alpha model selected；no fabricated fallback data
+## Visual truth and verification state
 
-## Full-view comparison
+- Reference: `docs/quant_ui_design_concepts/03-signal-observatory.png`
+- User-reported baseline: `upload/a103a3cd-561e-4472-9023-85811d9be979.png`
+- Browser capture: `/workspace/scratch/quantagent-dashboard-v5-final.jpg`
+- Verified viewport: 1363 × 936 (desktop); responsive breakpoints also covered by CSS and production build.
+- Browser data state: deterministic visual-only API fixture matching the typed production contracts. The fixture was removed before final verification and is not shipped.
 
-Source and implementation were rendered together in one 1800 × 760 browser frame.
-The implementation preserves the source visual language rather than reproducing
-unrelated content:
+## Comparison result
 
-- compact icon navigation、thin cyan/blue borders and restrained dark navy surfaces；
-- dense top-level filters and global operational status；
-- left asset catalog + central analysis workspace；
-- high-information cards、charts、tables and explicit model/risk states；
-- cyan/green for available/positive state，amber/red for warning/failure state；
-- no decorative gradients、hero illustration、emoji or fake financial imagery。
+| Area | Result | Notes |
+| --- | --- | --- |
+| Shell hierarchy | Pass | Primary navigation, workspace tabs and content no longer compete at equal visual weight. |
+| Dashboard hierarchy | Pass | One portfolio narrative dominates; risk, health, funnel and execution are secondary. |
+| KPI layout | Pass | All six KPI blocks share one baseline at the verified desktop width; no empty second row. |
+| Color system | Pass | Restrained blue/cyan command palette with amber warning and red drawdown states. |
+| Typography | Pass | Dashboard supporting labels increased to 10px minimum where practical; no overlapping labels. |
+| Chart interaction | Pass | Range buttons are single-select; wheel zoom, drag pan and slider zoom are enabled. |
+| Responsive containment | Pass | `documentElement.scrollWidth === innerWidth`; no page-level horizontal overflow. |
+| Empty/loading trust | Pass | Production code keeps explicit real-data unavailable states and does not ship mock fallbacks. |
 
-The source is a portfolio signal observatory while the implementation is a model
-observability terminal，so content blocks intentionally differ. Composition、
-density、hierarchy and terminal tokens remain aligned.
+## Interaction and console checks
 
-## Focused region comparison
+- `近3月` was selected in the browser and became the only `aria-pressed=true` range control.
+- `全部` restored the full time range.
+- Help remains an internal `/help` route.
+- Backtest experiment selection remains a radio/single-active-context interaction.
+- Browser console had no application warnings or errors. Chrome extension metadata messages were excluded as environment noise.
 
-Focused inspection used the direct 1440 × 1024 implementation capture because
-catalog labels、metric cards、chart axes and capability text are too small in the
-combined frame.
+## Defects
 
-### Fonts and typography
-
-- Inter Variable + Noto Sans SC provide compact bilingual UI text；JetBrains Mono
-  is limited to paths、IDs and numeric values。
-- Heading、metric and metadata weights form a clear hierarchy without oversized
-  display text。
-- Long model versions and paths use controlled truncation or wrapping。
-
-### Spacing and layout rhythm
-
-- Desktop uses a stable 58 px icon rail、8 px panel gaps and compact 7–18 px
-  internal padding，matching the source terminal density。
-- Model catalog、hero、metrics、tabs and 2-column analysis panels align to a
-  consistent grid。
-- Mobile collapses to one analysis column and converts catalog/tabs to contained
-  horizontal scrolling；document-level horizontal overflow is false。
-
-### Colors and visual tokens
-
-- Background/surface/border hierarchy remains within dark blue-black tokens。
-- Cyan is reserved for active/observability state，green for ready/positive，
-  amber for warning/manual review and red for destructive actions。
-- Contrast and focus rings remain visible without broad neon glow。
-
-### Image quality and assets
-
-- The product has no photographic or illustrative asset requirement。
-- Visible icons use the Phosphor icon family；no handcrafted SVG、CSS art、
-  placeholder image or emoji substitutes were introduced。
-- ECharts output remains sharp at the tested desktop and mobile viewports。
-
-### Copy and content
-
-- App-specific copy consistently uses research-only、PIT、T+1 and no-live-order
-  language。
-- Missing SHAP、feature importance、trade rationale or prediction artifact is
-  labeled unavailable；the UI does not invent values。
-
-### Interactions and accessibility
-
-- Model family filter updates both catalog and selected detail。
-- Model comparison supports up to 6 selections and prioritizes persisted
-  performance metrics。
-- Tabs、artifact inventory、Runtime cleanup、job templates and navigation work。
-- `Ctrl/Cmd + K` opens the command palette；arrow keys and Enter work；stock codes
-  route to Stock Replay。
-- Focus-visible and reduced-motion rules are present。
-
-## Findings
-
-No actionable P0/P1/P2 findings remain.
-
-Residual P3:
-
-- Dense metric bar labels may truncate on narrow panels；the complete metric name
-  remains available in the full metrics table。
-- Feature importance panels are empty for models without a persisted importance
-  artifact；this is correct source-backed behavior rather than a visual defect。
-
-## Patches made since the previous QA pass
-
-- Added unified visibility for Deep FT、registered alpha、RL policy、T+1 joblib
-  bundles and generic model binaries。
-- Added performance-first model comparison、checkpoint metadata and linked
-  artifact size。
-- Fixed family-filter selection and defaulted the first view to a rich Deep Alpha
-  model rather than a sparse generic artifact。
-- Added command palette keyboard navigation and direct stock-code routing。
-- Added explicit feedback when a requested stock has no standard trade in the
-  selected backtest。
-- Changed missing selection decision chains from HTTP 404 to an empty,
-  recoverable response。
-- Added real mobile layouts and removed the previous 1000 px forced canvas；
-  verified `scrollWidth === innerWidth` at 390 px。
-- Added audited Runtime cleanup and protected current QA captures from immediate
-  reclassification as stale。
-
-## Implementation checklist
-
-- [x] Desktop visual hierarchy and density
-- [x] Fonts、spacing、colors、icons and copy review
-- [x] Real model data and missing-data states
-- [x] Filters、tabs、comparison and command palette
-- [x] Runtime cleanup confirmation flow
-- [x] Desktop and mobile viewport resilience
-- [x] Side-by-side source/implementation comparison
-
-final result: passed
+- P0: none
+- P1: none
+- P2: none

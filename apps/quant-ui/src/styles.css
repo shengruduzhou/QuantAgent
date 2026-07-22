@@ -1,11 +1,9 @@
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/jetbrains-mono";
-@import "@fontsource/noto-sans-sc/chinese-simplified-400.css";
-@import "@fontsource/noto-sans-sc/chinese-simplified-600.css";
 
 :root {
   color-scheme: dark;
-  font-family: "Inter Variable", "Noto Sans SC", sans-serif;
+  font-family: "Inter Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   background: #06101a;
   color: #d8e5ef;
   font-synthesis: none;
@@ -74,7 +72,7 @@ code,
 .mono,
 kbd,
 time {
-  font-family: "JetBrains Mono Variable", "Noto Sans SC", ui-monospace, monospace;
+  font-family: "JetBrains Mono Variable", "Noto Sans CJK SC", "Microsoft YaHei", ui-monospace, monospace;
 }
 
 .app-frame {
@@ -512,7 +510,7 @@ time {
   margin: 8px 0 6px;
   overflow: hidden;
   color: #e1ebf3;
-  font-family: "JetBrains Mono Variable", "Noto Sans SC", monospace;
+  font-family: "JetBrains Mono Variable", "Noto Sans CJK SC", "Microsoft YaHei", ui-monospace, monospace;
   font-size: 19px;
   line-height: 22px;
   text-overflow: ellipsis;

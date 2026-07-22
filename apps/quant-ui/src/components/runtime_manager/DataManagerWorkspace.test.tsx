@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, test, vi } from "vitest";
@@ -50,6 +50,41 @@ test("submits the existing TickFlow daily provider contract by default", async (
   });
   expect(JSON.stringify(submittedBody)).not.toContain("shell");
   expect(await screen.findByText(/已提交 fetch-tickflow-daily/)).toBeInTheDocument();
+});
+
+test("keeps TickFlow acquisition and recorder modes mutually exclusive", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/data/providers")) {
+      return jsonResponse({
+        providers: [
+          { id: "tickflow", label: "TickFlow A股主数据源", module: "tickflow", commandId: "fetch-tickflow-daily", assetClasses: ["A股", "分钟线", "Level-2"], intervals: ["1d", "1m", "tick", "depth"], operations: ["download", "update", "record"], requires: [], optionalRequirements: [], note: "PIT", installed: true, configured: true, status: "ready", missingRequirements: [], missingOptionalRequirements: [] },
+        ],
+        constraints: [], jobEndpoint: "/api/jobs/data", coverageEndpoint: "/api/data/coverage", quarantineEndpoint: "/api/data/quarantine", supportsCancellation: true, runtimeRoot: "runtime", serverPaths: { quarantine: "runtime/import_quarantine", imports: "runtime/data/imported", exports: "runtime/exports" },
+      });
+    }
+    return jsonResponse([]);
+  }));
+
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MemoryRouter><QueryClientProvider client={queryClient}><DataManagerWorkspace /></QueryClientProvider></MemoryRouter>);
+
+  const granularity = await screen.findByRole("radiogroup", { name: "TickFlow 数据粒度" });
+  const acquisitionModes = within(granularity).getAllByRole("radio") as HTMLInputElement[];
+  expect(acquisitionModes).toHaveLength(4);
+  expect(acquisitionModes.filter((item) => item.checked)).toHaveLength(1);
+  fireEvent.click(within(granularity).getByRole("radio", { name: "分钟线" }));
+  expect(acquisitionModes.filter((item) => item.checked)).toHaveLength(1);
+  expect(within(granularity).getByRole("radio", { name: "分钟线" })).toBeChecked();
+
+  fireEvent.click(screen.getByRole("button", { name: /实时录制/ }));
+  const recorder = screen.getByRole("radiogroup", { name: "DataRecorder 数据类型" });
+  const recorderModes = within(recorder).getAllByRole("radio") as HTMLInputElement[];
+  expect(recorderModes).toHaveLength(2);
+  expect(recorderModes.filter((item) => item.checked)).toHaveLength(1);
+  fireEvent.click(within(recorder).getByRole("radio", { name: "Level-2 五档盘口" }));
+  expect(recorderModes.filter((item) => item.checked)).toHaveLength(1);
+  expect(within(recorder).getByRole("radio", { name: "Level-2 五档盘口" })).toBeChecked();
 });
 
 function jsonResponse(data: unknown): Response {

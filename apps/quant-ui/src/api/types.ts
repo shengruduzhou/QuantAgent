@@ -172,6 +172,36 @@ export interface JobSummary {
   error?: string | null;
 }
 
+export interface JobValidation {
+  valid: boolean;
+  type: string;
+  commandId: string;
+  entrypoint: string;
+  outputPaths: string[];
+  warnings: string[];
+}
+
+export interface SearchEntity {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  path: string;
+  status: string;
+  source: string;
+}
+
+export interface SearchGroup {
+  type: string;
+  label: string;
+  items: SearchEntity[];
+}
+
+export interface GlobalSearchResult {
+  query: string;
+  groups: SearchGroup[];
+}
+
 export interface EventEnvelope {
   schemaVersion: "quantagent.event.v1";
   eventId: string;
@@ -343,6 +373,19 @@ export interface ModelMetric {
   unit: "ratio" | "bps" | "count" | "number";
 }
 
+export interface TrainingMetricPoint {
+  epoch: number;
+  step?: number | null;
+  loss?: number | null;
+  validationLoss?: number | null;
+  learningRate?: number | null;
+  rankIc?: number | null;
+  gradientNorm?: number | null;
+  gpuMemory?: number | null;
+  samplesPerSecond?: number | null;
+  metrics: Record<string, number>;
+}
+
 export interface ModelArtifact {
   role: string;
   name: string;
@@ -364,6 +407,19 @@ export interface ModelObservability extends ModelSummary {
     count: number;
     sizeBytes: number;
   };
+}
+
+export interface ModelComparison {
+  models: Array<{
+    id: string;
+    version?: string | null;
+    modelType?: string | null;
+    modelFamily?: string | null;
+    verdict?: string | null;
+    status: string;
+    metrics: Record<string, number>;
+  }>;
+  metricKeys: string[];
 }
 
 export interface CleanupCandidate {

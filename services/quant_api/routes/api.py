@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -9,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from services.quant_api.adapters.utils import page_slice
 from services.quant_api.config import safe_project_path
 from services.quant_api.runtime_indexer.parsers import parser_for
-from services.quant_api.schemas.models import CleanupRequest, JobRequest
+from services.quant_api.schemas.models import CleanupRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
 
 
 router = APIRouter(prefix="/api")
@@ -25,6 +26,106 @@ def response(data: Any, *, issues: list[dict] | None = None, status: str | None 
     if provenance is not None:
         payload["provenance"] = provenance
     return payload
+
+
+@router.get("/search")
+async def global_search(request: Request, q: str = Query(min_length=2, max_length=120), limit: int = Query(8, ge=1, le=20)) -> dict:
+    svc = services(request)
+    needle = q.strip().lower()
+    groups: list[SearchGroup] = []
+
+    def matches(*values: object) -> bool:
+        return needle in " ".join(str(value or "") for value in values).lower()
+
+    factors = [
+        SearchEntity(
+            id=item["name"], kind="factor", label=item.get("displayName") or item["name"],
+            detail=f"{item.get('category') or 'factor'} · {item.get('lifecycle') or 'unclassified'}",
+            path=f"/factors?{urlencode({'factor': item['name']})}", status="ready", source="FactorAdapter",
+        )
+        for item in svc.factors.list()
+        if matches(item.get("name"), item.get("displayName"), item.get("description"))
+    ][:limit]
+    if factors:
+        groups.append(SearchGroup(type="factor", label="Factors", items=factors))
+
+    models = [
+        SearchEntity(
+            id=item["id"], kind="model", label=item.get("version") or item["id"],
+            detail=f"{item.get('modelFamily') or item.get('modelType') or 'model'} · {item.get('verdict') or item.get('status')}",
+            path=f"/models?{urlencode({'modelId': item['id']})}", status=item.get("status", "ready"), source="ModelAdapter",
+        )
+        for item in svc.models.list()
+        if matches(item.get("id"), item.get("version"), item.get("modelType"), item.get("modelFamily"), item.get("verdict"))
+    ][:limit]
+    if models:
+        groups.append(SearchGroup(type="model", label="Models", items=models))
+
+    backtests = svc.backtests.list()
+    backtest_entities = [
+        SearchEntity(
+            id=item["id"], kind="backtest", label=item.get("name") or item["id"],
+            detail=f"{item.get('horizon') or 'research'} · {item.get('startDate') or '—'} → {item.get('endDate') or '—'}",
+            path=f"/backtests?{urlencode({'run': item['id']})}", status=item.get("status", "ready"), source="BacktestAdapter",
+        )
+        for item in backtests
+        if matches(item.get("id"), item.get("name"), item.get("horizon"), item.get("modelVersion"))
+    ][:limit]
+    if backtest_entities:
+        groups.append(SearchGroup(type="backtest", label="Backtests", items=backtest_entities))
+
+    run_entities = [
+        SearchEntity(
+            id=item["id"], kind="run", label=item["id"],
+            detail=f"selection · {item.get('asOfDate') or 'unknown date'} · {item.get('finalCount') or 0} names",
+            path=f"/selection?{urlencode({'run': item['id']})}", status=item.get("status", "ready"), source="SelectionAdapter",
+        )
+        for item in svc.selections.list()
+        if matches(item.get("id"), item.get("asOfDate"), item.get("path"))
+    ][:limit]
+    if run_entities:
+        groups.append(SearchGroup(type="run", label="Runs", items=run_entities))
+
+    artifacts = [
+        SearchEntity(
+            id=item["id"], kind="artifact", label=item["name"],
+            detail=f"{item['kind']} · {item.get('runId') or 'no run'} · {item.get('trustClass') or 'unclassified'}",
+            path=f"/runtime?{urlencode({'artifact': item['id'], 'query': item['path']})}",
+            status=item.get("status", "ready"), source="RuntimeIndexer",
+        )
+        for item in svc.indexer.filter(query=q)[:limit]
+    ]
+    if artifacts:
+        groups.append(SearchGroup(type="artifact", label="Artifacts", items=artifacts))
+
+    stock_entities: list[SearchEntity] = []
+    seen_symbols: set[str] = set()
+    for backtest in backtests[:3]:
+        if len(stock_entities) >= limit:
+            break
+        try:
+            trades = svc.backtests.trades(backtest["id"], page=1, page_size=1_000)["items"]
+        except (KeyError, OSError, ValueError):
+            continue
+        for trade in trades:
+            symbol = str(trade.get("symbol") or "")
+            name = str(trade.get("name") or "")
+            if symbol in seen_symbols or not matches(symbol, name):
+                continue
+            seen_symbols.add(symbol)
+            stock_entities.append(SearchEntity(
+                id=symbol, kind="stock", label=f"{symbol} {name}".strip(),
+                detail=f"persisted trade · {backtest.get('name') or backtest['id']}",
+                path=f"/stock-replay?{urlencode({'symbol': symbol, 'backtestId': backtest['id']})}",
+                status="ready", source="BacktestAdapter",
+            ))
+            if len(stock_entities) >= limit:
+                break
+    if stock_entities:
+        groups.insert(0, SearchGroup(type="stock", label="Stocks", items=stock_entities))
+
+    data = GlobalSearchResult(query=q, groups=groups).model_dump(by_alias=True)
+    return response(data, status="ready" if groups else "empty")
 
 
 
@@ -609,6 +710,16 @@ async def create_train_job(request: Request, body: JobRequest) -> dict:
 @router.post("/jobs/infer")
 async def create_infer_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "infer", body)
+
+
+@router.post("/jobs/{job_type}/validate")
+async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
+    if job_type not in {"data", "backtest", "train", "infer"}:
+        raise HTTPException(404, "job type not found")
+    try:
+        return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 @router.get("/jobs")

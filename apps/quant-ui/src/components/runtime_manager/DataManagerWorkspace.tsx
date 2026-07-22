@@ -39,6 +39,18 @@ const DEFAULT_OUTPUTS: Record<string, string> = {
   tushare_fundamentals: "runtime/data/v7/raw/tushare/fundamentals",
 };
 
+function shanghaiDate(offsetDays = 0): string {
+  const value = new Date(Date.now() + offsetDays * 86_400_000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const read = (type: "year" | "month" | "day"): string => parts.find((part) => part.type === type)?.value ?? "";
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
 const TABS: Array<{ id: WorkspaceTab; label: string; detail: string }> = [
   { id: "acquire", label: "获取 / 更新", detail: "provider-specific" },
   { id: "coverage", label: "覆盖与重复", detail: "server scan" },
@@ -63,8 +75,8 @@ export function DataManagerWorkspace(): JSX.Element {
   const [providerId, setProviderId] = useState("tickflow");
   const [tickflowMode, setTickflowMode] = useState<TickflowMode>("daily");
   const [symbols, setSymbols] = useState("000001.SZ,600519.SH");
-  const [startDate, setStartDate] = useState("2025-01-01");
-  const [endDate, setEndDate] = useState("2026-07-22");
+  const [startDate, setStartDate] = useState(() => shanghaiDate(-365));
+  const [endDate, setEndDate] = useState(() => shanghaiDate());
   const [outputPath, setOutputPath] = useState(DEFAULT_OUTPUTS.tickflow);
   const [providerUri, setProviderUri] = useState("runtime/data/v7/raw/qlib/cn_data");
   const [networkApproved, setNetworkApproved] = useState(false);

@@ -14,6 +14,11 @@ import "./ux-depth-fixes.css";
 import "./control-depth.css";
 import "./data-manager.css";
 import "./workstation-v4.css";
+import "./workstation-v5.css";
+import "./vnext/styles/tokens.css";
+import "./vnext/styles/shell.css";
+import "./vnext/styles/dashboard.css";
+import "./vnext/styles/training.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

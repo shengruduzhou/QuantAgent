@@ -1,13 +1,20 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App";
 import { CommandPalette } from "./components/CommandPalette";
 
 vi.mock("./components/EChart", () => ({
   EChart: () => <div data-testid="chart" />,
 }));
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  window.localStorage.clear();
+  window.history.replaceState({}, "", "/");
+});
 
 const overview = {
   modelStatus: "ready",
@@ -43,6 +50,7 @@ function installFetchMock(): void {
 }
 
 function renderApp(path = "/"): void {
+  window.history.replaceState({}, "", path);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -55,13 +63,82 @@ function renderApp(path = "/"): void {
   );
 }
 
-test("renders the research terminal navigation with T+1 terminology", async () => {
+test("renders the VNext institutional module rail with T+1 terminology", async () => {
   installFetchMock();
   renderApp("/");
 
+  expect(await screen.findByLabelText("QuantAgent 模块栏")).toBeInTheDocument();
+  expect(screen.getByText("T+1 分析")).toBeInTheDocument();
+  expect(screen.queryByText("T+0 Analysis")).not.toBeInTheDocument();
+});
+
+test("VNext dashboard separates decision states from the primary canvas", async () => {
+  installFetchMock();
+  renderApp("/");
+
+  expect(await screen.findByRole("heading", { name: "今日决策总览" })).toBeInTheDocument();
+  expect(screen.getByText("Portfolio State")).toBeInTheDocument();
+  expect(screen.getByText("Model State")).toBeInTheDocument();
+  expect(screen.getByText("Risk State")).toBeInTheDocument();
+  expect(screen.getByText("Operations State")).toBeInTheDocument();
+  expect(screen.getByText("PRIMARY DECISION CANVAS")).toBeInTheDocument();
+
+  const portfolio = screen.getByRole("button", { name: "Portfolio" });
+  const risk = screen.getByRole("button", { name: "Risk" });
+  expect(portfolio).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(risk);
+  expect(risk).toHaveAttribute("aria-pressed", "true");
+  expect(portfolio).toHaveAttribute("aria-pressed", "false");
+});
+
+test("keeps the legacy dashboard available behind an explicit feature flag", async () => {
+  installFetchMock();
+  renderApp("/?ui=legacy");
+
   expect(await screen.findByText("QuantAgent")).toBeInTheDocument();
   expect(screen.getByText("T+1 做 T")).toBeInTheDocument();
-  expect(screen.queryByText("T+0 Analysis")).not.toBeInTheDocument();
+});
+
+test("opens QuantAgent help internally from the VNext command bar", async () => {
+  installFetchMock();
+  renderApp("/");
+
+  fireEvent.click(await screen.findByRole("button", { name: "打开用户与帮助" }));
+  expect(await screen.findByRole("heading", { name: "帮助中心" })).toBeInTheDocument();
+  expect(document.querySelector('a[href^="http"]')).toBeNull();
+});
+
+test("switches and persists the institutional workstation visual theme", async () => {
+  installFetchMock();
+  renderApp("/");
+
+  const trigger = await screen.findByRole("button", { name: "切换界面主题" });
+  expect(document.querySelector(".vnext-shell")).toHaveAttribute("data-theme", "night");
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole("menuitemradio", { name: /日间/ }));
+
+  expect(document.querySelector(".vnext-shell")).toHaveAttribute("data-theme", "day");
+  await waitFor(() => {
+    const saved = JSON.parse(window.localStorage.getItem("quantagent.workstation.vnext.v2") ?? "{}") as { theme?: string };
+    expect(saved.theme).toBe("day");
+  });
+});
+
+test("supports duplicate workspace instances and a real split pane", async () => {
+  installFetchMock();
+  renderApp("/");
+
+  const rail = await screen.findByLabelText("QuantAgent 模块栏");
+  fireEvent.click(within(rail).getByTitle("训练实验室 · Training Lab"));
+  expect(await screen.findByRole("heading", { name: "Training Lab" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "管理 训练实验室 标签" }));
+  fireEvent.click(screen.getByRole("button", { name: /复制实例/ }));
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "管理 训练实验室 标签" })).toHaveLength(2));
+
+  fireEvent.click(screen.getAllByRole("button", { name: "管理 训练实验室 标签" })[0]);
+  fireEvent.click(screen.getByRole("button", { name: /在右侧打开/ }));
+  expect(await screen.findByLabelText(/训练实验室 分屏工作区/)).toBeInTheDocument();
 });
 
 test("renders explicit empty state without fabricated data", async () => {

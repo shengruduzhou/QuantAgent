@@ -20,6 +20,7 @@ bid_ask_spread, queue_pressure_near_limit, microprice_dev.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -134,9 +135,9 @@ def main() -> int:
         # other transient errors: continue (will be retried per snapshot)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _persist(df: pd.DataFrame) -> None:
+    def _persist(df: pd.DataFrame) -> tuple[Path | None, int]:
         if df.empty:
-            return
+            return None, 0
         now = pd.Timestamp.now(tz="Asia/Shanghai")
         day = now.strftime("%Y-%m-%d")
         day_root = OUT_DIR / day
@@ -155,10 +156,17 @@ def main() -> int:
             warnings=("forward-only realtime snapshot; not historical tick data",),
         )
         manifest.write(path.with_suffix(".manifest.json"))
-        print(f"{now}: +{len(df)} rows -> {path}", flush=True)
+        return path, len(df)
 
     if args.loop_seconds <= 0:
-        _persist(snapshot_once(tf, symbols, args.sleep))
+        path, rows = _persist(snapshot_once(tf, symbols, args.sleep))
+        print(json.dumps({
+            "iteration": 1,
+            "total_iterations": 1,
+            "progress": 0.99,
+            "rows": rows,
+            "output": str(path) if path else None,
+        }, ensure_ascii=False), flush=True)
         return 0
     it = 0
     while True:
@@ -166,8 +174,16 @@ def main() -> int:
         if now.strftime("%H:%M") >= "15:00":
             print("session closed; stopping", flush=True)
             break
-        _persist(snapshot_once(tf, symbols, args.sleep))
+        path, rows = _persist(snapshot_once(tf, symbols, args.sleep))
         it += 1
+        progress = it / args.max_iterations if args.max_iterations else None
+        print(json.dumps({
+            "iteration": it,
+            "total_iterations": args.max_iterations or None,
+            "progress": min(progress, 0.99) if progress is not None else None,
+            "rows": rows,
+            "output": str(path) if path else None,
+        }, ensure_ascii=False), flush=True)
         if args.max_iterations and it >= args.max_iterations:
             break
         time.sleep(args.loop_seconds)

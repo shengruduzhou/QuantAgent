@@ -52,6 +52,7 @@ def test_api_smoke_and_required_routes(quant_ui_settings) -> None:
         "/api/risk/rules",
         "/api/do-t/sources",
         "/api/jobs",
+        "/api/search?q=000001",
     ]
     for url in urls:
         result = request(app, "GET", url)
@@ -131,6 +132,62 @@ def test_job_api_rejects_arbitrary_command_and_path_escape(quant_ui_settings) ->
     )
     assert missing.status_code == 422
     assert "missing required parameters" in missing.json()["detail"]
+
+
+def test_job_validation_is_read_only_and_checks_real_inputs(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    jobs_before = request(app, "GET", "/api/jobs").json()["data"]
+    result = request(
+        app,
+        "POST",
+        "/api/jobs/train/validate",
+        json={
+            "commandId": "train-v8-deep",
+            "parameters": {
+                "dataset_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+                "silver_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+                "output_dir": "runtime/reports/v8/deep/validated_only",
+                "require_gpu": True,
+            },
+        },
+    )
+
+    assert result.status_code == 200
+    assert result.json()["data"]["valid"] is True
+    assert result.json()["data"]["commandId"] == "train-v8-deep"
+    assert "GPU availability" in result.json()["data"]["warnings"][0]
+    assert request(app, "GET", "/api/jobs").json()["data"] == jobs_before
+
+    invalid = request(
+        app,
+        "POST",
+        "/api/jobs/train/validate",
+        json={
+            "commandId": "train-v8-deep",
+            "parameters": {
+                "dataset_path": "runtime/data/does-not-exist.parquet",
+                "silver_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+                "output_dir": "runtime/reports/v8/deep/validated_only",
+            },
+        },
+    )
+    assert invalid.status_code == 422
+
+
+def test_global_search_returns_typed_drill_down_entities(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+
+    stock_result = request(app, "GET", "/api/search", params={"q": "000001"})
+    assert stock_result.status_code == 200
+    stock_groups = stock_result.json()["data"]["groups"]
+    stock = next(group for group in stock_groups if group["type"] == "stock")["items"][0]
+    assert stock["id"] == "000001.SZ"
+    assert stock["path"].startswith("/stock-replay?symbol=000001.SZ")
+    assert stock["source"] == "BacktestAdapter"
+
+    model_result = request(app, "GET", "/api/search", params={"q": "fixture"})
+    model_groups = model_result.json()["data"]["groups"]
+    assert any(group["type"] in {"model", "backtest", "artifact"} for group in model_groups)
 
 
 def test_empty_runtime_api(empty_quant_ui_settings) -> None:

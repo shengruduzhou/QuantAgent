@@ -1,0 +1,645 @@
+.vnext-dashboard {
+  min-width: 0;
+  max-width: 2600px;
+  margin: 0 auto;
+  padding: 18px 20px 28px;
+}
+
+.vnext-dashboard-title {
+  min-height: 62px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+
+.vnext-dashboard-title span,
+.vnext-primary-canvas > header span,
+.vnext-action-queue > header span {
+  color: var(--vnx-muted-2);
+  font: 700 9px var(--vnx-font-mono);
+  letter-spacing: .12em;
+}
+
+.vnext-dashboard-title h1 {
+  margin: 4px 0 1px;
+  color: var(--vnx-text-bright);
+  font-size: 24px;
+  line-height: 30px;
+  letter-spacing: -.025em;
+}
+
+.vnext-dashboard-title p {
+  margin: 0;
+  color: var(--vnx-muted);
+  font-size: 12px;
+}
+
+.vnext-dashboard-title > div:last-child {
+  padding-top: 5px;
+  text-align: right;
+}
+
+.vnext-dashboard-title > div:last-child strong,
+.vnext-dashboard-title > div:last-child span {
+  display: block;
+}
+
+.vnext-dashboard-title > div:last-child strong {
+  color: var(--vnx-text-soft);
+  font: 600 12px var(--vnx-font-mono);
+}
+
+.vnext-dashboard-title > div:last-child span {
+  margin-top: 3px;
+  letter-spacing: 0;
+}
+
+.vnext-decision-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(230px, 1fr));
+  gap: 1px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-line);
+}
+
+.vnext-decision-state {
+  min-width: 0;
+  min-height: 164px;
+  padding: 12px 14px 10px;
+  background: var(--vnx-surface-1);
+}
+
+.vnext-decision-state.attention {
+  box-shadow: inset 0 2px var(--vnx-warning);
+}
+
+.vnext-decision-state > header,
+.vnext-state-primary,
+.vnext-decision-state dl,
+.vnext-decision-state > a {
+  display: flex;
+  align-items: center;
+}
+
+.vnext-decision-state > header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vnext-decision-state > header span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--vnx-text-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.vnext-decision-state > header em {
+  color: var(--vnx-muted);
+  font: 700 8px var(--vnx-font-mono);
+  font-style: normal;
+  letter-spacing: .06em;
+}
+
+.vnext-decision-state.attention > header em {
+  color: var(--vnx-warning);
+}
+
+.vnext-state-primary {
+  align-items: baseline;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.vnext-state-primary strong {
+  max-width: 70%;
+  overflow: hidden;
+  color: var(--vnx-text-bright);
+  font: 650 24px/27px var(--vnx-font-mono);
+  letter-spacing: -.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-state-primary span {
+  color: var(--vnx-muted);
+  font: 10px var(--vnx-font-mono);
+}
+
+.vnext-decision-state dl {
+  gap: 12px;
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-decision-state dl > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.vnext-decision-state dt,
+.vnext-decision-state dd {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-decision-state dt {
+  color: var(--vnx-muted-2);
+  font-size: 9px;
+}
+
+.vnext-decision-state dd {
+  margin-top: 2px;
+  color: var(--vnx-text-soft);
+  font: 10px var(--vnx-font-mono);
+}
+
+.vnext-decision-state > p {
+  height: 28px;
+  margin: 7px 0 3px;
+  overflow: hidden;
+  color: var(--vnx-muted-2);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.vnext-decision-state > a {
+  gap: 5px;
+  color: var(--vnx-primary-strong);
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.vnext-decision-state > a:hover {
+  color: var(--vnx-primary-strong);
+}
+
+.vnext-dashboard-main {
+  display: grid;
+  grid-template-columns: minmax(620px, 1fr) minmax(300px, 350px);
+  gap: 12px;
+  align-items: start;
+}
+
+.vnext-primary-canvas,
+.vnext-action-queue {
+  min-width: 0;
+  background: var(--vnx-surface-1);
+}
+
+.vnext-primary-canvas > header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 12px 8px 15px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-primary-canvas > header h2,
+.vnext-action-queue > header h2 {
+  margin: 2px 0 0;
+  color: var(--vnx-text);
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.vnext-primary-canvas > header nav {
+  display: flex;
+  padding: 2px;
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-input);
+}
+
+.vnext-primary-canvas > header nav button {
+  min-height: 27px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vnx-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.vnext-primary-canvas > header nav button.active {
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-primary-strong);
+}
+
+.vnext-primary-body {
+  min-height: 510px;
+}
+
+.vnext-portfolio-canvas {
+  min-height: 510px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+}
+
+.vnext-canvas-chart {
+  min-width: 0;
+  padding: 4px 8px 7px;
+}
+
+.vnext-chart-caption {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 4px;
+  color: var(--vnx-text-soft);
+  font-size: 10px;
+}
+
+.vnext-chart-caption small {
+  color: var(--vnx-muted);
+}
+
+.vnext-chart-caption a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: var(--vnx-primary-strong);
+  text-decoration: none;
+}
+
+.vnext-canvas-context {
+  padding: 8px 12px;
+  border-left: 1px solid var(--vnx-line-soft);
+  background: var(--vnx-input);
+}
+
+.vnext-canvas-context section + section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-canvas-context h3 {
+  margin: 0 0 7px;
+  color: var(--vnx-muted);
+  font: 700 9px var(--vnx-font-mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.vnext-canvas-context section > a {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-text-soft);
+  text-decoration: none;
+}
+
+.vnext-canvas-context section > a > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.vnext-canvas-context strong,
+.vnext-canvas-context small {
+  display: block;
+}
+
+.vnext-canvas-context strong {
+  font-size: 10px;
+}
+
+.vnext-canvas-context small {
+  color: var(--vnx-muted-2);
+  font-size: 9px;
+}
+
+.vnext-canvas-context em {
+  color: var(--vnx-text-soft);
+  font: 9px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-canvas-context p {
+  color: var(--vnx-muted);
+  font-size: 10px;
+}
+
+.vnext-inline-risk span {
+  min-height: 29px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--vnx-muted);
+  font-size: 9px;
+}
+
+.vnext-inline-risk strong {
+  color: var(--vnx-text-soft);
+  font-family: var(--vnx-font-mono);
+}
+
+.vnext-model-decision {
+  padding: 24px;
+}
+
+.vnext-model-decision > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-model-decision > header strong,
+.vnext-model-decision > header small {
+  display: block;
+}
+
+.vnext-model-decision > header strong {
+  font: 650 21px var(--vnx-font-mono);
+}
+
+.vnext-model-decision > header small {
+  color: var(--vnx-muted);
+}
+
+.vnext-model-decision > header em {
+  color: var(--vnx-warning);
+  font: 700 10px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-model-decision dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 1px;
+  margin: 18px 0;
+  background: var(--vnx-line-soft);
+}
+
+.vnext-model-decision dl > div {
+  padding: 13px;
+  background: var(--vnx-surface-2);
+}
+
+.vnext-model-decision dt,
+.vnext-model-decision dd {
+  margin: 0;
+}
+
+.vnext-model-decision dt {
+  color: var(--vnx-muted);
+  font-size: 10px;
+}
+
+.vnext-model-decision dd {
+  margin-top: 5px;
+  color: var(--vnx-text-soft);
+  font: 11px var(--vnx-font-mono);
+}
+
+.vnext-model-issues p {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--vnx-warning);
+}
+
+.vnext-model-decision > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vnx-primary);
+  text-decoration: none;
+}
+
+.vnext-risk-table {
+  padding: 8px 14px 16px;
+}
+
+.vnext-risk-table > div {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: minmax(210px, 1.6fr) minmax(105px, .7fr) minmax(115px, .7fr) minmax(160px, 1fr) 74px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-risk-table .vnext-risk-head {
+  min-height: 36px;
+  color: var(--vnx-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.vnext-risk-table strong,
+.vnext-risk-table small {
+  display: block;
+}
+
+.vnext-risk-table strong {
+  font-size: 11px;
+}
+
+.vnext-risk-table small {
+  margin-top: 2px;
+  color: var(--vnx-muted-2);
+  font-size: 9px;
+}
+
+.vnext-risk-table [role="row"] > span:nth-child(4) {
+  display: grid;
+  grid-template-columns: 1fr 68px;
+  align-items: center;
+  gap: 7px;
+}
+
+.vnext-risk-table i {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--vnx-surface-3);
+}
+
+.vnext-risk-table i b {
+  display: block;
+  height: 100%;
+  background: var(--vnx-success);
+}
+
+.vnext-risk-table .state-warning i b {
+  background: var(--vnx-warning);
+}
+
+.vnext-risk-table em {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+  font-style: normal;
+}
+
+.vnext-risk-table a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vnx-primary-strong);
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.vnext-training-summary {
+  padding: 9px 14px;
+}
+
+.vnext-training-summary > a {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 22px minmax(230px, 1fr) minmax(120px, 1.2fr) 62px;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-text-soft);
+  text-decoration: none;
+}
+
+.vnext-training-summary strong,
+.vnext-training-summary small {
+  display: block;
+}
+
+.vnext-training-summary small {
+  color: var(--vnx-muted-2);
+  font: 9px var(--vnx-font-mono);
+}
+
+.vnext-training-summary i {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--vnx-surface-3);
+}
+
+.vnext-training-summary i b {
+  display: block;
+  height: 100%;
+  background: var(--vnx-primary);
+}
+
+.vnext-training-summary em {
+  color: var(--vnx-muted);
+  font: 10px var(--vnx-font-mono);
+  font-style: normal;
+  text-align: right;
+}
+
+.vnext-action-queue > header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-action-queue > header > strong {
+  color: var(--vnx-warning);
+  font: 650 21px var(--vnx-font-mono);
+}
+
+.vnext-action-rows {
+  padding: 5px 12px 12px;
+}
+
+.vnext-action-rows article {
+  min-height: 71px;
+  display: grid;
+  grid-template-columns: 21px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 11px 3px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-info);
+}
+
+.vnext-action-rows article.severity-critical {
+  color: var(--vnx-danger);
+}
+
+.vnext-action-rows article.severity-warning {
+  color: var(--vnx-warning);
+}
+
+.vnext-action-rows article.severity-success {
+  color: var(--vnx-success);
+}
+
+.vnext-action-rows article > div {
+  min-width: 0;
+}
+
+.vnext-action-rows strong,
+.vnext-action-rows p,
+.vnext-action-rows small {
+  display: block;
+  margin: 0;
+}
+
+.vnext-action-rows strong {
+  color: var(--vnx-text-soft);
+  font-size: 11px;
+}
+
+.vnext-action-rows p {
+  margin-top: 3px;
+  color: var(--vnx-muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.vnext-action-rows small {
+  margin-top: 4px;
+  color: var(--vnx-muted-2);
+  font: 9px var(--vnx-font-mono);
+}
+
+.vnext-action-rows a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vnx-primary-strong);
+  font-size: 10px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+@media (min-width: 2100px) {
+  .vnext-dashboard { padding-inline: 28px; }
+  .vnext-dashboard-main { grid-template-columns: minmax(800px, 1fr) 420px; }
+  .vnext-portfolio-canvas { grid-template-columns: minmax(0, 1fr) 290px; }
+}
+
+@media (max-width: 1450px) {
+  .vnext-dashboard { padding: 14px 14px 24px; }
+  .vnext-decision-state { padding-inline: 11px; }
+  .vnext-decision-state dl { gap: 7px; }
+  .vnext-dashboard-main { grid-template-columns: minmax(580px, 1fr) 310px; }
+  .vnext-portfolio-canvas { grid-template-columns: minmax(0, 1fr) 190px; }
+}
+
+@media (max-width: 1180px) {
+  .vnext-decision-strip { grid-template-columns: repeat(2, minmax(260px, 1fr)); }
+  .vnext-dashboard-main { grid-template-columns: 1fr; }
+  .vnext-action-queue { order: -1; }
+  .vnext-action-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+}

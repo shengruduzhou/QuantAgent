@@ -15,11 +15,11 @@ function normalize(value: number | null | undefined, scale = 1): number {
 export function RiskRadar({ risk }: RiskRadarProps): JSX.Element {
   const option = useMemo<EChartsOption>(() => ({
     animation: false,
-    tooltip: { backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
+    tooltip: { backgroundColor: "#07131d", borderColor: "#31536a", textStyle: { color: "#e2edf4", fontSize: 11 } },
     radar: {
-      center: ["50%", "52%"],
-      radius: "66%",
-      splitNumber: 4,
+      center: ["50%", "51%"],
+      radius: "62%",
+      splitNumber: 5,
       indicator: [
         { name: "回撤", max: 100 },
         { name: "单票亏损", max: 100 },
@@ -28,10 +28,10 @@ export function RiskRadar({ risk }: RiskRadarProps): JSX.Element {
         { name: "跌停", max: 100 },
         { name: "连续亏损", max: 100 },
       ],
-      axisName: { color: "#9cb1c3", fontSize: 10 },
-      splitArea: { areaStyle: { color: ["rgba(17,38,55,.16)", "rgba(17,38,55,.32)"] } },
-      splitLine: { lineStyle: { color: "#294057" } },
-      axisLine: { lineStyle: { color: "#294057" } },
+      axisName: { color: "#91a8b8", fontSize: 11 },
+      splitArea: { areaStyle: { color: ["rgba(9,24,35,.36)", "rgba(12,31,44,.18)"] } },
+      splitLine: { lineStyle: { color: "#284354" } },
+      axisLine: { lineStyle: { color: "#284354" } },
     },
     series: [{
       type: "radar",
@@ -45,12 +45,12 @@ export function RiskRadar({ risk }: RiskRadarProps): JSX.Element {
           Math.min(100, (risk.consecutiveLossDays ?? 0) * 10),
         ],
         name: "Risk exposure",
-        lineStyle: { color: "#3f8cff", width: 1.8 },
-        areaStyle: { color: "rgba(63,140,255,.18)" },
-        itemStyle: { color: "#46d7bb" },
+        lineStyle: { color: "#4c8dff", width: 2 },
+        areaStyle: { color: "rgba(76,141,255,.15)" },
+        itemStyle: { color: "#2bc6d6", borderColor: "#07131d", borderWidth: 2 },
       }],
     }],
   }), [risk]);
 
-  return <EChart option={option} className="chart" />;
+  return <EChart option={option} className="chart" ariaLabel="组合风险相对阈值雷达图" />;
 }
