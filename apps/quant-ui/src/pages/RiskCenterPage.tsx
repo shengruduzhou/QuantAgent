@@ -5,11 +5,13 @@ import type { Page, RiskOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
 import { EChart } from "../components/EChart";
 import { MetricCard } from "../components/MetricCard";
+import { MonitorTable, type MonitorColumn } from "../components/MonitorTable";
 import { Panel } from "../components/Panel";
 import { RiskRadar } from "../components/RiskRadar";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { marketPalette } from "../theme/marketPalette";
 
 interface RiskEvent {
   id: string;
@@ -52,12 +54,61 @@ export function RiskCenterPage(): JSX.Element {
     return {
       animation: false,
       grid: { left: 106, right: 18, top: 16, bottom: 24 },
-      tooltip: { trigger: "axis", backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
-      xAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
+      tooltip: { trigger: "axis", backgroundColor: marketPalette.panel, borderColor: marketPalette.border, textStyle: { color: marketPalette.text } },
+      xAxis: { type: "value", axisLabel: { color: marketPalette.axis }, splitLine: { lineStyle: { color: marketPalette.grid } } },
       yAxis: { type: "category", inverse: true, data: entries.map(([name]) => name), axisLabel: { color: "#9cb1c3", fontSize: 10 } },
-      series: [{ type: "bar", data: entries.map(([, value]) => value), itemStyle: { color: "#e6a23c" }, barMaxWidth: 14 }],
+      series: [{ type: "bar", data: entries.map(([, value]) => value), itemStyle: { color: marketPalette.risk }, barMaxWidth: 14 }],
     };
   }, [risk?.eventCounts]);
+
+  const riskStockColumns = useMemo<MonitorColumn<RiskStock>[]>(() => [
+    {
+      id: "symbol",
+      header: "股票",
+      value: (stock) => stock.symbol,
+      render: (stock) => <strong>{stock.symbol}</strong>,
+      width: 116,
+    },
+    {
+      id: "netPnl",
+      header: "净 PnL",
+      value: (stock) => stock.netPnl ?? Number.NEGATIVE_INFINITY,
+      csvValue: (stock) => stock.netPnl,
+      render: (stock) => (
+        <span className={`mono ${(stock.netPnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>
+          {formatNumber(stock.netPnl)}
+        </span>
+      ),
+      align: "right",
+      width: 112,
+    },
+    {
+      id: "winRate",
+      header: "胜率",
+      value: (stock) => stock.winRate ?? Number.NEGATIVE_INFINITY,
+      csvValue: (stock) => stock.winRate,
+      render: (stock) => formatPercent(stock.winRate),
+      align: "right",
+      width: 92,
+    },
+    {
+      id: "tradeCount",
+      header: "交易数",
+      value: (stock) => stock.tradeCount ?? 0,
+      render: (stock) => <span className="mono">{formatCompact(stock.tradeCount)}</span>,
+      align: "right",
+      width: 86,
+    },
+    {
+      id: "riskScore",
+      header: "风险分",
+      value: (stock) => stock.riskScore ?? Number.NEGATIVE_INFINITY,
+      csvValue: (stock) => stock.riskScore,
+      render: (stock) => <span className="mono tone-warning">{formatNumber(stock.riskScore)}</span>,
+      align: "right",
+      width: 92,
+    },
+  ], []);
 
   if (overview.isLoading) return <StateView state="loading" />;
   if (!risk) return <StateView state="empty" />;
@@ -94,22 +145,16 @@ export function RiskCenterPage(): JSX.Element {
           </div>
         </Panel>
         <Panel title="单票风险排名" eyebrow="Negative realized PnL first" className="risk-stock-panel">
-          {(stocks.data?.data ?? []).length ? (
-            <div className="table-scroll">
-              <table className="data-table">
-                <thead><tr><th>股票</th><th className="numeric">净 PnL</th><th className="numeric">胜率</th><th className="numeric">交易数</th><th className="numeric">风险分</th></tr></thead>
-                <tbody>{stocks.data?.data.slice(0, 80).map((stock) => (
-                  <tr key={stock.symbol}>
-                    <td><strong>{stock.symbol}</strong></td>
-                    <td className={`numeric mono ${(stock.netPnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>{formatNumber(stock.netPnl)}</td>
-                    <td className="numeric">{formatPercent(stock.winRate)}</td>
-                    <td className="numeric mono">{formatCompact(stock.tradeCount)}</td>
-                    <td className="numeric mono tone-warning">{formatNumber(stock.riskScore)}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : <StateView state="empty" detail="profit_by_stock.csv 不存在。" />}
+          <MonitorTable
+            monitorId="risk-stocks"
+            ariaLabel="单票风险排名"
+            rows={stocks.data?.data ?? []}
+            columns={riskStockColumns}
+            rowKey={(stock) => stock.symbol}
+            maxRows={80}
+            exportFilename="quantagent-risk-stocks.csv"
+            emptyDetail="profit_by_stock.csv 不存在。"
+          />
         </Panel>
         <Panel title="风控事件时间线" eyebrow={`${events.data?.data.total ?? 0}+ indexed events`} className="risk-timeline-panel">
           {(events.data?.data.items ?? []).length ? (
