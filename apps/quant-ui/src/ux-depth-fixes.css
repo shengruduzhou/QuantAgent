@@ -1,0 +1,28 @@
+.parity-table-v2 td.parity-delivery-cell {
+  display: table-cell;
+  vertical-align: top;
+}
+
+.parity-table-v2 .parity-delivery-cell > span {
+  display: block;
+  max-height: 2.75em;
+  overflow: hidden;
+  color: var(--ux-text-soft);
+  font-size: 8px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.parity-table-v2 .parity-delivery-cell > span + span {
+  margin-top: 5px;
+}
+
+.parity-table-v2 .parity-delivery-cell > span b {
+  float: none;
+  display: inline-block;
+  min-width: 38px;
+  margin: 0 6px 0 0;
+  padding: 1px 4px;
+  vertical-align: top;
+}
