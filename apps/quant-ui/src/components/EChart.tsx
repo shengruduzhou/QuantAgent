@@ -33,6 +33,7 @@ interface EChartProps {
   ariaLabel?: string;
   interactive?: boolean;
   onClick?: (params: unknown) => void;
+  onDataZoom?: (params: unknown, chart: EChartsType) => void;
   onReady?: (chart: EChartsType) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
@@ -43,6 +44,7 @@ export function EChart({
   ariaLabel,
   interactive = false,
   onClick,
+  onDataZoom,
   onReady,
   onKeyDown,
 }: EChartProps): JSX.Element {
@@ -85,6 +87,16 @@ export function EChart({
       chart.off("click", onClick);
     };
   }, [onClick]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !onDataZoom) return undefined;
+    const handler = (params: unknown): void => onDataZoom(params, chart);
+    chart.on("datazoom", handler);
+    return () => {
+      chart.off("datazoom", handler);
+    };
+  }, [onDataZoom]);
 
   return (
     <div

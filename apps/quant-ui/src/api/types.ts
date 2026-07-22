@@ -115,16 +115,47 @@ export interface DataProvider {
   note: string;
   installed: boolean;
   configured: boolean;
-  status: "ready" | "needs_configuration" | "unavailable";
+  status: "ready" | "partial" | "needs_configuration" | "unavailable";
   missingRequirements: string[];
+  optionalRequirements?: string[];
+  missingOptionalRequirements?: string[];
 }
 
 export interface DataManagerOverview {
   providers: DataProvider[];
   constraints: string[];
   jobEndpoint: string;
+  coverageEndpoint: string;
+  quarantineEndpoint: string;
   supportsCancellation: boolean;
   runtimeRoot: string;
+  serverPaths: { quarantine: string; imports: string; exports: string };
+}
+
+export interface QuarantineFile {
+  path: string;
+  name: string;
+  format: string;
+  sizeBytes: number;
+  modifiedAt: string;
+}
+
+export interface DataCoverage {
+  path: string;
+  format: string;
+  sizeBytes: number;
+  columns: string[];
+  rows: number;
+  scannedKeyRows: number;
+  symbolCount: number;
+  dateCount: number;
+  dateStart: string | null;
+  dateEnd: string | null;
+  duplicateKeys: number;
+  duplicateMode: "exact" | "within_batch";
+  missingBusinessDayCandidates: string[];
+  missingBusinessDayCount: number;
+  warnings: string[];
 }
 
 export interface JobSummary {

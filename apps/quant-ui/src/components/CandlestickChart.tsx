@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
+import type { EChartsType } from "echarts/core";
 import type { BarSeriesOption, CandlestickSeriesOption, LineSeriesOption } from "echarts/charts";
 import type { KlineBar, Trade } from "../api/types";
 import {
@@ -35,11 +36,6 @@ const RANGE_OPTIONS: Array<{ value: KlineViewRange; label: string }> = [
 ];
 
 const RANGE_ORDER: KlineViewRange[] = ["60D", "120D", "1Y", "ALL"];
-const RANGE_SIZE: Record<Exclude<KlineViewRange, "ALL">, number> = {
-  "60D": 60,
-  "120D": 120,
-  "1Y": 250,
-};
 const KEYBOARD_PAN_STEP = 5;
 const KEYBOARD_PAGE_STEP = 20;
 
@@ -102,6 +98,7 @@ export function CandlestickChart({
   const [range, setRange] = useState<KlineViewRange>("120D");
   const [layers, setLayers] = useState<Record<LayerKey, boolean>>(DEFAULT_LAYERS);
   const [viewAnchorIndex, setViewAnchorIndex] = useState<number | null>(null);
+  const [manualWindow, setManualWindow] = useState<{ startIndex: number; endIndex: number } | null>(null);
 
   const dates = useMemo(() => bars.map((bar) => bar.datetime.slice(0, 10)), [bars]);
   const selectedTrade = trades.find((trade) => trade.id === selectedTradeId) ?? trades[0];
@@ -122,7 +119,7 @@ export function CandlestickChart({
 
   const derived = useMemo(() => {
     const dateSet = new Set(dates);
-    const window = resolveKlineWindow(dates.length, range, effectiveAnchor);
+    const window = manualWindow ?? resolveKlineWindow(dates.length, range, effectiveAnchor);
     const markerLayouts = layoutTradeMarkers(trades, dateSet).filter((marker) => markerVisible(marker, layers));
     const markersByDate = new Map<string, TradeMarkerLayout[]>();
 
@@ -339,7 +336,7 @@ export function CandlestickChart({
     };
 
     return { option, markerCount: markerLayouts.length, window };
-  }, [bars, dates, effectiveAnchor, layers, range, selectedTradeId, symbol, trades]);
+  }, [bars, dates, effectiveAnchor, layers, manualWindow, range, selectedTradeId, symbol, trades]);
 
   const toggleLayer = (key: LayerKey): void => {
     setLayers((current) => ({ ...current, [key]: !current[key] }));
@@ -348,26 +345,58 @@ export function CandlestickChart({
   const resetView = (): void => {
     setRange("120D");
     setViewAnchorIndex(null);
+    setManualWindow(null);
   };
 
   const jumpLatest = (): void => {
-    setViewAnchorIndex(Math.max(0, dates.length - 1));
+    const size = derived.window.endIndex - derived.window.startIndex;
+    const endIndex = Math.max(0, dates.length - 1);
+    setManualWindow({ startIndex: Math.max(0, endIndex - size), endIndex });
   };
 
   const changeRange = (direction: -1 | 1): void => {
     const currentIndex = RANGE_ORDER.indexOf(range);
     const nextIndex = Math.min(RANGE_ORDER.length - 1, Math.max(0, currentIndex + direction));
     setRange(RANGE_ORDER[nextIndex]);
+    setManualWindow(null);
   };
 
   const moveWindow = (delta: number): void => {
-    if (!dates.length || range === "ALL") return;
-    const windowSize = Math.min(RANGE_SIZE[range], dates.length);
-    const lookAhead = Math.floor(windowSize * 0.2);
-    const targetEnd = Math.min(dates.length - 1, Math.max(windowSize - 1, derived.window.endIndex + delta));
-    const targetAnchor = targetEnd >= dates.length - 1 ? dates.length - 1 : Math.max(0, targetEnd - lookAhead);
-    setViewAnchorIndex(targetAnchor);
+    if (!dates.length) return;
+    const width = derived.window.endIndex - derived.window.startIndex;
+    const targetStart = Math.min(Math.max(0, dates.length - width - 1), Math.max(0, derived.window.startIndex + delta));
+    setManualWindow({ startIndex: targetStart, endIndex: Math.min(dates.length - 1, targetStart + width) });
   };
+
+  const zoomWindow = (direction: -1 | 1): void => {
+    if (!dates.length) return;
+    const currentSize = derived.window.endIndex - derived.window.startIndex + 1;
+    const nextSize = Math.min(dates.length, Math.max(20, Math.round(currentSize * (direction < 0 ? 0.78 : 1.28))));
+    const center = (derived.window.startIndex + derived.window.endIndex) / 2;
+    let startIndex = Math.max(0, Math.round(center - nextSize / 2));
+    let endIndex = Math.min(dates.length - 1, startIndex + nextSize - 1);
+    startIndex = Math.max(0, endIndex - nextSize + 1);
+    setManualWindow({ startIndex, endIndex });
+  };
+
+  const handleDataZoom = useCallback((_params: unknown, chart: EChartsType): void => {
+    const option = chart.getOption() as { dataZoom?: Array<{ start?: number; end?: number; startValue?: string | number; endValue?: string | number }> };
+    const zoom = option.dataZoom?.[0];
+    if (!zoom || !dates.length) return;
+    const toIndex = (value: string | number | undefined, percent: number | undefined, fallback: number): number => {
+      if (typeof value === "string") {
+        const found = dates.indexOf(value);
+        if (found >= 0) return found;
+      }
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value < dates.length) return value;
+      if (typeof percent === "number") return Math.round((percent / 100) * Math.max(0, dates.length - 1));
+      return fallback;
+    };
+    const startIndex = toIndex(zoom.startValue, zoom.start, 0);
+    const endIndex = toIndex(zoom.endValue, zoom.end, dates.length - 1);
+    const next = { startIndex: Math.min(startIndex, endIndex), endIndex: Math.max(startIndex, endIndex) };
+    setManualWindow((current) => current?.startIndex === next.startIndex && current.endIndex === next.endIndex ? current : next);
+  }, [dates]);
 
   const handleKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (!dates.length) return;
@@ -396,6 +425,7 @@ export function CandlestickChart({
       event.preventDefault();
       setRange("ALL");
       setViewAnchorIndex(null);
+      setManualWindow(null);
     }
   };
 
@@ -410,13 +440,20 @@ export function CandlestickChart({
               type="button"
               className={range === item.value ? "active" : ""}
               aria-pressed={range === item.value}
-              onClick={() => setRange(item.value)}
+              onClick={() => { setRange(item.value); setManualWindow(null); }}
             >
               {item.label}
             </button>
           ))}
           <button type="button" onClick={resetView}>复位</button>
           <button type="button" onClick={jumpLatest}>最新</button>
+        </div>
+        <div className="kline-control-group kline-navigation-group" aria-label="图表平移与缩放">
+          <span>视图</span>
+          <button type="button" aria-label="向左平移" onClick={() => moveWindow(-KEYBOARD_PAN_STEP)}>←</button>
+          <button type="button" aria-label="向右平移" onClick={() => moveWindow(KEYBOARD_PAN_STEP)}>→</button>
+          <button type="button" aria-label="放大图表" onClick={() => zoomWindow(-1)}>＋</button>
+          <button type="button" aria-label="缩小图表" onClick={() => zoomWindow(1)}>－</button>
         </div>
         <div className="kline-control-group kline-layer-group">
           <span>指标</span>
@@ -468,6 +505,7 @@ export function CandlestickChart({
         className="chart chart-kline chart-kline-workstation"
         ariaLabel={`${symbol ?? bars[0]?.symbol ?? "股票"} K 线、成交量、均线与交易事件图`}
         interactive
+        onDataZoom={handleDataZoom}
         onKeyDown={handleKeyboard}
         onClick={(params) => {
           const value = params as { data?: { tradeId?: string } };

@@ -6,10 +6,10 @@
   --terminal-border-strong: #2a4b63;
   --terminal-selection: #102b40;
   --terminal-focus: #8bb8ff;
-  --market-up: #3f8cff;
-  --market-down: #ef5c63;
-  --trade-buy: #2ac89f;
-  --trade-sell: #ef5c63;
+  --market-up: #f0525f;
+  --market-down: #22b889;
+  --trade-buy: #f0525f;
+  --trade-sell: #22b889;
   --trade-t-buy: #6f9dff;
   --trade-t-sell: #b779ff;
   --market-bid: #f0a7c2;
@@ -24,7 +24,7 @@
   --surface: var(--terminal-panel);
   --surface-2: var(--terminal-panel-raised);
   --border: var(--terminal-border);
-  --blue: var(--market-up);
+  --blue: #4f9dff;
   --green: var(--state-verified);
   --red: var(--state-critical);
   --amber: var(--state-warning);

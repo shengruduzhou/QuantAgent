@@ -22,7 +22,9 @@ from pathlib import Path
 
 import pandas as pd
 
-CACHE_DIR = Path("runtime/data/v7/silver/minute_bars")
+from quantagent.config.paths import quant_paths
+
+CACHE_DIR = quant_paths().home / "data/v7/silver/minute_bars"
 PAGE = 2000  # max bars per call observed working
 
 

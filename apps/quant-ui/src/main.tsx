@@ -13,6 +13,7 @@ import "./ux-depth.css";
 import "./ux-depth-fixes.css";
 import "./control-depth.css";
 import "./data-manager.css";
+import "./workstation-v4.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

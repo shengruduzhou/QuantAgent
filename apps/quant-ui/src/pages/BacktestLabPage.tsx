@@ -94,7 +94,7 @@ export function BacktestLabPage(): JSX.Element {
           actions={<button className="secondary-button" onClick={() => primary && downloadJson("backtest-experiment.json", primary)}><DownloadSimple size={15} /> 导出当前</button>}
         >
           <div className="backtest-context-note">选择一行会替换当前实验上下文；不再通过复选框同时激活多个实验。多实验统计对比应使用独立 Compare 工作区，避免主图、指标卡和详情来源不一致。</div>
-          <div className="table-scroll">
+          <div className="table-scroll" role="radiogroup" aria-label="当前回测实验">
             <table className="data-table comparison-table single-select-table">
               <thead>
                 <tr>
