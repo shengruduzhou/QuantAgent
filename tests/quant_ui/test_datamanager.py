@@ -20,6 +20,7 @@ def request(app, method: str, url: str, **kwargs):
 
 def test_data_provider_registry_is_explicit_and_never_exposes_credentials(quant_ui_settings, monkeypatch) -> None:
     monkeypatch.setenv("TUSHARE_TOKEN", "do-not-expose-this-token")
+    monkeypatch.setattr("services.quant_api.services.data_manager._module_available", lambda _module: True)
 
     result = request(create_app(quant_ui_settings), "GET", "/api/data/providers")
 
