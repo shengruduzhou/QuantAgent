@@ -36,6 +36,32 @@ E:\Project\QuantAgent\runtime\
 
 `quantagent.config.paths.quant_paths()` 是单一来源。`QUANTAGENT_HOME` 覆盖全局 root，`QUANTAGENT_DATA_ROOT` 只覆盖 data tier。
 
+## Institutional Workstation / 网页工作站
+
+Linux 下从项目根目录启动 VNext-only 研究工作站：
+
+```bash
+python3 -m pip install -e ".[web]"
+./scripts/run_quant_ui.sh \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+打开 `http://127.0.0.1:8000`。该脚本会先构建 React production SPA，再启动同时托管
+Web 与 `/api` 的 FastAPI process；因此修改前端后不要直接复用旧 `dist`。只启动后端或
+由 systemd 管理时可使用：
+
+```bash
+python3 -m services.quant_api \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --no-reload
+```
+
+完整开发、验证和故障排查命令见 `docs/quant_ui_runbook.md`。
+
 ## Windows Setup
 
 ```powershell

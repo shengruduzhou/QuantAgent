@@ -101,7 +101,7 @@
         ],
         "artifacts": [],
         "frontend": [
-          "AppShell"
+          "InstitutionalShell"
         ]
       },
       "gap": "ServiceContainer wires API services but there is no domain-wide registry for research, backtest, paper and execution lifecycle.",
@@ -1171,8 +1171,8 @@
           "jobs"
         ],
         "frontend": [
-          "AppShell",
-          "Activity drawer"
+          "InstitutionalShell",
+          "OperationsDock"
         ]
       },
       "gap": "Web UI works, but auth, process isolation, replay/backpressure and multi-client state contracts are incomplete.",
@@ -1259,7 +1259,7 @@
       "description": "Discover, load and report optional capabilities.",
       "quantagent": {
         "modules": [
-          "workstation module registry"
+          "apps/quant-ui/src/vnext/workspace/modules.ts"
         ],
         "api": [],
         "events": [],
@@ -1272,7 +1272,7 @@
       "adoption": "Create one signed/typed plugin manifest registry shared by backend and UI.",
       "tests": [],
       "evidence": [
-        "workstation/modules.ts"
+        "vnext/workspace/modules.ts"
       ],
       "limitations": [
         "static frontend registry"

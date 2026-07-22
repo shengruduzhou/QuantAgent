@@ -17,4 +17,4 @@ When implementing from a selected generated mock, treat that image as the source
 - VNext separates Dashboard from Workstation: Dashboard answers system/data/model/portfolio/risk/next-action questions, while configuration and execution live in dedicated workstations.
 - VNext uses one Global Command Bar, one grouped Module Rail, true context-carrying Workspace Tabs, and a collapsible Operations Dock. Do not duplicate those actions in a second menu.
 - Risk radar is never the primary risk decision view. Prefer rules, limits, threshold bars, violations, and actionable queues.
-- Keep legacy pages behind an explicit UI feature flag until the corresponding VNext workflow passes browser and regression QA. Scope new styles under modular `vnext/styles/*`; do not add another monolithic stylesheet.
+- The VNext shell passed browser and regression QA and is now the only product entry. Do not reintroduce a parallel legacy shell, `?ui=legacy` escape hatch, or monolithic workstation stylesheet; domain pages may remain shared behind the canonical VNext shell.

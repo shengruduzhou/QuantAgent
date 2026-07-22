@@ -19,6 +19,13 @@ interface EntityCommandPaletteProps {
   openPath: (path: string, newInstance?: boolean) => void;
 }
 
+function directStockPath(value: string): string | null {
+  const stock = value.trim().toUpperCase().match(/^(\d{6})(?:\.(SZ|SH|BJ))?$/);
+  if (!stock) return null;
+  const suffix = stock[2] ?? (stock[1].startsWith("6") ? "SH" : "SZ");
+  return `/stock-replay?symbol=${stock[1]}.${suffix}`;
+}
+
 export function EntityCommandPalette({ open, onClose, openPath }: EntityCommandPaletteProps): JSX.Element | null {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -56,15 +63,15 @@ export function EntityCommandPalette({ open, onClose, openPath }: EntityCommandP
         detail: module.caption,
         path: module.path,
       }));
-    const directStock = deferredQuery.toUpperCase().match(/^(\d{6})(?:\.(SZ|SH|BJ))?$/);
-    if (directStock) {
-      const suffix = directStock[2] ?? (directStock[1].startsWith("6") ? "SH" : "SZ");
+    const stockPath = directStockPath(deferredQuery);
+    if (stockPath) {
+      const symbol = new URL(stockPath, window.location.origin).searchParams.get("symbol") ?? deferredQuery.toUpperCase();
       moduleItems.unshift({
-        id: `stock-direct-${directStock[1]}`,
+        id: `stock-direct-${symbol}`,
         group: "Stocks",
-        label: `${directStock[1]}.${suffix}`,
+        label: symbol,
         detail: "Open exact symbol in Chart Workstation",
-        path: `/stock-replay?symbol=${directStock[1]}.${suffix}`,
+        path: stockPath,
       });
     }
     const remoteGroups = (remote.data?.data.groups ?? []).map((group) => ({
@@ -126,9 +133,14 @@ export function EntityCommandPalette({ open, onClose, openPath }: EntityCommandP
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 setSelectedIndex((current) => Math.max(current - 1, 0));
-              } else if (event.key === "Enter" && flatResults[selectedIndex]) {
+              } else if (event.key === "Enter") {
+                const stockPath = directStockPath(query);
+                const target = stockPath
+                  ? { id: stockPath, group: "Stocks", label: query, detail: "", path: stockPath }
+                  : flatResults[selectedIndex];
+                if (!target) return;
                 event.preventDefault();
-                select(flatResults[selectedIndex]);
+                select(target);
               }
             }}
           />

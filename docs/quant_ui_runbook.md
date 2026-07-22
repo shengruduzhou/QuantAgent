@@ -2,14 +2,19 @@
 
 ## Recommended startup
 
-项目根目录执行一个命令：
+项目根目录执行一个命令；它会使用指定的 TickFlow/QuantAgent runtime、安装缺失的
+frontend dependencies、重新构建 VNext production SPA，并由同一个 FastAPI process
+同时提供 Web 与 API：
 
 ```bash
-./scripts/run_quant_ui.sh
+./scripts/run_quant_ui.sh \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000
 ```
 
-脚本会在需要时安装 frontend dependencies、构建 production SPA，并由同一个
-FastAPI process 同时提供 Web 与 API：
+日常代码未变化、只想复用已经构建的 `dist` 时可以追加 `--skip-build`。修改 frontend
+后不要使用该选项，否则浏览器看到的仍会是旧 bundle。
 
 ```text
 Web:     http://127.0.0.1:8000
@@ -18,7 +23,8 @@ OpenAPI: http://127.0.0.1:8000/docs
 ```
 
 不再要求同时维护 `8000 + 5173` 两个进程。控制中心页面还可以启动 allowlisted
-backtest/train/infer research jobs。
+backtest/train/infer research jobs。产品入口已完成 VNext-only cutover；`?ui=legacy`
+不会再恢复旧 shell。
 
 ## Backend API
 
@@ -34,14 +40,14 @@ python3 -m pip install -e ".[web]"
 
 ### Start
 
-```bash
-./scripts/run_quant_ui_api.sh
-```
-
-等价命令：
+仅启动 API/复用已有 frontend build：
 
 ```bash
-python3 -m services.quant_api
+python3 -m services.quant_api \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --no-reload
 ```
 
 默认监听：
@@ -50,12 +56,13 @@ python3 -m services.quant_api
 http://127.0.0.1:8000
 ```
 
-环境变量：
+命令行参数优先；同时保留以下环境变量以兼容 service/tmux/systemd：
 
 ```bash
 QUANT_UI_HOST=127.0.0.1
 QUANT_UI_PORT=8000
 QUANT_UI_RELOAD=false
+QUANT_UI_LOG_LEVEL=info
 ```
 
 OpenAPI：
@@ -140,7 +147,7 @@ npm install
 推荐的 production-style integrated startup：
 
 ```bash
-./scripts/run_quant_ui.sh
+./scripts/run_quant_ui.sh --runtime /home/shanhefu/QuantAgent/runtime
 ```
 
 默认访问：

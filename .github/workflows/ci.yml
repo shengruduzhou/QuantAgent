@@ -91,7 +91,7 @@ jobs:
         run: |
           set -o pipefail
           npm test -- --run \
-            src/components/AppShell.test.tsx \
+            src/App.test.tsx \
             src/components/CandlestickChart.test.tsx \
             src/pages/BacktestLabPage.test.tsx \
             src/pages/FactorCenterPage.test.tsx \
