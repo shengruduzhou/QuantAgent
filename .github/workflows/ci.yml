@@ -62,6 +62,8 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: MonitorTable component tests
+        run: npm test -- --run src/components/MonitorTable.test.tsx
       - name: Unit and component tests
         run: npm test -- --run
       - name: Production build
