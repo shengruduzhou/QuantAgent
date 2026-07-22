@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
-import { DownloadSimple } from "@phosphor-icons/react";
-import type { EChartsOption } from "echarts";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { ChartLineUp, DownloadSimple, Flask, Play, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type { BacktestSummary, EquityPoint } from "../api/types";
 import { downloadJson } from "../api/client";
 import { useApi } from "../hooks/useApi";
-import { EChart } from "../components/EChart";
-import { MetricCard } from "../components/MetricCard";
+import { EquityChart } from "../components/EquityChart";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 export function BacktestLabPage(): JSX.Element {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const backtests = useApi<BacktestSummary[]>(["backtest-lab"], "/backtests");
   const [selectedId, setSelectedId] = useState(searchParams.get("run") ?? "");
@@ -36,49 +36,24 @@ export function BacktestLabPage(): JSX.Element {
     primary ? `/backtests/${primary.id}/equity` : null,
   );
 
-  const comparisonOption = useMemo<EChartsOption>(() => ({
-    animation: false,
-    grid: { left: 54, right: 18, top: 20, bottom: 34 },
-    tooltip: { trigger: "axis", backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
-    xAxis: {
-      type: "category",
-      data: equity.data?.data.map((point) => point.datetime) ?? [],
-      axisLabel: { color: "#71879a", fontSize: 10 },
-      axisLine: { lineStyle: { color: "#20364a" } },
-    },
-    yAxis: {
-      type: "value",
-      scale: true,
-      axisLabel: { color: "#71879a", fontSize: 10 },
-      splitLine: { lineStyle: { color: "#14283a" } },
-    },
-    series: [{
-      name: primary?.name ?? "NAV",
-      type: "line",
-      data: equity.data?.data.map((point) => point.nav) ?? [],
-      showSymbol: false,
-      lineStyle: { color: "#3f8cff", width: 1.8 },
-      areaStyle: { color: "rgba(63,140,255,.08)" },
-    }],
-  }), [equity.data?.data, primary?.name]);
-
   if (backtests.isLoading) return <StateView state="loading" />;
-  if (!runs.length) return <StateView state="empty" />;
+  if (!runs.length) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验上下文、成本与 T+1 约束、可追踪 artifact。" context="no fabricated metrics" /><ActionableState title="没有可识别回测实验" detail="从经过 allowlist 与路径校验的严格 A 股回测任务开始。" icon={Flask} primary={{ label: "配置回测任务", onClick: () => navigate("/settings?job=backtest") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=backtest") }} /></div>;
 
   return (
-    <div className="page backtest-page backtest-page-v2">
-      <section className="metric-grid metric-grid-6">
-        <MetricCard label="总收益" value={formatPercent(primary?.totalReturn)} delta={primary?.totalReturn} />
-        <MetricCard label="年化收益" value={formatPercent(primary?.annualReturn)} delta={primary?.annualReturn} />
-        <MetricCard label="最大回撤" value={formatPercent(primary?.maxDrawdown)} tone="negative" />
-        <MetricCard label="Sharpe" value={formatNumber(primary?.sharpe)} detail={`Calmar ${formatNumber(primary?.calmar)}`} />
-        <MetricCard label="换手率" value={formatPercent(primary?.turnover)} tone="warning" />
-        <MetricCard label="成交数量" value={formatCompact(primary?.tradeCount)} detail={`${formatCompact(primary?.fillCount)} fills`} />
-      </section>
+    <div className="page institutional-workbench backtest-page backtest-page-v2">
+      <WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验驱动主图、指标和详情；多实验只进入独立 Compare，不再混合上下文。" asOf={primary?.endDate?.slice(0, 10)} context={primary?.trustClass ?? "research experiment"} actions={<><button type="button" onClick={() => primary && downloadJson("backtest-experiment.json", primary)}><DownloadSimple size={14} />导出当前</button><button type="button" className="primary" onClick={() => navigate("/settings?job=backtest")}><Play size={14} weight="fill" />新建回测</button></>} />
+      <WorkbenchMetricStrip metrics={[
+        { label: "总收益", value: formatPercent(primary?.totalReturn), detail: primary?.name ?? "active run", tone: toneName(primary?.totalReturn), icon: ChartLineUp },
+        { label: "年化收益", value: formatPercent(primary?.annualReturn), detail: primary?.horizon ?? "horizon unknown", tone: toneName(primary?.annualReturn), icon: ChartLineUp },
+        { label: "最大回撤", value: formatPercent(primary?.maxDrawdown), detail: "strict NAV", tone: "danger", icon: WarningCircle },
+        { label: "Sharpe", value: formatNumber(primary?.sharpe), detail: `Calmar ${formatNumber(primary?.calmar)}`, tone: "info", icon: ChartLineUp },
+        { label: "换手率", value: formatPercent(primary?.turnover), detail: "cost-sensitive", tone: "warning", icon: ShieldCheck },
+        { label: "成交数量", value: formatCompact(primary?.tradeCount), detail: `${formatCompact(primary?.fillCount)} fills`, tone: primary?.capabilities?.trades ? "positive" : "neutral", icon: Flask },
+      ]} />
 
       <section className="backtest-grid">
-        <Panel title="实验净值" eyebrow={`${primary?.name} · ${primary?.startDate ?? "未知"} → ${primary?.endDate ?? "未知"}`} className="backtest-equity-panel">
-          {equity.data?.data.length ? <EChart option={comparisonOption} className="chart" /> : <StateView state="empty" detail="该研究实验没有 NAV artifact。" />}
+        <Panel title="实验净值" eyebrow={`${primary?.name} · ${primary?.startDate?.slice(0, 10) ?? "未知"} → ${primary?.endDate?.slice(0, 10) ?? "未知"}`} className="backtest-equity-panel">
+          {equity.data?.data.length ? <EquityChart points={equity.data.data} height={286} showDrawdown /> : <ActionableState title="该实验没有 NAV artifact" detail="主指标保持暂无，不从成交或收益摘要反推净值。可切换其他实验，或检查该 run 的产物契约。" icon={ChartLineUp} primary={{ label: "检查 Runtime", onClick: () => navigate(`/runtime?runId=${encodeURIComponent(primary?.id ?? "")}`) }} />}
         </Panel>
 
         <Panel title="实验能力" eyebrow="Artifact Capability Matrix" className="capability-panel">
@@ -162,4 +137,9 @@ export function BacktestLabPage(): JSX.Element {
 function tone(value: number | null | undefined): string {
   if (value === null || value === undefined) return "";
   return value >= 0 ? "tone-positive" : "tone-negative";
+}
+
+function toneName(value: number | null | undefined): "positive" | "danger" | "neutral" {
+  if (value === null || value === undefined) return "neutral";
+  return value >= 0 ? "positive" : "danger";
 }

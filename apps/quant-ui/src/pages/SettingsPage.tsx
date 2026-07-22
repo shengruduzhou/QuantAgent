@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
+  Atom,
   Database,
   DesktopTower,
   Flask,
@@ -71,7 +72,7 @@ export function SettingsPage(): JSX.Element {
   };
 
   return (
-    <div className="page control-center-page control-center-v2">
+    <div className="page institutional-workbench control-center-page control-center-v2">
       <section className="control-hero">
         <div>
           <span className="page-kicker">QUANTAGENT CONTROL PLANE</span>
@@ -105,6 +106,7 @@ export function SettingsPage(): JSX.Element {
             <button className={jobType === "backtest" ? "active" : ""} onClick={() => selectTemplate("backtest")}><Flask size={16} /> 回测</button>
             <button className={jobType === "train" ? "active" : ""} onClick={() => selectTemplate("train")}><HardDrives size={16} /> 训练</button>
             <button className={jobType === "infer" ? "active" : ""} onClick={() => selectTemplate("infer")}><Play size={16} /> 推理</button>
+            <button className={jobType === "factor-discovery" ? "active" : ""} onClick={() => selectTemplate("factor-discovery")}><Atom size={16} /> 因子发现</button>
           </div>
 
           {jobType === "train" ? (
@@ -115,6 +117,17 @@ export function SettingsPage(): JSX.Element {
                 <small>模板不传 `symbols` 或 `symbols_file`，因此训练数据集中的全部股票都会参与。`feature_policy: judgment` 只采用已生成判断清单中的接受因子；清单缺失时任务会失败关闭，而不是回退并伪装成功。</small>
               </span>
               <StatusBadge status="warning" label="GPU / HIGH COST" />
+            </div>
+          ) : null}
+
+          {jobType === "factor-discovery" ? (
+            <div className="training-scope-banner" role="status">
+              <Atom size={21} weight="duotone" />
+              <span>
+                <strong>受治理的因子发现 · RESEARCH CANDIDATES ONLY</strong>
+                <small>先运行 PIT/表达式/相关性验证，再由人工复核。默认不调用网络 LLM；只有同时开启 use_llm 与 allow_network 才会允许模型提案。</small>
+              </span>
+              <StatusBadge status="warning" label="HUMAN GATE" />
             </div>
           ) : null}
 

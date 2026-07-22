@@ -50,7 +50,7 @@ const workflows = [
 
 export function HelpCenterPage(): JSX.Element {
   return (
-    <div className="page help-center-page">
+    <div className="page institutional-workbench help-center-page">
       <section className="help-hero">
         <div>
           <span className="page-kicker">QUANTAGENT WORKSTATION GUIDE</span>

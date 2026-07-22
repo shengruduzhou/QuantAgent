@@ -150,7 +150,7 @@ export function VnpyParityPage(): JSX.Element {
   }
 
   return (
-    <div className="page parity-page parity-page-v2">
+    <div className="page institutional-workbench parity-page parity-page-v2">
       <section className="parity-commandbar">
         <div>
           <span className="mono">GOVERNANCE / VN.PY PARITY</span>

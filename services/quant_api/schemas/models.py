@@ -233,6 +233,11 @@ class JobRequest(ApiModel):
     parameters: dict[str, str | int | float | bool | list[str] | None] = Field(default_factory=dict)
 
 
+class FactorReviewRequest(ApiModel):
+    action: Literal["approve", "revise", "reject", "deprecate"]
+    note: str = Field(min_length=3, max_length=2_000)
+
+
 class SearchEntity(ApiModel):
     id: str
     kind: str

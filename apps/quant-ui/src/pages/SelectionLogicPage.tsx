@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, CheckCircle, XCircle } from "@phosphor-icons/react";
+import { ArrowRight, Brain, CheckCircle, Database, FunnelSimple, ShieldCheck, Target, XCircle } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
 import type { SelectionRun } from "../api/types";
+import { useNavigate } from "react-router-dom";
 import { useApi } from "../hooks/useApi";
 import { EChart } from "../components/EChart";
 import { Panel } from "../components/Panel";
@@ -9,6 +10,7 @@ import { SelectionFunnel } from "../components/SelectionFunnel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatNumber } from "../utils/format";
+import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface RankingRow {
   symbol: string;
@@ -46,6 +48,7 @@ interface DecisionChain {
 }
 
 export function SelectionLogicPage(): JSX.Element {
+  const navigate = useNavigate();
   const runs = useApi<SelectionRun[]>(["selection-runs"], "/selection/runs");
   const [runId, setRunId] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -87,10 +90,19 @@ export function SelectionLogicPage(): JSX.Element {
   }, [ranking.data?.data]);
 
   if (runs.isLoading) return <StateView state="loading" />;
-  if (!runs.data?.data.length) return <StateView state="empty" detail="没有 hybrid_stock_pool selection run。" />;
+  if (!runs.data?.data.length) return <EmptySelectionWorkspace navigate={navigate} />;
 
   return (
-    <div className="page selection-page">
+    <div className="page institutional-workbench selection-page">
+      <WorkbenchHeader eyebrow="STRATEGY RESEARCH / SELECTION" title="策略与选股工作站" description="Universe → liquidity → risk → factor → model → portfolio；输出研究排名与 target hint，不直接生成订单。" asOf={runs.data.data.find((run) => run.id === runId)?.asOfDate ?? "as-of unavailable"} context="PIT / T+1 / human gated" />
+      <WorkbenchMetricStrip metrics={[
+        { label: "运行目录", value: String(runs.data.data.length), detail: "persisted selection runs", tone: "info" },
+        { label: "最终候选", value: String(ranking.data?.data.filter((row) => row.included).length ?? 0), detail: `${ranking.data?.data.length ?? 0} ranked names`, tone: "positive" },
+        { label: "漏斗关卡", value: String(funnel.data?.data.length ?? 0), detail: "source-backed stages", tone: "info" },
+        { label: "Fallback", value: runs.data.data.find((run) => run.id === runId)?.usedFallback ? "已使用" : "未使用", detail: "explicit metadata", tone: runs.data.data.find((run) => run.id === runId)?.usedFallback ? "warning" : "positive" },
+        { label: "选中排名", value: selected?.finalRank ? `#${selected.finalRank}` : "—", detail: selected?.symbol ?? "no selection", tone: "info" },
+        { label: "决策链", value: String(chain.data?.data.gates.length ?? 0), detail: chain.data?.data.finalDecision ?? "trace unavailable", tone: chain.data?.data ? "positive" : "neutral" },
+      ]} />
       <section className="workbench-toolbar">
         <label>
           <span>选股运行</span>
@@ -181,6 +193,39 @@ export function SelectionLogicPage(): JSX.Element {
       </section>
     </div>
   );
+}
+
+function EmptySelectionWorkspace({ navigate }: { navigate: ReturnType<typeof useNavigate> }): JSX.Element {
+  const gates = [
+    { icon: Database, order: "01", title: "Universe / PIT", detail: "等待 hybrid stock pool 与 as-of 契约" },
+    { icon: ShieldCheck, order: "02", title: "Liquidity / Risk", detail: "等待流动性、ST、涨跌停与风险事件" },
+    { icon: FunnelSimple, order: "03", title: "Factor scoring", detail: "等待已审核因子和 feature policy" },
+    { icon: Brain, order: "04", title: "Model ranking", detail: "等待注册模型、预测与校准证据" },
+    { icon: Target, order: "05", title: "Research portfolio", detail: "只输出 ranking / target hint，不生成订单" },
+  ];
+  return <div className="institutional-workbench selection-page selection-empty-page">
+    <WorkbenchHeader eyebrow="STRATEGY RESEARCH / SELECTION" title="策略与选股工作站" description="Universe → liquidity → risk → factor → model → portfolio；缺少运行时展示可执行的研究准备路径。" context="research ranking only" />
+    <WorkbenchMetricStrip metrics={[
+      { label: "Selection runs", value: "0", detail: "persisted runs", tone: "neutral", icon: FunnelSimple },
+      { label: "Universe", value: "—", detail: "artifact required", tone: "warning", icon: Database },
+      { label: "Risk gates", value: "—", detail: "evidence required", tone: "warning", icon: ShieldCheck },
+      { label: "Factor policy", value: "—", detail: "reviewed factors only", tone: "ai", icon: FunnelSimple },
+      { label: "Model rank", value: "—", detail: "registered model only", tone: "ai", icon: Brain },
+      { label: "Orders", value: "LOCKED", detail: "research output only", tone: "positive", icon: Target },
+    ]} />
+    <section className="selection-empty-grid">
+      <WorkbenchPanel eyebrow="DECISION PIPELINE" title="研究决策链" meta="waiting for persisted run" className="selection-empty-chain">
+        <div className="selection-empty-gates">{gates.map(({ icon: GateIcon, order, title, detail }) => <article key={order}><span>{order}</span><GateIcon size={18} weight="duotone" /><div><strong>{title}</strong><small>{detail}</small></div><i>PENDING</i></article>)}</div>
+      </WorkbenchPanel>
+      <WorkbenchPanel eyebrow="RUN READINESS" title="启动前证据" meta="fail closed">
+        <div className="selection-readiness-list"><span><CheckCircle size={15} />PIT universe contract</span><span><CheckCircle size={15} />Tradability and T+1 guards</span><span><CheckCircle size={15} />Reviewed feature policy</span><span><CheckCircle size={15} />Model registry acceptance</span><span><CheckCircle size={15} />Persisted ranking artifact</span></div>
+        <TruthNotice tone="warning">任何一项不可用时保持研究态，不补造排名、评分或订单。</TruthNotice>
+      </WorkbenchPanel>
+      <WorkbenchPanel eyebrow="NEXT ACTION" title="恢复工作上下文" meta="two source-backed paths">
+        <ActionableState compact title="没有 Selection run" detail="检查数据与 lineage，或从受治理任务配置创建研究运行。" icon={FunnelSimple} primary={{ label: "检查 Pipeline", onClick: () => navigate("/runtime?view=lineage") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=selection") }} />
+      </WorkbenchPanel>
+    </section>
+  </div>;
 }
 
 function ScorePill({ label, value, reverse = false }: { label: string; value?: number | null; reverse?: boolean }): JSX.Element {

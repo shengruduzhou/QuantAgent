@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from services.quant_api.adapters.utils import page_slice
 from services.quant_api.config import safe_project_path
 from services.quant_api.runtime_indexer.parsers import parser_for
-from services.quant_api.schemas.models import CleanupRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
+from services.quant_api.schemas.models import CleanupRequest, FactorReviewRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
 
 
 router = APIRouter(prefix="/api")
@@ -482,6 +482,22 @@ async def factor_explanation(request: Request, factor_name: str) -> dict:
     return response(data)
 
 
+@router.get("/factors/{factor_name}/reviews")
+async def factor_reviews(request: Request, factor_name: str) -> dict:
+    if services(request).factors.get(factor_name) is None:
+        raise HTTPException(404, "factor not found")
+    data = services(request).factors.reviews(factor_name)
+    return response(data, status="ready" if data else "empty")
+
+
+@router.post("/factors/{factor_name}/reviews")
+async def create_factor_review(request: Request, factor_name: str, body: FactorReviewRequest) -> dict:
+    try:
+        return response(services(request).factors.record_review(factor_name, body.action, body.note))
+    except KeyError:
+        raise HTTPException(404, "factor not found")
+
+
 @router.get("/factors/{factor_name}/backtest")
 async def factor_backtest(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
@@ -707,6 +723,11 @@ async def create_train_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "train", body)
 
 
+@router.post("/jobs/factor-discovery")
+async def create_factor_discovery_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "factor-discovery", body)
+
+
 @router.post("/jobs/infer")
 async def create_infer_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "infer", body)
@@ -714,7 +735,7 @@ async def create_infer_job(request: Request, body: JobRequest) -> dict:
 
 @router.post("/jobs/{job_type}/validate")
 async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
-    if job_type not in {"data", "backtest", "train", "infer"}:
+    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery"}:
         raise HTTPException(404, "job type not found")
     try:
         return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))
