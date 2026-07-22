@@ -77,6 +77,10 @@ export function AppShell(): JSX.Element {
     }
   };
 
+  const openVnpyDocs = (): void => {
+    window.open("https://www.vnpy.com/docs/cn/index.html", "_blank", "noopener,noreferrer");
+  };
+
   return (
     <div className={`app-frame terminal-frame ${layout.launcherCollapsed ? "sidebar-collapsed" : ""} ${layout.activityOpen ? "activity-open" : ""}`}>
       <aside className="sidebar terminal-launcher">
@@ -107,9 +111,12 @@ export function AppShell(): JSX.Element {
       </aside>
 
       <header className="topbar terminal-topbar">
-        <div className="terminal-menu">
-          <button onClick={() => setPaletteOpen(true)}>模块 <CaretDown size={11} /></button>
-          <span>视图</span><span>数据</span><span>研究</span><span>帮助</span>
+        <div className="terminal-menu" aria-label="终端菜单">
+          <button onClick={() => setPaletteOpen(true)} title="打开模块启动器">模块 <CaretDown size={11} /></button>
+          <button onClick={layout.resetLayout} title="恢复默认工作区布局">还原布局</button>
+          <button onClick={() => navigate("/runtime")} title="打开 Runtime / DataManager">数据</button>
+          <button onClick={() => navigate("/factors")} title="打开因子研究工作区">研究</button>
+          <button onClick={openVnpyDocs} title="打开 VeighNa 官方文档">帮助</button>
         </div>
         <form className="global-search" onSubmit={submitSearch}>
           <MagnifyingGlass size={16} />
@@ -156,7 +163,7 @@ export function AppShell(): JSX.Element {
           <div className="api-banner">
             <Warning size={18} />
             <span>Quant API 未连接；页面保持真实空数据态，不使用模拟结果。</span>
-            <code>python3 -m services.quant_api</code>
+            <code>在仓库根目录执行：python -m services.quant_api</code>
           </div>
         ) : null}
         <Outlet />
