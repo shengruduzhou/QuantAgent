@@ -1,6 +1,6 @@
 {
   "schemaVersion": "quantagent.vnpy-refactor-state.v1",
-  "updatedAt": "2026-07-22T20:20:00+09:00",
+  "updatedAt": "2026-07-22T21:05:00+09:00",
   "repository": "shengruduzhou/QuantAgent",
   "authority": {
     "repository": "vnpy/vnpy",
@@ -40,14 +40,15 @@
     ],
     "validation": {
       "staticReview": "complete",
-      "pythonSyntax": "pending_local_subset",
+      "pythonSyntax": "passed_remote_branch_ast_parse",
       "frontendTypecheck": "pending_github_actions",
       "focusedTests": "pending_github_actions",
       "fullFrontendTests": "pending_github_actions",
       "fullPythonSuite": "pending_github_actions",
       "productionBuild": "pending_github_actions",
       "browserVerification": "pending_local",
-      "realProviderRuns": "pending_operator_environment"
+      "realProviderRuns": "pending_operator_environment",
+      "frontendSyntax": "passed_esbuild_syntax_bundle"
     }
   },
   "completedSlices": [

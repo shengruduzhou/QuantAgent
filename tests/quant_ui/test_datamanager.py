@@ -18,14 +18,19 @@ def request(app, method: str, url: str, **kwargs):
     return asyncio.run(run())
 
 
-def test_data_provider_registry_is_explicit_and_never_exposes_credentials(quant_ui_settings) -> None:
+def test_data_provider_registry_is_explicit_and_never_exposes_credentials(quant_ui_settings, monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "do-not-expose-this-token")
+
     result = request(create_app(quant_ui_settings), "GET", "/api/data/providers")
 
     assert result.status_code == 200
     payload = result.json()["data"]
     assert payload["supportsCancellation"] is True
     assert any(provider["id"] == "runtime_catalog" for provider in payload["providers"])
-    assert "TUSHARE_TOKEN" not in result.text or "missingRequirements" in result.text
+    tushare = next(provider for provider in payload["providers"] if provider["id"] == "tushare_fundamentals")
+    assert tushare["configured"] is True
+    assert tushare["missingRequirements"] == []
+    assert "do-not-expose-this-token" not in result.text
     assert "tokenValue" not in result.text
 
 

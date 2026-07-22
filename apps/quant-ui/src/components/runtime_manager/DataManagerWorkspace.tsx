@@ -57,6 +57,8 @@ export function DataManagerWorkspace(): JSX.Element {
     && startDate
     && endDate
     && outputPath.trim()
+    && (providerId !== "qlib_local" || providerUri.trim())
+    && (providerId !== "tushare_fundamentals" || currentProvider.configured)
     && (!needsNetwork || networkApproved),
   );
 
@@ -140,7 +142,7 @@ export function DataManagerWorkspace(): JSX.Element {
                 onClick={() => selectProvider(provider)}
               >
                 <span><strong>{provider.label}</strong><small>{provider.assetClasses.join(" · ")} · {provider.intervals.join(" · ")}</small></span>
-                <StatusBadge status={provider.status} label={provider.status === "ready" ? "可用" : provider.status === "needs_configuration" ? "需配置" : "未安装"} />
+                <StatusBadge status={provider.status === "needs_configuration" ? "warning" : provider.status} label={provider.status === "ready" ? "可用" : provider.status === "needs_configuration" ? "需配置" : "未安装"} />
                 <p>{provider.note}</p>
               </button>
             ))}

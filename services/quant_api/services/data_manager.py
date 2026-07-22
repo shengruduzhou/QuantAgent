@@ -40,7 +40,6 @@ PROVIDERS: tuple[DataProviderSpec, ...] = (
         asset_classes=("A股",),
         intervals=("1d",),
         operations=("query", "export"),
-        requires=("provider_uri",),
         note="读取已安装的本地 Qlib provider；网页任务不会隐式下载官方数据包。",
     ),
     DataProviderSpec(
