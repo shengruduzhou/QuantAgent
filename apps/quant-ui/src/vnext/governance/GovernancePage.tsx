@@ -60,8 +60,18 @@ interface U0Status {
   coverageByBoard?: Record<string, number>;
   boardsAbsent?: string[];
   blockedByData?: number;
+  coverageBacklogFetchable?: number;
+  retryClassCounts?: Record<string, number>;
+  providerFailures?: number;
   pitGate?: Record<string, string>;
   pitFieldAvailability?: Record<string, string>;
+  survivorshipBias?: {
+    delisted_total?: number;
+    delisted_with_bar_history?: number;
+    delisted_with_delisting_date?: number;
+    delisted_fraction_of_master?: number;
+  };
+  starBseProbe?: Record<string, string>;
   coveredBarHistory?: number;
   backfill?: {
     masterSecurities?: number;
@@ -263,8 +273,13 @@ export function GovernancePage(): JSX.Element {
               <div><dt>训练许可</dt><dd>{yesNo(u0.trainingPermitted)}</dd></div>
               <div><dt>关卡</dt><dd>{Object.entries(u0.gatePass ?? {}).map(([g, ok]) => `${g}:${ok ? "PASS" : "FAIL"}`).join(" · ")}</dd></div>
               <div><dt>覆盖行情（票数）</dt><dd>{u0.coveredBarHistory ?? "—"}</dd></div>
-              <div><dt>缺失 / BLOCKED_BY_DATA</dt><dd>{u0.blockedByData ?? "—"}</dd></div>
+              <div><dt>BLOCKED_BY_DATA</dt><dd>{u0.blockedByData ?? "—"}</dd></div>
+              <div><dt>可取回未回填（backlog）</dt><dd>{u0.coverageBacklogFetchable ?? "—"}</dd></div>
+              <div><dt>供应商空响应</dt><dd>{u0.providerFailures ?? "—"}</dd></div>
               <div><dt>缺席板块</dt><dd>{u0.boardsAbsent?.length ? u0.boardsAbsent.join(", ") : "无"}</dd></div>
+              <div><dt>退市生存者偏差</dt><dd>{u0.survivorshipBias?.delisted_total != null ? `${u0.survivorshipBias.delisted_with_bar_history ?? 0}/${u0.survivorshipBias.delisted_total} 有行情, ${u0.survivorshipBias.delisted_with_delisting_date ?? 0} 有退市日` : "—"}</dd></div>
+              <div><dt>STAR/BSE 探针</dt><dd>{u0.starBseProbe && Object.keys(u0.starBseProbe).length ? Object.entries(u0.starBseProbe).map(([b, d]) => `${b}:${d}`).join(" · ") : "—"}</dd></div>
+              <div><dt>回填进度（staged）</dt><dd>{u0.backfill?.stagedBackfillFiles ?? "—"} · 缺 {u0.backfill?.missingSymbols ?? "—"}</dd></div>
             </dl>
             <div className="governance-boards">
               <h3>已覆盖板块</h3>
