@@ -81,6 +81,39 @@ interface U0Status {
   } | null;
 }
 
+interface U0BarPitStatus {
+  status: string;
+  barReadiness?: {
+    decision?: string;
+    gatePass?: Record<string, boolean>;
+    coveredByBoard?: Record<string, number>;
+    boardsAbsent?: string[];
+    fetchableBacklog?: number;
+    panelSha256?: string;
+  };
+  strictPitReadiness?: {
+    decision?: string;
+    trainingPermitted?: boolean;
+    blockedPitFields?: string[];
+  };
+  pitSourceAudit?: Record<string, string>;
+  tickflowBenchmark?: {
+    sdkVersion?: string;
+    count10000Works?: boolean;
+    batchEntitled?: boolean;
+    measuredRatePerMin?: number;
+    recommendedPath?: string;
+    old100BarCause?: string;
+  };
+  bseIdentity?: {
+    decision?: string;
+    authoritativeCount?: number;
+    masterCount?: number;
+    truePlaceholders?: string[];
+    missingFromMaster?: string[];
+  };
+}
+
 interface LineageStatus {
   status: string;
   reason?: string;
@@ -104,6 +137,7 @@ interface GovernanceStatus {
   shadow: ShadowStatus;
   s4: S4Status;
   u0: U0Status;
+  u0BarPit?: U0BarPitStatus;
   lineage: LineageStatus;
   governedCommands: GovernedCommand[];
   blinding: string;
@@ -312,6 +346,50 @@ export function GovernancePage(): JSX.Element {
           )}
         </div>
       </WorkbenchPanel>
+
+      {data.u0BarPit && data.u0BarPit.status === "ready" ? (
+        <WorkbenchPanel
+          eyebrow="U0 · H-032B"
+          title="条数据就绪 vs 严格 PIT 就绪（分列）"
+          meta={data.u0BarPit.tickflowBenchmark?.count10000Works ? "TickFlow count=10000 native" : "TickFlow"}
+        >
+          <div className="governance-grid">
+            <dl className="governance-facts">
+              <div><dt>条数据就绪（bar）</dt><dd>{data.u0BarPit.barReadiness?.decision ?? "—"}</dd></div>
+              <div><dt>bar 关卡</dt><dd>{Object.entries(data.u0BarPit.barReadiness?.gatePass ?? {}).map(([g, ok]) => `${g}:${ok ? "PASS" : "FAIL"}`).join(" · ") || "—"}</dd></div>
+              <div><dt>严格 PIT 就绪</dt><dd>{data.u0BarPit.strictPitReadiness?.decision ?? "—"}</dd></div>
+              <div><dt>训练许可（PIT 门）</dt><dd>{yesNo(data.u0BarPit.strictPitReadiness?.trainingPermitted)}</dd></div>
+              <div><dt>PIT 阻塞字段</dt><dd>{data.u0BarPit.strictPitReadiness?.blockedPitFields?.length ? data.u0BarPit.strictPitReadiness.blockedPitFields.join(", ") : "无"}</dd></div>
+              <div><dt>bar 缺席板块</dt><dd>{data.u0BarPit.barReadiness?.boardsAbsent?.length ? data.u0BarPit.barReadiness.boardsAbsent.join(", ") : "无"}</dd></div>
+            </dl>
+            <div className="governance-boards">
+              <h3>TickFlow 能力基准</h3>
+              <dl className="governance-facts">
+                <div><dt>SDK</dt><dd>{data.u0BarPit.tickflowBenchmark?.sdkVersion ?? "—"}</dd></div>
+                <div><dt>count=10000</dt><dd>{yesNo(data.u0BarPit.tickflowBenchmark?.count10000Works)}</dd></div>
+                <div><dt>batch 授权</dt><dd>{yesNo(data.u0BarPit.tickflowBenchmark?.batchEntitled)}</dd></div>
+                <div><dt>实测限速</dt><dd>{data.u0BarPit.tickflowBenchmark?.measuredRatePerMin ?? "—"} req/min</dd></div>
+              </dl>
+              <h3>BSE 身份</h3>
+              <dl className="governance-facts">
+                <div><dt>判定</dt><dd>{data.u0BarPit.bseIdentity?.decision ?? "—"}</dd></div>
+                <div><dt>权威/master</dt><dd>{data.u0BarPit.bseIdentity?.authoritativeCount ?? "—"} / {data.u0BarPit.bseIdentity?.masterCount ?? "—"}</dd></div>
+                <div><dt>真占位码</dt><dd>{data.u0BarPit.bseIdentity?.truePlaceholders?.length ? data.u0BarPit.bseIdentity.truePlaceholders.join(",") : "0（无占位）"}</dd></div>
+              </dl>
+            </div>
+          </div>
+          <ul className="governance-pit">
+            {Object.entries(data.u0BarPit.pitSourceAudit ?? {}).map(([field, state]) => (
+              <li key={field} className={String(state).includes("REQUIRED") || String(state).includes("BLOCKED") ? "blocked" : ""}>
+                <strong>{field}</strong><span>{state}</span>
+              </li>
+            ))}
+          </ul>
+          <TruthNotice tone="info">
+            条数据就绪仅解锁 smoke 测试（数据集构建 / 特征物化 / 内存基准 / CLI 校验）；正式训练需严格 PIT 就绪 = FULL_UNIVERSE_DATA_READY。
+          </TruthNotice>
+        </WorkbenchPanel>
+      ) : null}
 
       <WorkbenchPanel eyebrow="TRACK I" title="分支与架构血缘" meta={lineage.integrationBranch ?? "unavailable"}>
         {lineage.status !== "ready" ? (

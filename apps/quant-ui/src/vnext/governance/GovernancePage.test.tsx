@@ -55,6 +55,14 @@ const NOT_READY: unknown = {
     coveredBarHistory: 4030,
     backfill: { masterSecurities: 5888, panelSymbols: 4030, missingSymbols: 1858, stagedBackfillFiles: 159 },
   },
+  u0BarPit: {
+    status: "ready",
+    barReadiness: { decision: "U0_BAR_NOT_READY_COVERAGE", gatePass: { identity: true, provider: true, coverage: false, quality: false }, coveredByBoard: { BSE: 54, STAR: 24 }, boardsAbsent: [], fetchableBacklog: 936, panelSha256: "abc123" },
+    strictPitReadiness: { decision: "FULL_UNIVERSE_DATA_NOT_READY_PIT", trainingPermitted: false, blockedPitFields: ["st_intervals", "suspension_intervals", "delisting_intervals", "corporate_action_identity"] },
+    pitSourceAudit: { st_intervals: "ALTERNATIVE_SOURCE_REQUIRED", corporate_action_identity: "ALTERNATIVE_SOURCE_REQUIRED" },
+    tickflowBenchmark: { sdkVersion: "0.1.22", count10000Works: true, batchEntitled: false, measuredRatePerMin: 10, recommendedPath: "single get(count=10000)", old100BarCause: "MISSING count PARAMETER" },
+    bseIdentity: { decision: "BSE_IDENTITY_CURRENT_RESOLVED", authoritativeCount: 329, masterCount: 327, truePlaceholders: [], missingFromMaster: ["920079", "920117"] },
+  },
   lineage: {
     status: "ready",
     headCommit: "731e61172121b5338a6f7e7d655d59432ccac6d0",
@@ -98,6 +106,10 @@ test("renders governed operational state without any candidate performance", asy
   // H-032A: survivorship + STAR/BSE probe diagnosis are surfaced
   expect(screen.getByText(/226\/358 有行情/)).toBeInTheDocument();
   expect(screen.getByText(/STAR:FETCHABLE_NOT_PROBED/)).toBeInTheDocument();
+  // H-032B: bar vs strict-PIT decisions shown separately, benchmark + BSE identity
+  expect(screen.getByText("U0_BAR_NOT_READY_COVERAGE")).toBeInTheDocument();
+  expect(screen.getAllByText("FULL_UNIVERSE_DATA_NOT_READY_PIT").length).toBeGreaterThan(0);
+  expect(screen.getByText("BSE_IDENTITY_CURRENT_RESOLVED")).toBeInTheDocument();
 
   // NO performance token may appear as a standalone word in the DOM
   // (word boundaries avoid false positives such as "nav" inside "unavailable").

@@ -143,6 +143,52 @@ class GovernanceService:
             "backfill": backfill,
         }
 
+    def _u0_h032b(self) -> dict[str, Any]:
+        """H-032B: bar readiness vs strict PIT readiness reported SEPARATELY."""
+        bar = self._read_json("data/u0/u0_bar_readiness_certificate.json")
+        pit = self._read_json("data/u0/u0_strict_pit_certificate.json")
+        bench = self._read_json("reports/h032b/tickflow_capability_benchmark.json")
+        bse = self._read_json("data/u0/bse_identity_audit.json")
+        src = self._read_json("data/u0/pit_source_audit.json")
+        out: dict[str, Any] = {"status": "ready" if (bar or pit) else "unavailable"}
+        if bar:
+            out["barReadiness"] = {
+                "decision": bar.get("decision"),
+                "gatePass": bar.get("gate_pass", {}),
+                "coveredByBoard": bar.get("coverage", {}).get("covered_by_board", {}),
+                "boardsAbsent": bar.get("coverage", {}).get("boards_absent", []),
+                "fetchableBacklog": bar.get("coverage", {}).get("fetchable_not_probed_backlog"),
+                "panelSha256": bar.get("panel", {}).get("sha256"),
+            }
+        if pit:
+            out["strictPitReadiness"] = {
+                "decision": pit.get("decision"),
+                "trainingPermitted": pit.get("training_permitted"),
+                "blockedPitFields": pit.get("blocked_pit_fields", []),
+            }
+        if src:
+            out["pitSourceAudit"] = {f: v.get("tickflow") for f, v in (src.get("fields") or {}).items()}
+        if bench:
+            d = bench.get("diagnosis", {})
+            out["tickflowBenchmark"] = {
+                "sdkVersion": bench.get("sdk_version"),
+                "count10000Works": d.get("count_10000_works"),
+                "batchEntitled": d.get("batch_mode_entitled"),
+                "measuredRatePerMin": (bench.get("rate_limit_probe", {})
+                                       .get("measured_hard_limit_per_min")),
+                "recommendedPath": d.get("recommended_path"),
+                "old100BarCause": d.get("old_100_bar_cause"),
+            }
+        if bse:
+            out["bseIdentity"] = {
+                "decision": bse.get("identity_decision"),
+                "authoritativeCount": bse.get("authoritative_bse_count"),
+                "masterCount": bse.get("u0_master_bse_count"),
+                "truePlaceholders": bse.get("true_placeholder_codes_in_master"),
+                "missingFromMaster": bse.get("in_authoritative_not_master"),
+            }
+        return out
+
     def _lineage(self) -> dict[str, Any]:
         lin = self._read_json("reports/h031/branch_lineage.json")
         if lin is None:
@@ -162,7 +208,9 @@ class GovernanceService:
         from services.quant_api.services.jobs import COMMANDS
         ids = ("validate-shadow-days", "certify-s4-batch-replay", "build-u0-security-master",
                "report-u0-provider-coverage", "assemble-u0-full-universe",
-               "audit-u0-full-universe", "backfill-u0-market-panel", "probe-u0-star-bse")
+               "audit-u0-full-universe", "backfill-u0-market-panel", "probe-u0-star-bse",
+               "benchmark-tickflow-capability", "audit-bse-identity",
+               "audit-u0-pit-readiness", "report-u0-bar-readiness")
         out = []
         for cid in ids:
             spec = COMMANDS.get(cid)
@@ -180,6 +228,7 @@ class GovernanceService:
             "shadow": self._shadow(),
             "s4": self._s4(),
             "u0": self._u0(),
+            "u0BarPit": self._u0_h032b(),
             "lineage": self._lineage(),
             "governedCommands": self._governed_commands(),
             "blinding": "existence- and gate-level fields only; no candidate performance",
