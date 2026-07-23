@@ -121,6 +121,7 @@ class GovernanceService:
                 "missingSymbols": manifest.get("missing_symbols"),
                 "stagedBackfillFiles": manifest.get("staged_backfill_files"),
             }
+        probe = self._read_json("data/u0/star_bse_probe_report.json")
         return {
             "status": "ready",
             "dataReadinessState": cert.get("data_readiness_state"),
@@ -129,10 +130,15 @@ class GovernanceService:
             "coverageByBoard": coverage_gate.get("covered_by_board", {}),
             "boardsAbsent": coverage_gate.get("boards_absent", []),
             "blockedByData": coverage_gate.get("blocked_by_data"),
+            "coverageBacklogFetchable": coverage_gate.get("coverage_backlog_fetchable"),
+            "retryClassCounts": (cov or {}).get("retry_class_counts", {}),
+            "providerFailures": (cov or {}).get("tickflow_empty"),
             "pitGate": {k: gates.get("pit", {}).get(k) for k in (
                 "st_history", "suspension_history", "delisting_status",
                 "board_price_limits", "ipo_special_limit", "corporate_actions")},
             "pitFieldAvailability": (pit or {}).get("pit_field_availability", {}),
+            "survivorshipBias": (pit or {}).get("survivorship_bias", {}),
+            "starBseProbe": (probe or {}).get("diagnosis", {}),
             "coveredBarHistory": (cov or {}).get("covered_bar_history"),
             "backfill": backfill,
         }
@@ -156,7 +162,7 @@ class GovernanceService:
         from services.quant_api.services.jobs import COMMANDS
         ids = ("validate-shadow-days", "certify-s4-batch-replay", "build-u0-security-master",
                "report-u0-provider-coverage", "assemble-u0-full-universe",
-               "audit-u0-full-universe", "backfill-u0-market-panel")
+               "audit-u0-full-universe", "backfill-u0-market-panel", "probe-u0-star-bse")
         out = []
         for cid in ids:
             spec = COMMANDS.get(cid)

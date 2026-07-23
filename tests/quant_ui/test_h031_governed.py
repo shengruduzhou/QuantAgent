@@ -23,7 +23,9 @@ H031_COMMANDS = (
     ("data", "assemble-u0-full-universe"),
     ("data", "audit-u0-full-universe"),
     ("data", "backfill-u0-market-panel"),
+    ("data", "probe-u0-star-bse"),
 )
+NETWORK_COMMANDS = {"backfill-u0-market-panel", "probe-u0-star-bse"}
 
 
 # --- allowlist ---------------------------------------------------------------
@@ -51,28 +53,51 @@ def test_governed_commands_have_no_free_form_shell_field(job_type, command_id) -
 def test_default_u0_commands_validate_parameterless(quant_ui_settings) -> None:
     jm = JobManager(quant_ui_settings)
     for job_type, command_id in H031_COMMANDS:
-        params = {"allow_network": True} if command_id == "backfill-u0-market-panel" else {}
+        params = {"allow_network": True} if command_id in NETWORK_COMMANDS else {}
         result = jm.validate(job_type, command_id, params)
         assert result["valid"] is True
         assert result["entrypoint"].startswith("scripts/")
 
 
-# --- network gate ------------------------------------------------------------
-def test_backfill_requires_explicit_network_confirmation(quant_ui_settings) -> None:
+def test_backfill_accepts_priority_boards_and_rejects_unknown(quant_ui_settings) -> None:
     jm = JobManager(quant_ui_settings)
-    with pytest.raises(ValueError, match="allow_network"):
-        jm.validate("data", "backfill-u0-market-panel", {"max_minutes": 30})
-    # explicit confirmation passes
-    assert jm.validate("data", "backfill-u0-market-panel", {"allow_network": True})["valid"]
+    assert jm.validate("data", "backfill-u0-market-panel",
+                       {"allow_network": True, "priority_boards": "STAR,BSE", "max_minutes": 20})["valid"]
+    with pytest.raises(ValueError, match="unsupported parameters"):
+        jm.validate("data", "backfill-u0-market-panel", {"allow_network": True, "board": "STAR"})
 
 
-def test_only_backfill_declares_a_network_control() -> None:
+# --- network gate ------------------------------------------------------------
+def test_network_commands_require_explicit_confirmation(quant_ui_settings) -> None:
+    jm = JobManager(quant_ui_settings)
+    for command_id in NETWORK_COMMANDS:
+        with pytest.raises(ValueError, match="allow_network"):
+            jm.validate("data", command_id, {})
+        assert jm.validate("data", command_id, {"allow_network": True})["valid"]
+
+
+def test_only_network_commands_declare_a_network_control() -> None:
     for _, command_id in H031_COMMANDS:
         control = COMMANDS[command_id].get("control", set())
-        if command_id == "backfill-u0-market-panel":
+        if command_id in NETWORK_COMMANDS:
             assert control == {"allow_network"}
         else:
             assert not control
+
+
+@pytest.mark.parametrize("entrypoint,args", [
+    ("scripts/u0_star_bse_probe.py", []),
+    ("scripts/u0_full_universe_backfill.py", ["fetch"]),
+])
+def test_network_scripts_fail_closed_without_allow_network(entrypoint, args) -> None:
+    """The backend scripts themselves refuse (exit 2) before any vendor call."""
+    import subprocess
+    import sys
+    repo = Path(__file__).resolve().parents[2]
+    proc = subprocess.run([sys.executable, str(repo / entrypoint), *args],
+                          capture_output=True, text=True, cwd=repo, timeout=60)
+    assert proc.returncode == 2
+    assert "allow-network" in (proc.stdout + proc.stderr) or "refusing" in (proc.stdout + proc.stderr)
 
 
 # --- path / param safety -----------------------------------------------------
@@ -128,7 +153,7 @@ def test_governance_reports_unavailable_when_manifests_missing(empty_quant_ui_se
     assert status["shadow"]["status"] == "unavailable"
     assert status["u0"]["status"] == "unavailable"
     assert status["s4"]["status"] == "unavailable"
-    assert len(status["governedCommands"]) == 7
+    assert len(status["governedCommands"]) == 8
 
 
 # --- governance surface: honest ready extraction -----------------------------

@@ -158,6 +158,15 @@ def cmd_fetch(args) -> int:
 
     todo = [s for s in sorted(master["symbol"].astype(str).unique())
             if s not in panel_syms and s not in done]
+    # H-032A: prioritise under-covered boards (STAR/BSE) so a bounded nightly run
+    # closes the mission boards first instead of alphabetical order.
+    priority = [b for b in (args.priority_boards or "").split(",") if b]
+    if priority:
+        board_of = dict(zip(master["symbol"].astype(str), master["board"].astype(str)))
+        pri = set(priority)
+        todo.sort(key=lambda s: (board_of.get(s, "") not in pri, s))
+        n_pri = sum(1 for s in todo if board_of.get(s, "") in pri)
+        print(f"priority boards {priority}: {n_pri} symbols moved to the front", flush=True)
     print(f"master {len(master)} | already in frozen panel {len(panel_syms & set(master['symbol']))} "
           f"| staged {len(done)} | todo {len(todo)} | prior failures {len(prior_failed)}", flush=True)
     if not todo:
@@ -334,6 +343,8 @@ def main() -> int:
     f.add_argument("--max-minutes", type=float, default=240)
     f.add_argument("--allow-network", action="store_true",
                    help="explicit confirmation required before any vendor call")
+    f.add_argument("--priority-boards", default="",
+                   help="comma-separated boards fetched first, e.g. STAR,BSE")
     sub.add_parser("assemble")
     args = ap.parse_args()
     return cmd_fetch(args) if args.cmd == "fetch" else cmd_assemble(args)

@@ -51,6 +51,18 @@ def build() -> dict:
     delist_dates_available = int(m["delisting_date"].notna().sum())
     delisted_status = int((m["status"] == "delisted").sum())
 
+    # survivorship-bias quantification: how many delisted names actually carry bars?
+    covered_syms: set[str] = set()
+    panel = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
+    if panel.exists():
+        covered_syms |= set(pd.read_parquet(panel, columns=["symbol"])["symbol"].astype(str).unique())
+    staging = REPO / "runtime/data/v7/full_universe/_staging"
+    if staging.exists():
+        covered_syms |= {f.stem.replace("sym_", "").replace("_", ".") for f in staging.glob("sym_*.parquet")}
+    delisted_syms = set(m.loc[m["status"] == "delisted", "symbol"])
+    delisted_with_bars = len(delisted_syms & covered_syms)
+    now_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
     out = pd.DataFrame({
         "symbol": m["symbol"],
         # no historical code-migration table on disk (BSE/older-code remaps unknown)
@@ -102,6 +114,33 @@ def build() -> dict:
             "ipo_special_limit_rule": "AVAILABLE (preregistered 60-td window)",
             "corporate_action_identity": f"{BLOCKED} — not verified for the full-universe cohort",
             "historical_symbol_migration": f"{BLOCKED} — no code-migration table (BSE/older-code remaps)",
+        },
+        # §8: every PIT record must carry provenance; unavailable = BLOCKED_BY_DATA, not false.
+        "pit_field_provenance": {
+            "listing_date": {"available_at": "exchange listing", "source": "exchange_metadata",
+                             "source_timestamp": now_ts, "source_hash": src_hash},
+            "board_security_type": {"available_at": "exchange listing", "source": "exchange_metadata",
+                                    "source_timestamp": now_ts, "source_hash": src_hash},
+            "historical_price_limit_rule": {"available_at": "current snapshot", "source": "board_rule_table",
+                                            "source_timestamp": now_ts, "source_hash": src_hash,
+                                            "caveat": "current-snapshot only; time-varying history not tracked"},
+            "ipo_special_limit_rule": {"available_at": "preregistered", "source": "H028_rule",
+                                       "source_timestamp": now_ts, "source_hash": src_hash},
+            "delisting_date": BLOCKED, "st_intervals": BLOCKED, "suspension_intervals": BLOCKED,
+            "corporate_action_identity": BLOCKED, "historical_symbol_migration": BLOCKED,
+        },
+        "survivorship_bias": {
+            "master_securities": int(len(out)),
+            "delisted_total": delisted_status,
+            "delisted_with_delisting_date": delist_dates_available,
+            "delisted_with_bar_history": delisted_with_bars,
+            "delisted_fraction_of_master": round(delisted_status / max(1, len(out)), 4),
+            "delisted_history_gap": delisted_status - delisted_with_bars,
+            "assessment": (f"{delisted_status} delisted names ({round(100*delisted_status/max(1,len(out)),1)}% of "
+                           f"master); {delisted_with_bars} carry any bar history and {delist_dates_available} carry "
+                           f"a delisting date. Delisting-date + interval history is BLOCKED_BY_DATA. A universe that "
+                           f"silently drops delisted names is survivorship-biased; FULL_UNIVERSE_DATA_READY is "
+                           f"withheld unless a preregistered rule permits a bounded, quantified exclusion."),
         },
         "honesty_note": ("Missing ST / suspension / delisting-date / corporate-action intervals are marked "
                          "BLOCKED_BY_DATA, never fabricated or defaulted to false. This master is IDENTITY-"

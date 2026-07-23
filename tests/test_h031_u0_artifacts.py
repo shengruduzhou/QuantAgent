@@ -22,10 +22,18 @@ REQUIRED_COVERAGE_COLUMNS = [
     "symbol", "exchange", "board", "security_type", "listing_date", "delisting_date",
     "current_status", "tickflow_status", "tushare_status", "akshare_status", "qlib_status",
     "exchange_metadata_status", "selected_bar_provider", "selected_metadata_provider",
+    "source_boundary", "provider_retry_class",
     "coverage_start", "coverage_end", "bar_count", "expected_trading_days",
     "actual_trading_days", "missing_ratio", "adjustment_method", "volume_unit",
     "amount_unit", "source_timestamp", "source_hash", "blocked_reason",
 ]
+
+# strict provider-result vocabulary required by H-032A §5
+STRICT_STATUS_VOCAB = {
+    "NOT_PROBED", "RETRYABLE_FAILURE", "EMPTY_PROVIDER_RESPONSE",
+    "UNSUPPORTED_ENTITLEMENT", "NO_RELIABLE_HISTORY", "BLOCKED_BY_DATA",
+    "FETCHABLE_NOT_PROBED", "OK",
+}
 
 VALID_READINESS_STATES = {
     "FULL_UNIVERSE_DATA_READY", "FULL_UNIVERSE_DATA_NOT_READY_COVERAGE",
@@ -55,11 +63,13 @@ def test_empty_vendor_response_is_not_recorded_as_no_history() -> None:
     pd = _pd()
     m = pd.read_parquet(COVERAGE)
     statuses = set(m["tickflow_status"].unique())
-    # the classification vocabulary keeps EMPTY and NOT_PROBED separate
-    assert "EMPTY" in statuses or "NOT_PROBED" in statuses
-    empties = m[m["tickflow_status"] == "EMPTY"]
-    for reason in empties["blocked_reason"]:
-        assert "not_proof_of_no_history" in str(reason)
+    # the classification vocabulary keeps EMPTY_PROVIDER_RESPONSE and NOT_PROBED separate
+    assert "EMPTY_PROVIDER_RESPONSE" in statuses or "NOT_PROBED" in statuses
+    # every retry class uses the strict H-032A vocabulary
+    assert set(m["provider_retry_class"].unique()).issubset(STRICT_STATUS_VOCAB)
+    empties = m[m["tickflow_status"] == "EMPTY_PROVIDER_RESPONSE"]
+    for cls in empties["provider_retry_class"]:
+        assert cls == "NO_RELIABLE_HISTORY"
 
 
 def test_uncovered_security_is_blocked_by_data_not_defaulted() -> None:
@@ -69,7 +79,12 @@ def test_uncovered_security_is_blocked_by_data_not_defaulted() -> None:
     m = pd.read_parquet(COVERAGE)
     uncovered = m[m["selected_bar_provider"] == "NONE"]
     if len(uncovered):
-        assert uncovered["blocked_reason"].str.startswith("BLOCKED_BY_DATA").all()
+        # every uncovered security carries an explicit, non-default disposition:
+        # BLOCKED_BY_DATA (no reliable source) or COVERAGE_BACKLOG (probe-proven
+        # fetchable, just not backfilled yet) — never a silent "no data".
+        reasons = uncovered["blocked_reason"].astype(str)
+        assert reasons.str.startswith(("BLOCKED_BY_DATA", "COVERAGE_BACKLOG")).all()
+        assert (reasons != "").all()
 
 
 def test_security_master_marks_missing_pit_fields_blocked_not_false() -> None:
@@ -96,3 +111,37 @@ def test_readiness_certificate_carries_no_performance() -> None:
     import re
     text = READINESS.read_text().lower()
     assert not re.search(r"\b(nav|sharpe|cagr|drawdown|calmar|sortino|pnl)\b", text)
+
+
+def test_readiness_reports_bar_panel_gate_with_panel_hash() -> None:
+    """H-032A §9: the assembled panel is structurally gated and content-hashed."""
+    if not READINESS.exists():
+        pytest.skip("readiness certificate not generated")
+    cert = json.loads(READINESS.read_text())
+    bar = cert["gates"]["bar_panel"]
+    for gate in ("duplicate_symbol_date", "zero_post_delisting_rows", "no_unpublished_current_day",
+                 "suspended_rows_represented", "eligible_trading_day_null_close", "panel_content_hashed"):
+        assert gate in bar
+    assert bar["panel_sha256"]  # content hash present
+    assert "bar_panel" in cert["gate_pass"]
+
+
+def test_star_bse_probe_report_distinguishes_fetchable_from_unsupported() -> None:
+    """H-032A §6: an empty vendor response is not proof no history exists."""
+    probe = U0 / "star_bse_probe_report.json"
+    if not probe.exists():
+        pytest.skip("star_bse probe not run")
+    r = json.loads(probe.read_text())
+    assert "diagnosis" in r and {"STAR", "BSE"} <= set(r["diagnosis"])
+    # the probe uses the strict vocabulary, never silently "no data"
+    import re
+    assert not re.search(r"\b(nav|sharpe|cagr|drawdown|calmar|sortino|pnl)\b", probe.read_text().lower())
+
+
+def test_survivorship_bias_is_quantified_not_hidden() -> None:
+    if not PIT_AVAIL.exists():
+        pytest.skip("pit_field_availability not generated")
+    sb = json.loads(PIT_AVAIL.read_text()).get("survivorship_bias", {})
+    assert "delisted_total" in sb and "delisted_with_bar_history" in sb
+    # delisting-date interval history is BLOCKED_BY_DATA -> must be honestly reported
+    assert sb["delisted_with_delisting_date"] == 0

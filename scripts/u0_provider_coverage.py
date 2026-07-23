@@ -113,6 +113,16 @@ def build() -> dict:
     panel_max = max(calendar) if calendar else pd.NaT
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+    # H-032A: a representative probe tells us whether an as-yet-unfetched board is
+    # actually FETCHABLE (so NOT_PROBED means backlog, not "no data") vs unsupported.
+    probe = REPO / "runtime/data/u0/star_bse_probe_report.json"
+    fetchable_boards = set()
+    if probe.exists():
+        pr = json.loads(probe.read_text())
+        for board, diag in pr.get("diagnosis", {}).items():
+            if "FETCHABLE" in str(diag):
+                fetchable_boards.add(board)
+
     records = []
     for _, m in master.iterrows():
         sym = m["symbol"]
@@ -128,15 +138,27 @@ def build() -> dict:
             bar_count = int(r["bar_count"])
             actual_td = int(r["actual_trading_days"])
 
-        # provider statuses — EMPTY is distinct from NOT_PROBED (never "no data")
+        # provider statuses — strict vocabulary; EMPTY is distinct from NOT_PROBED
+        # (an empty vendor response is never recorded as proof of "no history").
+        covered = in_frozen or in_staged
         if in_frozen:
-            tickflow_status = "COVERED_FROZEN_COHORT"
+            tickflow_status, source_boundary = "COVERED_FROZEN_COHORT", "frozen_cohort<=2026-05-18+daily_topup"
         elif in_staged:
-            tickflow_status = "COVERED_BACKFILL"
+            tickflow_status, source_boundary = "COVERED_BACKFILL", "u0_backfill"
         elif sym in failed:
-            tickflow_status = "EMPTY"           # vendor returned nothing; NOT proof of no history
+            tickflow_status, source_boundary = "EMPTY_PROVIDER_RESPONSE", ""
         else:
-            tickflow_status = "NOT_PROBED"
+            tickflow_status, source_boundary = "NOT_PROBED", ""
+
+        # disposition of the (not-yet-covered) securities using the strict vocabulary
+        if covered:
+            retry_class = "OK"
+        elif sym in failed:
+            retry_class = "NO_RELIABLE_HISTORY"       # 3x retried, still empty
+        elif str(m["board"]) in fetchable_boards:
+            retry_class = "FETCHABLE_NOT_PROBED"      # probe passed; pure backfill backlog
+        else:
+            retry_class = "NOT_PROBED"
 
         # fallback/other bar providers were not exercised for this cohort
         akshare_status = "NOT_PROBED"
@@ -144,7 +166,6 @@ def build() -> dict:
         tushare_status = "METADATA_ONLY"        # PIT fundamentals, not bars
         exchange_metadata_status = "AUTHORITATIVE"  # identity/board/listing from exchange source
 
-        covered = in_frozen or in_staged
         selected_bar_provider = "tickflow" if covered else "NONE"
         selected_metadata_provider = f"exchange:{m['source']}"
 
@@ -158,7 +179,9 @@ def build() -> dict:
         blocked = ""
         if not covered:
             if sym in failed:
-                blocked = "BLOCKED_BY_DATA:tickflow_empty_response(not_proof_of_no_history;retry_or_fallback)"
+                blocked = "BLOCKED_BY_DATA:no_reliable_history(3x_empty;retry_or_fallback_provider)"
+            elif retry_class == "FETCHABLE_NOT_PROBED":
+                blocked = "COVERAGE_BACKLOG:fetchable_not_probed(run_backfill)"
             else:
                 blocked = "BLOCKED_BY_DATA:not_yet_backfilled"
         elif missing_ratio is not None and missing_ratio > 0.05:
@@ -175,6 +198,8 @@ def build() -> dict:
             "exchange_metadata_status": exchange_metadata_status,
             "selected_bar_provider": selected_bar_provider,
             "selected_metadata_provider": selected_metadata_provider,
+            "source_boundary": source_boundary,
+            "provider_retry_class": retry_class,
             "coverage_start": cov_start.date().isoformat() if pd.notna(cov_start) else None,
             "coverage_end": cov_end.date().isoformat() if pd.notna(cov_end) else None,
             "bar_count": bar_count, "expected_trading_days": expected_td,
@@ -198,10 +223,12 @@ def build() -> dict:
         "covered_bar_history": int(covered_mask.sum()),
         "covered_frozen_cohort": int((matrix["tickflow_status"] == "COVERED_FROZEN_COHORT").sum()),
         "covered_backfill": int((matrix["tickflow_status"] == "COVERED_BACKFILL").sum()),
-        "tickflow_empty": int((matrix["tickflow_status"] == "EMPTY").sum()),
+        "tickflow_empty": int((matrix["tickflow_status"] == "EMPTY_PROVIDER_RESPONSE").sum()),
         "not_probed": int((matrix["tickflow_status"] == "NOT_PROBED").sum()),
         "blocked_by_data": int(matrix["blocked_reason"].str.startswith("BLOCKED_BY_DATA").sum()),
+        "coverage_backlog_fetchable": int(matrix["blocked_reason"].str.startswith("COVERAGE_BACKLOG").sum()),
         "partial_coverage": int(matrix["blocked_reason"].str.startswith("PARTIAL_COVERAGE").sum()),
+        "retry_class_counts": matrix["provider_retry_class"].value_counts().to_dict(),
         "by_board_total": matrix["board"].value_counts().to_dict(),
         "by_board_covered": matrix.loc[covered_mask, "board"].value_counts().to_dict(),
         "by_status_total": matrix["current_status"].value_counts().to_dict(),

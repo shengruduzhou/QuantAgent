@@ -44,11 +44,16 @@ const NOT_READY: unknown = {
     gatePass: { integration: true, provider: true, coverage: false, pit: false },
     coverageByBoard: { SH_Main: 1562, SZ_Main: 1589, ChiNext: 877 },
     boardsAbsent: ["STAR", "BSE"],
-    blockedByData: 1860,
+    blockedByData: 920,
+    coverageBacklogFetchable: 938,
+    retryClassCounts: { OK: 4030, FETCHABLE_NOT_PROBED: 938, NOT_PROBED: 847, NO_RELIABLE_HISTORY: 73 },
+    providerFailures: 73,
     pitGate: { st_history: "BLOCKED_BY_DATA", suspension_history: "BLOCKED_BY_DATA", delisting_status: "BLOCKED_BY_DATA", board_price_limits: "PARTIAL(current-snapshot)", ipo_special_limit: "PRESENT", corporate_actions: "BLOCKED_BY_DATA" },
     pitFieldAvailability: {},
-    coveredBarHistory: 4028,
-    backfill: { masterSecurities: 5888, panelSymbols: 4029, missingSymbols: 1860, stagedBackfillFiles: 157 },
+    survivorshipBias: { delisted_total: 358, delisted_with_bar_history: 226, delisted_with_delisting_date: 0, delisted_fraction_of_master: 0.0608 },
+    starBseProbe: { STAR: "FETCHABLE_NOT_PROBED", BSE: "BSE_920x_FETCHABLE_NOT_PROBED" },
+    coveredBarHistory: 4030,
+    backfill: { masterSecurities: 5888, panelSymbols: 4030, missingSymbols: 1858, stagedBackfillFiles: 159 },
   },
   lineage: {
     status: "ready",
@@ -90,6 +95,9 @@ test("renders governed operational state without any candidate performance", asy
   // U0 state and absent boards are surfaced honestly
   expect(screen.getAllByText("FULL_UNIVERSE_DATA_NOT_READY_COVERAGE").length).toBeGreaterThan(0);
   expect(screen.getByText("STAR, BSE")).toBeInTheDocument();
+  // H-032A: survivorship + STAR/BSE probe diagnosis are surfaced
+  expect(screen.getByText(/226\/358 有行情/)).toBeInTheDocument();
+  expect(screen.getByText(/STAR:FETCHABLE_NOT_PROBED/)).toBeInTheDocument();
 
   // NO performance token may appear as a standalone word in the DOM
   // (word boundaries avoid false positives such as "nav" inside "unavailable").
