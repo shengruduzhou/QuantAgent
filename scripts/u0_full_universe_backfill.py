@@ -42,21 +42,40 @@ LOCK = REPO / "runtime/paper/fresh_blind/.u0_backfill.lock"
 TRACKF_LOCK = REPO / "runtime/paper/fresh_blind/.catchup_supervisor.lock"
 REPORTS = REPO / "runtime/reports/h030"
 BATCH = 25
-PAGE = 100                    # measured vendor page cap (bars per response)
-MAX_PAGES = 60                # 60 pages = ~6,000 bars = full A-share history
-REQ_INTERVAL_S = 6.2          # 10 req/min measured limit, with margin
+# H-032B: the ~100-bar responses were the SDK default (count omitted), NOT a
+# server cap. count=10000 returns full A-share daily history (max ~6,500 bars
+# since 1999) in ONE request. Benchmark: runtime/reports/h032b/. Batch mode is
+# not entitled on this account (PermissionError), so we stay on per-symbol get.
+FULL_COUNT = 10000            # documented max; > any A-share daily history length
+PAGE = 10000                  # single-request page size (was the 100 default)
+MAX_PAGES = 3                 # safety only; one page already covers full history
+# This PAID klines endpoint enforces 10 req/min (measured RateLimitError
+# "请求频率超限 (10/min)"); the 60/min figure is the free-tier default. The huge
+# win is count=10000: ONE request/symbol (~6s under the limit) instead of ~60
+# paginated requests/symbol — a ~60x per-symbol speedup, not a rate change.
+REQ_INTERVAL_S = 6.5          # 10 req/min hard limit, with margin
 TRACKF_PROCS = ("catchup_panel_chunked", "fresh_blind_daily", "catchup_supervisor",
                 "coverage_guard", "forward_daily_inference")
 IPO_INELIGIBLE_DAYS = 60      # preregistered (H-028): new listings ineligible for 60 td
 
 
 def trackf_busy() -> str | None:
-    """Return a reason string while Track F is active, else None."""
+    """Return a reason string while Track F is active, else None.
+
+    Matches only processes that are ACTUALLY executing a Track-F script
+    (`<name>.py` / `<name>.sh`), not any shell that merely mentions the name —
+    otherwise a monitoring `grep catchup_panel_chunked` would trigger a false
+    yield and stall the backfill indefinitely.
+    """
+    import re
     try:
         ps = subprocess.run(["ps", "-eo", "cmd"], capture_output=True, text=True).stdout
-        for p in TRACKF_PROCS:
-            if p in ps:
-                return f"track_f_process_active:{p}"
+        for line in ps.splitlines():
+            if "grep" in line or "ps -eo" in line or " eval " in line:
+                continue  # skip our own monitoring / shell-wrapper lines
+            for p in TRACKF_PROCS:
+                if re.search(rf"{re.escape(p)}\.(py|sh)\b", line):
+                    return f"track_f_process_active:{p}"
     except Exception:
         pass
     if TRACKF_LOCK.exists():
@@ -80,19 +99,21 @@ def last_available() -> pd.Timestamp:
 
 
 def fetch_full_history(tf, sym: str, start: pd.Timestamp, end: pd.Timestamp, attempts: int = 3):
-    """Date-ranged FULL-history fetch.
+    """TickFlow-native FULL-history fetch via a single count=10000 request.
 
-    The fresh-window repair helper uses count=40 (last 40 bars only), which
-    returns nothing for delisted names and no history for anyone — measured
-    25/25 failures before this was split out. Vendor timestamps are epoch-ms at
-    CST midnight, so they are converted via Asia/Shanghai (a naive UTC read
-    shifts every bar back one day).
+    H-032B root-cause fix: the previous implementation omitted `count`, so the
+    SDK returned its 100-bar default and had to page backwards 60+ times per
+    symbol. `count=10000` (the documented max, larger than any A-share daily
+    history) returns the whole series in ONE request (~0.3-0.5s). We keep a
+    bounded backwards-page loop only as a safety net in the impossible event a
+    series exceeds 10,000 daily bars. Vendor timestamps are epoch-ms at CST
+    midnight, converted via Asia/Shanghai (a naive UTC read shifts each bar a day).
     """
     def one_page(s_ms: int, e_ms: int):
         for i in range(attempts):
             try:
                 k = tf.klines.get(sym, period="1d", start_time=s_ms, end_time=e_ms,
-                                  adjust="none", as_dataframe=True)
+                                  count=FULL_COUNT, adjust="none", as_dataframe=True)
                 if k is None or not len(k):
                     return None
                 k = pd.DataFrame(k).copy()
@@ -109,9 +130,6 @@ def fetch_full_history(tf, sym: str, start: pd.Timestamp, end: pd.Timestamp, att
                     time.sleep((2, 5, 10)[i])
         return None
 
-    # The vendor caps a response at PAGE bars regardless of the requested range
-    # (measured 2026-07-22: a 1999->today request returns exactly 100), so full
-    # history must be paged backwards from `end` until a short page or `start`.
     pages, cursor = [], end
     for _ in range(MAX_PAGES):
         k = one_page(int(start.timestamp() * 1000),
@@ -120,10 +138,11 @@ def fetch_full_history(tf, sym: str, start: pd.Timestamp, end: pd.Timestamp, att
             break
         pages.append(k)
         oldest = k["trade_date"].min()
+        # a short page (< the count ceiling) or reaching `start` means we are done
         if len(k) < PAGE or oldest <= start:
             break
         cursor = oldest - pd.Timedelta(days=1)
-        time.sleep(REQ_INTERVAL_S)          # each page is a separate vendor call
+        time.sleep(REQ_INTERVAL_S)
     if not pages:
         return None
     out = pd.concat(pages, ignore_index=True).drop_duplicates("trade_date")
@@ -163,10 +182,11 @@ def cmd_fetch(args) -> int:
     priority = [b for b in (args.priority_boards or "").split(",") if b]
     if priority:
         board_of = dict(zip(master["symbol"].astype(str), master["board"].astype(str)))
-        pri = set(priority)
-        todo.sort(key=lambda s: (board_of.get(s, "") not in pri, s))
-        n_pri = sum(1 for s in todo if board_of.get(s, "") in pri)
-        print(f"priority boards {priority}: {n_pri} symbols moved to the front", flush=True)
+        # respect the EXACT order of --priority-boards (BSE before STAR before rest)
+        rank = {b: i for i, b in enumerate(priority)}
+        todo.sort(key=lambda s: (rank.get(board_of.get(s, ""), len(priority)), s))
+        n_pri = sum(1 for s in todo if board_of.get(s, "") in rank)
+        print(f"priority boards {priority} (in order): {n_pri} symbols moved to the front", flush=True)
     print(f"master {len(master)} | already in frozen panel {len(panel_syms & set(master['symbol']))} "
           f"| staged {len(done)} | todo {len(todo)} | prior failures {len(prior_failed)}", flush=True)
     if not todo:

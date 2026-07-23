@@ -24,8 +24,14 @@ H031_COMMANDS = (
     ("data", "audit-u0-full-universe"),
     ("data", "backfill-u0-market-panel"),
     ("data", "probe-u0-star-bse"),
+    # H-032B additions
+    ("data", "benchmark-tickflow-capability"),
+    ("data", "audit-bse-identity"),
+    ("data", "audit-u0-pit-readiness"),
+    ("data", "report-u0-bar-readiness"),
 )
-NETWORK_COMMANDS = {"backfill-u0-market-panel", "probe-u0-star-bse"}
+NETWORK_COMMANDS = {"backfill-u0-market-panel", "probe-u0-star-bse",
+                    "benchmark-tickflow-capability", "audit-bse-identity"}
 
 
 # --- allowlist ---------------------------------------------------------------
@@ -88,6 +94,8 @@ def test_only_network_commands_declare_a_network_control() -> None:
 @pytest.mark.parametrize("entrypoint,args", [
     ("scripts/u0_star_bse_probe.py", []),
     ("scripts/u0_full_universe_backfill.py", ["fetch"]),
+    ("scripts/tickflow_capability_benchmark.py", []),
+    ("scripts/u0_bse_identity.py", []),
 ])
 def test_network_scripts_fail_closed_without_allow_network(entrypoint, args) -> None:
     """The backend scripts themselves refuse (exit 2) before any vendor call."""
@@ -153,7 +161,7 @@ def test_governance_reports_unavailable_when_manifests_missing(empty_quant_ui_se
     assert status["shadow"]["status"] == "unavailable"
     assert status["u0"]["status"] == "unavailable"
     assert status["s4"]["status"] == "unavailable"
-    assert len(status["governedCommands"]) == 8
+    assert len(status["governedCommands"]) == 12
 
 
 # --- governance surface: honest ready extraction -----------------------------
