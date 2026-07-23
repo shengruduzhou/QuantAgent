@@ -15,6 +15,7 @@ import {
   Pulse,
   Question,
   ShieldCheck,
+  ShieldStar,
   SlidersHorizontal,
   Strategy,
 } from "@phosphor-icons/react";
@@ -52,6 +53,7 @@ export const vnextModules: VNextModule[] = [
   { id: "tasks", path: "/settings?view=jobs", label: "任务中心", caption: "Task Center", group: "control", icon: ListBullets, keywords: "jobs task logs events 任务" },
   { id: "runtime", path: "/runtime", label: "Runtime", caption: "Artifact Inspector", group: "control", icon: Pulse, keywords: "runtime artifact catalog cleanup" },
   { id: "evidence", path: "/reports", label: "证据与报告", caption: "Evidence Center", group: "control", icon: FileText, keywords: "evidence report audit 证据 报告" },
+  { id: "governance", path: "/governance", label: "运营治理", caption: "Operations Governance", group: "control", icon: ShieldStar, keywords: "governance shadow s4 u0 lineage readiness operations 治理 影子 就绪" },
   { id: "parity", path: "/parity", label: "VN.PY 对齐", caption: "Capability Registry", group: "control", icon: ListMagnifyingGlass, keywords: "vnpy veighna parity capability" },
   { id: "settings", path: "/settings", label: "系统设置", caption: "System Settings", group: "control", icon: Gear, keywords: "settings system configuration 设置" },
   { id: "help", path: "/help", label: "帮助中心", caption: "Product Help", group: "control", icon: Question, keywords: "help keyboard guide 帮助" },

@@ -32,6 +32,9 @@ LEDGER = ROOT / "append_only_ledger.jsonl"
 DAILY = ROOT / "daily"
 CERT = REPO / "runtime/reports/h028/forward_fidelity_certificate.json"
 PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
+# H-031: any entry here (or any non-daily_run ledger record) is proof the blind
+# key/ciphertext was touched before the formal first read → invalidates the run.
+DECRYPT_ACCESS_LOG = ROOT / "decrypt_access_log.jsonl"
 SHADOW_START = pd.Timestamp("2026-07-15")
 REQUIRED_DAYS = 7
 # data statuses acceptable under the T-1 policy: a bounded top-up that ran out
@@ -75,12 +78,23 @@ def panel_coverage() -> dict:
 
 
 def unblind_accesses() -> list:
-    """Any ledger record that is not a routine daily run = access to audit."""
+    """Any ledger record that is not a routine daily run, or any recorded decrypt
+    of the encrypted-performance artifacts, counts as an early-unblind access."""
     out = []
     for line in (LEDGER.read_text().strip().splitlines() if LEDGER.exists() else []):
         r = json.loads(line)
         if r.get("kind") not in ("daily_run",):
             out.append({"kind": r.get("kind"), "ts": r.get("ts")})
+    if DECRYPT_ACCESS_LOG.exists():
+        for line in DECRYPT_ACCESS_LOG.read_text().strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                out.append({"kind": "decrypt_access", "ts": None, "raw": line[:120]})
+                continue
+            out.append({"kind": "decrypt_access", "ts": r.get("ts"), "target": r.get("target")})
     return out
 
 
@@ -91,6 +105,9 @@ def build() -> dict:
         cert_hash = sha_file(CERT)
         cert_ok = bool(json.loads(CERT.read_text()).get("passes"))
     cov = panel_coverage()
+    # H-031: early-unblind / decrypt is a GLOBAL invalidator — a single touch of
+    # the blind key before the formal first read taints the whole shadow set.
+    nonroutine = unblind_accesses()
 
     by_date: dict[str, list] = {}
     for idx, line in enumerate(LEDGER.read_text().strip().splitlines()):
@@ -149,6 +166,10 @@ def build() -> dict:
             reasons.append("missing_encrypted_files")
         if not chain_ok:
             reasons.append("ledger_chain_invalid")
+        if nonroutine:
+            reasons.append("unblind_or_decrypt_access_detected")
+        if auth.get("ingest_tag") in KNOWN_CORRUPT_INGEST:
+            reasons.append("partial_intraday_bars")
 
         rows.append({
             "trade_date": d,
@@ -172,6 +193,20 @@ def build() -> dict:
             "invalid_reason": ";".join(reasons),
         })
 
+    # H-031: feature-schema-hash STABILITY across the otherwise-valid cohort. A
+    # silent schema drift between two "valid" days would invalidate cross-day
+    # comparability at first read, so a minority hash is demoted here.
+    from collections import Counter
+    cand = [r for r in rows if r["valid_shadow_day"]]
+    hashes = Counter(r["schema_hash"] for r in cand if r["schema_hash"])
+    if len(hashes) > 1:
+        expected = hashes.most_common(1)[0][0]
+        for r in rows:
+            if r["valid_shadow_day"] and r["schema_hash"] != expected:
+                r["valid_shadow_day"] = False
+                r["invalid_reason"] = (r["invalid_reason"] + ";" if r["invalid_reason"] else "") \
+                    + f"schema_hash_drift(!={expected})"
+
     valid = [r["trade_date"] for r in rows if r["valid_shadow_day"]]
     reg = {
         "generated": datetime.now().isoformat(), "experiment": "H-030 Track F1",
@@ -179,7 +214,7 @@ def build() -> dict:
         "ledger_records_total": n_records, "ledger_chain_valid": chain_ok,
         "fidelity_certificate_passes": cert_ok, "certificate_sha256": cert_hash,
         "valid_shadow_days": len(valid), "valid_dates": valid,
-        "unblind_or_nonroutine_accesses": unblind_accesses(),
+        "unblind_or_nonroutine_accesses": nonroutine,
         "days": rows,
         "note": ("2026-07-21 carries three records: the 19:30 cron run (data step failed), "
                  "the 20:18 auto-repair handoff built on the INC-P1 corrupted panel, and the "
@@ -235,6 +270,43 @@ def write_certificate(reg: dict) -> None:
     (ROOT / "shadow_test_report.md").write_text("".join(md))
 
 
+def next_expected_valid_date(valid: list[str]) -> str | None:
+    """Next trading day after the last valid shadow day, from the panel calendar."""
+    if not PANEL.exists():
+        return None
+    p = pd.read_parquet(PANEL, columns=["trade_date"])
+    cal = sorted(pd.to_datetime(p["trade_date"]).dt.normalize().unique())
+    anchor = pd.Timestamp(valid[-1]) if valid else SHADOW_START
+    after = [d for d in cal if d > anchor]
+    if after:
+        return str(after[0].date())
+    # panel not yet advanced past the anchor: fall back to the next weekday
+    nxt = anchor + pd.Timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += pd.Timedelta(days=1)
+    return str(nxt.date()) + " (calendar estimate; panel not yet advanced)"
+
+
+def write_accumulating_status(reg: dict) -> None:
+    """Human/UI-readable accumulating record — NEVER a passing certificate."""
+    valid = reg["valid_dates"]
+    excluded = [{"trade_date": r["trade_date"], "reason": r["invalid_reason"]}
+                for r in reg["days"] if not r["valid_shadow_day"]]
+    status = {
+        "generated": datetime.now().isoformat(), "experiment": "H-031 Track F",
+        "decision": "SHADOW_TEST_ACCUMULATING",
+        "valid_shadow_days": reg["valid_shadow_days"], "required_days": REQUIRED_DAYS,
+        "valid_dates": valid, "excluded": excluded,
+        "next_expected_valid_date": next_expected_valid_date(valid),
+        "ledger_chain_valid": reg["ledger_chain_valid"],
+        "fidelity_certificate_passes": reg["fidelity_certificate_passes"],
+        "unblind_or_nonroutine_accesses": reg["unblind_or_nonroutine_accesses"],
+        "blinding": "no candidate performance included",
+        "note": "certificate is written only once seven valid trading days exist",
+    }
+    (ROOT / "shadow_accumulating_status.json").write_text(json.dumps(status, indent=2))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--quiet", action="store_true")
@@ -250,6 +322,7 @@ def main() -> int:
         write_certificate(reg)
         status = "SHADOW_TEST_COMPLETE"
     else:
+        write_accumulating_status(reg)
         status = "SHADOW_TEST_ACCUMULATING"
     if not args.quiet:
         print(json.dumps({"status": status, "valid_shadow_days": reg["valid_shadow_days"],

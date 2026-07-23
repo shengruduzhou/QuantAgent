@@ -20,6 +20,7 @@ import "./vnext/styles/dashboard.css";
 import "./vnext/styles/training.css";
 import "./vnext/styles/workbench.css";
 import "./vnext/styles/factor-intelligence.css";
+import "./vnext/styles/governance.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

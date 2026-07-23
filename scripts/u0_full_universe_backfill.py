@@ -132,6 +132,10 @@ def fetch_full_history(tf, sym: str, start: pd.Timestamp, end: pd.Timestamp, att
 
 def cmd_fetch(args) -> int:
     import fcntl
+    if not getattr(args, "allow_network", False):
+        print("refusing to fetch: --allow-network was not explicitly confirmed "
+              "(vendor calls require an explicit network approval)", flush=True)
+        return 2
     import repair_fresh_window_20260704 as rep
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     lf = open(LOCK, "w")
@@ -326,7 +330,10 @@ def cmd_assemble(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    f = sub.add_parser("fetch"); f.add_argument("--max-minutes", type=float, default=240)
+    f = sub.add_parser("fetch")
+    f.add_argument("--max-minutes", type=float, default=240)
+    f.add_argument("--allow-network", action="store_true",
+                   help="explicit confirmation required before any vendor call")
     sub.add_parser("assemble")
     args = ap.parse_args()
     return cmd_fetch(args) if args.cmd == "fetch" else cmd_assemble(args)

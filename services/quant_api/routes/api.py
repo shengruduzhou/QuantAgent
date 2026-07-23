@@ -162,6 +162,17 @@ async def data_coverage(
         raise HTTPException(422, str(exc))
 
 
+@router.get("/governance/status")
+async def governance_status(request: Request) -> dict:
+    """Read-only operational governance surface (H-031): shadow/S4/U0/lineage.
+
+    Returns existence- and gate-level fields only; never candidate performance.
+    """
+    data = services(request).governance.status()
+    ready = data["shadow"]["status"] == "ready" or data["u0"]["status"] == "ready"
+    return response(data, status="ready" if ready else "partial")
+
+
 @router.get("/system/overview")
 async def system_overview(request: Request) -> dict:
     svc = services(request)
@@ -733,9 +744,14 @@ async def create_infer_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "infer", body)
 
 
+@router.post("/jobs/governance")
+async def create_governance_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "governance", body)
+
+
 @router.post("/jobs/{job_type}/validate")
 async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
-    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery"}:
+    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "governance"}:
         raise HTTPException(404, "job type not found")
     try:
         return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))

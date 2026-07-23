@@ -169,6 +169,91 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_inputs": {"symbols_file"},
         "path_outputs": {"fundamentals_root"},
     },
+    # ---- H-031 governed operational / full-universe data commands -----------
+    # All are parameterless or take a single bounded control; none exposes a
+    # free-form shell field. Outputs are fixed Runtime paths; none reads or
+    # reports candidate performance.
+    "validate-shadow-days": {
+        "type": "governance",
+        "entrypoint": "scripts/shadow_day_registry.py",
+        "required": set(),
+        "allowed": {"quiet"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/paper/fresh_blind/shadow_day_registry.json",
+            "runtime/paper/fresh_blind/shadow_accumulating_status.json",
+        ),
+        "control": set(),
+    },
+    "certify-s4-batch-replay": {
+        "type": "governance",
+        "entrypoint": "scripts/s4_batch_replay.py",
+        "required": set(),
+        "allowed": {"cutoff"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/reports/h030/s4_readiness_certificate.json",),
+        "control": set(),
+    },
+    "build-u0-security-master": {
+        "type": "data",
+        "entrypoint": "scripts/u0_build_security_master.py",
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/historical_security_master.parquet",
+            "runtime/data/u0/pit_field_availability.json",
+        ),
+        "control": set(),
+    },
+    "report-u0-provider-coverage": {
+        "type": "data",
+        "entrypoint": "scripts/u0_provider_coverage.py",
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/provider_coverage_matrix.parquet",
+            "runtime/data/u0/provider_coverage_matrix.csv",
+        ),
+        "control": set(),
+    },
+    "assemble-u0-full-universe": {
+        "type": "data",
+        "entrypoint": "scripts/u0_full_universe_backfill.py",
+        "fixed_args": ("assemble",),
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/v7/full_universe/full_universe_market_panel.parquet",),
+        "control": set(),
+    },
+    "audit-u0-full-universe": {
+        "type": "data",
+        "entrypoint": "scripts/u0_audit.py",
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/full_universe_readiness_certificate.json",),
+        "control": set(),
+    },
+    "backfill-u0-market-panel": {
+        "type": "data",
+        "entrypoint": "scripts/u0_full_universe_backfill.py",
+        "fixed_args": ("fetch",),
+        "required": {"allow_network"},
+        "allowed": {"max_minutes", "allow_network"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/v7/full_universe/_staging",),
+        "control": {"allow_network"},
+    },
 }
 
 
@@ -366,6 +451,9 @@ class JobManager:
             if entrypoint
             else [sys.executable, "-m", "quantagent.cli", command_id]
         )
+        # positional subcommands (e.g. `u0_full_universe_backfill.py fetch`) are
+        # fixed by the allowlist, never taken from user input.
+        command.extend(spec.get("fixed_args", ()))
         for key, value in parameters.items():
             if value is None:
                 continue
