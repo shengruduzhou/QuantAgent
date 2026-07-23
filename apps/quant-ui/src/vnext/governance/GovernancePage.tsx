@@ -112,6 +112,19 @@ interface U0BarPitStatus {
     truePlaceholders?: string[];
     missingFromMaster?: string[];
   };
+  pitMetadataSourcing?: {
+    closedFields?: string[];
+    blockedFields?: string[];
+    delistingDatesSourced?: number;
+  };
+  tickflowEntitlement?: Record<string, unknown>;
+  reconciliation?: {
+    supplementalAdditions?: number;
+    supplementalSymbols?: string[];
+    dualIdentityCollisions?: number;
+    starCovered?: number;
+    starTotal?: number;
+  };
 }
 
 interface LineageStatus {
@@ -378,6 +391,13 @@ export function GovernancePage(): JSX.Element {
               </dl>
             </div>
           </div>
+          <dl className="governance-facts">
+            <div><dt>PIT 已闭合字段</dt><dd>{data.u0BarPit.pitMetadataSourcing?.closedFields?.length ? data.u0BarPit.pitMetadataSourcing.closedFields.join(", ") : "—"}</dd></div>
+            <div><dt>退市日已取</dt><dd>{data.u0BarPit.pitMetadataSourcing?.delistingDatesSourced ?? "—"}</dd></div>
+            <div><dt>PIT 仍阻塞</dt><dd>{data.u0BarPit.pitMetadataSourcing?.blockedFields?.length ? data.u0BarPit.pitMetadataSourcing.blockedFields.join(", ") : "无"}</dd></div>
+            <div><dt>身份补录 / 双身份冲突</dt><dd>{data.u0BarPit.reconciliation?.supplementalAdditions ?? "—"} / {data.u0BarPit.reconciliation?.dualIdentityCollisions ?? "—"}</dd></div>
+            <div><dt>STAR 覆盖</dt><dd>{data.u0BarPit.reconciliation?.starCovered ?? "—"} / {data.u0BarPit.reconciliation?.starTotal ?? "—"}</dd></div>
+          </dl>
           <ul className="governance-pit">
             {Object.entries(data.u0BarPit.pitSourceAudit ?? {}).map(([field, state]) => (
               <li key={field} className={String(state).includes("REQUIRED") || String(state).includes("BLOCKED") ? "blocked" : ""}>

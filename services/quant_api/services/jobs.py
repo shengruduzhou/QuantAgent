@@ -306,6 +306,36 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "fixed_outputs": ("runtime/data/u0/u0_bar_readiness_certificate.json",),
         "control": set(),
     },
+    "source-u0-pit-metadata": {
+        "type": "data",
+        "entrypoint": "scripts/u0_pit_metadata.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/pit/pit_metadata_manifest.json",),
+        "control": {"allow_network"},
+    },
+    "audit-tickflow-entitlement": {
+        "type": "data",
+        "entrypoint": "scripts/u0_tickflow_entitlement.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/reports/h032c/tickflow_entitlement_audit.json",),
+        "control": {"allow_network"},
+    },
+    "report-u0-reconciliation": {
+        "type": "data",
+        "entrypoint": "scripts/u0_reconcile_universe.py",
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/universe_reconciliation.json",),
+        "control": set(),
+    },
 }
 
 

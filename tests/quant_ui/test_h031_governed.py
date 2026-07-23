@@ -29,9 +29,14 @@ H031_COMMANDS = (
     ("data", "audit-bse-identity"),
     ("data", "audit-u0-pit-readiness"),
     ("data", "report-u0-bar-readiness"),
+    # H-032C additions
+    ("data", "source-u0-pit-metadata"),
+    ("data", "audit-tickflow-entitlement"),
+    ("data", "report-u0-reconciliation"),
 )
 NETWORK_COMMANDS = {"backfill-u0-market-panel", "probe-u0-star-bse",
-                    "benchmark-tickflow-capability", "audit-bse-identity"}
+                    "benchmark-tickflow-capability", "audit-bse-identity",
+                    "source-u0-pit-metadata", "audit-tickflow-entitlement"}
 
 
 # --- allowlist ---------------------------------------------------------------
@@ -161,7 +166,7 @@ def test_governance_reports_unavailable_when_manifests_missing(empty_quant_ui_se
     assert status["shadow"]["status"] == "unavailable"
     assert status["u0"]["status"] == "unavailable"
     assert status["s4"]["status"] == "unavailable"
-    assert len(status["governedCommands"]) == 12
+    assert len(status["governedCommands"]) == 15
 
 
 # --- governance surface: honest ready extraction -----------------------------
