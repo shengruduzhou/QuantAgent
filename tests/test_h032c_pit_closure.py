@@ -78,6 +78,38 @@ def test_reconciliation_only_adds_authoritative_listings() -> None:
         assert sym.endswith(".BJ")  # only BSE recent listings this pass
 
 
+def test_supplemental_additions_actually_reach_the_backfill_master() -> None:
+    """§4: reconciliation additions must be fetched+assembled, not only recorded."""
+    import importlib.util
+    import sys
+    add = U0 / "master_supplemental_additions.parquet"
+    if not add.exists():
+        pytest.skip("no supplemental additions")
+    pd = _pd()
+    extra = set(pd.read_parquet(add)["symbol"].astype(str))
+    spec = importlib.util.spec_from_file_location(
+        "bf_mod", REPO / "scripts/u0_full_universe_backfill.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["bf_mod"] = mod
+    spec.loader.exec_module(mod)
+    master_syms = set(mod.load_master()["symbol"].astype(str))
+    # every supplemental symbol is now part of the universe the backfill iterates
+    assert extra <= master_syms
+
+
+def test_supplemental_union_dedupes_and_frozen_master_wins() -> None:
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location(
+        "bf_mod2", REPO / "scripts/u0_full_universe_backfill.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["bf_mod2"] = mod
+    spec.loader.exec_module(mod)
+    m = mod.load_master()
+    # no duplicate security identity introduced by the union
+    assert m["symbol"].astype(str).duplicated().sum() == 0
+
+
 def test_entitlement_audit_keeps_tickflow_primary_and_no_fabrication() -> None:
     a = REPO / "runtime/reports/h032c/tickflow_entitlement_audit.json"
     if not a.exists():

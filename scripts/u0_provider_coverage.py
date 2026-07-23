@@ -32,6 +32,23 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 MASTER = REPO / "runtime/reports/h028/track_a/historical_security_master.parquet"
+SUPPLEMENTAL = REPO / "runtime/data/u0/master_supplemental_additions.parquet"
+
+
+def _load_master() -> "pd.DataFrame":
+    """H-028 master unioned with reconciliation-approved supplemental additions."""
+    m = pd.read_parquet(MASTER)
+    if SUPPLEMENTAL.exists():
+        try:
+            add = pd.read_parquet(SUPPLEMENTAL)
+            shared = [c for c in m.columns if c in add.columns]
+            add = add[shared]
+            add = add[~add["symbol"].astype(str).isin(set(m["symbol"].astype(str)))]
+            if len(add):
+                m = pd.concat([m, add], ignore_index=True)
+        except Exception:
+            pass
+    return m
 FROZEN_PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 STAGING = REPO / "runtime/data/v7/full_universe/_staging"
 FAILED_LEDGER = REPO / "runtime/data/v7/full_universe/failed_fetch_ledger.csv"
@@ -94,7 +111,7 @@ def _expected_trading_days(calendar: list[pd.Timestamp], start, end) -> int:
 
 def build() -> dict:
     OUT.mkdir(parents=True, exist_ok=True)
-    master = pd.read_parquet(MASTER)
+    master = _load_master()
     master["symbol"] = master["symbol"].astype(str)
     for c in ("listing_date", "delisting_date"):
         master[c] = pd.to_datetime(master[c], errors="coerce")

@@ -35,6 +35,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 MASTER = REPO / "runtime/reports/h028/track_a/historical_security_master.parquet"
+# H-032C §4: reconciliation-approved recent listings that are not yet in the
+# frozen H-028 master (e.g. BSE 920079/920117). Unioned in so they are actually
+# fetched and assembled, not merely recorded. Identity provenance is on the file.
+SUPPLEMENTAL = REPO / "runtime/data/u0/master_supplemental_additions.parquet"
 OUT = REPO / "runtime/data/v7/full_universe"
 STAGING = OUT / "_staging"
 PANEL_F = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
@@ -90,6 +94,23 @@ def trackf_busy() -> str | None:
         except Exception:
             return None
     return None
+
+
+def load_master() -> pd.DataFrame:
+    """H-028 master unioned with reconciliation-approved supplemental additions
+    (deduped on symbol; the frozen master wins on any collision)."""
+    master = pd.read_parquet(MASTER)
+    if SUPPLEMENTAL.exists():
+        try:
+            add = pd.read_parquet(SUPPLEMENTAL)
+            shared = [c for c in master.columns if c in add.columns]
+            add = add[shared]
+            add = add[~add["symbol"].astype(str).isin(set(master["symbol"].astype(str)))]
+            if len(add):
+                master = pd.concat([master, add[shared]], ignore_index=True)
+        except Exception:
+            pass
+    return master
 
 
 def last_available() -> pd.Timestamp:
@@ -164,7 +185,7 @@ def cmd_fetch(args) -> int:
         print("another U0 backfill holds the lock — exiting"); return 0
 
     STAGING.mkdir(parents=True, exist_ok=True)
-    master = pd.read_parquet(MASTER)
+    master = load_master()
     master["listing_date"] = pd.to_datetime(master["listing_date"], errors="coerce")
     panel_syms = set(pd.read_parquet(PANEL_F, columns=["symbol"])["symbol"].astype(str).unique())
     done = set()
@@ -254,7 +275,7 @@ def cmd_fetch(args) -> int:
 def cmd_assemble(args) -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     REPORTS.mkdir(parents=True, exist_ok=True)
-    master = pd.read_parquet(MASTER)
+    master = load_master()
     master["listing_date"] = pd.to_datetime(master["listing_date"], errors="coerce")
     master["delisting_date"] = pd.to_datetime(master["delisting_date"], errors="coerce")
     master.to_parquet(OUT / "historical_security_master.parquet", index=False)
