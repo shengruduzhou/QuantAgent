@@ -13,6 +13,7 @@ const Models = lazy(() => import("../../pages/ModelLabPage").then((module) => ({
 const Risk = lazy(() => import("../../pages/RiskCenterPage").then((module) => ({ default: module.RiskCenterPage })));
 const Runtime = lazy(() => import("../../pages/RuntimeExplorerPage").then((module) => ({ default: module.RuntimeExplorerPage })));
 const Parity = lazy(() => import("../../pages/VnpyParityPage").then((module) => ({ default: module.VnpyParityPage })));
+const Governance = lazy(() => import("../governance/GovernancePage").then((module) => ({ default: module.GovernancePage })));
 const Reports = lazy(() => import("../../pages/ReportsPage").then((module) => ({ default: module.ReportsPage })));
 const Settings = lazy(() => import("../../pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const Help = lazy(() => import("../../pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
@@ -32,6 +33,7 @@ export function WorkspaceRoutes({ location }: { location: string }): JSX.Element
         <Route path="/risk" element={<Risk />} />
         <Route path="/runtime" element={<Runtime />} />
         <Route path="/parity" element={<Parity />} />
+        <Route path="/governance" element={<Governance />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/help" element={<Help />} />

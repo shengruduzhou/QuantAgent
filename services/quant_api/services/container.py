@@ -12,6 +12,7 @@ from services.quant_api.config import ApiSettings, default_settings
 from services.quant_api.events import EventBroker
 from services.quant_api.runtime_indexer import RuntimeIndexer
 from services.quant_api.services.data_manager import DataManagerService
+from services.quant_api.services.governance import GovernanceService
 from services.quant_api.services.jobs import JobManager
 from services.quant_api.services.runtime_cleanup import RuntimeCleanupService
 from services.quant_api.services.vnpy_parity import VnpyParityService
@@ -32,6 +33,7 @@ class ServiceContainer:
     jobs: JobManager
     cleanup: RuntimeCleanupService
     vnpy_parity: VnpyParityService
+    governance: GovernanceService
 
     @classmethod
     def create(cls, settings: ApiSettings | None = None) -> "ServiceContainer":
@@ -53,6 +55,7 @@ class ServiceContainer:
             jobs=JobManager(resolved, events, indexer.invalidate),
             cleanup=RuntimeCleanupService(resolved),
             vnpy_parity=VnpyParityService(),
+            governance=GovernanceService(resolved),
         )
 
     def start(self) -> None:
