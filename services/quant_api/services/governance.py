@@ -187,6 +187,29 @@ class GovernanceService:
                 "truePlaceholders": bse.get("true_placeholder_codes_in_master"),
                 "missingFromMaster": bse.get("in_authoritative_not_master"),
             }
+        # H-032C: PIT-metadata sourcing closures, entitlement re-test, reconciliation
+        meta = self._read_json("data/u0/pit/pit_metadata_manifest.json")
+        if meta:
+            out["pitMetadataSourcing"] = {
+                "closedFields": meta.get("closed_fields", []),
+                "blockedFields": meta.get("blocked_fields", []),
+                "delistingDatesSourced": meta.get("delisting_dates_sourced"),
+            }
+        ent = self._read_json("reports/h032c/tickflow_entitlement_audit.json")
+        if ent:
+            out["tickflowEntitlement"] = {k: ent.get(k) for k in (
+                "count_10000_get", "batch_klines", "ex_factors",
+                "measured_rate_limit_per_min", "corporate_action_classification")
+                if k in ent} or {"status": ent.get("status")}
+        recon = self._read_json("data/u0/universe_reconciliation.json")
+        if recon:
+            out["reconciliation"] = {
+                "supplementalAdditions": recon.get("supplemental_additions"),
+                "supplementalSymbols": recon.get("supplemental_additions_symbols", []),
+                "dualIdentityCollisions": recon.get("dual_identity_guard", {}).get("dual_identity_collisions"),
+                "starCovered": recon.get("star_covered"),
+                "starTotal": recon.get("star_total"),
+            }
         return out
 
     def _lineage(self) -> dict[str, Any]:
@@ -210,7 +233,9 @@ class GovernanceService:
                "report-u0-provider-coverage", "assemble-u0-full-universe",
                "audit-u0-full-universe", "backfill-u0-market-panel", "probe-u0-star-bse",
                "benchmark-tickflow-capability", "audit-bse-identity",
-               "audit-u0-pit-readiness", "report-u0-bar-readiness")
+               "audit-u0-pit-readiness", "report-u0-bar-readiness",
+               "source-u0-pit-metadata", "audit-tickflow-entitlement",
+               "report-u0-reconciliation")
         out = []
         for cid in ids:
             spec = COMMANDS.get(cid)

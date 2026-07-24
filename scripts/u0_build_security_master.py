@@ -24,6 +24,7 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "runtime/reports/h028/track_a/historical_security_master.parquet"
+SUPPLEMENTAL = REPO / "runtime/data/u0/master_supplemental_additions.parquet"
 OUT = REPO / "runtime/data/u0"
 IPO_SPECIAL_LIMIT_DAYS = 60   # preregistered H-028 IPO ineligibility window
 
@@ -41,6 +42,16 @@ def _sha_file(p: Path) -> str:
 def build() -> dict:
     OUT.mkdir(parents=True, exist_ok=True)
     m = pd.read_parquet(SRC)
+    if SUPPLEMENTAL.exists():
+        try:
+            _add = pd.read_parquet(SUPPLEMENTAL)
+            _shared = [c for c in m.columns if c in _add.columns]
+            _add = _add[_shared]
+            _add = _add[~_add['symbol'].astype(str).isin(set(m['symbol'].astype(str)))]
+            if len(_add):
+                m = pd.concat([m, _add], ignore_index=True)
+        except Exception:
+            pass
     m["symbol"] = m["symbol"].astype(str)
     for c in ("listing_date", "delisting_date", "st_start", "st_end", "available_at"):
         if c in m.columns:

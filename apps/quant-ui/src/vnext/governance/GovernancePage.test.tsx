@@ -62,6 +62,8 @@ const NOT_READY: unknown = {
     pitSourceAudit: { st_intervals: "ALTERNATIVE_SOURCE_REQUIRED", corporate_action_identity: "ALTERNATIVE_SOURCE_REQUIRED" },
     tickflowBenchmark: { sdkVersion: "0.1.22", count10000Works: true, batchEntitled: false, measuredRatePerMin: 10, recommendedPath: "single get(count=10000)", old100BarCause: "MISSING count PARAMETER" },
     bseIdentity: { decision: "BSE_IDENTITY_CURRENT_RESOLVED", authoritativeCount: 329, masterCount: 327, truePlaceholders: [], missingFromMaster: ["920079", "920117"] },
+    pitMetadataSourcing: { closedFields: ["price_limit_regimes", "ipo_special_limit_intervals", "delisting_intervals"], blockedFields: ["st_intervals", "suspension_intervals", "corporate_action_identity"], delistingDatesSourced: 367 },
+    reconciliation: { supplementalAdditions: 2, supplementalSymbols: ["920079.BJ", "920117.BJ"], dualIdentityCollisions: 0, starCovered: 24, starTotal: 613 },
   },
   lineage: {
     status: "ready",
@@ -110,6 +112,9 @@ test("renders governed operational state without any candidate performance", asy
   expect(screen.getByText("U0_BAR_NOT_READY_COVERAGE")).toBeInTheDocument();
   expect(screen.getAllByText("FULL_UNIVERSE_DATA_NOT_READY_PIT").length).toBeGreaterThan(0);
   expect(screen.getByText("BSE_IDENTITY_CURRENT_RESOLVED")).toBeInTheDocument();
+  // H-032C: PIT delisting closure + reconciliation surfaced
+  expect(screen.getByText("367")).toBeInTheDocument();
+  expect(screen.getByText(/price_limit_regimes/)).toBeInTheDocument();
 
   // NO performance token may appear as a standalone word in the DOM
   // (word boundaries avoid false positives such as "nav" inside "unavailable").

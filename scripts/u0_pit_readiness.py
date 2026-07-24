@@ -161,10 +161,37 @@ def build() -> dict:
                          "need an alternative authoritative source that is not yet materialised. Unavailable "
                          "= BLOCKED_BY_DATA / ALTERNATIVE_SOURCE_REQUIRED, never default-false."),
     }
+
+    # H-032C: fold in the sourced PIT metadata tables (delisting/price-limit/IPO
+    # closed with authoritative provenance) so the decision reflects real closures.
+    meta = REPO / "runtime/data/u0/pit/pit_metadata_manifest.json"
+    sourced = {}
+    if meta.exists():
+        mj = json.loads(meta.read_text())
+        sourced = mj.get("field_status", {})
+        availability["pit_metadata_sourcing"] = {
+            "closed_fields": mj.get("closed_fields", []),
+            "blocked_fields": mj.get("blocked_fields", []),
+            "delisting_dates_sourced": mj.get("delisting_dates_sourced"),
+        }
+        # reflect closures into the field availability + provenance
+        if sourced.get("delisting_intervals", {}).get("status") == "AVAILABLE":
+            availability["pit_field_availability"]["delisting_date"] = (
+                f"AVAILABLE — {mj.get('delisting_dates_sourced')} delisting dates sourced "
+                f"(akshare SH/SZ lists); PIT interval table runtime/data/u0/pit/delisting_intervals.parquet")
+        if sourced.get("price_limit_regimes", {}).get("status") == "AVAILABLE":
+            availability["pit_field_availability"]["historical_price_limit_rule"] = (
+                "AVAILABLE — deterministic exchange rule intervals "
+                "(runtime/data/u0/pit/price_limit_regimes.parquet)")
+
     (OUT / "pit_field_availability.json").write_text(json.dumps(availability, indent=2, ensure_ascii=False))
 
-    # §10 strict PIT decision
-    blocked_fields = [f for f, i in PIT_SOURCE.items() if i["readiness"] == BLOCKED]
+    # §10 strict PIT decision — blocked = fields with no authoritative source yet
+    if sourced:
+        blocked_fields = [f for f, v in sourced.items()
+                          if str(v.get("status")) in (BLOCKED, "ALTERNATIVE_SOURCE_REQUIRED")]
+    else:
+        blocked_fields = [f for f, i in PIT_SOURCE.items() if i["readiness"] == BLOCKED]
     # identity is resolved for BSE current codes; the binding blocker is PIT metadata
     bse_ok = bse.get("identity_decision") == "BSE_IDENTITY_CURRENT_RESOLVED"
     if not bse_ok:
