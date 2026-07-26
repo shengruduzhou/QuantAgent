@@ -67,9 +67,14 @@ def build_providers(names: list[str], end: pd.Timestamp) -> list[ProviderSpec]:
                 "tencent",
                 lambda symbol, s=source: s.daily_bars(symbol, HISTORY_START, str(end.date())),
                 TENCENT_PACE_S))
-        elif name == "sina_factors":
+        elif name == "sina":
+            # Last-resort source for DELISTED names that TickFlow and Tencent no
+            # longer serve; truncated to the vendor's 1023-session ceiling.
             source = SinaSource(client)
-            specs.append(ProviderSpec("sina", lambda symbol, s=source: s.adjust_factors(symbol), 0.05))
+            specs.append(ProviderSpec(
+                "sina",
+                lambda symbol, s=source: s.daily_bars(symbol, HISTORY_START, str(end.date())),
+                0.05))
         else:
             raise SystemExit(f"unknown provider {name!r}")
     return specs
@@ -87,6 +92,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="stop after N symbols (smoke runs)")
     parser.add_argument("--boards", default="", help="restrict to these boards")
     parser.add_argument("--symbols", default="", help="restrict to these symbols")
+    parser.add_argument("--status", default="", help="restrict to these lifecycle states "
+                                                     "(listed / delisted / unknown)")
     parser.add_argument("--refetch", action="store_true",
                         help="ignore existing partitions instead of resuming past them")
     parser.add_argument("--shard", default="",
@@ -114,6 +121,9 @@ def main() -> int:
     if args.symbols:
         wanted = {s.strip() for s in args.symbols.split(",") if s.strip()}
         master = master[master["symbol"].isin(wanted)]
+    if args.status:
+        wanted = {s.strip() for s in args.status.split(",") if s.strip()}
+        master = master[master["status"].isin(wanted)]
     symbols = sorted(master["symbol"].astype(str).unique())
     shard_label = "1/1"
     if args.shard:

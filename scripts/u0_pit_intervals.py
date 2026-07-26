@@ -14,9 +14,10 @@ Sub-commands (all resumable, all writing provenance with every row):
                 report, folded into ``(symbol, start, end)`` intervals. Each
                 snapshot carries the halt's own start date, so intervals are
                 vendor-dated rather than inferred from bar gaps.
-``st``          risk-warning (ST / *ST) state. The CURRENT state is authoritative
-                from the exchange instrument name; a historical interval table
-                is NOT fabricated — see the manifest for the sources tested.
+``st``          risk-warning (ST / *ST) state. The current state comes from the
+                exchange instrument name; dated episodes are folded out of the
+                SZSE short-name register. Exchanges with no dated register are
+                reported as blocked rather than assumed never-ST.
 
 Outputs land in runtime/data/u0/pit/.
 
@@ -259,52 +260,175 @@ def cmd_suspension(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#: Risk-warning prefixes as they appear in exchange security short names.
+#: Order matters — the longest marker must be tested first.
+ST_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("S*ST", "s_star_st"),      # pre-2007: unreformed share structure + delisting risk
+    ("*ST", "star_st"),         # delisting risk warning
+    ("SST", "s_st"),            # pre-2007: unreformed + other risk
+    ("ST", "st"),               # other risk warning
+)
+
+
+def _st_kind(name: str) -> str | None:
+    """Return the risk-warning kind encoded in a security short name, or None."""
+    cleaned = str(name).upper().replace(" ", "").replace("　", "")
+    for marker, kind in ST_PREFIXES:
+        if cleaned.startswith(marker):
+            return kind
+    return None
+
+
+def _szse_name_history() -> tuple[pd.DataFrame, dict]:
+    """Dated SZSE security short-name changes (the exchange's own register)."""
+    import akshare as ak
+
+    error = None
+    for attempt in range(3):
+        try:
+            raw = ak.stock_info_sz_change_name(symbol="简称变更")
+            break
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {str(exc)[:120]}"
+            raw = None
+            time.sleep((3, 8, 15)[attempt])
+    provenance = {"function": "akshare.stock_info_sz_change_name(简称变更)",
+                  "endpoint": "https://www.szse.cn/api/report/ShowReport",
+                  "rows": 0 if raw is None else int(len(raw)), "error": error}
+    if raw is None or not len(raw):
+        return pd.DataFrame(), provenance
+    frame = pd.DataFrame({
+        "code": raw["证券代码"].astype(str).str.zfill(6),
+        "change_date": pd.to_datetime(raw["变更日期"], errors="coerce"),
+        "name_before": raw["变更前简称"].astype(str),
+        "name_after": raw["变更后简称"].astype(str),
+    }).dropna(subset=["change_date"])
+    return frame.sort_values(["code", "change_date"]), provenance
+
+
+def _st_intervals_from_name_history(history: pd.DataFrame, master: pd.DataFrame,
+                                    now: str) -> pd.DataFrame:
+    """Fold a dated name history into closed ST episodes.
+
+    A security is in a risk-warning state from the date its short name gains an
+    ST marker until the date the name loses it. The episode that is still open
+    at the end of the register stays open (``effective_end`` NaT), which is the
+    honest representation of "still ST as far as the register shows".
+    """
+    code_to_symbol = dict(zip(master["code"].astype(str), master["symbol"].astype(str)))
+    records: list[dict] = []
+    for code, group in history.groupby("code"):
+        symbol = code_to_symbol.get(code)
+        if symbol is None:
+            continue                      # a code the current master does not carry
+        group = group.sort_values("change_date")
+        # timeline: the name in force before the first change, then each change
+        timeline = [(pd.NaT, group.iloc[0]["name_before"])]
+        timeline += [(row.change_date, row.name_after) for row in group.itertuples()]
+        open_start: pd.Timestamp | None = None
+        open_name = open_kind = None
+        for change_date, name in timeline:
+            kind = _st_kind(name)
+            if kind and open_start is None:
+                if pd.isna(change_date):
+                    continue              # ST before the register starts: undated, skipped
+                open_start, open_name, open_kind = change_date, name, kind
+            elif not kind and open_start is not None:
+                records.append({"symbol": symbol, "effective_start": open_start,
+                                "effective_end": change_date, "security_name": open_name,
+                                "st_flag": True, "st_kind": open_kind})
+                open_start = open_name = open_kind = None
+        if open_start is not None:
+            records.append({"symbol": symbol, "effective_start": open_start,
+                            "effective_end": pd.NaT, "security_name": open_name,
+                            "st_flag": True, "st_kind": open_kind})
+    return pd.DataFrame(records, columns=["symbol", "effective_start", "effective_end",
+                                          "security_name", "st_flag", "st_kind"])
+
+
 def cmd_st(args: argparse.Namespace) -> int:
-    """Risk-warning state: authoritative current snapshot, honest about history."""
+    """Risk-warning (ST / *ST) state: dated episodes where a register exists."""
     master = _load_master()
-    current = master[master["current_st"].fillna(False).astype(bool)].copy()
+    master["code"] = master["code"].astype(str).str.zfill(6)
     now = _now()
     today = pd.Timestamp.now().normalize()
-    frame = pd.DataFrame({
-        "symbol": current["symbol"],
-        "effective_start": today,           # the observation date, NOT the ST start date
-        "effective_end": pd.NaT,
-        "security_name": current["name"],
-        "st_flag": True,
-        "st_kind": current["name"].astype(str).str.startswith("*ST").map({True: "star_st", False: "st"}),
-        "source": "tickflow.exchanges.get_instruments (instrument name)",
-        "source_endpoint": "exchange instrument listing",
-        "retrieved_at": now,
-        "available_at": today.strftime("%Y-%m-%d"),
-        "quality_status": "OK",
-        "interval_semantics": "OBSERVED_ON_DATE — start of the ST episode is unknown",
-    })
     OUT.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(OUT / "st_current_snapshot.parquet", index=False)
+
+    # --- current snapshot (authoritative for today, from the instrument name) --
+    current = master[master["current_st"].fillna(False).astype(bool)].copy()
+    snapshot = pd.DataFrame({
+        "symbol": current["symbol"],
+        "observed_on": today,
+        "security_name": current["name"],
+        "st_kind": current["name"].astype(str).map(lambda n: _st_kind(n) or "st"),
+        "source": "tickflow.exchanges.get_instruments (instrument name)",
+        "retrieved_at": now, "available_at": today.strftime("%Y-%m-%d"), "quality_status": "OK",
+    })
+    snapshot.to_parquet(OUT / "st_current_snapshot.parquet", index=False)
+
+    # --- dated episodes from the SZSE short-name register ---------------------
+    history, provenance = (_szse_name_history() if args.allow_network
+                           else (pd.DataFrame(), {"skipped": True}))
+    intervals = pd.DataFrame()
+    if len(history):
+        intervals = _st_intervals_from_name_history(history, master, now)
+        if len(intervals):
+            intervals["source"] = "akshare.stock_info_sz_change_name (SZSE short-name register)"
+            intervals["source_endpoint"] = provenance.get("endpoint", "")
+            intervals["retrieved_at"] = now
+            intervals["available_at"] = intervals["effective_start"].dt.strftime("%Y-%m-%d")
+            intervals["quality_status"] = "OK"
+            intervals.to_parquet(OUT / "st_intervals.parquet", index=False)
+
+    covered_exchanges = sorted(
+        master.loc[master["symbol"].isin(set(intervals["symbol"])), "exchange"].unique()
+    ) if len(intervals) else []
+    uncovered = sorted(set(master["exchange"].unique()) - set(covered_exchanges))
     payload = {
         "dataset": "st_intervals",
-        "current_st_names": int(len(frame)),
-        "historical_intervals_status": BLOCKED,
+        "current_st_names": int(len(snapshot)),
+        "dated_episodes": int(len(intervals)),
+        "securities_with_dated_episodes": int(intervals["symbol"].nunique()) if len(intervals) else 0,
+        "name_change_records": provenance.get("rows", 0),
+        "episode_date_range": [str(intervals["effective_start"].min().date()),
+                               str(intervals["effective_start"].max().date())] if len(intervals) else None,
+        "exchanges_with_dated_history": covered_exchanges,
+        "exchanges_without_dated_history": uncovered,
+        "historical_intervals_status": "AVAILABLE" if len(intervals) else BLOCKED,
+        "coverage_caveat": ("The SZSE publishes a dated short-name register, so Shenzhen main-board "
+                            "and ChiNext episodes are exchange-sourced. No equivalent bulk register "
+                            "was found for the SSE or the BSE, so risk-warning history for those "
+                            f"exchanges ({', '.join(uncovered) or 'none'}) remains {BLOCKED}."),
         "sources_tested_for_history": [
+            {"source": "akshare.stock_info_sz_change_name (简称变更)",
+             "result": f"WORKS — {provenance.get('rows', 0)} dated SZSE short-name changes"},
+            {"source": "query.sse.com.cn common-query name-change reports",
+             "result": "no bulk dated short-name register found for the SSE"},
+            {"source": "akshare.stock_info_change_name (Sina former names)",
+             "result": "ordered former names WITHOUT change dates; cannot form intervals"},
             {"source": "akshare.stock_profile_cninfo (曾用简称)",
-             "result": "former names returned WITHOUT change dates; cannot form intervals; "
-                       "empty for delisted names"},
+             "result": "former names without dates; empty for delisted names"},
             {"source": "akshare.stock_zh_a_st_em",
-             "result": "Eastmoney current risk-warning board only, and the endpoint is "
-                       "IP-throttled in this runtime"},
+             "result": "Eastmoney current risk-warning board only, and IP-throttled here"},
             {"source": "TickFlow instrument listing",
              "result": "current name only — no name history in the entitled API"},
             {"source": "baostock query_history_k_data_plus (isST per trading day)",
-             "result": "would solve this exactly, but baostock needs TCP 10030 and this "
+             "result": "would cover every exchange, but baostock needs TCP 10030 and this "
                        "runtime only has 80/443 egress"},
         ],
-        "why_not_inferred": ("A ±5% limit signature would let ST days be guessed from bars, but a "
-                             "guessed regulatory state is not a point-in-time fact and is not written "
-                             "into a PIT table."),
+        "why_not_inferred": ("A +/-5% limit signature would let ST days be guessed from bars, but a "
+                             "guessed regulatory state is not a point-in-time fact and is never "
+                             "written into a PIT table."),
+        "provenance": provenance,
         "generated": now,
     }
-    (OUT / "st_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    (OUT / "st_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False,
+                                                    default=str))
+    print(json.dumps({k: payload[k] for k in
+                      ("current_st_names", "dated_episodes", "securities_with_dated_episodes",
+                       "name_change_records", "episode_date_range", "exchanges_with_dated_history",
+                       "exchanges_without_dated_history", "historical_intervals_status")},
+                     indent=2, ensure_ascii=False, default=str))
     return 0
 
 
@@ -316,7 +440,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--start", default="2010-01-01")
     args = parser.parse_args()
-    if args.cmd != "st" and not args.allow_network:
+    if not args.allow_network:
         print("refusing to run: --allow-network was not confirmed")
         return 2
     load_repo_env()

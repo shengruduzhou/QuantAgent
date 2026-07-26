@@ -292,9 +292,64 @@ class SinaSource:
     name = "sina"
     HFQ_URL = "https://finance.sina.com.cn/realstock/company/{code}/hfq.js"
     BONUS_URL = "https://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{code}.phtml"
+    KLINE_URL = "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"
+
+    #: Hard vendor ceiling: the endpoint returns at most the most recent 1023
+    #: sessions and offers no paging, so a long history comes back truncated.
+    MAX_SESSIONS = 1023
 
     def __init__(self, client: HttpClient | None = None) -> None:
         self.client = client or HttpClient()
+
+    def daily_bars(self, symbol: str, start: str | None = None,
+                   end: str | None = None) -> SourceResult:
+        """Raw daily OHLCV — the only public route that still serves DELISTED names.
+
+        TickFlow and Tencent both answer EMPTY for securities that have left the
+        exchange, which would leave the universe survivorship-biased. This
+        endpoint still serves them, but only the most recent ``MAX_SESSIONS``
+        sessions and without turnover, so the result is marked truncated in its
+        metadata rather than passed off as a complete history.
+        """
+        ident = identify(symbol)
+        outcome = self.client.get_json(self.KLINE_URL, params={
+            "symbol": ident.tencent_code, "scale": "240", "ma": "no",
+            "datalen": str(self.MAX_SESSIONS)})
+        cols = list(contracts.DAILY_BARS.columns)
+        if not outcome.ok:
+            return _empty(self.name, outcome, cols)
+        payload = outcome.payload
+        if not isinstance(payload, list) or not payload:
+            return _empty(self.name, outcome, cols, RETRY_EMPTY, "no bars in vendor response")
+        rows = []
+        for item in payload:
+            if not isinstance(item, dict) or "day" not in item:
+                continue
+            rows.append({
+                "symbol": ident.symbol, "trade_date": pd.Timestamp(item["day"]),
+                "open": _f(item.get("open")), "high": _f(item.get("high")),
+                "low": _f(item.get("low")), "close": _f(item.get("close")),
+                "volume": _f(item.get("volume")),        # already in shares here
+                "amount": float("nan"),
+            })
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return _empty(self.name, outcome, cols, RETRY_EMPTY, "unparseable vendor rows")
+        frame = frame.drop_duplicates("trade_date").sort_values("trade_date")
+        if start:
+            frame = frame[frame["trade_date"] >= pd.Timestamp(start)]
+        if end:
+            frame = frame[frame["trade_date"] <= pd.Timestamp(end)]
+        if frame.empty:
+            return _empty(self.name, outcome, cols, RETRY_EMPTY, "no bars inside range")
+        frame = _stamp(frame, self.name, self.KLINE_URL, outcome.retrieved_at,
+                       frame["trade_date"].dt.strftime("%Y-%m-%d") + " 15:00:00")
+        return SourceResult(frame[cols], self.name, self.KLINE_URL, RETRY_OK,
+                            outcome.retrieved_at, len(frame),
+                            metadata={"adjustment": contracts.ADJUST_NONE,
+                                      "amount_available": False,
+                                      "history_truncated": len(payload) >= self.MAX_SESSIONS,
+                                      "max_sessions": self.MAX_SESSIONS})
 
     def adjust_factors(self, symbol: str) -> SourceResult:
         """Cumulative backward-adjustment (hfq) factor series with effective dates.

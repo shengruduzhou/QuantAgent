@@ -35,9 +35,13 @@ HOST_MIN_INTERVAL: dict[str, float] = {
     "push2his.eastmoney.com": 0.6,
     "push2.eastmoney.com": 0.6,
     "datacenter-web.eastmoney.com": 0.8,
-    "web.ifzq.gtimg.cn": 0.15,
-    "ifzq.gtimg.cn": 0.15,
-    "qt.gtimg.cn": 0.15,
+    # Measured the hard way: a short burst is fine, but sustained fetching at
+    # ~2 req/s earns an HTTP 501 block lasting tens of minutes, and it persists
+    # across processes because the limit is per source IP. One worker at ~1 req/s
+    # runs indefinitely without tripping it.
+    "web.ifzq.gtimg.cn": 1.0,
+    "ifzq.gtimg.cn": 1.0,
+    "qt.gtimg.cn": 0.5,
     "stock.gtimg.cn": 0.25,
     "hq.sinajs.cn": 0.3,
     "finance.sina.com.cn": 0.3,

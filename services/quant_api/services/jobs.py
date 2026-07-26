@@ -369,7 +369,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "entrypoint": "scripts/u0_acquire_bars.py",
         "required": {"allow_network"},
         "allowed": {"allow_network", "providers", "staging_name", "max_minutes", "limit",
-                    "boards", "symbols", "shard", "order", "skip_if_in", "refetch"},
+                    "boards", "symbols", "status", "shard", "order", "skip_if_in", "refetch"},
         "path_inputs": set(),
         "path_outputs": set(),
         "fixed_outputs": ("runtime/data/u0/bars",),

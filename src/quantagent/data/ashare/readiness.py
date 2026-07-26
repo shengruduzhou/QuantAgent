@@ -274,12 +274,24 @@ def pit_gate(evidence: Evidence) -> dict[str, Any]:
         availability["suspension_intervals"] = f"{BLOCKED} — no halt snapshots on disk"
 
     st = manifests.get("st") or {}
-    if st.get("historical_intervals_status") == BLOCKED:
+    uncovered_exchanges = st.get("exchanges_without_dated_history") or []
+    if st.get("dated_episodes") and not uncovered_exchanges:
         availability["st_intervals"] = (
-            f"{BLOCKED} — current state AVAILABLE ({st.get('current_st_names')} names); "
-            "no dated name-change history from any source reachable in this runtime")
+            f"AVAILABLE — {st.get('dated_episodes')} dated risk-warning episodes over "
+            f"{st.get('securities_with_dated_episodes')} securities")
+    elif st.get("dated_episodes"):
+        # Partial is NOT a pass: an exchange without a dated register would be
+        # silently treated as "never ST", which is exactly the default-false the
+        # gate exists to prevent.
+        availability["st_intervals"] = (
+            f"{BLOCKED} — PARTIAL: {st.get('dated_episodes')} dated episodes over "
+            f"{st.get('securities_with_dated_episodes')} securities from "
+            f"{', '.join(st.get('exchanges_with_dated_history') or [])}; no dated register "
+            f"for {', '.join(uncovered_exchanges)}; current state known for "
+            f"{st.get('current_st_names')} names")
     elif st.get("current_st_names"):
-        availability["st_intervals"] = f"AVAILABLE ({st.get('current_st_names')} current names)"
+        availability["st_intervals"] = (
+            f"{BLOCKED} — current state only ({st.get('current_st_names')} names), no history")
     else:
         availability["st_intervals"] = f"{BLOCKED} — no ST source"
 

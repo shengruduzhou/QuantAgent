@@ -109,9 +109,15 @@ def build_tree(root: Path, *, coverage_full: bool = True, failing_checks: tuple[
     _write(u0 / "pit/suspension_manifest.json",
            {"intervals": 460, "symbols_with_halts": 460,
             "snapshot_date_range": ["20251029", "20260724"]})
-    _write(u0 / "pit/st_manifest.json",
-           {"current_st_names": 333,
-            "historical_intervals_status": "AVAILABLE" if pit_complete else "BLOCKED_BY_DATA"})
+    _write(u0 / "pit/st_manifest.json", {
+        "current_st_names": 333,
+        "dated_episodes": 906,
+        "securities_with_dated_episodes": 651,
+        "exchanges_with_dated_history": ["SSE", "SZSE", "BSE"] if pit_complete else ["SZSE"],
+        # an exchange with no dated register must not be treated as never-ST
+        "exchanges_without_dated_history": [] if pit_complete else ["SSE", "BSE"],
+        "historical_intervals_status": "AVAILABLE",
+    })
     return root
 
 
@@ -166,6 +172,16 @@ def test_blocked_pit_field_blocks_training_but_not_bar_readiness(tmp_path):
     assert certificates["overall"]["data_readiness_state"] == NOT_READY_PIT
     assert certificates["overall"]["training_permitted"] is False
     assert "st_intervals" in certificates["pit"]["blocked_pit_fields"]
+
+
+def test_partial_st_history_is_blocked_not_rounded_up_to_available(tmp_path):
+    """An exchange with no dated ST register must not read as 'never ST'."""
+    build_tree(tmp_path, pit_complete=False)
+    status = build_certificates(tmp_path)["pit"]["pit_field_availability"]["st_intervals"]
+    assert status.startswith("BLOCKED_BY_DATA")
+    assert "PARTIAL" in status
+    # the partial coverage that DOES exist is still reported, not discarded
+    assert "906" in status and "SZSE" in status and "SSE" in status
 
 
 def test_a_board_missing_from_the_master_fails_identity(tmp_path):
