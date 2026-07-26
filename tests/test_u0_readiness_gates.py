@@ -53,7 +53,8 @@ def _write(path: Path, payload) -> None:
 def build_tree(root: Path, *, coverage_full: bool = True, failing_checks: tuple[str, ...] = (),
                not_run_checks: tuple[str, ...] = (), pit_complete: bool = True,
                boards: tuple[str, ...] = ("SH_Main", "SZ_Main", "ChiNext", "STAR", "BSE"),
-               delisted_in_master: int = 12, drop_evidence: tuple[str, ...] = ()) -> Path:
+               delisted_in_master: int = 12, drop_evidence: tuple[str, ...] = (),
+               pre_listing: tuple[str, ...] = ()) -> Path:
     u0 = root / "runtime/data/u0"
     (u0 / "panel").mkdir(parents=True, exist_ok=True)
 
@@ -101,6 +102,13 @@ def build_tree(root: Path, *, coverage_full: bool = True, failing_checks: tuple[
                              "serving_provider": "tickflow" if covered else "none",
                              "blocked_reason": "" if covered else "NOT_YET_ACQUIRED"})
         pd.DataFrame(rows).to_parquet(u0 / "panel/coverage_matrix.parquet", index=False)
+        if pre_listing:
+            pd.DataFrame([
+                {"symbol": s, "disposition": "PRE_LISTING_NO_SESSIONS"} for s in pre_listing
+            ] + [
+                {"symbol": r["symbol"], "disposition": "LISTED_WITH_HISTORY"}
+                for r in rows if r["symbol"] not in pre_listing
+            ]).to_parquet(u0 / "master_disposition.parquet", index=False)
 
     _write(u0 / "pit/trading_calendar_manifest.json",
            {"rows": 8797, "first": "1990-12-19", "last": "2026-12-31"})
@@ -147,6 +155,36 @@ def test_incomplete_universe_coverage_blocks_the_certificate(tmp_path):
     coverage = certificates["overall"]["gates"]["coverage"]
     assert coverage["covered_securities"] < coverage["master_securities"]
     assert coverage["not_yet_acquired"] > 0
+
+
+def test_uncovered_security_blocks_when_no_disposition_evidence_exists(tmp_path):
+    """Without the exchange-register artifact the gate stays strict."""
+    build_tree(tmp_path, coverage_full=False)
+    coverage = build_certificates(tmp_path)["overall"]["gates"]["coverage"]
+    assert coverage["pass"] is False
+    assert coverage["unexplained_uncovered"], "uncovered names must be named, not tolerated"
+    assert "master_disposition.parquet absent" in coverage["disposition_evidence"]
+
+
+def test_exchange_confirmed_pre_listing_name_is_excluded_from_the_denominator(tmp_path):
+    """A security the exchange does not list cannot have bars and never gets placeholders."""
+    build_tree(tmp_path, coverage_full=False,
+               pre_listing=tuple(f"{b}{i}" for b in ("SH_Main", "SZ_Main", "ChiNext", "STAR", "BSE")
+                                 for i in range(6, 10)))
+    coverage = build_certificates(tmp_path)["overall"]["gates"]["coverage"]
+    assert coverage["unexplained_uncovered"] == []
+    assert coverage["pass"] is True
+    assert coverage["expected_securities"] < coverage["master_securities"]
+    assert coverage["covered_securities"] == coverage["expected_securities"]
+
+
+def test_a_pre_listing_disposition_cannot_excuse_an_unrelated_gap(tmp_path):
+    """Excluding one confirmed non-trading name must not excuse a different gap."""
+    build_tree(tmp_path, coverage_full=False, pre_listing=("SH_Main6",))
+    coverage = build_certificates(tmp_path)["overall"]["gates"]["coverage"]
+    assert "SH_Main6" not in coverage["unexplained_uncovered"]
+    assert coverage["unexplained_uncovered"], "other uncovered names must still block"
+    assert coverage["pass"] is False
 
 
 def test_a_failing_validation_check_fails_the_quality_gate(tmp_path):
