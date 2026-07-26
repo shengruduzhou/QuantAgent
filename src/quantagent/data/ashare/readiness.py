@@ -84,6 +84,7 @@ class Evidence:
     capability: dict | None = None
     master_manifest: dict | None = None
     coverage: pd.DataFrame | None = None
+    disposition: pd.DataFrame | None = None
     pit_manifests: dict[str, dict] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
 
@@ -107,6 +108,9 @@ class Evidence:
             evidence.coverage = pd.read_parquet(coverage_path)
         else:
             evidence.missing.append(str(coverage_path.relative_to(root)))
+        disposition_path = u0 / "master_disposition.parquet"
+        if disposition_path.exists():
+            evidence.disposition = pd.read_parquet(disposition_path)
         for name, filename in (("calendar", "trading_calendar_manifest.json"),
                                ("adjust_factors", "adjust_factors_manifest.json"),
                                ("corporate_actions", "corporate_actions_manifest.json"),
@@ -201,7 +205,37 @@ def coverage_gate(evidence: Evidence) -> dict[str, Any]:
         "no_vendor_history_delisted": int(
             (coverage["blocked_reason"] == "NO_VENDOR_HISTORY_DELISTED").sum()),
     }
-    result["pass"] = bool(covered == total and not result["boards_with_zero_coverage"])
+
+    # A security that has not begun trading cannot have bars, and demanding them
+    # would either block the gate forever or invite placeholder rows. It is
+    # excluded from the denominator ONLY when the exchange's own listed register
+    # says it is absent — evidence from
+    # scripts/u0_exchange_register_reconcile.py, never an assumption. Without
+    # that artifact the gate stays strict: every master security must be covered.
+    expected = total
+    uncovered_symbols: list[str] = []
+    if "symbol" in coverage.columns:
+        uncovered_symbols = coverage.loc[~coverage["covered"].astype(bool), "symbol"].astype(str).tolist()
+    result["uncovered_symbols"] = uncovered_symbols[:50]
+    disposition = evidence.disposition
+    if disposition is not None and not disposition.empty:
+        counts = disposition["disposition"].value_counts().to_dict()
+        not_expected = disposition.loc[
+            disposition["disposition"] == "PRE_LISTING_NO_SESSIONS", "symbol"].astype(str)
+        not_expected_set = set(not_expected)
+        expected = total - len(not_expected_set & set(coverage["symbol"].astype(str)))
+        result["disposition_counts"] = {str(k): int(v) for k, v in counts.items()}
+        result["not_expected_to_trade"] = sorted(not_expected_set)
+        result["expected_securities"] = expected
+        result["unexplained_uncovered"] = sorted(set(uncovered_symbols) - not_expected_set)
+    else:
+        result["disposition_evidence"] = (
+            "master_disposition.parquet absent — every master security must be covered")
+        result["unexplained_uncovered"] = uncovered_symbols
+
+    result["expected_coverage_share"] = round(covered / max(1, expected), 4)
+    result["pass"] = bool(not result["unexplained_uncovered"]
+                          and not result["boards_with_zero_coverage"])
     return result
 
 
