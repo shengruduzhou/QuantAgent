@@ -53,6 +53,9 @@ SOURCE_PRECEDENCE: tuple[tuple[str, Path], ...] = (
     ("tickflow", BARS / "tickflow_raw"),
     ("tickflow_h032c_staging", LEGACY_STAGING),
     ("tencent", BARS / "tencent_raw"),
+    # Sina is last: it is the only public route that still serves DELISTED
+    # names, but it truncates at 1023 sessions and publishes no turnover.
+    ("sina_truncated", BARS / "sina_delisted"),
 )
 
 

@@ -76,6 +76,35 @@ $env:QUANTAGENT_HOME = "E:\Project\QuantAgent\runtime"
 .\.venv\Scripts\quantagent.exe storage-info-v7 --ensure
 ```
 
+## A股全宇宙数据底座 (U0)
+
+全宇宙行情、身份与 PIT 元数据统一走 `src/quantagent/data/ashare/`，详见
+[docs/ashare_data_foundation.md](docs/ashare_data_foundation.md)。要点：
+
+- 所有落盘行都带 provenance（source / source_endpoint / retrieved_at /
+  available_at / quality_status），供应商永不在同一只股票内混用。
+- 面板为 **raw 未复权**，复权因子单独成表；复权口径由除权日因子回放取证，
+  不靠字段声明。
+- U0 就绪关卡由**真实产物**推导（capability matrix / coverage matrix /
+  validation report / PIT interval manifests），无硬编码通过项。
+- 本运行环境只放行 TCP 80/443，故 baostock(10030)、mootdx/pytdx(7709) 不可用；
+  Level-2 无合法通路（TickFlow `depth.get` 未授权，公开源仅五档 L1，QMT 为
+  Windows 客户端），如实记为外部授权阻塞。
+
+```bash
+AI_quant_venv/bin/python3 scripts/ashare_capability_probe.py --allow-network
+AI_quant_venv/bin/python3 scripts/u0_security_master.py --allow-network
+AI_quant_venv/bin/python3 scripts/u0_acquire_bars.py --allow-network \
+    --providers tickflow --staging-name tickflow_raw --max-minutes 600
+AI_quant_venv/bin/python3 scripts/u0_pit_intervals.py calendar --allow-network
+AI_quant_venv/bin/python3 scripts/u0_assemble_panel.py
+AI_quant_venv/bin/python3 scripts/u0_validate.py --allow-network
+AI_quant_venv/bin/python3 scripts/u0_audit.py
+```
+
+采集可中断续跑：按 symbol 分区落盘 + ledger；`PERMANENT`/`ENTITLEMENT` 失败
+不重试，`TRANSIENT`/`RATE_LIMITED` 会重试；`<staging>.cancel` 可安全停止。
+
 ## Qlib 历史数据
 
 Qlib CN instruments 使用 uppercase exchange prefix，例如 `SH600519`、`SZ000001`，不是 AkShare 的 `600519.SH` 后缀风格。官方 free Qlib CN release 覆盖 `2000-01-04 .. 2020-09-25`；超过这个日期必须用自备 PIT CSV/Parquet 通过 Qlib `scripts/dump_bin.py` dump，或者走下面的 AkShare 近年行情面板。
