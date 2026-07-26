@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """H-031 Track U0: provider coverage matrix (report-u0-provider-coverage).
 
+SUPERSEDED. This matrix describes the legacy panel at
+``runtime/data/v7/full_universe/full_universe_market_panel.parquet``, whose
+prices mix two adjustment conventions (see
+``runtime/data/u0/validation/adjustment_forensics.json``). The coverage matrix
+the readiness gates read is now ``runtime/data/u0/panel/coverage_matrix.parquet``,
+produced by ``scripts/u0_assemble_panel.py`` from the raw panel. This script is
+kept so the legacy artifact and its schema contract stay reproducible; it no
+longer feeds any gate.
+
 Builds `runtime/data/u0/provider_coverage_matrix.{parquet,csv}` — one row per
 security in the authoritative historical security master, recording which
 provider (if any) actually carries usable bar history, how complete it is, and

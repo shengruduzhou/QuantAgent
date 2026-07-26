@@ -166,7 +166,21 @@ def test_governance_reports_unavailable_when_manifests_missing(empty_quant_ui_se
     assert status["shadow"]["status"] == "unavailable"
     assert status["u0"]["status"] == "unavailable"
     assert status["s4"]["status"] == "unavailable"
-    assert len(status["governedCommands"]) == 15
+    # 15 legacy U0/shadow/S4 commands + the 8 A-share data-foundation commands
+    command_ids = [c["commandId"] for c in status["governedCommands"]]
+    assert len(command_ids) == 23
+    for command_id in ("probe-ashare-capabilities", "build-u0-live-security-master",
+                       "acquire-u0-daily-bars", "build-u0-pit-intervals",
+                       "acquire-u0-intraday-bars", "assemble-u0-raw-panel",
+                       "validate-u0-data", "audit-u0-adjustment-forensics"):
+        assert command_id in command_ids
+    # every acquisition command must declare that it needs explicit network approval
+    by_id = {c["commandId"]: c for c in status["governedCommands"]}
+    for command_id in ("probe-ashare-capabilities", "acquire-u0-daily-bars",
+                       "acquire-u0-intraday-bars", "build-u0-live-security-master"):
+        assert by_id[command_id]["requiresNetwork"] is True
+    # the empty runtime must also report the foundation surface as unavailable
+    assert status["ashareFoundation"]["status"] == "unavailable"
 
 
 # --- governance surface: honest ready extraction -----------------------------
@@ -194,17 +208,53 @@ def _write_governance_fixture(settings: ApiSettings, *, leak: bool = False) -> N
     }))
     u0 = root / "data" / "u0"
     u0.mkdir(parents=True, exist_ok=True)
+    # evidence-driven certificate shape produced by scripts/u0_audit.py
     (u0 / "full_universe_readiness_certificate.json").write_text(json.dumps({
         "data_readiness_state": "FULL_UNIVERSE_DATA_NOT_READY_COVERAGE",
         "training_permitted": False,
-        "gate_pass": {"integration": True, "provider": True, "coverage": False, "pit": False},
-        "gates": {"coverage": {"covered_by_board": {"SH_Main": 1562}, "boards_absent": ["STAR", "BSE"],
-                               "blocked_by_data": 1860},
-                  "pit": {"st_history": "BLOCKED_BY_DATA"}},
+        "gate_pass": {"integration": True, "provider": True, "identity": True,
+                      "coverage": False, "quality": True, "pit": False},
+        "missing_evidence": [],
+        "evidence_sources": {"panel_manifest": "runtime/data/u0/panel/panel_manifest.json"},
+        "panel_sha256": "abc123",
+        "gates": {
+            "coverage": {"by_board": {"SH_Main": {"covered": 232, "total": 1848}},
+                         "by_status": {"delisted": {"covered": 16, "total": 361}},
+                         "boards_with_zero_coverage": ["STAR", "BSE"],
+                         "covered_securities": 2020, "master_securities": 5894,
+                         "coverage_share": 0.3427, "not_yet_acquired": 3874},
+            "identity": {"securities": 5894, "bse_current_920": 330, "bse_legacy_codes": 0,
+                         "delisted_in_master": 361, "symbol_normalisation": "PASS"},
+            "provider": {"serving_providers_by_family": {"daily_bars": ["tickflow"]},
+                         "families_without_provider": [],
+                         "fallback_providers_exercised": True,
+                         "fallback_provider_symbols_served": 128,
+                         "environment_blockers": []},
+            "quality": {"verdicts": {"adjustment_is_raw": "PASS"}, "failures": [],
+                        "not_run": [], "adjustment_method": "none (raw traded prices)",
+                        "volume_unit": "shares", "amount_unit": "CNY", "amount_coverage": 1.0},
+            "pit": {"field_availability": {"st_intervals": "BLOCKED_BY_DATA"},
+                    "blocked_fields": ["st_intervals"],
+                    "suspension_coverage_window": ["20251029", "20260724"]},
+        },
     }))
-    (u0 / "provider_coverage_summary.json").write_text(json.dumps({"covered_bar_history": 4028}))
-    (u0 / "pit_field_availability.json").write_text(json.dumps(
-        {"pit_field_availability": {"st_intervals": "BLOCKED_BY_DATA"}}))
+    (u0 / "panel").mkdir(parents=True, exist_ok=True)
+    (u0 / "panel" / "panel_manifest.json").write_text(json.dumps({
+        "serving_provider_counts": {"tickflow": 2020},
+        "quality_checks": {"rows": 2769268, "symbols": 2020, "min_date": "1990-12-19",
+                           "max_date": "2026-07-24", "session_gaps_suspended": 523,
+                           "session_gaps_unexplained": 44542},
+    }))
+    (u0 / "capability").mkdir(parents=True, exist_ok=True)
+    (u0 / "capability" / "provider_capability_matrix.json").write_text(json.dumps({
+        "probes": 71, "supported_probes": 32,
+        "providers_with_any_support": ["tickflow", "tencent", "sina"],
+        "serving_providers_by_family": {"daily_bars": ["tickflow", "tencent"], "l2_depth": []},
+        "families_without_any_provider": ["l2_depth"],
+        "blockers": [{"provider": "baostock", "dataset_family": "transport",
+                      "status": "BLOCKED_BY_ENVIRONMENT", "detail": "TCP 10030"}],
+        "environment": {"egress": "TCP 80/443 only"},
+    }))
 
 
 def test_governance_ready_extraction_has_no_performance(quant_ui_settings) -> None:
@@ -215,6 +265,17 @@ def test_governance_ready_extraction_has_no_performance(quant_ui_settings) -> No
     assert status["u0"]["dataReadinessState"] == "FULL_UNIVERSE_DATA_NOT_READY_COVERAGE"
     assert status["u0"]["trainingPermitted"] is False
     assert status["u0"]["boardsAbsent"] == ["STAR", "BSE"]
+    # the surface reports measured coverage, declared units and the fallback fact
+    assert status["u0"]["coveredSecurities"] == 2020
+    assert status["u0"]["masterSecurities"] == 5894
+    assert status["u0"]["quality"]["volumeUnit"] == "shares"
+    assert status["u0"]["provider"]["fallbackProvidersExercised"] is True
+    assert status["u0"]["blockedPitFields"] == ["st_intervals"]
+    # the capability matrix surfaces a dataset family that no provider serves
+    foundation = status["ashareFoundation"]
+    assert foundation["status"] == "ready"
+    assert "l2_depth" in foundation["capability"]["familiesWithoutAnyProvider"]
+    assert foundation["capability"]["blockers"][0]["status"] == "BLOCKED_BY_ENVIRONMENT"
 
 
 def test_governance_guard_blocks_a_performance_leak(quant_ui_settings) -> None:

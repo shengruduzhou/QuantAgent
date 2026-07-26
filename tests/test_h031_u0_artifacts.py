@@ -88,12 +88,28 @@ def test_uncovered_security_is_blocked_by_data_not_defaulted() -> None:
 
 
 def test_security_master_marks_missing_pit_fields_blocked_not_false() -> None:
+    """Each mandatory PIT field is either sourced with evidence or BLOCKED_BY_DATA.
+
+    The point is that no field may be silently absent or defaulted to false. A
+    field that HAS been sourced states what backs it (row counts and provider);
+    one that has not says BLOCKED_BY_DATA and why.
+    """
     if not PIT_AVAIL.exists():
         pytest.skip("pit_field_availability not generated")
-    avail = json.loads(PIT_AVAIL.read_text())["pit_field_availability"]
-    # ST / suspension / corporate-action have no PIT source on disk -> BLOCKED_BY_DATA
-    for field in ("st_intervals", "suspension_intervals", "corporate_action_identity"):
-        assert str(avail[field]).startswith("BLOCKED_BY_DATA")
+    payload = json.loads(PIT_AVAIL.read_text())
+    avail = payload["pit_field_availability"]
+    mandatory = ("listing_date", "delisting_date", "trading_calendar", "price_limit_regime",
+                 "ipo_special_limit", "corporate_action_identity", "suspension_intervals",
+                 "st_intervals")
+    for field in mandatory:
+        status = str(avail[field])
+        assert status, field
+        assert status.startswith(("AVAILABLE", "BLOCKED_BY_DATA")), (field, status)
+        if status.startswith("BLOCKED_BY_DATA"):
+            # a blocker must say what is missing, not just that something is
+            assert len(status) > len("BLOCKED_BY_DATA"), field
+    assert set(payload["blocked_fields"]) == {
+        f for f in mandatory if str(avail[f]).startswith("BLOCKED_BY_DATA")}
 
 
 def test_readiness_decision_uses_the_defined_state_vocabulary() -> None:
@@ -113,17 +129,28 @@ def test_readiness_certificate_carries_no_performance() -> None:
     assert not re.search(r"\b(nav|sharpe|cagr|drawdown|calmar|sortino|pnl)\b", text)
 
 
-def test_readiness_reports_bar_panel_gate_with_panel_hash() -> None:
-    """H-032A §9: the assembled panel is structurally gated and content-hashed."""
+def test_readiness_reports_panel_quality_with_panel_hash() -> None:
+    """The assembled panel is structurally gated and content-hashed.
+
+    The structural gates moved out of the certificate into the validation report
+    when they stopped being hardcoded constants, so the certificate now names the
+    checks it consumed and carries their verdicts.
+    """
     if not READINESS.exists():
         pytest.skip("readiness certificate not generated")
     cert = json.loads(READINESS.read_text())
-    bar = cert["gates"]["bar_panel"]
-    for gate in ("duplicate_symbol_date", "zero_post_delisting_rows", "no_unpublished_current_day",
-                 "suspended_rows_represented", "eligible_trading_day_null_close", "panel_content_hashed"):
-        assert gate in bar
-    assert bar["panel_sha256"]  # content hash present
-    assert "bar_panel" in cert["gate_pass"]
+    quality = cert["gates"]["quality"]
+    for check in ("duplicate_symbol_date", "post_delisting_rows", "null_close",
+                  "suspension_representation", "adjustment_is_raw",
+                  "volume_unit_is_shares", "amount_volume_units"):
+        assert check in quality["verdicts"], check
+        # a check that never ran can never be reported as a pass
+        assert quality["verdicts"][check] in {"PASS", "FAIL", "WARN", "NOT_RUN"}
+    assert cert["panel_sha256"]
+    assert "quality" in cert["gate_pass"]
+    # the declared semantics travel with the certificate, not as prose
+    assert quality["volume_unit"] == "shares"
+    assert "raw" in str(quality["adjustment_method"]).lower()
 
 
 def test_star_bse_probe_report_distinguishes_fetchable_from_unsupported() -> None:
@@ -139,9 +166,12 @@ def test_star_bse_probe_report_distinguishes_fetchable_from_unsupported() -> Non
 
 
 def test_survivorship_bias_is_quantified_not_hidden() -> None:
-    if not PIT_AVAIL.exists():
-        pytest.skip("pit_field_availability not generated")
-    sb = json.loads(PIT_AVAIL.read_text()).get("survivorship_bias", {})
-    assert "delisted_total" in sb and "delisted_with_bar_history" in sb
-    # delisting-date interval history is BLOCKED_BY_DATA -> must be honestly reported
-    assert sb["delisted_with_delisting_date"] == 0
+    """Delisted coverage is stated as a measured ratio, never omitted."""
+    if not READINESS.exists():
+        pytest.skip("readiness certificate not generated")
+    coverage = json.loads(READINESS.read_text())["gates"]["coverage"]
+    by_status = coverage.get("by_status", {})
+    assert "delisted" in by_status, "a universe that hides delisted names is survivorship-biased"
+    delisted = by_status["delisted"]
+    assert delisted["total"] > 0
+    assert 0 <= delisted["covered"] <= delisted["total"]

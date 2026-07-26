@@ -106,6 +106,24 @@ Model 不能标记 production-ready，除非：
 - 财务报表合并必须走 `pit_wide_merge_statements`：按 statement type 加列前缀（income_revenue / balance_total_assets / cashflow_operating_cash_flow / indicator_*），按 PIT 四键 outer-merge，重复 `(symbol, report_period, available_at)` 必须 raise。
 - 真实数据 manifest（`DataManifest`）必须包含 provider、source paths、generated_at、row_count、date_range、symbols、schema report、PIT violations、duplicate rate、warnings 和 content hash。
 
+## A股数据底座 / A-share Data Foundation
+
+- 全宇宙（U0）行情、身份与 PIT 元数据的唯一入口是 `quantagent.data.ashare`；
+  新增数据源必须实现 adapter + capability probe，而不是在脚本里直接发请求。
+- 每一行落盘数据必须带 provenance（`source` / `source_endpoint` /
+  `retrieved_at` / `available_at` / `quality_status`）；同一 symbol 的历史
+  **不允许**跨供应商拼接，换源必须写 `SourceBoundary`。
+- 单位与复权口径写进 contract 并**实测验证**：`volume` = 股（vendor 的"手"在
+  adapter 边界 ×100），`amount` = CNY，面板 = raw 未复权。复权口径用
+  `scripts/u0_adjustment_forensics.py` 以除权日因子回放取证。
+- 存续期内没有 bar 的交易日不写 NaN 行，进 `session_gaps.parquet` 并分类为
+  `SUSPENDED`（命中供应商停牌区间）或 `MISSING_UNEXPLAINED`。
+- U0 关卡一律由产物推导（`quantagent.data.ashare.readiness`）；**禁止**把关卡
+  写成常量 `True`，NOT_RUN 不得当作 PASS，缺证据即 NOT_READY_INTEGRATION。
+- 缺失来源记 `BLOCKED_BY_DATA` 并列出**已实测过的候选来源**；部分覆盖（如仅
+  SZSE 有简称变更登记）算 BLOCKED，不算通过。
+- 详见 `docs/ashare_data_foundation.md`。
+
 ## New Modules / 新增模块
 
 - `quantagent.config.paths` — 统一 `E:\Project\QuantAgent\runtime\` 存储布局，环境变量 `QUANTAGENT_HOME` / `QUANTAGENT_DATA_ROOT` 覆盖。

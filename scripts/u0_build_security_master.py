@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """H-031 Track U0: normalised historical security master (build-u0-security-master).
 
+SUPERSEDED by ``scripts/u0_security_master.py``, which builds the master from
+LIVE exchange instrument listings plus the exchange delisting lists rather than
+re-normalising a frozen on-disk master. Kept so the H-031 artifact and its PIT
+availability contract stay reproducible.
+
 Normalises the authoritative exchange-derived master
 (runtime/reports/h028/track_a/historical_security_master.parquet) into the
 H-031 §7 schema and records, honestly, which point-in-time identity fields are

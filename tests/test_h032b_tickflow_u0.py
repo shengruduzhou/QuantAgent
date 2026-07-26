@@ -58,15 +58,22 @@ def test_bse_identity_not_all_920_classified_synthetic() -> None:
     assert a["identity_decision"] in {"BSE_IDENTITY_CURRENT_RESOLVED", "BSE_IDENTITY_PARTIAL"}
 
 
-def test_pit_source_audit_uses_the_strict_vocabulary() -> None:
+def test_pit_source_audit_points_at_the_interval_manifests() -> None:
+    """The PIT audit is a pointer to produced interval tables, not a vocabulary.
+
+    It used to classify each field against TickFlow's capability by hand; the
+    field status is now derived from the manifests that the interval builders
+    actually wrote, so the audit records those manifests and their contents.
+    """
     src = U0 / "pit_source_audit.json"
     if not src.exists():
         pytest.skip("pit source audit not generated")
-    vocab = {"TICKFLOW_AVAILABLE", "TICKFLOW_CURRENT_ONLY", "EXCHANGE_SOURCE_AVAILABLE",
-             "ALTERNATIVE_SOURCE_REQUIRED", "BLOCKED_BY_DATA"}
-    fields = json.loads(src.read_text())["fields"]
-    for info in fields.values():
-        assert info["tickflow"] in vocab
+    payload = json.loads(src.read_text())
+    manifests = payload["pit_interval_manifests"]
+    assert manifests, "the audit must name the interval manifests it derived from"
+    assert "u0_pit_intervals.py" in payload["source_of_truth"]
+    for name, manifest in manifests.items():
+        assert isinstance(manifest, dict) and manifest, name
 
 
 def _load_backfill_module():
