@@ -51,34 +51,99 @@ interface S4Status {
   codeOrTraceHashChanged?: boolean | null;
 }
 
+interface BoardCoverage {
+  covered?: number;
+  total?: number;
+}
+
 interface U0Status {
   status: string;
   reason?: string;
   dataReadinessState?: string;
   trainingPermitted?: boolean;
   gatePass?: Record<string, boolean>;
-  coverageByBoard?: Record<string, number>;
+  missingEvidence?: string[];
+  evidenceSources?: Record<string, unknown>;
+  coverageByBoard?: Record<string, BoardCoverage>;
+  coverageByStatus?: Record<string, BoardCoverage>;
   boardsAbsent?: string[];
-  blockedByData?: number;
-  coverageBacklogFetchable?: number;
-  retryClassCounts?: Record<string, number>;
-  providerFailures?: number;
-  pitGate?: Record<string, string>;
-  pitFieldAvailability?: Record<string, string>;
-  survivorshipBias?: {
-    delisted_total?: number;
-    delisted_with_bar_history?: number;
-    delisted_with_delisting_date?: number;
-    delisted_fraction_of_master?: number;
+  coveredSecurities?: number;
+  masterSecurities?: number;
+  coverageShare?: number;
+  notYetAcquired?: number;
+  identity?: {
+    securities?: number;
+    bseCurrent920?: number;
+    bseLegacyCodes?: number;
+    delistedInMaster?: number;
+    symbolNormalisation?: string;
   };
-  starBseProbe?: Record<string, string>;
-  coveredBarHistory?: number;
-  backfill?: {
-    masterSecurities?: number;
+  provider?: {
+    servingProvidersByFamily?: Record<string, string[]>;
+    familiesWithoutProvider?: string[];
+    fallbackProvidersExercised?: boolean;
+    fallbackSymbolsServed?: number;
+    environmentBlockers?: Array<{ provider?: string; detail?: string }>;
+  };
+  quality?: {
+    verdicts?: Record<string, string>;
+    failures?: string[];
+    notRun?: string[];
+    adjustmentMethod?: string;
+    volumeUnit?: string;
+    amountUnit?: string;
+    amountCoverage?: number;
+  };
+  pitFieldAvailability?: Record<string, string>;
+  blockedPitFields?: string[];
+  suspensionCoverageWindow?: string[] | null;
+  panel?: {
+    sha256?: string;
+    rows?: number;
+    symbols?: number;
+    dateRange?: (string | null)[];
+    sessionGapsSuspended?: number;
+    sessionGapsUnexplained?: number;
+    servingProviderCounts?: Record<string, number>;
+  };
+}
+
+interface AshareFoundationStatus {
+  status: string;
+  reason?: string;
+  capability?: {
+    probes?: number;
+    supportedProbes?: number;
+    providersWithAnySupport?: string[];
+    servingProvidersByFamily?: Record<string, string[]>;
+    familiesWithoutAnyProvider?: string[];
+    blockers?: Array<{ provider?: string; dataset_family?: string; status?: string; detail?: string }>;
+    environment?: { platform?: string; egress?: string };
+  };
+  securityMaster?: {
+    securities?: number;
+    byBoard?: Record<string, number>;
+    byStatus?: Record<string, number>;
+    currentStNames?: number;
+    delistingDateCoverage?: number;
+  };
+  intraday?: {
+    frequencyMinutes?: number;
+    symbolsWithBars?: number;
+    rows?: number;
+    symbolSessions?: number;
+    servingProviders?: Record<string, number>;
+    depthLimitation?: string;
+  };
+  adjustmentForensics?: {
+    results?: Array<{ label?: string; events_tested?: number; sign_agreement?: number; verdict?: string }>;
+  };
+  validation?: {
+    panelRows?: number;
     panelSymbols?: number;
-    missingSymbols?: number;
-    stagedBackfillFiles?: number;
-  } | null;
+    dateRange?: string[];
+    verdicts?: Record<string, number>;
+  };
 }
 
 interface U0BarPitStatus {
@@ -151,6 +216,7 @@ interface GovernanceStatus {
   s4: S4Status;
   u0: U0Status;
   u0BarPit?: U0BarPitStatus;
+  ashareFoundation?: AshareFoundationStatus;
   lineage: LineageStatus;
   governedCommands: GovernedCommand[];
   blinding: string;
@@ -319,25 +385,29 @@ export function GovernancePage(): JSX.Element {
               <div><dt>数据就绪状态</dt><dd>{u0.dataReadinessState}</dd></div>
               <div><dt>训练许可</dt><dd>{yesNo(u0.trainingPermitted)}</dd></div>
               <div><dt>关卡</dt><dd>{Object.entries(u0.gatePass ?? {}).map(([g, ok]) => `${g}:${ok ? "PASS" : "FAIL"}`).join(" · ")}</dd></div>
-              <div><dt>覆盖行情（票数）</dt><dd>{u0.coveredBarHistory ?? "—"}</dd></div>
-              <div><dt>BLOCKED_BY_DATA</dt><dd>{u0.blockedByData ?? "—"}</dd></div>
-              <div><dt>可取回未回填（backlog）</dt><dd>{u0.coverageBacklogFetchable ?? "—"}</dd></div>
-              <div><dt>供应商空响应</dt><dd>{u0.providerFailures ?? "—"}</dd></div>
+              <div><dt>覆盖证券</dt><dd>{u0.coveredSecurities ?? "—"} / {u0.masterSecurities ?? "—"}{u0.coverageShare != null ? `（${(u0.coverageShare * 100).toFixed(1)}%）` : ""}</dd></div>
+              <div><dt>尚未采集</dt><dd>{u0.notYetAcquired ?? "—"}</dd></div>
               <div><dt>缺席板块</dt><dd>{u0.boardsAbsent?.length ? u0.boardsAbsent.join(", ") : "无"}</dd></div>
-              <div><dt>退市生存者偏差</dt><dd>{u0.survivorshipBias?.delisted_total != null ? `${u0.survivorshipBias.delisted_with_bar_history ?? 0}/${u0.survivorshipBias.delisted_total} 有行情, ${u0.survivorshipBias.delisted_with_delisting_date ?? 0} 有退市日` : "—"}</dd></div>
-              <div><dt>STAR/BSE 探针</dt><dd>{u0.starBseProbe && Object.keys(u0.starBseProbe).length ? Object.entries(u0.starBseProbe).map(([b, d]) => `${b}:${d}`).join(" · ") : "—"}</dd></div>
-              <div><dt>回填进度（staged）</dt><dd>{u0.backfill?.stagedBackfillFiles ?? "—"} · 缺 {u0.backfill?.missingSymbols ?? "—"}</dd></div>
+              <div><dt>退市覆盖（生存者偏差）</dt><dd>{u0.coverageByStatus?.delisted ? `${u0.coverageByStatus.delisted.covered ?? 0}/${u0.coverageByStatus.delisted.total ?? 0} 有行情` : "—"}</dd></div>
+              <div><dt>复权口径</dt><dd>{u0.quality?.adjustmentMethod ?? "—"}</dd></div>
+              <div><dt>单位</dt><dd>成交量 {u0.quality?.volumeUnit ?? "—"} · 成交额 {u0.quality?.amountUnit ?? "—"}{u0.quality?.amountCoverage != null ? `（成交额覆盖 ${(u0.quality.amountCoverage * 100).toFixed(1)}%）` : ""}</dd></div>
+              <div><dt>校验失败项</dt><dd>{u0.quality?.failures?.length ? u0.quality.failures.join(", ") : "无"}</dd></div>
+              <div><dt>未执行校验</dt><dd>{u0.quality?.notRun?.length ? u0.quality.notRun.join(", ") : "无"}</dd></div>
+              <div><dt>回退供应商已实测</dt><dd>{yesNo(u0.provider?.fallbackProvidersExercised)}（{u0.provider?.fallbackSymbolsServed ?? 0} 票）</dd></div>
+              <div><dt>停牌 / 无法解释缺口</dt><dd>{u0.panel?.sessionGapsSuspended ?? "—"} / {u0.panel?.sessionGapsUnexplained ?? "—"}</dd></div>
+              <div><dt>面板</dt><dd>{u0.panel?.rows?.toLocaleString() ?? "—"} 行 · {u0.panel?.symbols ?? "—"} 票 · {u0.panel?.dateRange?.[0] ?? "—"} → {u0.panel?.dateRange?.[1] ?? "—"}</dd></div>
+              <div><dt>缺失证据</dt><dd>{u0.missingEvidence?.length ? u0.missingEvidence.join(", ") : "无"}</dd></div>
             </dl>
             <div className="governance-boards">
-              <h3>已覆盖板块</h3>
+              <h3>板块覆盖（已覆盖 / 总数）</h3>
               <ul>
-                {Object.entries(u0.coverageByBoard ?? {}).map(([board, count]) => (
-                  <li key={board}><strong>{board}</strong><span>{count}</span></li>
+                {Object.entries(u0.coverageByBoard ?? {}).map(([board, row]) => (
+                  <li key={board}><strong>{board}</strong><span>{row?.covered ?? 0} / {row?.total ?? 0}</span></li>
                 ))}
               </ul>
               <h3>PIT 执行字段</h3>
               <ul className="governance-pit">
-                {Object.entries(u0.pitGate ?? {}).map(([field, state]) => (
+                {Object.entries(u0.pitFieldAvailability ?? {}).map(([field, state]) => (
                   <li key={field} className={String(state).includes("BLOCKED") ? "blocked" : ""}>
                     <strong>{field}</strong><span>{state}</span>
                   </li>
@@ -359,6 +429,56 @@ export function GovernancePage(): JSX.Element {
           )}
         </div>
       </WorkbenchPanel>
+
+      {data.ashareFoundation && data.ashareFoundation.status === "ready" ? (
+        <WorkbenchPanel
+          eyebrow="A股数据底座"
+          title="供应商能力 / 授权矩阵与采集溯源"
+          meta={`${data.ashareFoundation.capability?.supportedProbes ?? 0}/${data.ashareFoundation.capability?.probes ?? 0} 实网探针 SUPPORTED`}
+        >
+          <div className="governance-grid">
+            <dl className="governance-facts">
+              <div><dt>运行环境出网</dt><dd>{data.ashareFoundation.capability?.environment?.egress ?? "—"}</dd></div>
+              <div><dt>有实测支持的供应商</dt><dd>{data.ashareFoundation.capability?.providersWithAnySupport?.join(", ") || "—"}</dd></div>
+              <div><dt>证券主表</dt><dd>{data.ashareFoundation.securityMaster?.securities ?? "—"} 只 · 退市 {data.ashareFoundation.securityMaster?.byStatus?.delisted ?? "—"} · 当前 ST {data.ashareFoundation.securityMaster?.currentStNames ?? "—"}</dd></div>
+              <div><dt>分钟数据</dt><dd>{data.ashareFoundation.intraday ? `${data.ashareFoundation.intraday.symbolsWithBars ?? 0} 票 · ${data.ashareFoundation.intraday.rows?.toLocaleString() ?? 0} 根 ${data.ashareFoundation.intraday.frequencyMinutes ?? "?"}分钟条` : "未采集"}</dd></div>
+              <div><dt>分钟深度限制</dt><dd>{data.ashareFoundation.intraday?.depthLimitation ?? "—"}</dd></div>
+              <div><dt>校验结论</dt><dd>{Object.entries(data.ashareFoundation.validation?.verdicts ?? {}).map(([k, v]) => `${k}:${v}`).join(" · ") || "—"}</dd></div>
+            </dl>
+            <div className="governance-boards">
+              <h3>各数据族的可用供应商（实测）</h3>
+              <ul className="governance-pit">
+                {Object.entries(data.ashareFoundation.capability?.servingProvidersByFamily ?? {}).map(([family, providers]) => (
+                  <li key={family} className={providers?.length ? "" : "blocked"}>
+                    <strong>{family}</strong><span>{providers?.length ? providers.join(", ") : "无"}</span>
+                  </li>
+                ))}
+              </ul>
+              <h3>外部阻塞（授权 / 环境）</h3>
+              <ul className="governance-pit">
+                {(data.ashareFoundation.capability?.blockers ?? []).slice(0, 12).map((blocker, index) => (
+                  <li key={`${blocker.provider}-${blocker.dataset_family}-${index}`} className="blocked">
+                    <strong>{blocker.provider} · {blocker.dataset_family}</strong><span>{blocker.status}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          {data.ashareFoundation.adjustmentForensics?.results?.length ? (
+            <>
+              <h3>复权口径取证（除权日因子回放）</h3>
+              <ul className="governance-pit">
+                {data.ashareFoundation.adjustmentForensics.results.map((row) => (
+                  <li key={row.label} className={row.verdict === "RAW" ? "" : "blocked"}>
+                    <strong>{row.label}</strong>
+                    <span>{row.verdict} · 符号一致率 {row.sign_agreement ?? "—"}（{row.events_tested ?? 0} 事件）</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </WorkbenchPanel>
+      ) : null}
 
       {data.u0BarPit && data.u0BarPit.status === "ready" ? (
         <WorkbenchPanel

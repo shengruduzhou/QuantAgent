@@ -336,6 +336,109 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "fixed_outputs": ("runtime/data/u0/universe_reconciliation.json",),
         "control": set(),
     },
+    # --- A-share data foundation (canonical U0 acquisition pipeline) ---------
+    "probe-ashare-capabilities": {
+        "type": "data",
+        "entrypoint": "scripts/ashare_capability_probe.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network", "skip_tickflow"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/capability/provider_capability_matrix.json",
+            "runtime/data/u0/capability/provider_capability_matrix.csv",
+            "runtime/data/u0/capability/provider_capability_report.md",
+        ),
+        "control": {"allow_network"},
+    },
+    "build-u0-live-security-master": {
+        "type": "data",
+        "entrypoint": "scripts/u0_security_master.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/security_master.parquet",
+            "runtime/data/u0/security_master_manifest.json",
+        ),
+        "control": {"allow_network"},
+    },
+    "acquire-u0-daily-bars": {
+        "type": "data",
+        "entrypoint": "scripts/u0_acquire_bars.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network", "providers", "staging_name", "max_minutes", "limit",
+                    "boards", "symbols", "shard", "order", "skip_if_in", "refetch"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/bars",),
+        "control": {"allow_network"},
+    },
+    "acquire-u0-intraday-bars": {
+        "type": "data",
+        "entrypoint": "scripts/u0_acquire_intraday.py",
+        "required": {"allow_network"},
+        "allowed": {"allow_network", "per_board", "frequency", "count", "providers",
+                    "max_minutes"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/intraday/minute_bars.parquet",
+            "runtime/data/u0/intraday/intraday_manifest.json",
+        ),
+        "control": {"allow_network"},
+    },
+    "build-u0-pit-intervals": {
+        "type": "data",
+        "entrypoint": "scripts/u0_pit_intervals.py",
+        "required": {"cmd"},
+        "allowed": {"cmd", "allow_network", "max_minutes", "limit", "start"},
+        "positional": ("cmd",),
+        "choices": {"cmd": ("calendar", "factors", "dividends", "suspension", "st")},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/pit",),
+        "control": {"allow_network"},
+    },
+    "assemble-u0-raw-panel": {
+        "type": "data",
+        "entrypoint": "scripts/u0_assemble_panel.py",
+        "required": set(),
+        "allowed": {"flush_every"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/panel/daily_bars_raw.parquet",
+            "runtime/data/u0/panel/panel_manifest.json",
+            "runtime/data/u0/panel/coverage_matrix.parquet",
+            "runtime/data/u0/panel/session_gaps.parquet",
+        ),
+        "control": set(),
+    },
+    "validate-u0-data": {
+        "type": "data",
+        "entrypoint": "scripts/u0_validate.py",
+        "required": set(),
+        "allowed": {"allow_network"},
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": (
+            "runtime/data/u0/validation/validation_report.json",
+            "runtime/data/u0/validation/validation_report.md",
+        ),
+        "control": {"allow_network"},
+    },
+    "audit-u0-adjustment-forensics": {
+        "type": "data",
+        "entrypoint": "scripts/u0_adjustment_forensics.py",
+        "required": set(),
+        "allowed": set(),
+        "path_inputs": set(),
+        "path_outputs": set(),
+        "fixed_outputs": ("runtime/data/u0/validation/adjustment_forensics.json",),
+        "control": set(),
+    },
 }
 
 
@@ -536,8 +639,18 @@ class JobManager:
         # positional subcommands (e.g. `u0_full_universe_backfill.py fetch`) are
         # fixed by the allowlist, never taken from user input.
         command.extend(spec.get("fixed_args", ()))
+        # A parameter named in `positional` is passed as a bare argument, but only
+        # after being matched against the command's declared choices — a caller
+        # can never smuggle an arbitrary token into the argv this way.
+        positional = spec.get("positional", ())
+        for key in positional:
+            value = parameters.get(key)
+            choices = spec.get("choices", {}).get(key)
+            if value is None or (choices and str(value) not in choices):
+                raise ValueError(f"parameter {key} must be one of {sorted(choices or [])}")
+            command.append(str(value))
         for key, value in parameters.items():
-            if value is None:
+            if value is None or key in positional:
                 continue
             option = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):

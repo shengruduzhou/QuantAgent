@@ -104,44 +104,131 @@ class GovernanceService:
         }
 
     def _u0(self) -> dict[str, Any]:
+        """Composite U0 readiness, read from the evidence-driven certificate.
+
+        Every field here traces to an artifact a real acquisition or validation
+        run produced; a missing artifact surfaces as ``missingEvidence`` rather
+        than being smoothed over with a default.
+        """
         cert = self._read_json("data/u0/full_universe_readiness_certificate.json")
-        cov = self._read_json("data/u0/provider_coverage_summary.json")
-        pit = self._read_json("data/u0/pit_field_availability.json")
-        manifest = self._read_json("data/v7/full_universe/full_universe_manifest.json")
         if cert is None:
             return {"status": "unavailable",
-                    "reason": "full_universe_readiness_certificate.json not found; run audit-u0-full-universe"}
+                    "reason": "full_universe_readiness_certificate.json not found; "
+                              "run audit-u0-full-universe"}
         gates = cert.get("gates", {})
-        coverage_gate = gates.get("coverage", {})
-        backfill = None
-        if manifest:
-            backfill = {
-                "masterSecurities": manifest.get("master_securities"),
-                "panelSymbols": manifest.get("panel_symbols"),
-                "missingSymbols": manifest.get("missing_symbols"),
-                "stagedBackfillFiles": manifest.get("staged_backfill_files"),
-            }
-        probe = self._read_json("data/u0/star_bse_probe_report.json")
+        coverage = gates.get("coverage", {})
+        identity = gates.get("identity", {})
+        provider = gates.get("provider", {})
+        quality = gates.get("quality", {})
+        pit_gate = gates.get("pit", {})
+        panel = self._read_json("data/u0/panel/panel_manifest.json") or {}
         return {
             "status": "ready",
             "dataReadinessState": cert.get("data_readiness_state"),
             "trainingPermitted": cert.get("training_permitted"),
             "gatePass": cert.get("gate_pass", {}),
-            "coverageByBoard": coverage_gate.get("covered_by_board", {}),
-            "boardsAbsent": coverage_gate.get("boards_absent", []),
-            "blockedByData": coverage_gate.get("blocked_by_data"),
-            "coverageBacklogFetchable": coverage_gate.get("coverage_backlog_fetchable"),
-            "retryClassCounts": (cov or {}).get("retry_class_counts", {}),
-            "providerFailures": (cov or {}).get("tickflow_empty"),
-            "pitGate": {k: gates.get("pit", {}).get(k) for k in (
-                "st_history", "suspension_history", "delisting_status",
-                "board_price_limits", "ipo_special_limit", "corporate_actions")},
-            "pitFieldAvailability": (pit or {}).get("pit_field_availability", {}),
-            "survivorshipBias": (pit or {}).get("survivorship_bias", {}),
-            "starBseProbe": (probe or {}).get("diagnosis", {}),
-            "coveredBarHistory": (cov or {}).get("covered_bar_history"),
-            "backfill": backfill,
+            "missingEvidence": cert.get("missing_evidence", []),
+            "evidenceSources": cert.get("evidence_sources", {}),
+            "coverageByBoard": coverage.get("by_board", {}),
+            "coverageByStatus": coverage.get("by_status", {}),
+            "boardsAbsent": coverage.get("boards_with_zero_coverage", []),
+            "coveredSecurities": coverage.get("covered_securities"),
+            "masterSecurities": coverage.get("master_securities"),
+            "coverageShare": coverage.get("coverage_share"),
+            "notYetAcquired": coverage.get("not_yet_acquired"),
+            "identity": {
+                "securities": identity.get("securities"),
+                "bseCurrent920": identity.get("bse_current_920"),
+                "bseLegacyCodes": identity.get("bse_legacy_codes"),
+                "delistedInMaster": identity.get("delisted_in_master"),
+                "symbolNormalisation": identity.get("symbol_normalisation"),
+            },
+            "provider": {
+                "servingProvidersByFamily": provider.get("serving_providers_by_family", {}),
+                "familiesWithoutProvider": provider.get("families_without_provider", []),
+                "fallbackProvidersExercised": provider.get("fallback_providers_exercised"),
+                "fallbackSymbolsServed": provider.get("fallback_provider_symbols_served"),
+                "environmentBlockers": provider.get("environment_blockers", []),
+            },
+            "quality": {
+                "verdicts": quality.get("verdicts", {}),
+                "failures": quality.get("failures", []),
+                "notRun": quality.get("not_run", []),
+                "adjustmentMethod": quality.get("adjustment_method"),
+                "volumeUnit": quality.get("volume_unit"),
+                "amountUnit": quality.get("amount_unit"),
+                "amountCoverage": quality.get("amount_coverage"),
+            },
+            "pitFieldAvailability": pit_gate.get("field_availability", {}),
+            "blockedPitFields": pit_gate.get("blocked_fields", []),
+            "suspensionCoverageWindow": pit_gate.get("suspension_coverage_window"),
+            "panel": {
+                "sha256": cert.get("panel_sha256"),
+                "rows": (panel.get("quality_checks") or {}).get("rows"),
+                "symbols": (panel.get("quality_checks") or {}).get("symbols"),
+                "dateRange": [(panel.get("quality_checks") or {}).get("min_date"),
+                              (panel.get("quality_checks") or {}).get("max_date")],
+                "sessionGapsSuspended": (panel.get("quality_checks") or {}).get("session_gaps_suspended"),
+                "sessionGapsUnexplained": (panel.get("quality_checks") or {}).get("session_gaps_unexplained"),
+                "servingProviderCounts": panel.get("serving_provider_counts", {}),
+            },
         }
+
+    def _ashare_foundation(self) -> dict[str, Any]:
+        """Provider capability / entitlement matrix and acquisition provenance."""
+        capability = self._read_json("data/u0/capability/provider_capability_matrix.json")
+        intraday = self._read_json("data/u0/intraday/intraday_manifest.json")
+        forensics = self._read_json("data/u0/validation/adjustment_forensics.json")
+        validation = self._read_json("data/u0/validation/validation_report.json")
+        master = self._read_json("data/u0/security_master_manifest.json")
+        if capability is None and validation is None:
+            return {"status": "unavailable",
+                    "reason": "no capability matrix or validation report; run "
+                              "probe-ashare-capabilities and validate-u0-data"}
+        out: dict[str, Any] = {"status": "ready"}
+        if capability:
+            out["capability"] = {
+                "probes": capability.get("probes"),
+                "supportedProbes": capability.get("supported_probes"),
+                "providersWithAnySupport": capability.get("providers_with_any_support", []),
+                "servingProvidersByFamily": capability.get("serving_providers_by_family", {}),
+                "familiesWithoutAnyProvider": capability.get("families_without_any_provider", []),
+                "blockers": capability.get("blockers", []),
+                "environment": capability.get("environment", {}),
+            }
+        if master:
+            out["securityMaster"] = {
+                "securities": master.get("securities"),
+                "byBoard": master.get("by_board", {}),
+                "byStatus": master.get("by_status", {}),
+                "byOrigin": master.get("by_origin", {}),
+                "currentStNames": master.get("current_st_names"),
+                "delistingDateCoverage": master.get("delisting_date_coverage"),
+                "precedence": master.get("precedence"),
+            }
+        if intraday:
+            out["intraday"] = {
+                "frequencyMinutes": intraday.get("frequency_minutes"),
+                "symbolsWithBars": intraday.get("symbols_with_bars"),
+                "rows": intraday.get("rows"),
+                "symbolSessions": intraday.get("symbol_sessions"),
+                "byBoard": intraday.get("by_board", {}),
+                "servingProviders": intraday.get("serving_providers", {}),
+                "depthLimitation": intraday.get("depth_limitation"),
+            }
+        if forensics:
+            out["adjustmentForensics"] = {
+                "method": forensics.get("method"),
+                "results": forensics.get("results", []),
+            }
+        if validation:
+            out["validation"] = {
+                "panelRows": validation.get("panel_rows"),
+                "panelSymbols": validation.get("panel_symbols"),
+                "dateRange": validation.get("date_range", []),
+                "verdicts": validation.get("verdicts", {}),
+            }
+        return out
 
     def _u0_h032b(self) -> dict[str, Any]:
         """H-032B: bar readiness vs strict PIT readiness reported SEPARATELY."""
@@ -235,7 +322,12 @@ class GovernanceService:
                "benchmark-tickflow-capability", "audit-bse-identity",
                "audit-u0-pit-readiness", "report-u0-bar-readiness",
                "source-u0-pit-metadata", "audit-tickflow-entitlement",
-               "report-u0-reconciliation")
+               "report-u0-reconciliation",
+               # A-share data foundation pipeline, in execution order
+               "probe-ashare-capabilities", "build-u0-live-security-master",
+               "acquire-u0-daily-bars", "build-u0-pit-intervals",
+               "acquire-u0-intraday-bars", "assemble-u0-raw-panel",
+               "validate-u0-data", "audit-u0-adjustment-forensics")
         out = []
         for cid in ids:
             spec = COMMANDS.get(cid)
@@ -254,6 +346,7 @@ class GovernanceService:
             "s4": self._s4(),
             "u0": self._u0(),
             "u0BarPit": self._u0_h032b(),
+            "ashareFoundation": self._ashare_foundation(),
             "lineage": self._lineage(),
             "governedCommands": self._governed_commands(),
             "blinding": "existence- and gate-level fields only; no candidate performance",

@@ -41,19 +41,75 @@ const NOT_READY: unknown = {
     status: "ready",
     dataReadinessState: "FULL_UNIVERSE_DATA_NOT_READY_COVERAGE",
     trainingPermitted: false,
-    gatePass: { integration: true, provider: true, coverage: false, pit: false },
-    coverageByBoard: { SH_Main: 1562, SZ_Main: 1589, ChiNext: 877 },
-    boardsAbsent: ["STAR", "BSE"],
-    blockedByData: 920,
-    coverageBacklogFetchable: 938,
-    retryClassCounts: { OK: 4030, FETCHABLE_NOT_PROBED: 938, NOT_PROBED: 847, NO_RELIABLE_HISTORY: 73 },
-    providerFailures: 73,
-    pitGate: { st_history: "BLOCKED_BY_DATA", suspension_history: "BLOCKED_BY_DATA", delisting_status: "BLOCKED_BY_DATA", board_price_limits: "PARTIAL(current-snapshot)", ipo_special_limit: "PRESENT", corporate_actions: "BLOCKED_BY_DATA" },
-    pitFieldAvailability: {},
-    survivorshipBias: { delisted_total: 358, delisted_with_bar_history: 226, delisted_with_delisting_date: 0, delisted_fraction_of_master: 0.0608 },
-    starBseProbe: { STAR: "FETCHABLE_NOT_PROBED", BSE: "BSE_920x_FETCHABLE_NOT_PROBED" },
-    coveredBarHistory: 4030,
-    backfill: { masterSecurities: 5888, panelSymbols: 4030, missingSymbols: 1858, stagedBackfillFiles: 159 },
+    gatePass: { integration: true, provider: true, identity: true, coverage: false, quality: true, pit: false },
+    missingEvidence: [],
+    coverageByBoard: {
+      SH_Main: { covered: 232, total: 1848 },
+      SZ_Main: { covered: 275, total: 1661 },
+      ChiNext: { covered: 571, total: 1441 },
+      STAR: { covered: 613, total: 614 },
+      BSE: { covered: 329, total: 330 },
+    },
+    coverageByStatus: { listed: { covered: 2004, total: 5533 }, delisted: { covered: 226, total: 361 } },
+    boardsAbsent: [],
+    coveredSecurities: 2020,
+    masterSecurities: 5894,
+    coverageShare: 0.3427,
+    notYetAcquired: 3874,
+    identity: { securities: 5894, bseCurrent920: 330, bseLegacyCodes: 0, delistedInMaster: 361, symbolNormalisation: "PASS" },
+    provider: {
+      servingProvidersByFamily: { daily_bars: ["tickflow", "tencent"], adjust_factors: ["sina"], minute_bars: ["tencent"] },
+      familiesWithoutProvider: [],
+      fallbackProvidersExercised: true,
+      fallbackSymbolsServed: 128,
+      environmentBlockers: [{ provider: "baostock", detail: "TCP 10030 unreachable" }],
+    },
+    quality: {
+      verdicts: { adjustment_is_raw: "PASS", volume_unit_is_shares: "PASS" },
+      failures: [],
+      notRun: ["intraday_to_daily_reconciliation"],
+      adjustmentMethod: "none (raw traded prices) — verified against an independent provider",
+      volumeUnit: "shares",
+      amountUnit: "CNY",
+      amountCoverage: 1.0,
+    },
+    pitFieldAvailability: {
+      st_intervals: "BLOCKED_BY_DATA — current state AVAILABLE (333 names)",
+      suspension_intervals: "AVAILABLE — 460 vendor-dated halts",
+      corporate_action_identity: "AVAILABLE — 36155 ex-rights factor records",
+    },
+    blockedPitFields: ["st_intervals"],
+    suspensionCoverageWindow: ["20251029", "20260724"],
+    panel: {
+      sha256: "abc123",
+      rows: 2769268,
+      symbols: 2020,
+      dateRange: ["1990-12-19", "2026-07-24"],
+      sessionGapsSuspended: 523,
+      sessionGapsUnexplained: 44542,
+      servingProviderCounts: { tickflow: 128, tickflow_h032c_staging: 1892 },
+    },
+  },
+  ashareFoundation: {
+    status: "ready",
+    capability: {
+      probes: 71,
+      supportedProbes: 32,
+      providersWithAnySupport: ["sina", "tencent", "tickflow"],
+      servingProvidersByFamily: { daily_bars: ["tickflow", "tencent"], l2_depth: [] },
+      familiesWithoutAnyProvider: ["l2_depth"],
+      blockers: [{ provider: "baostock", dataset_family: "transport", status: "BLOCKED_BY_ENVIRONMENT", detail: "port 10030" }],
+      environment: { platform: "Linux", egress: "TCP 80/443 only" },
+    },
+    securityMaster: { securities: 5894, byBoard: { BSE: 330 }, byStatus: { listed: 5533, delisted: 361 }, currentStNames: 333, delistingDateCoverage: 361 },
+    intraday: { frequencyMinutes: 5, symbolsWithBars: 180, rows: 57600, symbolSessions: 1200, servingProviders: { tencent: 180 }, depthLimitation: "public feeds serve a rolling intraday window only" },
+    adjustmentForensics: {
+      results: [
+        { label: "u0/panel/daily_bars_raw.parquet", events_tested: 1853, sign_agreement: 0.945, verdict: "RAW" },
+        { label: "legacy panel · source_track=frozen_cohort", events_tested: 9407, sign_agreement: 0.5316, verdict: "ADJUSTED_OR_MIXED" },
+      ],
+    },
+    validation: { panelRows: 2769268, panelSymbols: 2020, dateRange: ["1990-12-19", "2026-07-24"], verdicts: { PASS: 20, WARN: 2 } },
   },
   u0BarPit: {
     status: "ready",
@@ -104,10 +160,18 @@ test("renders governed operational state without any candidate performance", asy
   expect(screen.getAllByText("2 / 7").length).toBeGreaterThan(0);
   // U0 state and absent boards are surfaced honestly
   expect(screen.getAllByText("FULL_UNIVERSE_DATA_NOT_READY_COVERAGE").length).toBeGreaterThan(0);
-  expect(screen.getByText("STAR, BSE")).toBeInTheDocument();
-  // H-032A: survivorship + STAR/BSE probe diagnosis are surfaced
-  expect(screen.getByText(/226\/358 有行情/)).toBeInTheDocument();
-  expect(screen.getByText(/STAR:FETCHABLE_NOT_PROBED/)).toBeInTheDocument();
+  // survivorship is surfaced from the coverage matrix, not a hardcoded claim
+  expect(screen.getByText(/226\/361 有行情/)).toBeInTheDocument();
+  // the declared adjustment convention and units are shown, and the forensic
+  // verdict that proves them is rendered next to the legacy mixed-panel result
+  expect(screen.getByText(/raw traded prices/)).toBeInTheDocument();
+  expect(screen.getByText(/RAW · 符号一致率 0.945/)).toBeInTheDocument();
+  expect(screen.getByText(/ADJUSTED_OR_MIXED/)).toBeInTheDocument();
+  // uncovered securities are stated as a number, never rounded away
+  expect(screen.getByText(/2020 \/ 5894/)).toBeInTheDocument();
+  expect(screen.getByText("3874")).toBeInTheDocument();
+  // a dataset family with no provider is rendered as a blocker, not omitted
+  expect(screen.getByText(/baostock · transport/)).toBeInTheDocument();
   // H-032B: bar vs strict-PIT decisions shown separately, benchmark + BSE identity
   expect(screen.getByText("U0_BAR_NOT_READY_COVERAGE")).toBeInTheDocument();
   expect(screen.getAllByText("FULL_UNIVERSE_DATA_NOT_READY_PIT").length).toBeGreaterThan(0);
