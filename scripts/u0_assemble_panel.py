@@ -174,20 +174,39 @@ def assemble(args: argparse.Namespace) -> dict:
     panel = panel.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     panel.to_parquet(OUT / "daily_bars_raw.parquet", index=False)
 
+    # Everything downstream needs per-symbol facts, not the bars. Grouping the
+    # full panel repeatedly does not scale: at full-universe size it carries
+    # ~17M rows across seven object columns, and each group-by re-hashes every
+    # symbol string. Project to the four columns that matter, make `symbol` a
+    # category, aggregate ONCE, then release the panel before touching the
+    # legacy one.
+    slim = panel[["symbol", "trade_date", "amount", "serving_provider"]].copy()
+    slim["symbol"] = slim["symbol"].astype("category")
+    slim["_has_amount"] = slim["amount"].notna()
+    summary = slim.groupby("symbol", observed=True).agg(
+        rows=("trade_date", "size"),
+        first_date=("trade_date", "min"),
+        last_date=("trade_date", "max"),
+        amount_coverage=("_has_amount", "mean"),
+        serving_provider=("serving_provider", "first"),
+    ).reset_index()
+    summary["symbol"] = summary["symbol"].astype(str)
+
     # -- classify in-life sessions with no bar --------------------------------
-    gaps = classify_session_gaps(panel, master)
+    gaps = classify_session_gaps(slim, master)
     gaps.to_parquet(OUT / "session_gaps.parquet", index=False)
     checks["session_gaps"] = int(len(gaps))
     for label in ("SUSPENDED", "MISSING_UNEXPLAINED", "PROVIDER_HISTORY_TRUNCATED"):
         checks[f"session_gaps_{label.lower()}"] = (
             int((gaps["classification"] == label).sum()) if len(gaps) else 0)
+    del panel, slim
 
     # -- source boundaries versus the previous panel --------------------------
-    boundaries = source_boundaries(panel)
+    boundaries = source_boundaries(summary)
     boundaries.to_parquet(OUT / "source_boundaries.parquet", index=False)
 
     # -- coverage matrix ------------------------------------------------------
-    coverage = build_coverage(master, panel, pd.DataFrame(provenance_rows))
+    coverage = build_coverage(master, summary, pd.DataFrame(provenance_rows))
     coverage.to_parquet(OUT / "coverage_matrix.parquet", index=False)
     coverage.to_csv(OUT / "coverage_matrix.csv", index=False)
 
@@ -240,10 +259,10 @@ def classify_session_gaps(panel: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
     # Providers that cap how far back they will serve; sessions before their
     # earliest bar are a known provider limit, not missing market data.
     truncating = {"sina_truncated"}
-    provider_of = (panel.groupby("symbol")["serving_provider"].first().to_dict()
+    provider_of = (panel.groupby("symbol", observed=True)["serving_provider"].first().to_dict()
                    if "serving_provider" in panel.columns else {})
     records: list[dict] = []
-    for symbol, group in panel.groupby("symbol", sort=False):
+    for symbol, group in panel.groupby("symbol", sort=False, observed=True):
         traded = group["trade_date"].to_numpy()
         listed_on = listing.get(symbol, pd.NaT)
         truncates = provider_of.get(symbol) in truncating
@@ -291,37 +310,45 @@ def classify_session_gaps(panel: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
     return pd.DataFrame(records, columns=["symbol", "trade_date", "classification", "evidence"])
 
 
-def source_boundaries(panel: pd.DataFrame) -> pd.DataFrame:
-    """Record where this panel's provider differs from the previous panel's."""
-    if not LEGACY_PANEL.exists():
-        return pd.DataFrame(columns=["symbol", "boundary_date", "provider_before",
-                                     "provider_after", "reason"])
-    legacy = pd.read_parquet(LEGACY_PANEL, columns=["symbol", "trade_date", "source_track"])
+def source_boundaries(summary: pd.DataFrame) -> pd.DataFrame:
+    """Record where this panel's provider differs from the previous panel's.
+
+    Takes the one-row-per-symbol summary, never the bar panel: the previous
+    implementation re-filtered the whole panel inside the per-symbol loop, which
+    is quadratic and stalls for hours once the universe is fully acquired
+    (~5.8k symbols x ~17M rows).
+    """
+    columns = ["symbol", "boundary_date", "provider_before", "provider_after", "reason"]
+    if not LEGACY_PANEL.exists() or summary.empty:
+        return pd.DataFrame(columns=columns)
+    legacy = pd.read_parquet(LEGACY_PANEL, columns=["symbol", "source_track"])
     legacy["symbol"] = legacy["symbol"].astype(str)
     legacy_track = legacy.groupby("symbol")["source_track"].first()
-    current = panel.groupby("symbol")["serving_provider"].first()
-    overlap = current.index.intersection(legacy_track.index)
-    rows = []
-    for symbol in overlap:
-        before = legacy_track[symbol]
-        after = current[symbol]
-        reason = ("previous panel served this symbol as forward-adjusted (qfq) prices; "
-                  "this panel serves raw prices"
-                  if before == "frozen_cohort" else
-                  "provider changed between panel generations")
-        rows.append({"symbol": symbol,
-                     "boundary_date": str(panel.loc[panel["symbol"] == symbol, "trade_date"].min().date()),
-                     "provider_before": f"legacy:{before}", "provider_after": after,
-                     "reason": reason})
-    return pd.DataFrame(rows)
+    del legacy
+    indexed = summary.set_index("symbol")
+    overlap = indexed.index.intersection(legacy_track.index)
+    if not len(overlap):
+        return pd.DataFrame(columns=columns)
+    before = legacy_track.reindex(overlap)
+    frame = pd.DataFrame({
+        "symbol": list(overlap),
+        "boundary_date": pd.to_datetime(indexed["first_date"].reindex(overlap)).dt.strftime("%Y-%m-%d").to_numpy(),
+        "provider_before": ("legacy:" + before.astype(str)).to_numpy(),
+        "provider_after": indexed["serving_provider"].reindex(overlap).to_numpy(),
+    })
+    frame["reason"] = np.where(
+        before.to_numpy() == "frozen_cohort",
+        "previous panel served this symbol as forward-adjusted (qfq) prices; "
+        "this panel serves raw prices",
+        "provider changed between panel generations")
+    return frame[columns]
 
 
-def build_coverage(master: pd.DataFrame, panel: pd.DataFrame,
+def build_coverage(master: pd.DataFrame, summary: pd.DataFrame,
                    provenance: pd.DataFrame) -> pd.DataFrame:
-    stats = panel.groupby("symbol").agg(
-        rows=("trade_date", "size"), first_date=("trade_date", "min"),
-        last_date=("trade_date", "max"), amount_coverage=("amount", lambda s: float(s.notna().mean())))
-    serving = panel.groupby("symbol")["serving_provider"].first()
+    """Join the per-symbol summary onto the master; uncovered names keep a reason."""
+    stats = summary[["symbol", "rows", "first_date", "last_date", "amount_coverage"]]
+    serving = summary.set_index("symbol")["serving_provider"]
     coverage = master[["symbol", "code", "exchange", "board", "security_type", "status",
                        "listing_date", "delisting_date", "current_st", "bse_legacy_code"]].copy()
     coverage = coverage.merge(stats, on="symbol", how="left")

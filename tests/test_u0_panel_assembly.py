@@ -141,9 +141,13 @@ def test_coverage_matrix_reports_uncovered_securities_with_a_reason(assembler):
          "security_type": "A_share", "status": "delisted", "listing_date": "1997-01-01",
          "delisting_date": "2019-06-01", "current_st": False, "bse_legacy_code": False},
     ])
-    panel = _panel([{"symbol": "600519.SH", "trade_date": "2026-07-20", "close": 10.0,
-                     "amount": 1.0, "serving_provider": "tickflow"}])
-    coverage = assembler.build_coverage(master, panel, pd.DataFrame())
+    # build_coverage consumes the one-row-per-symbol summary, not the bar panel
+    summary = pd.DataFrame([{
+        "symbol": "600519.SH", "rows": 1,
+        "first_date": pd.Timestamp("2026-07-20"), "last_date": pd.Timestamp("2026-07-20"),
+        "amount_coverage": 1.0, "serving_provider": "tickflow",
+    }])
+    coverage = assembler.build_coverage(master, summary, pd.DataFrame())
     covered = coverage.set_index("symbol")
     assert covered.loc["600519.SH", "covered"]
     assert not covered.loc["600087.SH", "covered"]
@@ -160,6 +164,41 @@ def test_provider_precedence_puts_the_entitled_source_first(assembler):
         "no public fallback may outrank the entitled provider"
     # the truncating source is the last resort, never ahead of a complete one
     assert names[-1] == "sina_truncated"
+
+
+def test_source_boundaries_does_not_rescan_the_panel_per_symbol(assembler):
+    """The per-symbol loop over a multi-million-row frame was quadratic.
+
+    At full-universe size (~5.8k symbols x ~17M rows) it stalled the assembly for
+    hours, so the boundary builder must consume the per-symbol summary only.
+    """
+    source = (REPO / "scripts/u0_assemble_panel.py").read_text()
+    assert 'panel.loc[panel["symbol"] == symbol' not in source
+    assert "def source_boundaries(summary: pd.DataFrame)" in source
+
+
+def test_source_boundaries_marks_the_qfq_to_raw_seam(assembler, tmp_path, monkeypatch):
+    legacy = pd.DataFrame({
+        "symbol": ["600519.SH", "600519.SH", "000001.SZ"],
+        "source_track": ["frozen_cohort", "frozen_cohort", "u0_backfill"],
+    })
+    path = tmp_path / "legacy_panel.parquet"
+    legacy.to_parquet(path, index=False)
+    monkeypatch.setattr(assembler, "LEGACY_PANEL", path)
+
+    summary = pd.DataFrame([
+        {"symbol": "600519.SH", "first_date": pd.Timestamp("2001-08-27"),
+         "serving_provider": "tickflow"},
+        {"symbol": "000001.SZ", "first_date": pd.Timestamp("1991-04-03"),
+         "serving_provider": "tencent"},
+    ])
+    boundaries = assembler.source_boundaries(summary).set_index("symbol")
+    assert len(boundaries) == 2
+    assert boundaries.loc["600519.SH", "provider_before"] == "legacy:frozen_cohort"
+    assert "forward-adjusted" in boundaries.loc["600519.SH", "reason"]
+    assert boundaries.loc["600519.SH", "boundary_date"] == "2001-08-27"
+    # a track that was already raw is a provider change, not an adjustment seam
+    assert "forward-adjusted" not in boundaries.loc["000001.SZ", "reason"]
 
 
 def test_assembler_declares_one_adjustment_for_the_whole_panel():
