@@ -149,10 +149,21 @@ def assemble(args: argparse.Namespace) -> dict:
 
     checks["null_close"] = int(panel["close"].isna().sum())
     checks["negative_or_zero_close"] = int((panel["close"] <= 0).sum())
+    # A bar whose OHLC cannot all be true is a vendor defect, not a session. It
+    # is quarantined with its provenance so the defect stays auditable instead of
+    # sitting in the panel where a downstream range or gap calculation would
+    # silently consume it.
     ohlc_violation = ((panel["high"] < panel["low"]) |
                       (panel["close"] > panel["high"]) | (panel["close"] < panel["low"]) |
-                      (panel["open"] > panel["high"]) | (panel["open"] < panel["low"]))
-    checks["ohlc_relationship_violations"] = int(ohlc_violation.fillna(False).sum())
+                      (panel["open"] > panel["high"]) | (panel["open"] < panel["low"])).fillna(False)
+    checks["ohlc_relationship_violations"] = int(ohlc_violation.sum())
+    if ohlc_violation.any():
+        defects = panel[ohlc_violation].copy()
+        defects["quality_status"] = "SUSPECT"
+        defects.to_parquet(OUT / "ohlc_violation_quarantine.parquet", index=False)
+        checks["ohlc_violation_symbols"] = sorted(defects["symbol"].unique().tolist())[:20]
+        checks["ohlc_violation_providers"] = defects["serving_provider"].value_counts().to_dict()
+        panel = panel[~ohlc_violation]
     checks["negative_volume"] = int((panel["volume"] < 0).sum())
     checks["amount_coverage"] = float(panel["amount"].notna().mean())
     checks["rows"] = int(len(panel))
@@ -167,8 +178,9 @@ def assemble(args: argparse.Namespace) -> dict:
     gaps = classify_session_gaps(panel, master)
     gaps.to_parquet(OUT / "session_gaps.parquet", index=False)
     checks["session_gaps"] = int(len(gaps))
-    checks["session_gaps_suspended"] = int((gaps["classification"] == "SUSPENDED").sum()) if len(gaps) else 0
-    checks["session_gaps_unexplained"] = int((gaps["classification"] == "MISSING_UNEXPLAINED").sum()) if len(gaps) else 0
+    for label in ("SUSPENDED", "MISSING_UNEXPLAINED", "PROVIDER_HISTORY_TRUNCATED"):
+        checks[f"session_gaps_{label.lower()}"] = (
+            int((gaps["classification"] == label).sum()) if len(gaps) else 0)
 
     # -- source boundaries versus the previous panel --------------------------
     boundaries = source_boundaries(panel)
@@ -225,11 +237,27 @@ def classify_session_gaps(panel: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
     listing = master.set_index("symbol")["listing_date"]
     delisting = master.set_index("symbol")["delisting_date"]
     today = pd.Timestamp.now().normalize()
+    # Providers that cap how far back they will serve; sessions before their
+    # earliest bar are a known provider limit, not missing market data.
+    truncating = {"sina_truncated"}
+    provider_of = (panel.groupby("symbol")["serving_provider"].first().to_dict()
+                   if "serving_provider" in panel.columns else {})
     records: list[dict] = []
     for symbol, group in panel.groupby("symbol", sort=False):
         traded = group["trade_date"].to_numpy()
-        start = max(pd.Timestamp(listing.get(symbol, pd.NaT)) if pd.notna(listing.get(symbol, pd.NaT))
-                    else traded.min(), traded.min())
+        listed_on = listing.get(symbol, pd.NaT)
+        truncates = provider_of.get(symbol) in truncating
+        truncated_before = pd.Timestamp(traded.min()) if truncates else None
+        # Normally the in-life window starts at the first bar we hold, because
+        # earlier sessions may simply predate the vendor's coverage. For a
+        # provider with a KNOWN history cap the window starts at the listing date
+        # instead, so the truncated span is counted and labelled rather than
+        # disappearing from the coverage picture entirely.
+        if truncates and pd.notna(listed_on):
+            start = pd.Timestamp(listed_on)
+        else:
+            start = max(pd.Timestamp(listed_on) if pd.notna(listed_on) else traded.min(),
+                        traded.min())
         end_candidates = [traded.max()]
         delist = delisting.get(symbol, pd.NaT)
         if pd.notna(delist):
@@ -243,7 +271,12 @@ def classify_session_gaps(panel: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
         for day in missing:
             stamp = pd.Timestamp(day)
             reason = next((note for lo, hi, note in intervals if lo <= stamp <= hi), None)
-            if reason is not None:
+            if truncated_before is not None and stamp < truncated_before:
+                records.append({"symbol": symbol, "trade_date": stamp,
+                                "classification": "PROVIDER_HISTORY_TRUNCATED",
+                                "evidence": f"serving provider {provider_of[symbol]} caps history "
+                                            f"at its earliest bar {truncated_before.date()}"})
+            elif reason is not None:
                 records.append({"symbol": symbol, "trade_date": stamp,
                                 "classification": "SUSPENDED",
                                 "evidence": f"vendor halt interval: {reason}"})

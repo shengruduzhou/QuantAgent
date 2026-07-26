@@ -101,6 +101,37 @@ def test_sessions_after_delisting_are_not_counted_as_gaps(assembler, tmp_path, m
     assert gaps.empty
 
 
+def test_gap_before_a_truncating_provider_is_not_called_missing_data(assembler, tmp_path,
+                                                                    monkeypatch):
+    """Sina caps delisted history at 1023 sessions; that is a provider limit."""
+    calendar = pd.DataFrame({"trade_date": pd.to_datetime(
+        ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"])})
+    pit = tmp_path / "pit"
+    pit.mkdir(parents=True)
+    calendar.to_parquet(pit / "trading_calendar.parquet", index=False)
+    monkeypatch.setattr(assembler, "PIT", pit)
+
+    panel = _panel([
+        {"symbol": "600087.SH", "trade_date": "2026-07-22", "close": 1.0,
+         "serving_provider": "sina_truncated"},
+        {"symbol": "600087.SH", "trade_date": "2026-07-23", "close": 1.1,
+         "serving_provider": "sina_truncated"},
+    ])
+    master = _master([{"symbol": "600087.SH", "listing_date": "2020-01-01",
+                       "delisting_date": None}])
+    gaps = assembler.classify_session_gaps(panel, master)
+    assert set(gaps["classification"]) == {"PROVIDER_HISTORY_TRUNCATED"}
+    assert "caps history" in gaps["evidence"].iloc[0]
+
+
+def test_ohlc_defects_are_quarantined_out_of_the_panel(assembler):
+    text = (REPO / "scripts/u0_assemble_panel.py").read_text()
+    # a bar whose OHLC cannot all be true must leave the panel with its provenance
+    assert "ohlc_violation_quarantine.parquet" in text
+    assert "SUSPECT" in text
+    assert "panel = panel[~ohlc_violation]" in text
+
+
 def test_coverage_matrix_reports_uncovered_securities_with_a_reason(assembler):
     master = _master([
         {"symbol": "600519.SH", "code": "600519", "exchange": "SSE", "board": "SH_Main",
@@ -122,8 +153,13 @@ def test_coverage_matrix_reports_uncovered_securities_with_a_reason(assembler):
 
 def test_provider_precedence_puts_the_entitled_source_first(assembler):
     names = [name for name, _ in assembler.SOURCE_PRECEDENCE]
-    assert names[0].startswith("tickflow")
-    assert names[-1] == "tencent", "the public fallback must never outrank the entitled provider"
+    entitled = [i for i, name in enumerate(names) if name.startswith("tickflow")]
+    public = [i for i, name in enumerate(names) if not name.startswith("tickflow")]
+    assert entitled and public
+    assert max(entitled) < min(public), \
+        "no public fallback may outrank the entitled provider"
+    # the truncating source is the last resort, never ahead of a complete one
+    assert names[-1] == "sina_truncated"
 
 
 def test_assembler_declares_one_adjustment_for_the_whole_panel():

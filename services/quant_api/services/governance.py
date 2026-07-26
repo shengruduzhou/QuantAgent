@@ -169,7 +169,11 @@ class GovernanceService:
                 "dateRange": [(panel.get("quality_checks") or {}).get("min_date"),
                               (panel.get("quality_checks") or {}).get("max_date")],
                 "sessionGapsSuspended": (panel.get("quality_checks") or {}).get("session_gaps_suspended"),
-                "sessionGapsUnexplained": (panel.get("quality_checks") or {}).get("session_gaps_unexplained"),
+                "sessionGapsUnexplained": (panel.get("quality_checks") or {}).get("session_gaps_missing_unexplained"),
+                "sessionGapsProviderTruncated": (panel.get("quality_checks") or {})
+                .get("session_gaps_provider_history_truncated"),
+                "ohlcViolationsQuarantined": (panel.get("quality_checks") or {})
+                .get("ohlc_relationship_violations"),
                 "servingProviderCounts": panel.get("serving_provider_counts", {}),
             },
         }

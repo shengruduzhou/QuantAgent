@@ -104,6 +104,8 @@ interface U0Status {
     dateRange?: (string | null)[];
     sessionGapsSuspended?: number;
     sessionGapsUnexplained?: number;
+    sessionGapsProviderTruncated?: number;
+    ohlcViolationsQuarantined?: number;
     servingProviderCounts?: Record<string, number>;
   };
 }
@@ -394,7 +396,8 @@ export function GovernancePage(): JSX.Element {
               <div><dt>校验失败项</dt><dd>{u0.quality?.failures?.length ? u0.quality.failures.join(", ") : "无"}</dd></div>
               <div><dt>未执行校验</dt><dd>{u0.quality?.notRun?.length ? u0.quality.notRun.join(", ") : "无"}</dd></div>
               <div><dt>回退供应商已实测</dt><dd>{yesNo(u0.provider?.fallbackProvidersExercised)}（{u0.provider?.fallbackSymbolsServed ?? 0} 票）</dd></div>
-              <div><dt>停牌 / 无法解释缺口</dt><dd>{u0.panel?.sessionGapsSuspended ?? "—"} / {u0.panel?.sessionGapsUnexplained ?? "—"}</dd></div>
+              <div><dt>缺口分类（停牌 / 供应商截断 / 无法解释）</dt><dd>{u0.panel?.sessionGapsSuspended ?? "—"} / {u0.panel?.sessionGapsProviderTruncated ?? "—"} / {u0.panel?.sessionGapsUnexplained ?? "—"}</dd></div>
+              <div><dt>OHLC 矛盾行（已隔离）</dt><dd>{u0.panel?.ohlcViolationsQuarantined ?? "—"}</dd></div>
               <div><dt>面板</dt><dd>{u0.panel?.rows?.toLocaleString() ?? "—"} 行 · {u0.panel?.symbols ?? "—"} 票 · {u0.panel?.dateRange?.[0] ?? "—"} → {u0.panel?.dateRange?.[1] ?? "—"}</dd></div>
               <div><dt>缺失证据</dt><dd>{u0.missingEvidence?.length ? u0.missingEvidence.join(", ") : "无"}</dd></div>
             </dl>
