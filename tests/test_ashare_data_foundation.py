@@ -363,3 +363,17 @@ def test_capability_probe_treats_import_success_as_insufficient_evidence():
     text = (REPO / "scripts/ashare_capability_probe.py").read_text()
     assert "NOT_INSTALLED" in text and "BLOCKED_BY_ENVIRONMENT" in text
     assert "SUPPORTED means a real request returned parsed rows" in text
+
+
+def test_capability_probe_separates_throttling_from_unsupported():
+    text = (REPO / "scripts/ashare_capability_probe.py").read_text()
+    # a temporarily blocked public host must not read as a permanent gap
+    assert "families_unavailable_only_due_to_throttling" in text
+    assert "RATE_LIMITED" in text
+
+
+def test_capability_probe_paces_the_rate_limited_vendor():
+    """Without pacing the probe rate-limits itself and slanders its own vendor."""
+    text = (REPO / "scripts/ashare_capability_probe.py").read_text()
+    assert "TICKFLOW_PACE_S = 6.5" in text
+    assert text.count("time.sleep(TICKFLOW_PACE_S)") >= 2
