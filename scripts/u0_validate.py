@@ -396,7 +396,8 @@ def validate_cross_provider(panel: pd.DataFrame, allow_network: bool, checks: Ch
         checks.add("cross_provider_reconciliation", NOT_RUN,
                    "--allow-network not given, so no independent provider was queried", {})
         return
-    from quantagent.data.ashare.sources import TencentSource, TickFlowSource
+    from quantagent.data.ashare.http import HttpClient
+    from quantagent.data.ashare.sources import SinaSource, TencentSource
 
     served_by = panel.groupby("symbol")["serving_provider"].first() \
         if "serving_provider" in panel.columns else pd.Series(dtype=str)
@@ -408,26 +409,38 @@ def validate_cross_provider(panel: pd.DataFrame, allow_network: bool, checks: Ch
     if not tickflow_symbols:
         checks.add("cross_provider_reconciliation", NOT_RUN, "no TickFlow-served symbols", {})
         return
-    tencent = TencentSource()
+    # Two independent public providers. Tencent is preferred, but it blocks a
+    # source IP for tens of minutes after heavy acquisition, so Sina is tried
+    # next rather than letting a throttle turn into an unrun check.
+    client = HttpClient(timeout=20, max_attempts=1)
+    alternatives = [("tencent", TencentSource(client)), ("sina", SinaSource(client))]
     rows = []
     for symbol in tickflow_symbols:
         ours = panel[panel["symbol"] == symbol][["trade_date", "close", "volume"]]
         if ours.empty:
             continue
         start = str(max(ours["trade_date"].min(), pd.Timestamp("2024-01-01")).date())
-        result = tencent.daily_bars(symbol, start, str(ours["trade_date"].max().date()))
-        if not result.rows:
-            rows.append({"symbol": symbol, "status": result.retry_class, "sessions": 0})
+        result = None
+        alt_name = ""
+        for alt_name, source in alternatives:
+            result = source.daily_bars(symbol, start, str(ours["trade_date"].max().date()))
+            if result.rows:
+                break
+        if result is None or not result.rows:
+            rows.append({"symbol": symbol, "status": result.retry_class if result else "NO_PROVIDER",
+                         "sessions": 0, "compared_against": alt_name})
             continue
         joined = ours.merge(result.frame[["trade_date", "close", "volume"]],
                             on="trade_date", suffixes=("_ours", "_alt"))
         if joined.empty:
-            rows.append({"symbol": symbol, "status": "NO_OVERLAP", "sessions": 0})
+            rows.append({"symbol": symbol, "status": "NO_OVERLAP", "sessions": 0,
+                         "compared_against": alt_name})
             continue
         close_diff = (joined["close_ours"] / joined["close_alt"] - 1).abs()
         volume_diff = (joined["volume_ours"] / joined["volume_alt"].replace(0, np.nan) - 1).abs()
         rows.append({
             "symbol": symbol, "status": "COMPARED", "sessions": int(len(joined)),
+            "compared_against": alt_name,
             "close_match_share": float((close_diff < 0.001).mean()),
             "median_close_diff": float(close_diff.median()),
             "volume_match_share": float((volume_diff < 0.001).mean()),
@@ -444,6 +457,7 @@ def validate_cross_provider(panel: pd.DataFrame, allow_network: bool, checks: Ch
     checks.add("cross_provider_reconciliation", PASS if agreement > 0.97 else WARN,
                "TickFlow-served prices reconcile against an independent public provider",
                {"symbols_compared": int(len(compared)),
+                "independent_providers_used": sorted(compared["compared_against"].unique().tolist()),
                 "mean_close_match_share": round(agreement, 4),
                 "mean_volume_match_share": round(float(compared["volume_match_share"].mean()), 4),
                 "worst_symbol": compared.sort_values("close_match_share").iloc[0].to_dict()})

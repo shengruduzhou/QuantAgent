@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """H-030 Track U0: full-universe historical backfill worker (LOW PRIORITY).
 
+SUPERSEDED by ``scripts/u0_acquire_bars.py``, which loads the repository .env
+(this worker died with a bare KeyError when a scheduler launched it), records
+provenance per row, classifies failures, and supports provider fallback. Kept
+because its staging directory holds raw TickFlow partitions the new assembler
+still reads.
+
 Builds the next-generation point-in-time A-share data foundation covering the
 boards the frozen 3,872-symbol cohort never contained (STAR, BSE) plus
 post-2020 listings and historically delisted names.

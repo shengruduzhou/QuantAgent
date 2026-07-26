@@ -46,6 +46,10 @@ from quantagent.data.ashare.sources import (  # noqa: E402
 
 OUT = REPO / "runtime/data/u0/capability"
 
+#: TickFlow enforces a hard 10 requests/minute. Without pacing the probe would
+#: rate-limit ITSELF and report an entitled method as a capability failure.
+TICKFLOW_PACE_S = 6.5
+
 # (label, symbol, why this security is in the cohort)
 COHORT: tuple[tuple[str, str, str], ...] = (
     ("SH_Main", "600519.SH", "Shanghai main board, long history"),
@@ -158,7 +162,9 @@ def probe_tickflow() -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         return [_row("tickflow", "auth", "client", "NO_CREDENTIAL", detail=str(exc)[:200])]
 
-    for label, symbol, _ in COHORT:
+    for index, (label, symbol, _) in enumerate(COHORT):
+        if index:
+            time.sleep(TICKFLOW_PACE_S)
         started = time.monotonic()
         result = source.daily_bars(symbol, start=pd.Timestamp("1999-01-01"),
                                    end=pd.Timestamp.now().normalize())
@@ -192,6 +198,7 @@ def probe_tickflow() -> list[dict]:
         ("shares_outstanding", "financials.shares", ("600519.SH",), {}),
     ]
     for family, method, args, kwargs in probes:
+        time.sleep(TICKFLOW_PACE_S)
         started = time.monotonic()
         info = source.probe(method, *args, **kwargs)
         out.append(_row("tickflow", family, method, info["status"], info.get("rows", 0),
@@ -310,6 +317,12 @@ def main() -> int:
     blockers = frame[frame["status"].isin(
         ["BLOCKED_BY_ENVIRONMENT", "UNAUTHORIZED", "NO_CREDENTIAL", "NOT_INSTALLED",
          "MISSING_DATA_ROOT", "EMPTY_DATA_ROOT", "NOT_CONFIGURED"])]
+    # A provider that is merely throttled right now is NOT the same as one that
+    # cannot serve the family at all; conflating them would let a temporary IP
+    # block read as a permanent capability gap.
+    throttled = frame[frame["status"].isin(["RATE_LIMITED", "TRANSIENT_FAILURE"])]
+    throttled_families = sorted(
+        set(throttled["dataset_family"]) - set(supported["dataset_family"]))
     summary = {
         "generated": _now(),
         "environment": {
@@ -322,6 +335,9 @@ def main() -> int:
         "providers_with_any_support": sorted(supported["provider"].unique()),
         "serving_providers_by_family": by_family,
         "families_without_any_provider": [f for f, p in by_family.items() if not p],
+        "families_unavailable_only_due_to_throttling": throttled_families,
+        "throttled_probes": throttled[["provider", "dataset_family", "target", "status"]]
+        .to_dict("records"),
         "blockers": blockers[["provider", "dataset_family", "status", "detail"]].to_dict("records"),
         "principle": "SUPPORTED means a real request returned parsed rows in this runtime",
     }

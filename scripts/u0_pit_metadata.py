@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """H-032C §7: strict PIT metadata sourcing (interval tables with provenance).
 
+SUPERSEDED by ``scripts/u0_pit_intervals.py``, which additionally sources the
+trading calendar, adjustment factors, dividends, vendor-dated halt intervals and
+dated ST episodes. Kept for the deterministic price-limit and IPO rule tables.
+
 Builds auditable historical PIT interval tables. TickFlow stays the primary BAR
 provider; these tables come from authoritative NON-bar sources:
 
