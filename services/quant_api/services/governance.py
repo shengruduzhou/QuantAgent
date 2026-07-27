@@ -344,6 +344,214 @@ class GovernanceService:
             })
         return out
 
+    def _microstructure(self) -> dict[str, Any]:
+        """Tick / Level-2 / MT5 / QMT surface. Read-only, existence-level only.
+
+        Every field here is a capability, a count or a verdict. No candidate
+        performance is exposed, and there is deliberately no control that could
+        reach an order path -- acquisition and probing run through allowlisted
+        JobRunner commands, not through this endpoint.
+        """
+        tick_l2 = self._read_json("data/capabilities/tick_l2/tick_l2_capability_matrix.json")
+        mt5 = self._read_json("data/capabilities/mt5/terminal.json")
+        mt5_matrix = self._read_json("data/capabilities/mt5/capability_matrix.json")
+        qmt = self._read_json("data/capabilities/qmt/runtime.json")
+        acquisition = self._read_json(
+            "data/market_events/_reports/tick_acquisition_2026-07-24.json"
+        )
+        export_index = self._read_json("data/mt5_custom_symbols/export_index.json")
+        gold = self._read_json(
+            "data/gold/full_universe_smoke/training_slice_certificate.json"
+        )
+
+        if not any((tick_l2, mt5, qmt, acquisition)):
+            return {"status": "unavailable",
+                    "reason": "no capability artifacts; run probe-tick-l2-source-matrix, "
+                              "probe-mt5-capability and probe-xtdata-capability"}
+
+        out: dict[str, Any] = {"status": "ready"}
+        if tick_l2:
+            out["sourceMatrix"] = {
+                "cells": tick_l2.get("cells"),
+                "statusCounts": tick_l2.get("status_counts", {}),
+                "servingByFamily": tick_l2.get("families_with_a_serving_provider", {}),
+                "familiesWithoutProvider": tick_l2.get("families_without_provider", []),
+                "blockers": tick_l2.get("blockers", []),
+            }
+        if mt5:
+            out["mt5"] = {
+                "classification": mt5.get("classification"),
+                "os": f"{mt5.get('os_name')} {mt5.get('os_release')}",
+                "packageImportable": mt5.get("package_importable"),
+                "importError": mt5.get("import_error"),
+                "terminalBuild": mt5.get("terminal_build"),
+                "detail": mt5.get("detail"),
+                "cells": (mt5_matrix or {}).get("cells"),
+            }
+        if qmt:
+            out["qmtXtdata"] = {
+                "packageImportable": qmt.get("package_importable"),
+                "xtdataImportable": qmt.get("xtdata_importable"),
+                "platformSupported": qmt.get("platform_supported"),
+                "clientConnected": qmt.get("client_connected"),
+                "importError": qmt.get("import_error"),
+                "authorizedMarkets": qmt.get("authorized_markets", []),
+            }
+        if acquisition:
+            integrity = acquisition.get("integrity", {})
+            reconciliation = acquisition.get("reconciliation", {})
+            out["tickAcquisition"] = {
+                "tradeDate": acquisition.get("trade_date"),
+                "provider": acquisition.get("provider"),
+                "dataClass": acquisition.get("data_class"),
+                "aggregationSeconds": acquisition.get("aggregation_seconds"),
+                "events": integrity.get("rows"),
+                "symbols": integrity.get("symbols"),
+                "partitionsWritten": acquisition.get("journal", {}).get("partitions_written"),
+                "integrityVerdicts": integrity.get("verdict_counts", {}),
+                "integrityFailed": integrity.get("failed_checks", []),
+                "integrityNotRun": integrity.get("not_run_checks", []),
+                "usable": integrity.get("usable"),
+                "reconciliationStatusCounts": reconciliation.get("status_counts", {}),
+                "unverifiableSymbolDays": reconciliation.get("unverifiable_symbol_days"),
+            }
+        if export_index:
+            out["mt5CustomSymbols"] = {
+                "symbolsExported": export_index.get("symbols_exported"),
+                "totalTicks": export_index.get("total_ticks"),
+                "totalBars": export_index.get("total_bars"),
+                "importedDataClass": export_index.get("imported_data_class"),
+                "warnings": export_index.get("distinct_warnings", []),
+            }
+        if gold:
+            out["goldTrainingSlice"] = {
+                "decision": gold.get("decision"),
+                "trainingPermitted": gold.get("training_permitted"),
+                "blockers": gold.get("blockers", []),
+                "datasetContentHash": gold.get("dataset_content_hash"),
+            }
+        out["liveTradingControls"] = "absent"
+        return out
+
+    def _qmt(self) -> dict[str, Any]:
+        """QMT platform, entitlement, skills and gold/training gate. Read-only.
+
+        Existence- and gate-level only, like every other section here. The
+        entitlement fields deliberately surface ``probe_status`` verbatim so the
+        UI can distinguish "not entitled" from "not reachable from this host"
+        from "never tried" -- collapsing those into a single availability flag
+        is what turns an unmeasured capability into an assumed one.
+        """
+        environment = self._read_json("data/capabilities/qmt/environment.json")
+        matrix = self._read_json("data/capabilities/qmt/entitlement_matrix.json")
+        st_probe = self._read_json("data/capabilities/qmt/st_probe.json")
+        level2 = self._read_json("data/capabilities/qmt/level2_probe.json")
+        periods = self._read_json("data/capabilities/qmt/period_list.json")
+        skills = self._read_json("data/capabilities/qmt/skill_inventory.json")
+        download = self._read_json("data/capabilities/qmt/download_probe.json")
+        gold = self._read_json(
+            "data/gold/full_universe_smoke/training_slice_certificate.json"
+        )
+
+        if environment is None and matrix is None:
+            return {"status": "unavailable",
+                    "reason": "no QMT capability artifacts; run probe-qmt-entitlements"}
+
+        out: dict[str, Any] = {"status": "ready"}
+        if environment:
+            out["platform"] = {
+                "verdict": environment.get("verdict"),
+                "os": f"{environment.get('os_name')} {environment.get('os_release')}",
+                "isWindows": environment.get("is_windows"),
+                "xtquantInstalled": environment.get("xtquant_installed"),
+                "xtdataImportable": environment.get("xtdata_importable"),
+                "miniqmtConnected": environment.get("client_connected"),
+                "importError": environment.get("import_error"),
+                "connectError": environment.get("connect_error"),
+                "authorizedMarkets": environment.get("authorized_markets", []),
+                "detail": environment.get("detail"),
+            }
+        if matrix:
+            out["entitlement"] = {
+                "capabilities": matrix.get("capabilities"),
+                "probeStatusCounts": matrix.get("probe_status_counts", {}),
+                "permissionClassCounts": matrix.get("permission_class_counts", {}),
+                "serving": matrix.get("serving", []),
+                "notUsable": matrix.get("not_usable", [])[:64],
+                "families": matrix.get("families", {}),
+                "interpretationRules": matrix.get("interpretation_rules", {}),
+            }
+        if periods:
+            out["periods"] = {
+                "available": periods.get("periods", []),
+                "verifiedAgainstClient": periods.get("verified_against_client"),
+            }
+        if download:
+            out["historyRanges"] = {
+                "status": download.get("status"),
+                "measured": download.get("measured_ranges", {}),
+                "note": download.get("note"),
+            }
+        if st_probe:
+            out["stHistory"] = {
+                "entitlementVerdict": st_probe.get("entitlement_verdict"),
+                "positiveControls": st_probe.get("positive_controls")
+                if isinstance(st_probe.get("positive_controls"), list) else
+                list((st_probe.get("positive_controls") or {}).keys()),
+                "interpretation": st_probe.get("interpretation"),
+            }
+        if level2:
+            out["level2"] = {
+                "status": level2.get("status"),
+                "recordsRetrieved": level2.get("records_retrieved"),
+                "capabilities": level2.get("capabilities", []),
+                "documentedRequirement": level2.get("documented_requirement"),
+            }
+        if skills:
+            inventory = skills.get("skills", [])
+            out["skills"] = {
+                "count": len(inventory),
+                "names": [s.get("name") for s in inventory],
+                "platformIsWindows": skills.get("platform_is_windows"),
+                "allReadOnly": all(s.get("read_only") for s in inventory),
+                "anyTradingPermitted": any(
+                    s.get("trading_permitted") for s in inventory
+                ),
+            }
+        if gold:
+            out["goldTrainingGate"] = {
+                "decision": gold.get("decision"),
+                "trainingPermitted": gold.get("training_permitted"),
+                "blockers": gold.get("blockers", []),
+                "datasetContentHash": gold.get("dataset_content_hash"),
+            }
+
+        out["dependencyHealth"] = self._dependency_health()
+        out["liveTradingControls"] = "absent"
+        return out
+
+    def _dependency_health(self) -> dict[str, Any]:
+        """Whether declared dependencies match unconditional production imports.
+
+        Surfaces the class of defect that took CI down: a module-scope import
+        with no matching declaration passes on a developer machine and fails in
+        a clean environment.
+        """
+        try:
+            from tests.test_declared_dependencies import _undeclared_imports
+        except Exception:  # noqa: BLE001 - the UI must not depend on test imports
+            return {"status": "unavailable",
+                    "reason": "dependency audit helper not importable"}
+        try:
+            offenders = _undeclared_imports()
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+        return {
+            "status": "ready",
+            "undeclaredImports": offenders,
+            "clean": not offenders,
+        }
+
     def status(self) -> dict[str, Any]:
         payload = {
             "shadow": self._shadow(),
@@ -351,6 +559,8 @@ class GovernanceService:
             "u0": self._u0(),
             "u0BarPit": self._u0_h032b(),
             "ashareFoundation": self._ashare_foundation(),
+            "microstructure": self._microstructure(),
+            "qmt": self._qmt(),
             "lineage": self._lineage(),
             "governedCommands": self._governed_commands(),
             "blinding": "existence- and gate-level fields only; no candidate performance",
