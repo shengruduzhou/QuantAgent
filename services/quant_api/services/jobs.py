@@ -311,6 +311,22 @@ COMMANDS: dict[str, dict[str, Any]] = {
                           "runtime/data/capabilities/mt5/terminal.json"),
         "control": set(),
     },
+    # Read-only. On a non-Windows host this writes the full capability
+    # catalogue marked PLATFORM_UNAVAILABLE rather than an empty file, so the
+    # scope of what is unmeasured stays visible.
+    "probe-qmt-entitlements": {
+        "type": "data",
+        "entrypoint": "scripts/probe_qmt_entitlements.py",
+        "required": set(),
+        "allowed": {"output", "earliest", "latest"},
+        "path_inputs": set(),
+        "path_outputs": {"output"},
+        "fixed_outputs": ("runtime/data/capabilities/qmt/entitlement_matrix.json",
+                          "runtime/data/capabilities/qmt/environment.json",
+                          "runtime/data/capabilities/qmt/st_probe.json",
+                          "runtime/data/capabilities/qmt/level2_probe.json"),
+        "control": set(),
+    },
     "probe-xtdata-capability": {
         "type": "data",
         "entrypoint": "scripts/probe_xtdata_capability.py",

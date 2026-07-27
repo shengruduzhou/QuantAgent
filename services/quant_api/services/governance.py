@@ -433,6 +433,125 @@ class GovernanceService:
         out["liveTradingControls"] = "absent"
         return out
 
+    def _qmt(self) -> dict[str, Any]:
+        """QMT platform, entitlement, skills and gold/training gate. Read-only.
+
+        Existence- and gate-level only, like every other section here. The
+        entitlement fields deliberately surface ``probe_status`` verbatim so the
+        UI can distinguish "not entitled" from "not reachable from this host"
+        from "never tried" -- collapsing those into a single availability flag
+        is what turns an unmeasured capability into an assumed one.
+        """
+        environment = self._read_json("data/capabilities/qmt/environment.json")
+        matrix = self._read_json("data/capabilities/qmt/entitlement_matrix.json")
+        st_probe = self._read_json("data/capabilities/qmt/st_probe.json")
+        level2 = self._read_json("data/capabilities/qmt/level2_probe.json")
+        periods = self._read_json("data/capabilities/qmt/period_list.json")
+        skills = self._read_json("data/capabilities/qmt/skill_inventory.json")
+        download = self._read_json("data/capabilities/qmt/download_probe.json")
+        gold = self._read_json(
+            "data/gold/full_universe_smoke/training_slice_certificate.json"
+        )
+
+        if environment is None and matrix is None:
+            return {"status": "unavailable",
+                    "reason": "no QMT capability artifacts; run probe-qmt-entitlements"}
+
+        out: dict[str, Any] = {"status": "ready"}
+        if environment:
+            out["platform"] = {
+                "verdict": environment.get("verdict"),
+                "os": f"{environment.get('os_name')} {environment.get('os_release')}",
+                "isWindows": environment.get("is_windows"),
+                "xtquantInstalled": environment.get("xtquant_installed"),
+                "xtdataImportable": environment.get("xtdata_importable"),
+                "miniqmtConnected": environment.get("client_connected"),
+                "importError": environment.get("import_error"),
+                "connectError": environment.get("connect_error"),
+                "authorizedMarkets": environment.get("authorized_markets", []),
+                "detail": environment.get("detail"),
+            }
+        if matrix:
+            out["entitlement"] = {
+                "capabilities": matrix.get("capabilities"),
+                "probeStatusCounts": matrix.get("probe_status_counts", {}),
+                "permissionClassCounts": matrix.get("permission_class_counts", {}),
+                "serving": matrix.get("serving", []),
+                "notUsable": matrix.get("not_usable", [])[:64],
+                "families": matrix.get("families", {}),
+                "interpretationRules": matrix.get("interpretation_rules", {}),
+            }
+        if periods:
+            out["periods"] = {
+                "available": periods.get("periods", []),
+                "verifiedAgainstClient": periods.get("verified_against_client"),
+            }
+        if download:
+            out["historyRanges"] = {
+                "status": download.get("status"),
+                "measured": download.get("measured_ranges", {}),
+                "note": download.get("note"),
+            }
+        if st_probe:
+            out["stHistory"] = {
+                "entitlementVerdict": st_probe.get("entitlement_verdict"),
+                "positiveControls": st_probe.get("positive_controls")
+                if isinstance(st_probe.get("positive_controls"), list) else
+                list((st_probe.get("positive_controls") or {}).keys()),
+                "interpretation": st_probe.get("interpretation"),
+            }
+        if level2:
+            out["level2"] = {
+                "status": level2.get("status"),
+                "recordsRetrieved": level2.get("records_retrieved"),
+                "capabilities": level2.get("capabilities", []),
+                "documentedRequirement": level2.get("documented_requirement"),
+            }
+        if skills:
+            inventory = skills.get("skills", [])
+            out["skills"] = {
+                "count": len(inventory),
+                "names": [s.get("name") for s in inventory],
+                "platformIsWindows": skills.get("platform_is_windows"),
+                "allReadOnly": all(s.get("read_only") for s in inventory),
+                "anyTradingPermitted": any(
+                    s.get("trading_permitted") for s in inventory
+                ),
+            }
+        if gold:
+            out["goldTrainingGate"] = {
+                "decision": gold.get("decision"),
+                "trainingPermitted": gold.get("training_permitted"),
+                "blockers": gold.get("blockers", []),
+                "datasetContentHash": gold.get("dataset_content_hash"),
+            }
+
+        out["dependencyHealth"] = self._dependency_health()
+        out["liveTradingControls"] = "absent"
+        return out
+
+    def _dependency_health(self) -> dict[str, Any]:
+        """Whether declared dependencies match unconditional production imports.
+
+        Surfaces the class of defect that took CI down: a module-scope import
+        with no matching declaration passes on a developer machine and fails in
+        a clean environment.
+        """
+        try:
+            from tests.test_declared_dependencies import _undeclared_imports
+        except Exception:  # noqa: BLE001 - the UI must not depend on test imports
+            return {"status": "unavailable",
+                    "reason": "dependency audit helper not importable"}
+        try:
+            offenders = _undeclared_imports()
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+        return {
+            "status": "ready",
+            "undeclaredImports": offenders,
+            "clean": not offenders,
+        }
+
     def status(self) -> dict[str, Any]:
         payload = {
             "shadow": self._shadow(),
@@ -441,6 +560,7 @@ class GovernanceService:
             "u0BarPit": self._u0_h032b(),
             "ashareFoundation": self._ashare_foundation(),
             "microstructure": self._microstructure(),
+            "qmt": self._qmt(),
             "lineage": self._lineage(),
             "governedCommands": self._governed_commands(),
             "blinding": "existence- and gate-level fields only; no candidate performance",
