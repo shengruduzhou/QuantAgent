@@ -87,6 +87,11 @@ def main() -> int:
     parser.add_argument("--output", default="runtime/data/market_events")
     parser.add_argument("--report", default="runtime/data/market_events/_reports")
     parser.add_argument("--max-pages", type=int, default=200)
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="recompute verdicts from the existing journal without re-fetching; "
+             "use after a checker fix so artifacts match the current logic",
+    )
     args = parser.parse_args()
 
     if args.symbols:
@@ -111,7 +116,26 @@ def main() -> int:
     fetch_log: list[dict[str, object]] = []
     receipts: list[dict[str, object]] = []
 
-    for record in cohort.to_dict("records"):
+    if args.report_only:
+        # Re-fetching would produce a different receive_time_ns and so a
+        # different partition content, which the immutable journal rightly
+        # refuses. Recomputing from what was already journalled is the correct
+        # way to refresh verdicts after a checker change.
+        journalled = store.read(family=mc.FAMILY_TRADE, trade_date=args.trade_date)
+        if journalled.empty:
+            print(json.dumps({"error": "nothing journalled for that date"}, indent=2))
+            return 1
+        acquired = [journalled]
+        fetch_log = [{"mode": "report-only",
+                      "note": "recomputed from the existing journal, no vendor calls",
+                      "rows": len(journalled),
+                      "symbols": int(journalled["symbol"].nunique())}]
+        inventory = store.inventory()
+        if not inventory.empty:
+            day = inventory[inventory.get("trade_date") == args.trade_date]
+            receipts = day.to_dict("records")
+
+    for record in ([] if args.report_only else cohort.to_dict("records")):
         symbol = str(record["symbol"])
         frame, outcome = source.fetch(symbol, args.trade_date, max_pages=args.max_pages)
         fetch_log.append({
@@ -165,8 +189,11 @@ def main() -> int:
 
     print(json.dumps({
         "trade_date": args.trade_date,
-        "symbols_attempted": len(cohort),
-        "symbols_acquired": len(acquired),
+        "mode": "report-only" if args.report_only else "acquire",
+        "symbols_attempted": None if args.report_only else len(cohort),
+        # In report-only mode `acquired` holds one combined frame, so counting
+        # frames would understate coverage; count distinct symbols instead.
+        "symbols_acquired": int(events["symbol"].nunique()),
         "events": len(events),
         "integrity_verdicts": report.verdict_counts,
         "integrity_failed": report.failed,

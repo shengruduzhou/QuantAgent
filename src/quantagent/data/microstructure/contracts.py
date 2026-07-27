@@ -383,25 +383,26 @@ POST_CLOSE_WINDOW = ("15:01", "15:35")
 
 
 def board_of(symbol: str) -> str:
-    """Infer the board from a canonical ``<code>.<EX>`` symbol.
+    """Board for a canonical ``<code>.<EX>`` symbol, for session selection.
 
-    Code-prefix rules per the exchanges' own listing conventions. Used only to
-    pick the right *session calendar*; anything that needs authoritative board
-    membership must read the U0 security master instead.
+    Delegates to :func:`quantagent.data.ashare.symbols.board_of`, which is the
+    single authoritative code-prefix classifier in this repository. Keeping a
+    second copy of those prefix rules here would guarantee the two drift --
+    B-share ranges, the 002/003 SME merger and the BSE legacy codes are exactly
+    the kind of detail one copy would quietly miss.
+
+    Used only to pick the right *session calendar*. Anything needing
+    authoritative board membership must read the U0 security master.
     """
-    code, _, exchange = symbol.partition(".")
-    exchange = exchange.upper()
-    if exchange == "BJ" or code.startswith(("920", "43", "83", "87", "88")):
-        return "BSE"
-    if code.startswith(("688", "689")):
-        return "STAR"
-    if code.startswith("300") or code.startswith("301"):
-        return "ChiNext"
-    if exchange == "SH":
-        return "SH_Main"
-    if exchange == "SZ":
-        return "SZ_Main"
-    return "UNKNOWN"
+    from quantagent.data.ashare.symbols import SymbolError
+    from quantagent.data.ashare.symbols import board_of as _board_of
+
+    try:
+        return _board_of(symbol)
+    except (SymbolError, ValueError):
+        # A malformed symbol must not crash a session classification; the
+        # caller gets the default (non-STAR) calendar.
+        return "UNKNOWN"
 
 
 def session_phase(hhmm: str, *, board: str | None = None) -> str:
