@@ -26,6 +26,14 @@ jobs:
         run: python -m pip install -e ".[test]"
       - name: Compile
         run: python -m compileall -q src services scripts
+      # Runs before the suite so an undeclared production dependency is reported
+      # as itself rather than as a collection crash 1,700 tests later. This is
+      # the exact failure that broke CI: quantagent.data.ashare.http imports
+      # requests at module scope while pyproject did not declare it.
+      - name: Declared-dependency audit
+        run: python -m pytest tests/test_declared_dependencies.py -q
+      - name: Verify collection in the installed environment
+        run: python -m pytest tests/ -q --collect-only > /dev/null
       - name: Test
         shell: bash
         run: |
@@ -39,6 +47,43 @@ jobs:
           path: |
             pytest-results.xml
             pytest.log
+          if-no-files-found: error
+          retention-days: 14
+
+  # QMT/MiniQMT is a Windows-only client requiring a funded broker account, so
+  # it cannot be genuinely exercised on a hosted Ubuntu runner. This job runs
+  # the mock and contract tests that CAN run anywhere, and records the platform
+  # verdict explicitly. It must never report a pass for a capability that was
+  # not exercised -- the probe itself classifies unreachable capabilities as
+  # PLATFORM_BLOCKED rather than as absent.
+  qmt-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -e ".[test]"
+      - name: QMT contract and mock tests
+        run: python -m pytest tests/data/test_qmt_gateway.py tests/data/test_market_data_providers.py -q
+      - name: Record platform verdict
+        shell: bash
+        run: |
+          echo "QMT live probe: NOT_RUN_PLATFORM (hosted runner is Linux; QMT/MiniQMT requires Windows + broker entitlement)" | tee qmt-platform-verdict.txt
+      - name: Upload QMT platform verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmt-platform-verdict
+          path: qmt-platform-verdict.txt
           if-no-files-found: error
           retention-days: 14
 
