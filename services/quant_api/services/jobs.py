@@ -11,6 +11,7 @@ from threading import RLock, Thread
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
+from quantagent.safety.operating_mode import reject_live_intent
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
 from services.quant_api.events import EventBroker
 
@@ -596,6 +597,15 @@ class JobManager:
         command_id: str,
         parameters: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        # Live-order intent is refused before anything else happens: before the
+        # command is resolved, before parameters are normalised, and before a
+        # JobRecord exists. Checking later would mean an intent to trade real
+        # money had already been routed or queued by the time it was refused.
+        reject_live_intent(
+            {"job_type": job_type, "command_id": command_id, "parameters": parameters},
+            where="job submission",
+        )
+
         spec = COMMANDS.get(command_id)
         if spec is None or spec["type"] != job_type:
             raise ValueError(f"command {command_id!r} is not allowed for {job_type}")
