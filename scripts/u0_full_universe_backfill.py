@@ -102,21 +102,62 @@ def trackf_busy() -> str | None:
     return None
 
 
-def load_master() -> pd.DataFrame:
-    """H-028 master unioned with reconciliation-approved supplemental additions
-    (deduped on symbol; the frozen master wins on any collision)."""
-    master = pd.read_parquet(MASTER)
-    if SUPPLEMENTAL.exists():
-        try:
-            add = pd.read_parquet(SUPPLEMENTAL)
-            shared = [c for c in master.columns if c in add.columns]
-            add = add[shared]
-            add = add[~add["symbol"].astype(str).isin(set(master["symbol"].astype(str)))]
-            if len(add):
-                master = pd.concat([master, add[shared]], ignore_index=True)
-        except Exception:
-            pass
-    return master
+def union_master(master: pd.DataFrame, supplemental: pd.DataFrame | None) -> pd.DataFrame:
+    """Union the frozen H-028 master with reconciliation-approved additions.
+
+    Pure function over frames so the union *semantics* -- which are the part
+    worth testing -- can be exercised without any runtime artifact on disk.
+
+    The contract, in precedence order:
+
+    * the frozen master is authoritative: a supplemental row whose symbol
+      already exists is dropped entirely, never merged field-by-field, so no
+      supplemental value can overwrite frozen listing/delisting metadata;
+    * only columns present in the frozen master survive, so a supplemental file
+      cannot widen the schema;
+    * the result carries no duplicate symbol.
+    """
+    if supplemental is None or not len(supplemental):
+        return master
+    shared = [c for c in master.columns if c in supplemental.columns]
+    if "symbol" not in shared:
+        # Without a join key the addition cannot be deduped, and silently
+        # concatenating would corrupt the universe.
+        return master
+    add = supplemental[shared]
+    known = set(master["symbol"].astype(str))
+    add = add[~add["symbol"].astype(str).isin(known)]
+    # A supplemental file may itself repeat a symbol; keep the first only.
+    add = add[~add["symbol"].astype(str).duplicated()]
+    if not len(add):
+        return master
+    return pd.concat([master, add], ignore_index=True)
+
+
+def load_master(master_path: Path | None = None,
+                supplemental_path: Path | None = None) -> pd.DataFrame:
+    """Load the frozen master and apply :func:`union_master`.
+
+    Paths are injectable so tests can supply deterministic fixtures instead of
+    depending on a gitignored runtime artifact -- that dependency is what broke
+    CI, because the file exists on the research host and nowhere else.
+    """
+    master_path = Path(master_path) if master_path is not None else MASTER
+    supplemental_path = (
+        Path(supplemental_path) if supplemental_path is not None else SUPPLEMENTAL
+    )
+    master = pd.read_parquet(master_path)
+    if not supplemental_path.exists():
+        return union_master(master, None)
+    try:
+        supplemental = pd.read_parquet(supplemental_path)
+    except Exception as exc:  # noqa: BLE001 - a corrupt addition must be visible
+        # Previously swallowed silently, which turned a corrupt supplemental
+        # file into "there were no additions" -- a wrong universe with no signal.
+        print(f"[load_master] WARNING: unreadable supplemental "
+              f"{supplemental_path}: {type(exc).__name__}: {exc}")
+        return union_master(master, None)
+    return union_master(master, supplemental)
 
 
 def last_available() -> pd.Timestamp:
