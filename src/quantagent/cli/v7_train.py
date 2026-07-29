@@ -415,6 +415,8 @@ def auto_train_v7(
         initial_cash=initial_cash,
         min_order_value_yuan=100.0,
         benchmark_symbol=None,
+        acceptance_max_drawdown=0.10,
+        acceptance_min_sharpe=None,
         paper_report_output_dir=None,
         mark_production_ready=False,
         paper_report=None,
@@ -770,6 +772,20 @@ def run_full_real_training_v7(
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
     benchmark_symbol: str | None = typer.Option(None, "--benchmark-symbol"),
+    acceptance_max_drawdown: float = typer.Option(
+        0.10,
+        "--acceptance-max-drawdown",
+        min=0.0,
+        max=0.80,
+        help="Maximum absolute drawdown allowed by the research acceptance gate.",
+    ),
+    acceptance_min_sharpe: float | None = typer.Option(
+        None,
+        "--acceptance-min-sharpe",
+        min=-5.0,
+        max=10.0,
+        help="Optional minimum paper/backtest Sharpe required by the research acceptance gate.",
+    ),
     paper_report_output_dir: Path | None = typer.Option(None, "--paper-report-output-dir"),
     mark_production_ready: bool = typer.Option(False, "--mark-production-ready"),
     paper_report: Path | None = typer.Option(None, "--paper-report"),
@@ -833,6 +849,7 @@ def run_full_real_training_v7(
     horizons_tuple = tuple(int(item) for item in parse_csv_tuple(horizons))
     output_dir = Path(output_dir) if output_dir is not None else default_artifact_root()
     output_dir.mkdir(parents=True, exist_ok=True)
+    typer.echo(json_dump({"progress": 0.03, "stage": "contract", "message": "strategy contract accepted"}))
     resolved_training_dataset = (
         Path(training_dataset_path)
         if training_dataset_path is not None
@@ -863,6 +880,7 @@ def run_full_real_training_v7(
             enable_index=enable_index,
         )
     )
+    typer.echo(json_dump({"progress": 0.18, "stage": "dataset", "message": "PIT dataset persisted"}))
 
     training_dataset = read_frame(dataset_result.output_path)
     training_result = run_v7_training_experiment(
@@ -888,6 +906,7 @@ def run_full_real_training_v7(
             require_gpu=require_gpu,
         ),
     )
+    typer.echo(json_dump({"progress": 0.48, "stage": "training", "message": "walk-forward training completed"}))
 
     raw_predictions = read_frame(Path(training_result.artifact_paths["predictions"]))
     if multi_horizon_blend and "horizon" in raw_predictions.columns and raw_predictions["horizon"].nunique() > 1:
@@ -913,6 +932,7 @@ def run_full_real_training_v7(
     predictions_path = default_predictions_root() / "predictions.parquet"
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
     written_predictions = write_frame(predictions_frame, predictions_path)
+    typer.echo(json_dump({"progress": 0.62, "stage": "prediction", "message": "OOS predictions persisted"}))
 
     sector_frame = read_frame(sector_map_path) if sector_map_path else None
 
@@ -979,6 +999,7 @@ def run_full_real_training_v7(
     weights_result.diagnostics["training_dataset_row_count"] = int(len(training_dataset))
     weights_path = default_target_weights_root() / "target_weights.parquet"
     written_weights = write_v7_target_weights(weights_result, weights_path)
+    typer.echo(json_dump({"progress": 0.76, "stage": "portfolio", "message": "constrained target weights persisted"}))
 
     reports_root = default_reports_root()
     reports_root.mkdir(parents=True, exist_ok=True)
@@ -1042,6 +1063,8 @@ def run_full_real_training_v7(
         acceptance = evaluate_model_acceptance_gates(
             acceptance_metrics,
             V7ModelAcceptanceGateConfig(
+                max_drawdown=acceptance_max_drawdown,
+                min_sharpe=acceptance_min_sharpe,
                 require_paper_report=mark_production_ready,
                 require_benchmark=mark_production_ready,
                 min_training_symbols=max(50 if mark_production_ready else 1, int(min_symbols)),
@@ -1079,6 +1102,7 @@ def run_full_real_training_v7(
             "summary": paper_result.summary,
             "files": paper_result.files,
         }
+        typer.echo(json_dump({"progress": 0.94, "stage": "risk", "message": "A-share simulation and acceptance gates completed"}))
 
     pipeline_report = {
         "training_dataset": dataset_result.summary,
@@ -1103,6 +1127,7 @@ def run_full_real_training_v7(
     }
     pipeline_report_path = reports_root / "full_pipeline_report.json"
     pipeline_report_path.write_text(json_dump(pipeline_report), encoding="utf-8")
+    typer.echo(json_dump({"progress": 0.98, "stage": "evidence", "message": "pipeline evidence persisted"}))
     typer.echo(json_dump(pipeline_report))
 
 
@@ -1123,6 +1148,7 @@ def _build_full_pipeline_acceptance_metrics(
         {
             "turnover_adjusted_net_return": paper_summary.get("turnover_adjusted_net_return", paper_summary.get("net_return_after_estimated_costs", 0.0)),
             "max_drawdown": paper_summary.get("max_drawdown", 0.0),
+            "sharpe": paper_summary.get("sharpe", training_metrics.get("sharpe", 0.0)),
             "benchmark_symbol": benchmark_symbol,
             "benchmark_return": paper_summary.get("benchmark_return"),
             "excess_return": paper_summary.get("excess_return"),
@@ -1503,6 +1529,8 @@ def run_full_ai_quant_v7(
         initial_cash=initial_cash,
         min_order_value_yuan=min_order_value_yuan,
         benchmark_symbol=None,
+        acceptance_max_drawdown=0.10,
+        acceptance_min_sharpe=None,
         paper_report_output_dir=None,
         mark_production_ready=False,
         paper_report=None,

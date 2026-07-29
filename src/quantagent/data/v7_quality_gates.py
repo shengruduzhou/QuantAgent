@@ -24,6 +24,7 @@ class V7ModelAcceptanceGateConfig:
     min_rank_ic_stability: float = 0.0
     min_turnover_adjusted_return: float = 0.0
     max_drawdown: float = 0.10
+    min_sharpe: float | None = None
     max_single_factor_dominance: float = 0.60
     require_adverse_regime: bool = True
     require_paper_report: bool = True
@@ -123,6 +124,15 @@ def evaluate_model_acceptance_gates(
         f"abs(drawdown) <= {config.max_drawdown}",
         "max_drawdown_exceeded",
     )
+    if config.min_sharpe is not None:
+        sharpe = float(metrics.get("sharpe", 0.0))
+        add_gate(
+            "sharpe",
+            sharpe >= config.min_sharpe,
+            sharpe,
+            f">= {config.min_sharpe}",
+            "sharpe_below_minimum",
+        )
     add_gate(
         "single_factor_dominance",
         float(metrics.get("single_factor_dominance", 0.0)) <= config.max_single_factor_dominance,

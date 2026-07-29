@@ -14,8 +14,8 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
-import { apiPost } from "../api/client";
-import type { JobSummary, SystemOverview } from "../api/types";
+import { apiDelete, apiPost } from "../api/client";
+import type { ConnectionStatus, JobSummary, SystemOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
@@ -30,6 +30,7 @@ export function SettingsPage(): JSX.Element {
   const initialType: JobType = isJobType(requestedJob) ? requestedJob : "backtest";
   const overview = useApi<SystemOverview>(["settings-overview"], "/system/overview");
   const jobs = useApi<JobSummary[]>(["settings-jobs"], "/jobs");
+  const connections = useApi<ConnectionStatus[]>(["settings-connections"], "/connections");
   const [jobType, setJobType] = useState<JobType>(initialType);
   const [jobJson, setJobJson] = useState(() => templateJson(initialType));
   const [launching, setLaunching] = useState(false);
@@ -101,6 +102,12 @@ export function SettingsPage(): JSX.Element {
           </div>
         </Panel>
 
+        <ConnectionVault
+          items={Array.isArray(connections.data?.data) ? connections.data.data : []}
+          loading={connections.isLoading}
+          refetch={connections.refetch}
+        />
+
         <Panel title="网页启动研究任务" eyebrow="Allowlisted CLI adapter · validate before launch" className="job-launcher-panel">
           <div className="job-type-tabs">
             <button className={jobType === "backtest" ? "active" : ""} onClick={() => selectTemplate("backtest")}><Flask size={16} /> 回测</button>
@@ -164,6 +171,83 @@ export function SettingsPage(): JSX.Element {
         </Panel>
       </section>
     </div>
+  );
+}
+
+function ConnectionVault({
+  items,
+  loading,
+  refetch,
+}: {
+  items: ConnectionStatus[];
+  loading: boolean;
+  refetch: () => Promise<unknown>;
+}): JSX.Element {
+  const [selected, setSelected] = useState("tickflow");
+  const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const current = items.find((item) => item.id === selected) ?? items[0];
+
+  const connect = async (): Promise<void> => {
+    if (!current) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await apiPost<ConnectionStatus>(`/connections/${current.id}`, { credentials });
+      setCredentials({});
+      setMessage(`${current.label} 会话已连接；密钥仅保存在当前 API 进程内存。`);
+      await refetch();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "连接失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async (): Promise<void> => {
+    if (!current) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await apiDelete<ConnectionStatus>(`/connections/${current.id}`);
+      setCredentials({});
+      setMessage(`${current.label} 会话密钥已从进程内存移除。`);
+      await refetch();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "断开失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel title="API 会话连接器" eyebrow="Process-memory vault · allowlisted task injection" className="connection-vault-panel">
+      {loading || !current ? <StateView state="loading" /> : <>
+        <div className="connection-provider-tabs" role="tablist" aria-label="API 连接器">
+          {items.map((item) => <button type="button" role="tab" aria-selected={item.id === current.id} className={item.id === current.id ? "active" : ""} key={item.id} onClick={() => { setSelected(item.id); setCredentials({}); setMessage(""); }}>
+            <i className={item.connected ? "connected" : ""} />
+            <span>{item.label}<small>{item.capabilities.join(" · ")}</small></span>
+            <StatusBadge status={item.connected ? "ready" : "partial"} label={item.connected ? item.source : "未连接"} />
+          </button>)}
+        </div>
+        <div className="connection-vault-body">
+          <div className="connection-copy">
+            <Lock size={24} weight="duotone" />
+            <div><strong>{current.label}</strong><p>{current.note}</p><small>浏览器只发送到本机 Quant API；不会进入 URL、命令行、日志、localStorage 或 Runtime。API 进程重启会清除 session 密钥。</small></div>
+          </div>
+          <div className="connection-fields">
+            {current.variables.map((name) => <label key={name}><span>{name}</span><input type="password" autoComplete="off" value={credentials[name] ?? ""} placeholder={current.connected ? `已配置 · ${current.fingerprints[name] ?? current.source}` : "粘贴后仅用于当前会话"} onChange={(event) => setCredentials((value) => ({ ...value, [name]: event.target.value }))} /></label>)}
+          </div>
+          <div className="connection-actions">
+            <button type="button" className="primary-button" disabled={busy || current.variables.some((name) => !(credentials[name] ?? "").trim())} onClick={connect}><ShieldCheck size={16} />{busy ? "处理中…" : "建立安全会话"}</button>
+            <button type="button" disabled={busy || !current.connected || current.source === "environment"} onClick={disconnect}>移除会话密钥</button>
+            <span>{current.source === "environment" ? "由服务器环境变量管理，网页不能删除。" : "只允许白名单 provider/研究任务读取。"}</span>
+          </div>
+          {message ? <div className="connection-message" role="status">{message}</div> : null}
+        </div>
+      </>}
+    </Panel>
   );
 }
 

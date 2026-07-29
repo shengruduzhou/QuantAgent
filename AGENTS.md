@@ -149,3 +149,15 @@ git diff --check
 - TuShare / AkShare：财务报表、财务指标、估值字段、公告披露日期。
 - TradingView public pages：sentiment / attention context，不作为基本面或行情真值。
 - Policy、announcement、news 原文必须保留 `source / published_at / available_at / raw_hash / confidence` 并进入 `EvidenceStore`。
+
+## Strategy Workbench / 策略实验室
+
+- 策略 Web 启动统一走 `quantagent.strategy.v1` manifest 与
+  `run-full-real-training-v7` allowlist；禁止另建浏览器内训练/回测实现。
+- 策略链固定为真实输入校验 → manifest → Human Gate → dataset/factor/train →
+  target_weights → A股回测 → risk/paper evidence。
+- 用户输入的收益/回撤目标只是研究偏好，UI 不得把它渲染成真实或承诺收益。
+- Web API credential 只允许进程内存或服务器环境变量，禁止 URL/argv/log/Runtime/
+  localStorage；只向命令声明的 provider 注入。
+- 不提供 arbitrary Bash；新执行能力必须登记 allowlisted command、路径边界、
+  控制开关、credential provider 和测试。
