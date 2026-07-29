@@ -13,7 +13,11 @@ export const jobTemplates = {
     commandId: "train-v8-deep",
     parameters: {
       horizon_class: "short_5d",
-      dataset_path: "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus8.parquet",
+      // Full-universe Gold (5,790 securities, all five boards). Replaced the
+      // V7 frozen cohort (3,872) once FULL_UNIVERSE_GOLD_READY was granted.
+      // There is deliberately no fallback to the old path: a silently
+      // narrower universe is worse than a job that fails.
+      dataset_path: "runtime/data/gold/full_universe/dataset.parquet",
       silver_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
       output_dir: "runtime/reports/quant_ui_jobs/web_train_all_symbols",
       max_epochs: 20,
