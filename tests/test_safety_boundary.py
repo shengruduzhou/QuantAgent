@@ -259,3 +259,53 @@ class TestReadinessTiers:
         for certificate in evaluator.evaluate_all()["certificates"].values():
             assert certificate["allows"]
             assert certificate["forbids"]
+
+
+class TestJobRunnerRejectsLiveIntent:
+    """The guard must sit on the real enforcement path, not only in a module.
+
+    A safety helper nobody calls is decoration. These tests exercise the actual
+    JobManager validation entry point that every web-submitted job passes
+    through.
+    """
+
+    def _manager(self):
+        from services.quant_api.services.jobs import JobManager
+
+        # Only _validate is exercised; it runs the guard before touching state.
+        return JobManager.__new__(JobManager)
+
+    @pytest.mark.parametrize("command_id", ["实盘下单", "enable-live-trading"])
+    def test_live_command_id_rejected_before_lookup(self, command_id):
+        with pytest.raises(om.LiveTradingRejected):
+            self._manager()._validate("data", command_id, {})
+
+    def test_live_intent_in_nested_parameters_rejected(self):
+        with pytest.raises(om.LiveTradingRejected) as exc:
+            self._manager()._validate(
+                "data", "probe-qmt-entitlements", {"notes": "请自动买入"}
+            )
+        assert exc.value.matched == "自动买入"
+
+    def test_broker_api_in_parameter_rejected(self):
+        with pytest.raises(om.LiveTradingRejected) as exc:
+            self._manager()._validate(
+                "data", "probe-qmt-entitlements", {"output": "order_stock_async"}
+            )
+        assert exc.value.matched == "order_stock_async"
+
+    def test_rejection_happens_before_the_command_is_resolved(self):
+        """An unknown command with live intent must fail as live intent."""
+        with pytest.raises(om.LiveTradingRejected):
+            self._manager()._validate("data", "totally-unknown-实盘", {})
+
+    def test_benign_job_passes_the_guard(self):
+        """The guard must not block ordinary research jobs."""
+        manager = self._manager()
+        try:
+            manager._validate("data", "probe-qmt-entitlements",
+                              {"output": "runtime/data/capabilities/qmt"})
+        except om.LiveTradingRejected:
+            pytest.fail("benign research job was wrongly rejected as live intent")
+        except Exception:
+            pass  # later stages need real settings; the guard is what matters here

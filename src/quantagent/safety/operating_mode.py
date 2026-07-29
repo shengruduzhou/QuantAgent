@@ -117,8 +117,20 @@ EXEMPT_CONTEXTS: frozenset[str] = frozenset({
 })
 
 
-def _normalise(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).strip().lower()
+def _haystacks(text: str) -> tuple[str, ...]:
+    """Normalised variants of ``text`` to match markers against.
+
+    Two variants are needed because live intent arrives in different shapes.
+    Command ids are hyphenated by convention (``enable-live-trading``), so a
+    separator-flattened variant is required or the phrase markers miss them.
+    The raw variant is kept because the API markers are themselves
+    underscore-joined (``order_stock_async``) and would be destroyed by
+    flattening.
+    """
+    lowered = re.sub(r"\s+", " ", str(text)).strip().lower()
+    flattened = re.sub(r"[-_./]+", " ", lowered)
+    flattened = re.sub(r"\s+", " ", flattened).strip()
+    return (lowered, flattened) if flattened != lowered else (lowered,)
 
 
 def scan_for_live_intent(payload: Any, *, where: str = "request") -> str | None:
@@ -130,12 +142,15 @@ def scan_for_live_intent(payload: Any, *, where: str = "request") -> str | None:
     """
     def _scan(value: Any) -> str | None:
         if isinstance(value, str):
-            haystack = _normalise(value)
-            for exempt in EXEMPT_CONTEXTS:
-                haystack = haystack.replace(exempt, "")
-            for marker in ALL_LIVE_MARKERS:
-                if marker.lower() in haystack:
-                    return marker
+            for haystack in _haystacks(value):
+                # Strip read-only contexts first so the l2*order* feed is not
+                # mistaken for order submission.
+                for exempt in EXEMPT_CONTEXTS:
+                    haystack = haystack.replace(exempt, "")
+                    haystack = haystack.replace(exempt.replace("_", " "), "")
+                for marker in ALL_LIVE_MARKERS:
+                    if marker.lower() in haystack:
+                        return marker
             return None
         if isinstance(value, Mapping):
             for key, item in value.items():
