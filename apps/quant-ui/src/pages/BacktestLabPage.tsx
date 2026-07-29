@@ -37,11 +37,11 @@ export function BacktestLabPage(): JSX.Element {
   );
 
   if (backtests.isLoading) return <StateView state="loading" />;
-  if (!runs.length) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验上下文、成本与 T+1 约束、可追踪 artifact。" context="no fabricated metrics" /><ActionableState title="没有可识别回测实验" detail="从经过 allowlist 与路径校验的严格 A 股回测任务开始。" icon={Flask} primary={{ label: "配置回测任务", onClick: () => navigate("/settings?job=backtest") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=backtest") }} /></div>;
+  if (!runs.length) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验上下文、成本与 T+1 约束、可追踪 artifact。" context="no fabricated metrics" /><ActionableState title="没有可识别回测实验" detail="从策略实验室启动因子、训练、组合、严格 A 股回测和风控的一体化研究闭环。" icon={Flask} primary={{ label: "打开策略实验室", onClick: () => navigate("/strategy") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=backtest") }} /></div>;
 
   return (
     <div className="page institutional-workbench backtest-page backtest-page-v2">
-      <WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验驱动主图、指标和详情；多实验只进入独立 Compare，不再混合上下文。" asOf={primary?.endDate?.slice(0, 10)} context={primary?.trustClass ?? "research experiment"} actions={<><button type="button" onClick={() => primary && downloadJson("backtest-experiment.json", primary)}><DownloadSimple size={14} />导出当前</button><button type="button" className="primary" onClick={() => navigate("/settings?job=backtest")}><Play size={14} weight="fill" />新建回测</button></>} />
+      <WorkbenchHeader eyebrow="BACKTEST WORKSTATION / STRICT A-SHARE" title="回测工作站" description="单一活动实验驱动主图、指标和详情；多实验只进入独立 Compare，不再混合上下文。" asOf={primary?.endDate?.slice(0, 10)} context={primary?.trustClass ?? "research experiment"} actions={<><button type="button" onClick={() => primary && downloadJson("backtest-experiment.json", primary)}><DownloadSimple size={14} />导出当前</button><button type="button" className="primary" onClick={() => navigate("/strategy")}><Play size={14} weight="fill" />策略闭环</button></>} />
       <WorkbenchMetricStrip metrics={[
         { label: "总收益", value: formatPercent(primary?.totalReturn), detail: primary?.name ?? "active run", tone: toneName(primary?.totalReturn), icon: ChartLineUp },
         { label: "年化收益", value: formatPercent(primary?.annualReturn), detail: primary?.horizon ?? "horizon unknown", tone: toneName(primary?.annualReturn), icon: ChartLineUp },

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -14,6 +15,7 @@ from uuid import uuid4
 from quantagent.safety.operating_mode import reject_live_intent
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
 from services.quant_api.events import EventBroker
+from services.quant_api.services.connections import CREDENTIAL_VARIABLES
 
 
 @dataclass
@@ -42,6 +44,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_inputs": {"symbols_file"},
         "path_outputs": {"output"},
         "control": {"allow_network"},
+        "credential_providers": {"tickflow"},
     },
     "fetch-tickflow-minute": {
         "type": "data",
@@ -53,6 +56,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_outputs": set(),
         "fixed_outputs": ("runtime/data/v7/silver/minute_bars",),
         "control": {"allow_network"},
+        "credential_providers": {"tickflow"},
     },
     "record-tickflow-depth": {
         "type": "data",
@@ -64,6 +68,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_outputs": set(),
         "fixed_outputs": ("runtime/data/v7/silver/depth_snapshots",),
         "control": {"allow_network"},
+        "credential_providers": {"tickflow"},
     },
     "record-tickflow-quotes": {
         "type": "data",
@@ -75,6 +80,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_outputs": set(),
         "fixed_outputs": ("runtime/data/v7/silver/tick_snapshots",),
         "control": {"allow_network"},
+        "credential_providers": {"tickflow"},
     },
     "data-manager-transfer": {
         "type": "data",
@@ -109,6 +115,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         },
         "path_inputs": {"dataset_path", "silver_panel_path", "symbols_file"},
         "path_outputs": {"output_dir"},
+        "dual_boolean_options": {"require_gpu", "label_norm"},
     },
     "synthesize-factors-v7": {
         "type": "factor-discovery",
@@ -129,6 +136,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_outputs": {"output_dir"},
         "control": {"allow_network"},
         "conditional_controls": {"allow_network": "use_llm"},
+        "credential_providers": {"openai"},
     },
     "predict-alpha-v7": {
         "type": "infer",
@@ -169,6 +177,41 @@ COMMANDS: dict[str, dict[str, Any]] = {
         },
         "path_inputs": {"symbols_file"},
         "path_outputs": {"fundamentals_root"},
+        "credential_providers": {"tushare"},
+    },
+    "run-full-real-training-v7": {
+        "type": "strategy-pipeline",
+        "required": {"market_panel_path", "labels_path", "output_dir"},
+        "allowed": {
+            "market_panel_path", "labels_path", "output_dir", "sector_map_path",
+            "training_dataset_path", "synthesized_factors_path", "factor_library",
+            "model", "horizons", "primary_horizon", "split_mode", "n_splits",
+            "require_gpu", "top_k", "max_weight_per_name", "max_sector_weight",
+            "max_turnover", "objective", "weighting", "initial_cash",
+            "benchmark_symbol", "acceptance_max_drawdown",
+            "acceptance_min_sharpe",
+        },
+        "path_inputs": {
+            "market_panel_path", "labels_path", "sector_map_path",
+            "training_dataset_path", "synthesized_factors_path",
+        },
+        "path_outputs": {"output_dir"},
+        "option_aliases": {
+            "market_panel_path": "market-panel",
+            "labels_path": "labels",
+            "sector_map_path": "sector-map",
+            "training_dataset_path": "training-dataset",
+            "synthesized_factors_path": "synthesized-factors",
+            "max_weight_per_name": "max-weight",
+            "max_sector_weight": "max-sector",
+        },
+        "choices": {
+            "factor_library": {"basic", "alpha101", "alpha181", "cicc_ashare80"},
+            "model": {"ridge", "ft_transformer"},
+            "split_mode": {"rolling", "expanding"},
+            "objective": {"max_expected_alpha", "mean_variance", "min_variance"},
+            "weighting": {"equal", "rank", "softmax"},
+        },
     },
     # ---- H-031 governed operational / full-universe data commands -----------
     # All are parameterless or take a single bounded control; none exposes a
@@ -538,10 +581,12 @@ class JobManager:
         settings: ApiSettings,
         events: EventBroker | None = None,
         on_success: Callable[[], None] | None = None,
+        connection_environment: Callable[[set[str] | tuple[str, ...]], dict[str, str]] | None = None,
     ) -> None:
         self.settings = settings
         self.events = events
         self.on_success = on_success
+        self.connection_environment = connection_environment
         self.state_path = settings.jobs_root / "jobs.json"
         self._lock = RLock()
         self._jobs: dict[str, JobRecord] = {}
@@ -582,6 +627,11 @@ class JobManager:
             warnings.append("Factor discovery writes research candidates only; registration and training remain separate human-gated steps")
             if parameters.get("use_llm"):
                 warnings.append("LLM network execution is armed for this research job")
+        if command_id == "run-full-real-training-v7":
+            warnings.extend([
+                "End-to-end strategy pipeline remains research/paper only; no live order route is enabled",
+                "Acceptance objectives are evaluated from persisted OOS and backtest artifacts, never promised in advance",
+            ])
         return {
             "valid": True,
             "type": job_type,
@@ -751,12 +801,13 @@ class JobManager:
         for key, value in parameters.items():
             if value is None or key in positional:
                 continue
-            option = f"--{key.replace('_', '-')}"
+            option_name = spec.get("option_aliases", {}).get(key, key.replace("_", "-"))
+            option = f"--{option_name}"
             if isinstance(value, bool):
-                if key in {"require_gpu", "label_norm"}:
-                    command.append(option if value else f"--no-{key.replace('_', '-')}")
-                elif value:
+                if value:
                     command.append(option)
+                elif key in spec.get("dual_boolean_options", set()):
+                    command.append(f"--no-{option_name}")
                 continue
             if isinstance(value, list):
                 value = ",".join(str(item) for item in value)
@@ -769,6 +820,7 @@ class JobManager:
                 process = subprocess.Popen(
                     command,
                     cwd=self.settings.project_root,
+                    env=self._process_environment(spec),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -831,6 +883,17 @@ class JobManager:
                     job_id, status="failed", finishedAt=_now(), message="failed to start",
                     error=str(exc),
                 )
+
+    def _process_environment(self, spec: dict[str, Any]) -> dict[str, str]:
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in CREDENTIAL_VARIABLES
+        }
+        providers = set(spec.get("credential_providers", set()))
+        if providers and self.connection_environment is not None:
+            environment.update(self.connection_environment(providers))
+        return environment
 
     def _normalize_parameters(self, spec: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
         normalized: dict[str, Any] = {}

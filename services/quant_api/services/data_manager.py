@@ -11,6 +11,7 @@ from typing import Any, Iterator
 import pandas as pd
 
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
+from services.quant_api.services.connections import ConnectionManager
 
 
 @dataclass(frozen=True)
@@ -86,8 +87,9 @@ PROVIDERS: tuple[DataProviderSpec, ...] = (
 class DataManagerService:
     """Provider registry and bounded, server-side dataset inspection surface."""
 
-    def __init__(self, settings: ApiSettings) -> None:
+    def __init__(self, settings: ApiSettings, connections: ConnectionManager | None = None) -> None:
         self.settings = settings
+        self.connections = connections
 
     def overview(self) -> dict[str, Any]:
         quarantine = self._runtime_subdir("import_quarantine")
@@ -221,8 +223,9 @@ class DataManagerService:
 
     def _provider_payload(self, spec: DataProviderSpec) -> dict[str, Any]:
         installed = True if spec.module is None else _module_available(spec.module)
-        missing_requirements = [name for name in spec.requires if not os.getenv(name)]
-        missing_optional = [name for name in spec.optional_requirements if not os.getenv(name)]
+        configured_variable = self.connections.has_variable if self.connections else lambda name: bool(os.getenv(name))
+        missing_requirements = [name for name in spec.requires if not configured_variable(name)]
+        missing_optional = [name for name in spec.optional_requirements if not configured_variable(name)]
         configured = installed and not missing_requirements
         status = "ready" if configured and not missing_optional else "partial" if configured else "needs_configuration" if installed else "unavailable"
         payload = asdict(spec)

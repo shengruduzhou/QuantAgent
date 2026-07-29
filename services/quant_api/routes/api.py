@@ -11,6 +11,7 @@ from services.quant_api.adapters.utils import page_slice
 from services.quant_api.config import safe_project_path
 from services.quant_api.runtime_indexer.parsers import parser_for
 from services.quant_api.schemas.models import CleanupRequest, FactorReviewRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
+from services.quant_api.schemas.strategy import ConnectionRequest, StrategyDraft
 
 
 router = APIRouter(prefix="/api")
@@ -692,6 +693,78 @@ async def risk_rules(request: Request) -> dict:
     return response(services(request).risk.rules())
 
 
+@router.get("/connections")
+async def list_connections(request: Request) -> dict:
+    return response(services(request).connections.list())
+
+
+@router.post("/connections/{provider_id}")
+async def connect_provider(request: Request, provider_id: str, body: ConnectionRequest) -> dict:
+    try:
+        return response(services(request).connections.connect(provider_id, body.credentials))
+    except KeyError:
+        raise HTTPException(404, "connector not found")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.delete("/connections/{provider_id}")
+async def disconnect_provider(request: Request, provider_id: str) -> dict:
+    try:
+        return response(services(request).connections.disconnect(provider_id))
+    except KeyError:
+        raise HTTPException(404, "connector not found")
+
+
+@router.get("/strategies")
+async def list_strategies(request: Request) -> dict:
+    data = services(request).strategies.list()
+    return response(data, status="ready" if data else "empty")
+
+
+@router.get("/strategies/defaults")
+async def strategy_defaults(request: Request) -> dict:
+    return response(services(request).strategies.defaults())
+
+
+@router.post("/strategies/validate")
+async def validate_strategy(request: Request, body: StrategyDraft) -> dict:
+    return response(services(request).strategies.validate(body))
+
+
+@router.post("/strategies")
+async def save_strategy(request: Request, body: StrategyDraft) -> dict:
+    return response(services(request).strategies.save(body))
+
+
+@router.post("/strategies/launch")
+async def launch_strategy(request: Request, body: StrategyDraft) -> dict:
+    service_container = services(request)
+    validation = service_container.strategies.validate(body)
+    launch = validation["launch"]
+    if not validation["valid"] or not launch["armed"]:
+        raise HTTPException(
+            422,
+            {
+                "message": "strategy validation and Human Gate are required",
+                "errors": validation["errors"],
+                "warnings": validation["warnings"],
+            },
+        )
+    service_container.jobs.validate(
+        launch["jobType"],
+        launch["commandId"],
+        launch["parameters"],
+    )
+    manifest = service_container.strategies.save(body)
+    job = service_container.jobs.submit(
+        launch["jobType"],
+        launch["commandId"],
+        launch["parameters"],
+    )
+    return response({"job": job, "strategy": manifest})
+
+
 @router.get("/risk/backtests/{backtest_id}")
 async def risk_backtest(request: Request, backtest_id: str) -> dict:
     if services(request).backtests.get(backtest_id) is None:
@@ -751,7 +824,7 @@ async def create_governance_job(request: Request, body: JobRequest) -> dict:
 
 @router.post("/jobs/{job_type}/validate")
 async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
-    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "governance"}:
+    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "governance", "strategy-pipeline"}:
         raise HTTPException(404, "job type not found")
     try:
         return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))

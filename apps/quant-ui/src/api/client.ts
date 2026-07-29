@@ -49,6 +49,23 @@ export async function apiPost<T>(
   return response.json() as Promise<ApiResponse<T>>;
 }
 
+export async function apiDelete<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<T>> {
+  const url = new URL(`${API_BASE}${path}`, window.location.origin);
+  const response = await fetch(url, { method: "DELETE", signal });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiError(text || `Request failed: ${response.status}`, response.status);
+  }
+  return response.json() as Promise<ApiResponse<T>>;
+}
+
+export function apiEventSourceUrl(path: string): string {
+  return new URL(`${API_BASE}${path}`, window.location.origin).toString();
+}
+
 export function apiWebSocketUrl(
   path: string,
   params?: Record<string, string | number | boolean | null | undefined>,

@@ -11,10 +11,12 @@ from services.quant_api.adapters.selection import SelectionAdapter
 from services.quant_api.config import ApiSettings, default_settings
 from services.quant_api.events import EventBroker
 from services.quant_api.runtime_indexer import RuntimeIndexer
+from services.quant_api.services.connections import ConnectionManager
 from services.quant_api.services.data_manager import DataManagerService
 from services.quant_api.services.governance import GovernanceService
 from services.quant_api.services.jobs import JobManager
 from services.quant_api.services.runtime_cleanup import RuntimeCleanupService
+from services.quant_api.services.strategies import StrategyService
 from services.quant_api.services.vnpy_parity import VnpyParityService
 
 
@@ -29,7 +31,9 @@ class ServiceContainer:
     do_t: DoTAdapter
     risk: RiskAdapter
     events: EventBroker
+    connections: ConnectionManager
     data_manager: DataManagerService
+    strategies: StrategyService
     jobs: JobManager
     cleanup: RuntimeCleanupService
     vnpy_parity: VnpyParityService
@@ -41,6 +45,7 @@ class ServiceContainer:
         indexer = RuntimeIndexer(resolved)
         backtests = BacktestAdapter(resolved, indexer)
         events = EventBroker()
+        connections = ConnectionManager()
         return cls(
             settings=resolved,
             indexer=indexer,
@@ -51,8 +56,15 @@ class ServiceContainer:
             do_t=DoTAdapter(resolved),
             risk=RiskAdapter(backtests),
             events=events,
-            data_manager=DataManagerService(resolved),
-            jobs=JobManager(resolved, events, indexer.invalidate),
+            connections=connections,
+            data_manager=DataManagerService(resolved, connections),
+            strategies=StrategyService(resolved),
+            jobs=JobManager(
+                resolved,
+                events,
+                indexer.invalidate,
+                connection_environment=connections.environment_for,
+            ),
             cleanup=RuntimeCleanupService(resolved),
             vnpy_parity=VnpyParityService(),
             governance=GovernanceService(resolved),

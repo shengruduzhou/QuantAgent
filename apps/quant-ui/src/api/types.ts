@@ -181,6 +181,112 @@ export interface JobValidation {
   warnings: string[];
 }
 
+export interface ConnectionStatus {
+  id: string;
+  label: string;
+  variables: string[];
+  capabilities: string[];
+  note: string;
+  connected: boolean;
+  source: "session" | "environment" | "none";
+  fingerprints: Record<string, string>;
+  persistence: "process_memory" | "server_environment" | "none";
+}
+
+export interface StrategyObjectiveWeights {
+  excessReturn: number;
+  annualReturn: number;
+  drawdownControl: number;
+}
+
+export interface StrategyRiskLimits {
+  maxDrawdown: number;
+  maxTurnover: number;
+  minSharpe: number;
+}
+
+export interface StrategyDraft {
+  id?: string | null;
+  name: string;
+  hypothesis: string;
+  invalidationCriteria: string;
+  marketPanelPath: string;
+  labelsPath: string;
+  sectorMapPath?: string | null;
+  trainingDatasetPath?: string | null;
+  synthesizedFactorsPath?: string | null;
+  outputDir: string;
+  factorLibrary: "basic" | "alpha101" | "alpha181" | "cicc_ashare80";
+  model: "ridge" | "ft_transformer";
+  horizons: string;
+  primaryHorizon: number;
+  splitMode: "rolling" | "expanding";
+  nSplits: number;
+  requireGpu: boolean;
+  topK: number;
+  maxWeightPerName: number;
+  maxSectorWeight: number;
+  maxTurnover: number;
+  objective: "max_expected_alpha" | "mean_variance" | "min_variance";
+  weighting: "equal" | "rank" | "softmax";
+  initialCash: number;
+  benchmarkSymbol?: string | null;
+  objectiveWeights: StrategyObjectiveWeights;
+  riskLimits: StrategyRiskLimits;
+  humanApproved: boolean;
+}
+
+export interface DecisionCouncilMember {
+  id: string;
+  label: string;
+  responsibility: string;
+  status: "ready" | "approved" | "waiting" | "blocked";
+  veto: boolean;
+}
+
+export interface StrategyValidation {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  resolvedInputs: Record<string, string>;
+  launch: {
+    jobType: "strategy-pipeline";
+    commandId: "run-full-real-training-v7";
+    parameters: Record<string, string | number | boolean>;
+    armed: boolean;
+  };
+  decisionCouncil: DecisionCouncilMember[];
+}
+
+export interface StrategyManifestSummary {
+  id: string;
+  version: string;
+  name: string;
+  createdAt: string;
+  trustClass: "research_only";
+  contentHash?: string | null;
+  path: string;
+  valid: boolean;
+  humanApproved: boolean;
+  draft: StrategyDraft;
+}
+
+export interface StrategyLaunchResult {
+  job: JobSummary;
+  strategy: StrategyManifestSummary;
+}
+
+export interface StrategyDefaults {
+  selected: {
+    marketPanelPath?: string | null;
+    labelsPath?: string | null;
+    trainingDatasetPath?: string | null;
+    sectorMapPath?: string | null;
+  };
+  evidence: Array<{ field: string; path: string; sizeBytes: number; modifiedAt: string }>;
+  selectionRule: string;
+}
+
 export interface SearchEntity {
   id: string;
   kind: string;

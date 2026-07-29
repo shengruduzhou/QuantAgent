@@ -62,6 +62,12 @@ python3 -m services.quant_api \
 
 完整开发、验证和故障排查命令见 `docs/quant_ui_runbook.md`。
 
+工作站中的「策略实验室」把研究假设、审核因子、滚动 OOS 训练、目标权重、
+严格 A 股回测、风控 Gate 和 paper report 连接为一个可验证、可取消、实时回传的
+研究闭环。系统设置提供进程内存 API 会话连接器；不开放任意 Bash，密钥不进入
+argv、日志、Runtime 或浏览器存储。设计与安全契约见
+`docs/architecture/strategy-operations-workbench.md`。
+
 ## Windows Setup
 
 ```powershell

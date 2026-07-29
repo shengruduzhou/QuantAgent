@@ -26,6 +26,19 @@ OpenAPI: http://127.0.0.1:8000/docs
 backtest/train/infer research jobs。产品入口已完成 VNext-only cutover；`?ui=legacy`
 不会再恢复旧 shell。
 
+启动后，完整策略工作流使用左侧「策略实验室」：
+
+1. 填写研究假设、失效条件和真实 Runtime 输入路径；
+2. 配置因子库、模型、walk-forward 切分、Top-K、集中度、换手和风险 Gate；
+3. 先「校验」，再「保存版本」；
+4. 明确勾选 Human Gate 后启动；
+5. 页面通过 SSE 实时显示数据构建、训练、组合、回测、风控和 paper report 日志；
+6. 完成后从回测工作站、风险管理、模型注册表和 Runtime 检查持久化产物。
+
+系统设置中的「API 会话连接器」可配置 TickFlow/TuShare/OpenAI research/Alpaca
+会话。密钥只保存在 API 进程内存，不进 URL、argv、日志、Runtime 或浏览器存储。
+它不是任意 Bash 终端：只有声明了对应 provider 的 allowlisted 任务可以读取。
+
 ## Backend API
 
 ### Install
@@ -116,10 +129,23 @@ GET /api/jobs/{job_id}/logs
 GET /api/jobs/{job_id}/stream
 ```
 
+策略实验室使用下列受治理 API：
+
+```text
+POST /api/strategies/validate
+POST /api/strategies
+POST /api/strategies/launch
+GET  /api/jobs/{job_id}/stream
+GET  /api/connections
+POST /api/connections/{provider_id}
+DELETE /api/connections/{provider_id}
+```
+
 ### Safety
 
 - API 默认 read-only。
 - Job API 只接受 allowlisted QuantAgent research commands。
+- 策略闭环只能由 `/api/strategies/launch` 原子校验、保存版本并提交；不暴露可绕过 Human Gate 的直接策略 Job 路由。
 - Job output 必须位于项目 `runtime/`。
 - 不提供 live-trading/QMT enable command。
 - Model checkpoint 只返回 metadata，不返回 binary content。
