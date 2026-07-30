@@ -14,6 +14,8 @@ export interface VNextChartPalette {
   slider: string;
   sliderData: string;
   sliderSelected: string;
+  positive: string;
+  negative: string;
 }
 
 const chartPalettes: Record<WorkspaceTheme, VNextChartPalette> = {
@@ -28,6 +30,8 @@ const chartPalettes: Record<WorkspaceTheme, VNextChartPalette> = {
     slider: "#0c171f",
     sliderData: "#172c3a",
     sliderSelected: "#183c5a",
+    positive: "#d95864",
+    negative: "#30ad83",
   },
   dawn: {
     text: "#a9bbc5",
@@ -40,6 +44,8 @@ const chartPalettes: Record<WorkspaceTheme, VNextChartPalette> = {
     slider: "#15242d",
     sliderData: "#203946",
     sliderSelected: "#25516f",
+    positive: "#e06b74",
+    negative: "#43bd91",
   },
   day: {
     text: "#304853",
@@ -52,6 +58,8 @@ const chartPalettes: Record<WorkspaceTheme, VNextChartPalette> = {
     slider: "#e4edf1",
     sliderData: "#cbdbe2",
     sliderSelected: "#9ec7df",
+    positive: "#c63c4a",
+    negative: "#168166",
   },
 };
 

@@ -182,6 +182,23 @@ def test_builder_refuses_synthetic_fallback(tmp_path):
         )
 
 
+def test_builder_refuses_to_silently_substitute_missing_label_horizon(tmp_path):
+    market_path, labels_path, fundamentals_path = _write_inputs(tmp_path)
+    with pytest.raises(ValueError, match="forward_return_10d"):
+        build_v7_training_dataset_artifact(
+            V7TrainingDatasetConfig(
+                market_panel_path=str(market_path),
+                labels_path=str(labels_path),
+                output_path=str(tmp_path / "missing_horizon.parquet"),
+                fundamentals_root=str(fundamentals_path),
+                horizons=(1, 5, 10),
+                min_rows=20,
+                min_symbols=2,
+                min_dates=10,
+            )
+        )
+
+
 def test_builder_blocks_label_leakage(tmp_path):
     market_path, labels_path, fundamentals_path = _write_inputs(tmp_path)
     output = tmp_path / "training_dataset.parquet"

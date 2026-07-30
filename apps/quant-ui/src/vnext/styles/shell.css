@@ -604,7 +604,7 @@
 }
 
 .vnext-tab-menu-button {
-  opacity: 0;
+  opacity: .45;
 }
 
 .vnext-workspace-tab:hover .vnext-tab-menu-button,
@@ -615,7 +615,7 @@
 .vnext-tab-menu {
   position: fixed;
   z-index: 400;
-  width: 170px;
+  width: 188px;
   padding: 5px;
   border: 1px solid var(--vnx-line-strong);
   border-radius: var(--vnx-radius);
@@ -623,9 +623,34 @@
   box-shadow: 0 18px 50px var(--vnx-shadow);
 }
 
+.vnext-tab-menu > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 3px 5px;
+  padding: 5px 5px 8px;
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-tab-menu > header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--vnx-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-tab-menu > header span {
+  flex: 0 0 auto;
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
+}
+
 .vnext-tab-menu button {
   width: 100%;
-  min-height: 30px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -641,6 +666,10 @@
 
 .vnext-tab-menu button:hover {
   background: var(--vnx-surface-selected);
+}
+
+.vnext-tab-menu button.danger {
+  color: var(--vnx-danger);
 }
 
 .vnext-tab-actions {

@@ -46,6 +46,68 @@
   display: block;
 }
 
+.vnext-dashboard-unavailable {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-line-soft);
+}
+
+.vnext-dashboard-unavailable article {
+  min-height: 122px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  background: var(--vnx-surface-1);
+}
+
+.vnext-dashboard-unavailable article:first-child {
+  grid-column: 1 / -1;
+  min-height: 96px;
+}
+
+.vnext-dashboard-unavailable article > svg {
+  color: var(--vnx-primary);
+}
+
+.vnext-dashboard-unavailable article.critical {
+  box-shadow: inset 3px 0 var(--vnx-danger);
+}
+
+.vnext-dashboard-unavailable article.critical > svg,
+.vnext-dashboard-unavailable article.critical > em {
+  color: var(--vnx-danger);
+}
+
+.vnext-dashboard-unavailable strong,
+.vnext-dashboard-unavailable small {
+  display: block;
+}
+
+.vnext-dashboard-unavailable strong {
+  color: var(--vnx-text);
+  font-size: 13px;
+}
+
+.vnext-dashboard-unavailable small {
+  margin-top: 4px;
+  color: var(--vnx-muted);
+  font-size: 11px;
+}
+
+.vnext-dashboard-unavailable a,
+.vnext-dashboard-unavailable em {
+  color: var(--vnx-primary-strong);
+  font: 700 10px var(--vnx-font-mono);
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .vnext-dashboard-title > div:last-child strong {
   color: var(--vnx-text-soft);
   font: 600 12px var(--vnx-font-mono);

@@ -10,7 +10,9 @@ import {
   Lock,
   Play,
   ShieldCheck,
+  Stop,
   TerminalWindow,
+  Trash,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
@@ -36,6 +38,7 @@ export function SettingsPage(): JSX.Element {
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState("");
   const [launchedJob, setLaunchedJob] = useState<JobSummary | null>(null);
+  const [jobAction, setJobAction] = useState("");
   const data = overview.data?.data;
 
   const activeJobs = useMemo(
@@ -72,6 +75,35 @@ export function SettingsPage(): JSX.Element {
     }
   };
 
+  const stopJob = async (job: JobSummary): Promise<void> => {
+    setJobAction(job.id);
+    setLaunchError("");
+    try {
+      await apiPost<JobSummary>(`/jobs/${job.id}/cancel`, {});
+      await jobs.refetch();
+    } catch (error) {
+      setLaunchError(error instanceof Error ? error.message : "停止任务失败");
+    } finally {
+      setJobAction("");
+    }
+  };
+
+  const purgeJob = async (job: JobSummary): Promise<void> => {
+    const confirmed = window.confirm(`停止并删除 ${job.commandId}（${job.id}）的任务记录、日志和该任务独占产物？`);
+    if (!confirmed) return;
+    setJobAction(job.id);
+    setLaunchError("");
+    try {
+      await apiDelete(`/jobs/${job.id}?deleteOutputs=true`);
+      if (launchedJob?.id === job.id) setLaunchedJob(null);
+      await jobs.refetch();
+    } catch (error) {
+      setLaunchError(error instanceof Error ? error.message : "删除任务失败");
+    } finally {
+      setJobAction("");
+    }
+  };
+
   return (
     <div className="page institutional-workbench control-center-page control-center-v2">
       <section className="control-hero">
@@ -81,7 +113,7 @@ export function SettingsPage(): JSX.Element {
           <p>从网页提交经过 allowlist、参数和路径校验的研究任务。训练、推理和回测都由后台任务执行，不在浏览器线程中运行。</p>
         </div>
         <div className="control-health">
-          <span><i className="health-dot" /> API ready</span>
+          <span><i className={`health-dot ${overview.isError ? "error" : ""}`} /> {overview.isError ? "API unavailable" : "API ready"}</span>
           <strong>{activeJobs}</strong>
           <small>active jobs</small>
         </div>
@@ -91,11 +123,11 @@ export function SettingsPage(): JSX.Element {
         <Panel title="一键启动" eyebrow="Single process · integrated static UI" className="startup-panel">
           <div className="startup-command">
             <TerminalWindow size={24} weight="duotone" />
-            <div><span>项目根目录执行</span><code>./scripts/run_quant_ui.sh --runtime /path/to/runtime</code></div>
-            <StatusBadge status="ready" label="localhost:8000" />
+            <div><span>项目根目录执行 · tmux 持久会话</span><code>./scripts/run_quant_ui_tmux.sh --runtime /path/to/runtime --host 127.0.0.1 --port 8000</code></div>
+            <StatusBadge status="ready" label="TMUX / 8000" />
           </div>
           <div className="settings-list compact-settings">
-            <SettingRow icon={DesktopTower} label="Unified Server" value="/api + React SPA on 127.0.0.1:8000" status={overview.isError ? "error" : "ready"} />
+            <SettingRow icon={DesktopTower} label="Unified Server" value="tmux: quantagent · /api + React SPA · persistent log" status={overview.isError ? "error" : "ready"} />
             <SettingRow icon={Database} label="Runtime Index" value={`${data?.runtime.artifactCount ?? 0} artifacts · ${formatBytes(data?.runtime.totalSizeBytes)}`} status={data ? "ready" : "partial"} />
             <SettingRow icon={ShieldCheck} label="Safety Mode" value="Research only · no live order route" status="ready" />
             <SettingRow icon={Lock} label="Path Policy" value="Inputs project-only · outputs runtime-only" status="ready" />
@@ -105,6 +137,7 @@ export function SettingsPage(): JSX.Element {
         <ConnectionVault
           items={Array.isArray(connections.data?.data) ? connections.data.data : []}
           loading={connections.isLoading}
+          error={connections.isError ? connections.error.message : ""}
           refetch={connections.refetch}
         />
 
@@ -154,7 +187,7 @@ export function SettingsPage(): JSX.Element {
           {(jobs.data?.data ?? []).length ? (
             <div className="table-scroll">
               <table className="data-table">
-                <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>创建时间</th><th>输出</th><th>消息</th></tr></thead>
+                <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>创建时间</th><th>输出</th><th>消息</th><th>操作</th></tr></thead>
                 <tbody>{jobs.data?.data.map((job) => (
                   <tr key={job.id}>
                     <td><strong>{job.commandId}</strong><span className="mono">{job.id}</span></td>
@@ -163,6 +196,10 @@ export function SettingsPage(): JSX.Element {
                     <td className="mono">{formatDate(job.createdAt)}</td>
                     <td>{job.outputPaths.join(", ") || "暂无"}</td>
                     <td>{job.error ?? job.message ?? "—"}</td>
+                    <td><div className="settings-job-actions">
+                      <button type="button" disabled={jobAction === job.id || !["queued", "running", "cancelling"].includes(job.status)} onClick={() => stopJob(job)} title="停止任务"><Stop size={14} />停止</button>
+                      <button type="button" className="danger" disabled={jobAction === job.id} onClick={() => purgeJob(job)} title="停止并删除任务记录、日志与独占产物"><Trash size={14} />删除</button>
+                    </div></td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -177,10 +214,12 @@ export function SettingsPage(): JSX.Element {
 function ConnectionVault({
   items,
   loading,
+  error,
   refetch,
 }: {
   items: ConnectionStatus[];
   loading: boolean;
+  error: string;
   refetch: () => Promise<unknown>;
 }): JSX.Element {
   const [selected, setSelected] = useState("tickflow");
@@ -223,7 +262,9 @@ function ConnectionVault({
 
   return (
     <Panel title="API 会话连接器" eyebrow="Process-memory vault · allowlisted task injection" className="connection-vault-panel">
-      {loading || !current ? <StateView state="loading" /> : <>
+      {error ? <StateView state="unavailable" title="连接器状态不可用" detail={`${error}。恢复 Quant API 后可重新读取，页面不会把未知状态显示为“已连接”。`} />
+        : loading ? <StateView state="loading" />
+          : !current ? <StateView state="empty" detail="Quant API 未返回任何已注册连接器。" /> : <>
         <div className="connection-provider-tabs" role="tablist" aria-label="API 连接器">
           {items.map((item) => <button type="button" role="tab" aria-selected={item.id === current.id} className={item.id === current.id ? "active" : ""} key={item.id} onClick={() => { setSelected(item.id); setCredentials({}); setMessage(""); }}>
             <i className={item.connected ? "connected" : ""} />

@@ -146,6 +146,40 @@ class SelectionGovernanceReport:
         }
 
 
+@dataclass
+class FrozenSelectionGateReport:
+    """Overfitting evidence for a candidate frozen by an upstream selector.
+
+    The upstream selector may use a Pareto frontier or another declared
+    business objective.  This gate deliberately does not re-select the
+    champion: it tests the already-frozen candidate against the complete
+    family of tried candidates so the final holdout is not reused for tuning.
+    """
+
+    selected_candidate: str
+    pbo: float
+    dsr_probability: float
+    spa_pvalue: float
+    cumulative_trials: int
+    losing_fold_rate: float
+    observed_days: int
+    accepted: bool
+    rejection_reasons: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_candidate": self.selected_candidate,
+            "pbo": self.pbo,
+            "dsr_probability": self.dsr_probability,
+            "spa_pvalue": self.spa_pvalue,
+            "cumulative_trials": self.cumulative_trials,
+            "losing_fold_rate": self.losing_fold_rate,
+            "observed_days": self.observed_days,
+            "accepted": self.accepted,
+            "rejection_reasons": list(self.rejection_reasons),
+        }
+
+
 def _safe_sharpe(series: pd.Series, periods_per_year: int) -> float:
     value = sharpe_ratio(series.dropna(), periods_per_year=periods_per_year)
     return float(value) if np.isfinite(value) else -1e9
@@ -292,6 +326,113 @@ def nested_purged_select(
         spa_pvalue=spa_pvalue,
         cumulative_trials=trial_count,
         losing_outer_fold_rate=losing_rate,
+        accepted=not reasons,
+        rejection_reasons=reasons,
+    )
+
+
+def evaluate_frozen_candidate(
+    candidate_returns: pd.DataFrame,
+    *,
+    selected_candidate: str,
+    benchmark_returns: pd.Series | None = None,
+    config: NestedSelectionConfig | None = None,
+    cumulative_trials: int | None = None,
+    minimum_observed_days: int = 80,
+) -> FrozenSelectionGateReport:
+    """Evaluate a frozen candidate without touching the final holdout.
+
+    ``candidate_returns`` must contain only the early, fully out-of-sample
+    selection segment.  PBO and SPA account for the full candidate family;
+    DSR and contiguous-fold stability are evaluated for the candidate already
+    selected by the declared Pareto objective.
+    """
+
+    cfg = config or NestedSelectionConfig()
+    if candidate_returns is None or candidate_returns.empty:
+        raise ValueError("candidate_returns is empty")
+    if candidate_returns.shape[1] < 2:
+        raise ValueError("frozen selection governance requires at least two candidates")
+    if selected_candidate not in candidate_returns.columns:
+        raise ValueError(f"selected candidate is absent: {selected_candidate}")
+
+    returns = candidate_returns.sort_index().astype(float).replace([np.inf, -np.inf], np.nan)
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        returns.index = pd.to_datetime(returns.index, errors="raise")
+    if not returns.index.is_monotonic_increasing or returns.index.has_duplicates:
+        raise ValueError("candidate_returns index must be unique and monotonic")
+    returns = returns.dropna(how="all")
+    if len(returns) < int(minimum_observed_days):
+        raise ValueError(
+            "insufficient early OOS days for overfitting governance: "
+            f"observed={len(returns)}, required={int(minimum_observed_days)}"
+        )
+
+    selected = returns[selected_candidate].dropna()
+    if len(selected) < int(minimum_observed_days):
+        raise ValueError(
+            "selected candidate has insufficient early OOS days: "
+            f"observed={len(selected)}, required={int(minimum_observed_days)}"
+        )
+
+    pbo = probability_of_backtest_overfitting(
+        returns.fillna(0.0),
+        n_partitions=_resolve_pbo_partitions(cfg.pbo_partitions, len(returns)),
+    )
+    candidate_sharpes = np.asarray(
+        [_safe_sharpe(returns[column], cfg.periods_per_year) for column in returns.columns]
+    )
+    trial_count = max(len(candidate_sharpes), int(cumulative_trials or 0))
+    if trial_count > len(candidate_sharpes):
+        candidate_sharpes = np.concatenate(
+            [
+                candidate_sharpes,
+                np.full(
+                    trial_count - len(candidate_sharpes),
+                    np.nanmedian(candidate_sharpes),
+                ),
+            ]
+        )
+    dsr = deflated_sharpe_ratio(
+        selected,
+        candidate_sharpes,
+        periods_per_year=cfg.periods_per_year,
+    )
+    bench = (
+        benchmark_returns.reindex(returns.index).fillna(0.0)
+        if benchmark_returns is not None
+        else pd.Series(0.0, index=returns.index)
+    )
+    spa = spa_test(returns.fillna(0.0), bench, n_bootstrap=500, rng_seed=0)
+    spa_pvalue = float(spa.get("p_consistent", float("nan")))
+    fold_means = [
+        float(part.dropna().mean())
+        for part in np.array_split(selected, min(cfg.outer_splits, len(selected)))
+        if len(part)
+    ]
+    losing_rate = float(np.mean([value <= 0.0 for value in fold_means]))
+
+    reasons: list[str] = []
+    if not np.isfinite(pbo) or pbo > cfg.max_pbo:
+        reasons.append(f"pbo={pbo:.4f} exceeds {cfg.max_pbo:.4f}")
+    if not np.isfinite(dsr) or dsr < cfg.min_dsr_probability:
+        reasons.append(f"dsr={dsr:.4f} below {cfg.min_dsr_probability:.4f}")
+    if not np.isfinite(spa_pvalue) or spa_pvalue > cfg.max_spa_pvalue:
+        reasons.append(f"spa_pvalue={spa_pvalue:.4f} exceeds {cfg.max_spa_pvalue:.4f}")
+    if losing_rate > cfg.max_losing_outer_fold_rate:
+        reasons.append(
+            f"losing_fold_rate={losing_rate:.4f} exceeds "
+            f"{cfg.max_losing_outer_fold_rate:.4f}"
+        )
+
+    return FrozenSelectionGateReport(
+        selected_candidate=selected_candidate,
+        pbo=float(pbo),
+        dsr_probability=float(dsr),
+        spa_pvalue=spa_pvalue,
+        cumulative_trials=trial_count,
+        losing_fold_rate=losing_rate,
+        observed_days=int(len(selected)),
         accepted=not reasons,
         rejection_reasons=reasons,
     )

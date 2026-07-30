@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import json
+import inspect
+
+import pandas as pd
 
 from services.quant_api.app import create_app
 from services.quant_api.services.connections import ConnectionManager
 from services.quant_api.services.jobs import COMMANDS, JobManager, JobRecord
 from quantagent.data.v7_quality_gates import V7ModelAcceptanceGateConfig, evaluate_model_acceptance_gates
 from tests.quant_ui.test_api import request
+from quantagent.cli.v7_train import run_full_real_training_v7
+
+
+def _write_labels(path, horizons: tuple[int, ...] = (1, 5, 20)) -> None:
+    frame = pd.DataFrame({
+        "symbol": ["000001.SZ", "000002.SZ"],
+        "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
+        **{
+            f"forward_return_{horizon}d": [0.01, -0.01]
+            for horizon in horizons
+        },
+    })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(path, index=False)
 
 
 def _strategy_payload() -> dict:
@@ -27,7 +44,17 @@ def _strategy_payload() -> dict:
         "topK": 30,
         "topKCandidates": [10, 20, 30, 50],
         "stockSelectionModes": ["none", "fundamental"],
+        "fundamentalSelectionMode": "auto",
         "fundamentalSelectionThreshold": 0.5,
+        "fundamentalBlendWeight": 0.4,
+        "fundamentalThresholdCandidates": [0.25, 0.4, 0.55],
+        "fundamentalBlendCandidates": [0.2, 0.4, 0.6],
+        "selectionMaxCandidates": 64,
+        "selectionMinOosDays": 80,
+        "selectionMinHoldoutDays": 20,
+        "maxPbo": 0.25,
+        "minDsrProbability": 0.95,
+        "maxSpaPValue": 0.05,
         "factorScreeningMode": "pretrain",
         "doTMode": "daily_swing",
         "maxWeightPerName": 0.08,
@@ -48,8 +75,7 @@ def _strategy_payload() -> dict:
 
 def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_ui_settings) -> None:
     labels = quant_ui_settings.runtime_root / "data" / "v7" / "gold" / "labels"
-    labels.mkdir(parents=True)
-    (labels / "labels.parquet").write_bytes(b"fixture")
+    _write_labels(labels / "labels.parquet")
     app = create_app(quant_ui_settings)
 
     defaults = request(app, "GET", "/api/strategies/defaults")
@@ -69,6 +95,10 @@ def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_u
     assert data["launch"]["parameters"]["factor_library"] == "all_reviewed"
     assert data["launch"]["parameters"]["top_k_candidates"] == [10, 20, 30, 50]
     assert data["launch"]["parameters"]["stock_selection_modes"] == ["none", "fundamental"]
+    assert data["launch"]["parameters"]["fundamental_selection_mode"] == "auto"
+    assert data["launch"]["parameters"]["fundamental_blend_candidates"] == [0.2, 0.4, 0.6]
+    assert data["launch"]["parameters"]["selection_min_oos_days"] == 80
+    assert data["launch"]["parameters"]["max_pbo"] == 0.25
     assert any(member["id"] == "risk" and member["veto"] for member in data["decisionCouncil"])
 
     saved = request(app, "POST", "/api/strategies", json=_strategy_payload())
@@ -89,8 +119,7 @@ def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_u
 
 def test_strategy_launch_is_atomic_and_direct_job_route_is_not_exposed(quant_ui_settings, monkeypatch) -> None:
     labels = quant_ui_settings.runtime_root / "data" / "v7" / "gold" / "labels"
-    labels.mkdir(parents=True)
-    (labels / "labels.parquet").write_bytes(b"fixture")
+    _write_labels(labels / "labels.parquet")
     app = create_app(quant_ui_settings)
     observed: dict = {}
 
@@ -128,6 +157,90 @@ def test_strategy_launch_is_atomic_and_direct_job_route_is_not_exposed(quant_ui_
         json={"commandId": "run-full-real-training-v7", "parameters": {}},
     )
     assert direct.status_code in {404, 405}
+
+
+def test_strategy_horizon_contract_fails_before_launch_and_checks_label_schema(
+    quant_ui_settings,
+) -> None:
+    labels = quant_ui_settings.runtime_root / "data" / "v7" / "gold" / "labels" / "labels.parquet"
+    _write_labels(labels, horizons=(1, 5, 20))
+    app = create_app(quant_ui_settings)
+
+    invalid_primary = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={**_strategy_payload(), "primaryHorizon": 10},
+    )
+    assert invalid_primary.status_code == 422
+    assert "primaryHorizon must be included in horizons" in invalid_primary.text
+
+    missing_label = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={
+            **_strategy_payload(),
+            "horizons": "1,5,10,20",
+            "primaryHorizon": 10,
+        },
+    )
+    assert missing_label.status_code == 200
+    result = missing_label.json()["data"]
+    assert result["valid"] is False
+    assert any("forward_return_10d" in error for error in result["errors"])
+
+
+def test_strategy_auto_search_is_bounded_and_gpu_training_is_fail_closed(
+    quant_ui_settings,
+) -> None:
+    app = create_app(quant_ui_settings)
+    too_many = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={
+            **_strategy_payload(),
+            "topKCandidates": [10, 20, 30, 40, 50, 60, 70, 80],
+            "fundamentalThresholdCandidates": [0.1, 0.2, 0.3, 0.4],
+            "fundamentalBlendCandidates": [0.2, 0.4, 0.6, 0.8],
+            "selectionMaxCandidates": 64,
+        },
+    )
+    assert too_many.status_code == 422
+    assert "selectionMaxCandidates" in too_many.text
+
+    cpu_deep = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={**_strategy_payload(), "requireGpu": False},
+    )
+    assert cpu_deep.status_code == 422
+    assert "requires GPU" in cpu_deep.text
+
+
+def test_strategy_cli_signature_contains_every_allowlisted_search_parameter() -> None:
+    parameters = inspect.signature(run_full_real_training_v7).parameters
+    expected = {
+        "top_k_candidates",
+        "stock_selection_modes",
+        "fundamental_selection_mode",
+        "fundamental_selection_threshold",
+        "fundamental_blend_weight",
+        "fundamental_threshold_candidates",
+        "fundamental_blend_candidates",
+        "selection_max_candidates",
+        "selection_min_oos_days",
+        "selection_min_holdout_days",
+        "max_pbo",
+        "min_dsr_probability",
+        "max_spa_pvalue",
+        "objective_excess_weight",
+        "objective_annual_weight",
+        "objective_drawdown_weight",
+    }
+    assert expected <= set(parameters)
 
 
 def test_strategy_launch_fails_closed_without_human_gate_or_real_inputs(quant_ui_settings) -> None:

@@ -31,7 +31,7 @@
 .iw-header-copy > span,
 .iw-panel-header > div > span {
   color: var(--vnx-muted-2);
-  font: 700 9px var(--vnx-font-mono);
+  font: 700 10px var(--vnx-font-mono);
   letter-spacing: .12em;
   text-transform: uppercase;
 }
@@ -47,7 +47,7 @@
 .iw-header p {
   margin: 0;
   color: var(--vnx-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .iw-header-context {
@@ -154,7 +154,7 @@
   justify-content: space-between;
   gap: 8px;
   color: var(--vnx-muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .iw-metric > strong {
@@ -173,7 +173,7 @@
   margin-top: 2px;
   overflow: hidden;
   color: var(--vnx-muted-2);
-  font-size: 8px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -224,7 +224,7 @@
 .iw-panel-header small {
   margin-left: 7px;
   color: var(--vnx-muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .iw-panel-body {
@@ -326,7 +326,7 @@
   border-left: 2px solid var(--vnx-info);
   background: color-mix(in srgb, var(--vnx-info) 8%, transparent);
   color: var(--vnx-muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .iw-truth-notice.tone-warning { border-color: var(--iw-warning); background: color-mix(in srgb, var(--iw-warning) 8%, transparent); }
@@ -369,6 +369,28 @@
 
 .vnext-shell :where(.page, .runtime-manager-page) .data-table tr.row-selected td {
   background: var(--vnx-surface-selected);
+}
+
+/* Legacy domain components must stay theme-safe inside the VNext shell. */
+.vnext-shell :where(.runtime-topline, .control-hero) {
+  border-color: var(--vnx-line);
+  border-left-color: var(--vnx-realtime);
+  background: var(--vnx-surface-1);
+  color: var(--vnx-text);
+}
+
+.vnext-shell :where(.runtime-topline, .control-hero) :where(h1, h2, h3, strong) {
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .startup-command code {
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell.theme-day .job-json-editor {
+  border-color: var(--vnx-line);
+  background: #14232c;
+  color: #d9e9f1;
 }
 
 .selection-empty-grid {
@@ -444,7 +466,7 @@
 }
 
 .t1-empty-grid > .iw-panel:first-child { grid-row: span 2; }
-.t1-empty-grid > .iw-panel:first-child > .iw-panel-body { min-height: 360px; display: flex; flex-direction: column; justify-content: space-between; }
+.t1-empty-grid > .iw-panel:first-child > .iw-panel-body { min-height: 270px; display: flex; flex-direction: column; justify-content: space-between; }
 
 .t1-empty-timeline {
   display: grid;
@@ -452,13 +474,13 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 270px;
-  padding: 18px;
+  min-height: 180px;
+  padding: 14px;
 }
 
 .t1-empty-timeline article {
   width: 132px;
-  min-height: 108px;
+  min-height: 96px;
   padding: 13px;
   border: 1px solid var(--vnx-line);
   background: var(--vnx-surface-2);
@@ -475,6 +497,16 @@
 .t1-empty-thresholds { display: grid; gap: 1px; padding: 10px; background: var(--vnx-line-soft); }
 .t1-empty-thresholds span { min-height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 10px; background: var(--vnx-surface-1); color: var(--vnx-muted); font-size: 9px; }
 .t1-empty-thresholds i { color: var(--iw-warning); font: 700 8px var(--vnx-font-mono); font-style: normal; }
+
+.vnext-shell .t1-verdict {
+  border-color: color-mix(in srgb, var(--vnx-warning) 52%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-warning) 8%, var(--vnx-surface-1));
+  color: var(--vnx-text);
+}
+
+.vnext-shell .failure-control-row > div {
+  background: var(--vnx-track);
+}
 
 @media (max-width: 1120px) {
   .t1-empty-grid { grid-template-columns: 1fr; }

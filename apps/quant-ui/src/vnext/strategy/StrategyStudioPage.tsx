@@ -59,7 +59,17 @@ const DEFAULT_DRAFT: StrategyDraft = {
   topK: 30,
   topKCandidates: [10, 20, 30, 50, 80],
   stockSelectionModes: ["none", "fundamental"],
+  fundamentalSelectionMode: "auto",
   fundamentalSelectionThreshold: 0.5,
+  fundamentalBlendWeight: 0.4,
+  fundamentalThresholdCandidates: [0.25, 0.4, 0.55],
+  fundamentalBlendCandidates: [0.2, 0.4, 0.6],
+  selectionMaxCandidates: 64,
+  selectionMinOosDays: 80,
+  selectionMinHoldoutDays: 20,
+  maxPbo: 0.25,
+  minDsrProbability: 0.95,
+  maxSpaPValue: 0.05,
   factorScreeningMode: "pretrain",
   doTMode: "daily_swing",
   minutePanelPath: "",
@@ -84,6 +94,26 @@ const PIPELINE = [
   { id: "risk", label: "风控 / Paper", icon: ShieldCheck },
 ];
 
+function parseHorizons(value: string): number[] {
+  return Array.from(new Set(
+    value
+      .split(",")
+      .map((item) => Number(item.trim()))
+      .filter((item) => Number.isInteger(item) && item >= 1 && item <= 252),
+  )).sort((left, right) => left - right);
+}
+
+function normalizeDraft(draft: StrategyDraft): StrategyDraft {
+  const horizons = parseHorizons(draft.horizons);
+  return {
+    ...DEFAULT_DRAFT,
+    ...draft,
+    primaryHorizon: horizons.includes(draft.primaryHorizon)
+      ? draft.primaryHorizon
+      : (horizons[0] ?? DEFAULT_DRAFT.primaryHorizon),
+  };
+}
+
 export function StrategyStudioPage(): JSX.Element {
   const theme = useVNextTheme();
   const chartPalette = useVNextChartPalette();
@@ -100,6 +130,18 @@ export function StrategyStudioPage(): JSX.Element {
   const running = Boolean(job && ["queued", "running", "cancelling"].includes(job.status));
   const progress = job?.progress ?? 0;
   const activeStage = Math.min(PIPELINE.length - 1, Math.floor(progress * PIPELINE.length));
+  const horizonOptions = useMemo(() => parseHorizons(draft.horizons), [draft.horizons]);
+  const portfolioCandidateCount = useMemo(() => {
+    const topKCount = new Set(draft.topKCandidates).size;
+    const baseline = draft.stockSelectionModes.includes("none") ? 1 : 0;
+    const fundamental = draft.stockSelectionModes.includes("fundamental")
+      ? draft.fundamentalSelectionMode === "auto"
+        ? new Set(draft.fundamentalThresholdCandidates).size
+          * new Set(draft.fundamentalBlendCandidates).size
+        : draft.fundamentalSelectionMode === "off" ? 0 : 1
+      : 0;
+    return topKCount * (baseline + fundamental);
+  }, [draft]);
 
   const update = <K extends keyof StrategyDraft>(key: K, value: StrategyDraft[K]): void => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -118,6 +160,19 @@ export function StrategyStudioPage(): JSX.Element {
       [otherKeys[0]]: Number((remainder * current[otherKeys[0]] / otherTotal).toFixed(3)),
       [otherKeys[1]]: Number((remainder * current[otherKeys[1]] / otherTotal).toFixed(3)),
     });
+  };
+
+  const updateHorizons = (value: string): void => {
+    const horizons = parseHorizons(value);
+    setDraft((current) => ({
+      ...current,
+      horizons: value.replace(/\s+/g, ""),
+      primaryHorizon: horizons.includes(current.primaryHorizon)
+        ? current.primaryHorizon
+        : (horizons[0] ?? current.primaryHorizon),
+    }));
+    setValidation(null);
+    setSaved(null);
   };
 
   const validate = async (): Promise<StrategyValidation | null> => {
@@ -252,7 +307,7 @@ export function StrategyStudioPage(): JSX.Element {
         { label: "因子库", value: draft.factorLibrary.toUpperCase(), detail: draft.synthesizedFactorsPath ? "含审核后的合成因子" : "native reviewed library", tone: "ai", icon: Graph },
         { label: "模型", value: draft.model === "ft_transformer" ? "V8 DEEP GPU" : "V7 CLASSICAL", detail: `${draft.nSplits} folds · ${draft.splitMode}`, tone: "info", icon: Brain },
         { label: "主周期", value: `${draft.primaryHorizon}D`, detail: draft.horizons, tone: "info", icon: ArrowsClockwise },
-        { label: "持仓搜索", value: `${draft.topKCandidates.length} 组`, detail: draft.topKCandidates.join(" / "), tone: "positive", icon: Target },
+        { label: "组合搜索", value: `${portfolioCandidateCount} 组`, detail: `Top-K ${draft.topKCandidates.join(" / ")}`, tone: portfolioCandidateCount > draft.selectionMaxCandidates ? "danger" : "positive", icon: Target },
         { label: "回撤 Gate", value: `≤ ${(draft.riskLimits.maxDrawdown * 100).toFixed(0)}%`, detail: `Sharpe ≥ ${draft.riskLimits.minSharpe.toFixed(1)}`, tone: "warning", icon: ShieldCheck },
         { label: "运行状态", value: job?.status.toUpperCase() ?? "DRAFT", detail: job?.id ?? saved?.version ?? "not persisted", tone: job?.status === "failed" ? "danger" : running ? "ai" : "neutral", icon: Lightning },
       ]} />
@@ -281,24 +336,53 @@ export function StrategyStudioPage(): JSX.Element {
                 <option value="all_reviewed">全混合 · 全部已审查因子</option><option value="alpha181">Alpha181</option><option value="alpha101">Alpha101</option><option value="cicc_ashare80">CICC A-share 80</option><option value="basic">Basic</option>
               </select>
             </Field>
-            <Field label="Horizon"><input value={draft.horizons} onChange={(event) => update("horizons", event.target.value)} /></Field>
-            <Field label="主周期"><input type="number" min={1} max={252} value={draft.primaryHorizon} onChange={(event) => update("primaryHorizon", Number(event.target.value))} /></Field>
+            <Field label="Horizon 集合"><input aria-describedby="strategy-horizon-help" value={draft.horizons} onChange={(event) => updateHorizons(event.target.value)} /></Field>
+            <Field label="主周期">
+              <select value={draft.primaryHorizon} onChange={(event) => update("primaryHorizon", Number(event.target.value))} disabled={!horizonOptions.length}>
+                {horizonOptions.map((horizon) => <option key={horizon} value={horizon}>{horizon}D · forward_return_{horizon}d</option>)}
+              </select>
+            </Field>
+            <div id="strategy-horizon-help" className="strategy-field-help">主周期只能来自 Horizon 集合；Labels 必须存在同名 <code>forward_return_*d</code> 列。</div>
             <Field label="Top K"><input type="number" min={5} max={500} value={draft.topK} onChange={(event) => update("topK", Number(event.target.value))} /></Field>
             <Field label="Top K 候选（逗号分隔）" wide><input value={draft.topKCandidates.join(",")} onChange={(event) => update("topKCandidates", event.target.value.split(",").map(Number).filter((value) => Number.isFinite(value) && value > 0))} /></Field>
-            <Field label="选股实验">
-              <select value={draft.stockSelectionModes.includes("fundamental") ? "both" : "none"} onChange={(event) => update("stockSelectionModes", event.target.value === "both" ? ["none", "fundamental"] : ["none"])}>
+            <Field label="基本面学习">
+              <select value={draft.fundamentalSelectionMode} onChange={(event) => {
+                const mode = event.target.value as StrategyDraft["fundamentalSelectionMode"];
+                setDraft((current) => ({
+                  ...current,
+                  fundamentalSelectionMode: mode,
+                  stockSelectionModes: mode === "off" ? ["none"] : ["none", "fundamental"],
+                }));
+                setValidation(null);
+                setSaved(null);
+              }}>
+                <option value="auto">自动 · 早期 OOS 搜索后冻结</option>
+                <option value="fixed">固定 · 仅用于复现实验</option>
+                <option value="off">关闭 · 无基本面基线</option>
+              </select>
+            </Field>
+            <Field label="选股消融">
+              <select value={draft.stockSelectionModes.includes("fundamental") ? "both" : "none"} disabled={draft.fundamentalSelectionMode === "off"} onChange={(event) => update("stockSelectionModes", event.target.value === "both" ? ["none", "fundamental"] : ["none"])}>
                 <option value="both">无预筛选 vs 基本面选股</option><option value="none">仅无预筛选基线</option>
               </select>
             </Field>
-            <Field label="基本面入围分位"><input type="number" step="0.05" min="0.05" max="1" value={draft.fundamentalSelectionThreshold} onChange={(event) => update("fundamentalSelectionThreshold", Number(event.target.value))} /></Field>
+            {draft.fundamentalSelectionMode === "auto" ? <>
+              <Field label="基本面入围分位候选" wide><input value={draft.fundamentalThresholdCandidates.join(",")} onChange={(event) => update("fundamentalThresholdCandidates", event.target.value.split(",").map(Number).filter((value) => Number.isFinite(value)))} /></Field>
+              <Field label="基本面混合权重候选" wide><input value={draft.fundamentalBlendCandidates.join(",")} onChange={(event) => update("fundamentalBlendCandidates", event.target.value.split(",").map(Number).filter((value) => Number.isFinite(value)))} /></Field>
+            </> : draft.fundamentalSelectionMode === "fixed" ? <>
+              <Field label="固定入围分位"><input type="number" step="0.05" min="0.05" max="0.95" value={draft.fundamentalSelectionThreshold} onChange={(event) => update("fundamentalSelectionThreshold", Number(event.target.value))} /></Field>
+              <Field label="固定混合权重"><input type="number" step="0.05" min="0" max="1" value={draft.fundamentalBlendWeight} onChange={(event) => update("fundamentalBlendWeight", Number(event.target.value))} /></Field>
+            </> : null}
+            <Field label="早期 OOS 最少交易日"><input type="number" min="20" max="1260" value={draft.selectionMinOosDays} onChange={(event) => update("selectionMinOosDays", Number(event.target.value))} /></Field>
+            <Field label="最终 Holdout 最少交易日"><input type="number" min="10" max="504" value={draft.selectionMinHoldoutDays} onChange={(event) => update("selectionMinHoldoutDays", Number(event.target.value))} /></Field>
             <Field label="因子筛选">
-              <select value={draft.factorScreeningMode} onChange={(event) => update("factorScreeningMode", event.target.value as StrategyDraft["factorScreeningMode"])}><option value="pretrain">训练前实验筛选</option><option value="off">关闭（仅作对照）</option></select>
+              <select value={draft.factorScreeningMode} onChange={(event) => update("factorScreeningMode", event.target.value as StrategyDraft["factorScreeningMode"])}><option value="pretrain">先筛选再训练 · 推荐</option><option value="evaluate_only">先配置再评估 · 消融</option><option value="off">关闭 · 仅基线</option></select>
             </Field>
             <Field label="T+1 做T模式">
               <select value={draft.doTMode} onChange={(event) => update("doTMode", event.target.value as StrategyDraft["doTMode"])}><option value="daily_swing">日线波段做T</option><option value="intraday">分钟级做T（需要分钟数据）</option><option value="off">关闭对照</option></select>
             </Field>
             <Field label="分钟数据路径" wide><input className="mono" value={draft.minutePanelPath ?? ""} onChange={(event) => update("minutePanelPath", event.target.value)} disabled={draft.doTMode !== "intraday"} /></Field>
-            <Field label="训练设备"><select value={draft.requireGpu ? "required" : "optional"} onChange={(event) => update("requireGpu", event.target.value === "required")}><option value="required">强制 GPU（缺失即失败）</option><option value="optional">允许 CPU（仅对照）</option></select></Field>
+            <Field label="训练设备"><select value={draft.model === "ft_transformer" ? "required" : "baseline"} disabled><option value="required">GPU REQUIRED · 缺失即失败</option><option value="baseline">V7 Classical CPU 基线</option></select></Field>
             <Field label="基准指数"><input value={draft.benchmarkSymbol ?? ""} onChange={(event) => update("benchmarkSymbol", event.target.value)} /></Field>
             <Field label="组合目标">
               <select value={draft.objective} onChange={(event) => update("objective", event.target.value as StrategyDraft["objective"])}>
@@ -311,7 +395,14 @@ export function StrategyStudioPage(): JSX.Element {
             <Field label="最大回撤 Gate"><input type="number" step="0.01" min="0.01" max="0.8" value={draft.riskLimits.maxDrawdown} onChange={(event) => update("riskLimits", { ...draft.riskLimits, maxDrawdown: Number(event.target.value) })} /></Field>
             <Field label="风险换手 Gate"><input type="number" step="0.05" min="0.05" max="2" value={draft.riskLimits.maxTurnover} onChange={(event) => update("riskLimits", { ...draft.riskLimits, maxTurnover: Number(event.target.value) })} /></Field>
             <Field label="最低 Sharpe"><input type="number" step="0.1" min="-5" max="10" value={draft.riskLimits.minSharpe} onChange={(event) => update("riskLimits", { ...draft.riskLimits, minSharpe: Number(event.target.value) })} /></Field>
+            <Field label="最大 PBO"><input type="number" step="0.05" min="0" max="1" value={draft.maxPbo} onChange={(event) => update("maxPbo", Number(event.target.value))} /></Field>
+            <Field label="最低 DSR 概率"><input type="number" step="0.05" min="0" max="1" value={draft.minDsrProbability} onChange={(event) => update("minDsrProbability", Number(event.target.value))} /></Field>
+            <Field label="最大 SPA p-value"><input type="number" step="0.01" min="0" max="1" value={draft.maxSpaPValue} onChange={(event) => update("maxSpaPValue", Number(event.target.value))} /></Field>
             <Field label="输出目录" wide><input className="mono" value={draft.outputDir} onChange={(event) => update("outputDir", event.target.value)} /></Field>
+            <div className={`strategy-search-budget ${portfolioCandidateCount > draft.selectionMaxCandidates ? "invalid" : ""}`}>
+              <strong>{portfolioCandidateCount} / {draft.selectionMaxCandidates} 组搜索预算</strong>
+              <span>基本面权重、入围分位与 Top-K 仅在早期 OOS 上学习；冠军冻结后，最终 Holdout 不再调参。</span>
+            </div>
           </div>
         </WorkbenchPanel>
 
@@ -346,7 +437,7 @@ export function StrategyStudioPage(): JSX.Element {
               const items = Array.isArray(manifests.data?.data) ? manifests.data.data : [];
               const selected = items.find((item) => item.path === event.target.value);
               if (!selected) return;
-              setDraft(selected.draft);
+              setDraft(normalizeDraft(selected.draft));
               setSaved(selected);
               setValidation(null);
               setError("");
@@ -371,7 +462,7 @@ export function StrategyStudioPage(): JSX.Element {
             {validation.warnings.map((item) => <small key={item}>{item}</small>)}
           </div> : null}
           {saved ? <div className="strategy-saved"><CheckCircle weight="fill" /><span><strong>{saved.version}</strong><small>{saved.path} · {saved.contentHash?.slice(0, 12)}</small></span></div> : null}
-          {error ? <div className="strategy-error" role="alert"><WarningCircle /><span>{error}</span></div> : null}
+          {error ? <div className="strategy-error" role="alert"><WarningCircle /><span><strong>无法提交当前策略</strong>{error.split("；").map((item) => <small key={item}>{item}</small>)}</span></div> : null}
         </WorkbenchPanel>
 
         <WorkbenchPanel eyebrow="DECISION COUNCIL" title="多 Agent 审查" meta="structured roles · veto visible" className="strategy-council-panel">

@@ -229,9 +229,19 @@ export interface StrategyDraft {
   topK: number;
   topKCandidates: number[];
   stockSelectionModes: Array<"none" | "fundamental">;
+  fundamentalSelectionMode: "auto" | "fixed" | "off";
   fundamentalSelectionThreshold: number;
-  factorScreeningMode: "off" | "pretrain";
-  doTMode: "off" | "daily_swing" | "intraday";
+  fundamentalBlendWeight: number;
+  fundamentalThresholdCandidates: number[];
+  fundamentalBlendCandidates: number[];
+  selectionMaxCandidates: number;
+  selectionMinOosDays: number;
+  selectionMinHoldoutDays: number;
+  maxPbo: number;
+  minDsrProbability: number;
+  maxSpaPValue: number;
+  factorScreeningMode: "off" | "evaluate_only" | "pretrain";
+  doTMode: "off" | "daily_swing" | "intraday" | "both";
   minutePanelPath?: string | null;
   maxWeightPerName: number;
   maxSectorWeight: number;
@@ -261,7 +271,7 @@ export interface StrategyValidation {
   launch: {
     jobType: "strategy-pipeline";
     commandId: "run-full-real-training-v7";
-    parameters: Record<string, string | number | boolean>;
+  parameters: Record<string, string | number | boolean | Array<string | number>>;
     armed: boolean;
   };
   decisionCouncil: DecisionCouncilMember[];

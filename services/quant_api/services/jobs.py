@@ -211,7 +211,12 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "max_turnover", "objective", "weighting", "initial_cash",
             "benchmark_symbol", "acceptance_max_drawdown",
             "acceptance_min_sharpe", "top_k_candidates",
-            "stock_selection_modes", "fundamental_selection_threshold",
+            "stock_selection_modes", "fundamental_selection_mode",
+            "fundamental_selection_threshold", "fundamental_blend_weight",
+            "fundamental_threshold_candidates", "fundamental_blend_candidates",
+            "selection_max_candidates", "selection_min_oos_days",
+            "selection_min_holdout_days", "max_pbo",
+            "min_dsr_probability", "max_spa_pvalue",
             "factor_screening_mode", "objective_excess_weight",
             "objective_annual_weight", "objective_drawdown_weight",
             "do_t_mode", "minute_panel_path",
@@ -241,6 +246,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "objective": {"max_expected_alpha", "mean_variance", "min_variance"},
             "weighting": {"equal", "rank", "softmax"},
             "factor_screening_mode": {"off", "evaluate_only", "pretrain"},
+            "fundamental_selection_mode": {"auto", "fixed", "off"},
             "do_t_mode": {"off", "intraday", "daily_swing", "both"},
         },
     },
@@ -709,6 +715,11 @@ class JobManager:
         spec = COMMANDS.get(command_id)
         if spec is None or spec["type"] != job_type:
             raise ValueError(f"command {command_id!r} is not allowed for {job_type}")
+        if command_id == "train-v8-deep" and parameters.get("require_gpu") is not True:
+            raise ValueError(
+                "train-v8-deep requires require_gpu=true; CPU fallback is disabled "
+                "for governed workstation training"
+            )
         unknown = set(parameters) - set(spec["allowed"])
         if unknown:
             raise ValueError(f"unsupported parameters: {sorted(unknown)}")

@@ -365,6 +365,11 @@ time {
   box-shadow: 0 0 7px rgba(42, 200, 159, 0.55);
 }
 
+.health-dot.error {
+  background: var(--red);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--red) 55%, transparent);
+}
+
 .api-banner {
   min-height: 36px;
   display: flex;
@@ -3561,6 +3566,10 @@ a:focus-visible,
 .control-health > span {
   color: var(--green);
   font-size: 9px;
+}
+
+.control-health > span:has(.health-dot.error) {
+  color: var(--red);
 }
 
 .control-health > strong {

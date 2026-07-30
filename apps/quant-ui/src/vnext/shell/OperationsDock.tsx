@@ -167,8 +167,12 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
                 <span className="vnext-gpu-card" key={gpu.index}>
                   <small>GPU {gpu.index} · {gpu.name}</small>
                   <strong>{gpu.utilizationPercent == null ? "—" : `${gpu.utilizationPercent.toFixed(0)}%`}</strong>
-                  <i><b style={{ width: `${Math.max(0, Math.min(100, gpu.utilizationPercent ?? 0))}%` }} /></i>
-                  <em>{gpu.memoryUsedMiB ?? "—"} / {gpu.memoryTotalMiB ?? "—"} MiB · {gpu.temperatureC ?? "—"}°C</em>
+                  <i aria-label={`GPU utilization ${gpu.utilizationPercent ?? 0}%`}><b style={{ width: `${Math.max(0, Math.min(100, gpu.utilizationPercent ?? 0))}%` }} /></i>
+                  <em>
+                    VRAM {gpu.memoryUsedMiB ?? "—"} / {gpu.memoryTotalMiB ?? "—"} MiB
+                    {" · "}{gpu.temperatureC ?? "—"}°C
+                    {" · "}{gpu.powerDrawW == null ? "—" : `${gpu.powerDrawW.toFixed(0)}W`}
+                  </em>
                 </span>
               ))}
               {!resources.data?.data.gpus.length ? <p>GPU telemetry unavailable. GPU-required training will fail closed; use the tmux 0.1s NVIDIA monitor for high-frequency inspection.</p> : null}
