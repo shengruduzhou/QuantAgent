@@ -335,3 +335,30 @@ def test_api_reads_runtime_outside_repository(
     artifact = next(item for item in runtime_index["data"]["items"] if item["name"] == "metrics.json")
     assert artifact["path"].startswith("runtime/")
     assert artifact["validationStatus"] == "verified"
+
+
+def test_factor_evaluation_and_resource_endpoints_are_governed(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    labels = quant_ui_settings.runtime_root / "data" / "v7" / "gold" / "labels"
+    labels.mkdir(parents=True, exist_ok=True)
+    (labels / "labels.parquet").write_bytes(b"fixture")
+    payload = {
+        "commandId": "evaluate-factor-library-v7",
+        "parameters": {
+            "market_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+            "labels_path": "runtime/data/v7/gold/labels/labels.parquet",
+            "output_dir": "runtime/reports/factor_evaluation/test",
+            "factor_library": "all_reviewed",
+            "calibration_days": 252,
+            "holdout_days": 60,
+        },
+    }
+
+    validated = request(app, "POST", "/api/jobs/factor-evaluation/validate", json=payload)
+    resources = request(app, "GET", "/api/system/resources")
+
+    assert validated.status_code == 200
+    assert validated.json()["data"]["valid"] is True
+    assert validated.json()["data"]["commandId"] == "evaluate-factor-library-v7"
+    assert resources.status_code == 200
+    assert "gpus" in resources.json()["data"]

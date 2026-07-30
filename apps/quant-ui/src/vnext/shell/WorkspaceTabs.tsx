@@ -30,7 +30,9 @@ interface WorkspaceTabsProps {
 
 export function WorkspaceTabs(props: WorkspaceTabsProps): JSX.Element {
   const [menuTabId, setMenuTabId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const menuTab = props.tabs.find((tab) => tab.id === menuTabId);
 
   return (
     <nav className="vnext-workspace-tabs" aria-label="工作区标签">
@@ -53,6 +55,7 @@ export function WorkspaceTabs(props: WorkspaceTabsProps): JSX.Element {
               onContextMenu={(event) => {
                 event.preventDefault();
                 setMenuTabId(tab.id);
+                setMenuPosition({ top: event.clientY, left: Math.min(event.clientX, window.innerWidth - 180) });
               }}
             >
               <button type="button" className="vnext-tab-main" onClick={() => props.activateTab(tab.id)} title={tab.path}>
@@ -61,17 +64,12 @@ export function WorkspaceTabs(props: WorkspaceTabsProps): JSX.Element {
                 {tab.dirty ? <i title="未保存更改" /> : null}
                 {tab.status !== "idle" ? <em className={`state-${tab.status}`}>{tab.status}</em> : null}
               </button>
-              <button type="button" className="vnext-tab-menu-button" onClick={() => setMenuTabId(menuTabId === tab.id ? null : tab.id)} aria-label={`管理 ${tab.title} 标签`}><DotsThree size={15} /></button>
+              <button type="button" className="vnext-tab-menu-button" onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setMenuPosition({ top: rect.bottom + 4, left: Math.min(rect.right - 170, window.innerWidth - 180) });
+                setMenuTabId(menuTabId === tab.id ? null : tab.id);
+              }} aria-label={`管理 ${tab.title} 标签`}><DotsThree size={15} /></button>
               {!tab.pinned ? <button type="button" className="vnext-tab-close" onClick={() => props.closeTab(tab.id)} aria-label={`关闭 ${tab.title}`}><X size={12} /></button> : null}
-              {menuTabId === tab.id ? (
-                <div className="vnext-tab-menu" role="menu">
-                  <button type="button" onClick={() => { props.togglePin(tab.id); setMenuTabId(null); }}>{tab.pinned ? <LockSimpleOpen size={14} /> : <LockSimple size={14} />}{tab.pinned ? "取消固定" : "固定标签"}</button>
-                  <button type="button" onClick={() => { props.duplicateTab(tab.id); setMenuTabId(null); }}><Copy size={14} />复制实例</button>
-                  <button type="button" onClick={() => { props.setSplit(tab.id, "right"); setMenuTabId(null); }}><ArrowBendDownRight size={14} />在右侧打开</button>
-                  <button type="button" onClick={() => { props.setSplit(tab.id, "bottom"); setMenuTabId(null); }}><ArrowBendRightDown size={14} />在下方打开</button>
-                  <button type="button" onClick={() => { props.closeOtherTabs(tab.id); setMenuTabId(null); }}><X size={14} />关闭其他</button>
-                </div>
-              ) : null}
             </div>
           );
         })}
@@ -80,6 +78,15 @@ export function WorkspaceTabs(props: WorkspaceTabsProps): JSX.Element {
         <button type="button" onClick={props.openLauncher} aria-label="打开新工作区"><Plus size={15} /></button>
         <button type="button" onClick={props.reopenLastTab} disabled={!props.canReopen} title="恢复最近关闭的标签">↶</button>
       </div>
+      {menuTab ? (
+        <div className="vnext-tab-menu" role="menu" style={{ top: menuPosition.top, left: menuPosition.left }}>
+          <button type="button" onClick={() => { props.togglePin(menuTab.id); setMenuTabId(null); }}>{menuTab.pinned ? <LockSimpleOpen size={14} /> : <LockSimple size={14} />}{menuTab.pinned ? "取消固定" : "固定标签"}</button>
+          <button type="button" onClick={() => { props.duplicateTab(menuTab.id); setMenuTabId(null); }}><Copy size={14} />复制实例</button>
+          <button type="button" onClick={() => { props.setSplit(menuTab.id, "right"); setMenuTabId(null); }}><ArrowBendDownRight size={14} />在右侧打开</button>
+          <button type="button" onClick={() => { props.setSplit(menuTab.id, "bottom"); setMenuTabId(null); }}><ArrowBendRightDown size={14} />在下方打开</button>
+          <button type="button" onClick={() => { props.closeOtherTabs(menuTab.id); setMenuTabId(null); }}><X size={14} />关闭其他</button>
+        </div>
+      ) : null}
     </nav>
   );
 }

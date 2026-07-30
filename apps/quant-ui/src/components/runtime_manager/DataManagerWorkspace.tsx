@@ -13,7 +13,7 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useNavigate } from "react-router-dom";
-import { apiGet, apiPost } from "../../api/client";
+import { apiDelete, apiGet, apiPost } from "../../api/client";
 import type {
   DataCoverage,
   DataManagerOverview,
@@ -213,6 +213,16 @@ export function DataManagerWorkspace(): JSX.Element {
     }
   };
 
+  const purge = async (jobId: string): Promise<void> => {
+    try {
+      await apiDelete(`/jobs/${jobId}?deleteOutputs=true`);
+      if (submitted?.id === jobId) setSubmitted(null);
+      await jobs.refetch();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "stop and purge failed");
+    }
+  };
+
   if (registry.isLoading) return <StateView state="loading" />;
   if (registry.isError) return <StateView state="error" detail={registry.error.message} />;
 
@@ -292,7 +302,7 @@ export function DataManagerWorkspace(): JSX.Element {
       {submitted ? <div className="launch-message launch-success"><CheckCircle size={18} />已提交 {submitted.commandId} · {submitted.id}</div> : null}
 
       <Panel title="数据任务" eyebrow={`${dataJobs.length} governed jobs · refresh 2s`} className="data-job-queue-panel">
-        {dataJobs.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建 / 完成</th><th>输出</th><th>操作</th></tr></thead><tbody>{dataJobs.map((job) => <tr key={job.id}><td><strong>{job.commandId}</strong><span className="mono">{job.id}</span></td><td><StatusBadge status={job.status} /></td><td><div className="job-progress"><span style={{ width: `${Math.round((job.progress ?? 0) * 100)}%` }} /><b>{job.progress == null ? "等待 provider" : `${Math.round(job.progress * 100)}%`}</b></div></td><td><strong>{formatDate(job.createdAt)}</strong><span>{job.finishedAt ? formatDate(job.finishedAt) : job.message ?? "—"}</span></td><td>{job.outputPaths.join(" · ") || "等待产物"}</td><td>{["queued", "running", "cancelling"].includes(job.status) ? <button className="secondary-button" onClick={() => cancel(job.id)}><Stop size={14} />取消</button> : "—"}</td></tr>)}</tbody></table></div> : <StateView state={jobs.isError ? "error" : "empty"} detail={jobs.error?.message ?? "尚未提交数据任务。"} />}
+        {dataJobs.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建 / 完成</th><th>输出</th><th>操作</th></tr></thead><tbody>{dataJobs.map((job) => <tr key={job.id}><td><strong>{job.commandId}</strong><span className="mono">{job.id}</span></td><td><StatusBadge status={job.status} /></td><td><div className="job-progress"><span style={{ width: `${Math.round((job.progress ?? 0) * 100)}%` }} /><b>{job.progress == null ? "等待 provider" : `${Math.round(job.progress * 100)}%`}</b></div></td><td><strong>{formatDate(job.createdAt)}</strong><span>{job.finishedAt ? formatDate(job.finishedAt) : job.message ?? "—"}</span></td><td>{job.outputPaths.join(" · ") || "等待产物"}</td><td><div className="data-job-actions">{["queued", "running", "cancelling"].includes(job.status) ? <button className="secondary-button" onClick={() => cancel(job.id)}><Stop size={14} />停止</button> : null}<button className="secondary-button danger" onClick={() => purge(job.id)}><Stop size={14} />{["queued", "running", "cancelling"].includes(job.status) ? "停止并清除" : "清除"}</button></div></td></tr>)}</tbody></table></div> : <StateView state={jobs.isError ? "error" : "empty"} detail={jobs.error?.message ?? "尚未提交数据任务。"} />}
         <div className="data-job-queue-footer"><ArrowClockwise size={16} /><span>Provider 日志实时解析为进度；成功后 Runtime Catalog 自动失效并重扫。</span></div>
       </Panel>
     </section>

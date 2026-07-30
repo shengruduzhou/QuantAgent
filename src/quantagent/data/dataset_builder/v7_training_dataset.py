@@ -554,6 +554,29 @@ def _append_factor_library(
     selected = library.strip().lower()
     if selected in {"", "basic", "none", "off"}:
         return features, {"status": "skipped", "library": selected or "basic"}
+    if selected == "all_reviewed":
+        merged = features
+        reports: list[dict[str, object]] = []
+        total_added = 0
+        for member in ("alpha101", "alpha181", "cicc_ashare80"):
+            before = set(merged.columns)
+            merged, report = _append_factor_library(
+                merged,
+                market,
+                library=member,
+                synthesized_factors_path=synthesized_factors_path,
+                min_finite_ratio=min_finite_ratio,
+            )
+            added = [column for column in merged.columns if column not in before]
+            total_added += len(added)
+            reports.append({**report, "added_columns": added})
+        return merged, {
+            "status": "passed" if total_added else "empty",
+            "library": selected,
+            "members": reports,
+            "columns_added": total_added,
+            "selection_required": True,
+        }
     if selected == "alpha101":
         from quantagent.factors.alpha101 import compute_alpha101
 
@@ -567,9 +590,16 @@ def _append_factor_library(
 
         factors = compute_cicc_ashare80_factors(market)
     else:
-        raise ValueError("factor_library must be basic, alpha101, alpha181, or cicc_ashare80")
+        raise ValueError(
+            "factor_library must be all_reviewed, basic, alpha101, alpha181, or cicc_ashare80"
+        )
     if factors.empty:
-        return features, {"status": "empty", "library": selected, "columns_added": 0}
+        return features, {
+            "status": "empty",
+            "library": selected,
+            "columns_added": 0,
+            "added_columns": [],
+        }
     wide = factors.pivot_table(
         index=["trade_date", "symbol"],
         columns="factor_name",
@@ -593,6 +623,7 @@ def _append_factor_library(
         "status": "passed",
         "library": selected,
         "columns_added": len(kept),
+        "added_columns": kept,
         "columns_dropped": len(dropped),
         "min_finite_ratio": min_finite_ratio,
         "synthesized_factors_path": synthesized_factors_path,

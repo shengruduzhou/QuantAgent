@@ -502,7 +502,7 @@
   overflow: auto;
   padding: 10px 12px;
   background: var(--vnx-code);
-  color: #aebfc8;
+  color: var(--vnx-text-soft);
   font: 9px/1.5 var(--vnx-font-mono);
   white-space: pre-wrap;
 }
@@ -664,9 +664,9 @@
 }
 
 .vnext-run-actions button.primary {
-  border-color: #456fa7;
-  background: #1b3e6d;
-  color: #e0ecff;
+  border-color: var(--vnx-primary);
+  background: var(--vnx-primary-surface);
+  color: var(--vnx-primary-strong);
 }
 
 .vnext-run-actions button:disabled {
@@ -680,8 +680,8 @@
   gap: 8px;
   margin: 0 9px 9px;
   padding: 9px;
-  border: 1px solid #58431f;
-  background: #211a10;
+  border: 1px solid var(--vnx-warning);
+  background: color-mix(in srgb, var(--vnx-warning) 12%, var(--vnx-surface-1));
 }
 
 .vnext-launch-arm input {
@@ -695,13 +695,13 @@
 }
 
 .vnext-launch-arm strong {
-  color: #e3bd74;
+  color: var(--vnx-warning);
   font-size: 10px;
 }
 
 .vnext-launch-arm small {
   margin-top: 2px;
-  color: #a08a62;
+  color: var(--vnx-text-soft);
   font-size: 9px;
 }
 
@@ -712,12 +712,12 @@
   gap: 8px;
   margin: 0 9px 10px;
   padding: 9px;
-  background: #10251e;
+  background: color-mix(in srgb, var(--vnx-success) 12%, var(--vnx-surface-1));
   color: var(--vnx-success);
 }
 
 .vnext-validation-wait {
-  background: #211a10;
+  background: color-mix(in srgb, var(--vnx-warning) 12%, var(--vnx-surface-1));
   color: var(--vnx-warning);
 }
 
@@ -789,7 +789,7 @@
   gap: 7px;
   margin: 10px;
   padding: 9px;
-  background: #2a1518;
+  background: color-mix(in srgb, var(--vnx-danger) 12%, var(--vnx-surface-1));
   color: var(--vnx-danger);
   font-size: 9px;
 }
@@ -863,7 +863,7 @@
   overflow: auto;
   padding: 10px 12px;
   background: var(--vnx-code);
-  color: #aebfc8;
+  color: var(--vnx-text-soft);
   font: 9px/1.55 var(--vnx-font-mono);
   white-space: pre-wrap;
 }

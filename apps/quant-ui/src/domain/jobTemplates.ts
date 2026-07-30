@@ -48,6 +48,22 @@ export const jobTemplates = {
       exclude_st: true,
     },
   },
+  "factor-evaluation": {
+    commandId: "evaluate-factor-library-v7",
+    parameters: {
+      market_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
+      labels_path: "runtime/data/v7/gold/labels/labels.parquet",
+      output_dir: "runtime/reports/factor_evaluation/all_reviewed",
+      factor_library: "all_reviewed",
+      calibration_days: 252,
+      holdout_days: 60,
+      min_abs_rank_ic: 0.01,
+      min_abs_rank_icir: 0.25,
+      min_finite_ratio: 0.8,
+      min_abs_monotonicity: 0.5,
+      max_pairwise_correlation: 0.85,
+    },
+  },
   infer: {
     commandId: "predict-alpha-v7",
     parameters: {
@@ -67,7 +83,7 @@ export interface JobLaunchPayload {
 }
 
 export function isJobType(value: string | null): value is JobType {
-  return value === "backtest" || value === "train" || value === "infer" || value === "factor-discovery";
+  return value === "backtest" || value === "train" || value === "infer" || value === "factor-discovery" || value === "factor-evaluation";
 }
 
 export function templateJson(type: JobType): string {

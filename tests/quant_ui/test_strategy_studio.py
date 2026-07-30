@@ -17,14 +17,19 @@ def _strategy_payload() -> dict:
         "marketPanelPath": "runtime/data/v7/silver/market_panel/market_panel.parquet",
         "labelsPath": "runtime/data/v7/gold/labels/labels.parquet",
         "outputDir": "runtime/reports/strategy_studio/fixture",
-        "factorLibrary": "alpha181",
-        "model": "ridge",
+        "factorLibrary": "all_reviewed",
+        "model": "ft_transformer",
         "horizons": "1,5,20",
         "primaryHorizon": 5,
         "splitMode": "rolling",
         "nSplits": 4,
-        "requireGpu": False,
+        "requireGpu": True,
         "topK": 30,
+        "topKCandidates": [10, 20, 30, 50],
+        "stockSelectionModes": ["none", "fundamental"],
+        "fundamentalSelectionThreshold": 0.5,
+        "factorScreeningMode": "pretrain",
+        "doTMode": "daily_swing",
         "maxWeightPerName": 0.08,
         "maxSectorWeight": 0.30,
         "maxTurnover": 0.50,
@@ -61,6 +66,9 @@ def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_u
     assert data["launch"]["parameters"]["market_panel_path"].endswith("market_panel.parquet")
     assert data["launch"]["parameters"]["acceptance_max_drawdown"] == 0.15
     assert data["launch"]["parameters"]["acceptance_min_sharpe"] == 1.0
+    assert data["launch"]["parameters"]["factor_library"] == "all_reviewed"
+    assert data["launch"]["parameters"]["top_k_candidates"] == [10, 20, 30, 50]
+    assert data["launch"]["parameters"]["stock_selection_modes"] == ["none", "fundamental"]
     assert any(member["id"] == "risk" and member["veto"] for member in data["decisionCouncil"])
 
     saved = request(app, "POST", "/api/strategies", json=_strategy_payload())

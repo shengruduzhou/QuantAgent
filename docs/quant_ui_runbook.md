@@ -13,6 +13,17 @@ frontend dependencies、重新构建 VNext production SPA，并由同一个 Fast
   --port 8000
 ```
 
+生产式后台运行建议使用 tmux 启动器：
+
+```bash
+./scripts/run_quant_ui_tmux.sh \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+启动器会立即返回 session、日志路径和 attach 命令，并创建三个 pane：服务进程、实时日志、`watch -n 0.1 nvidia-smi`。已存在同名 session 时不会重复启动。Web 资源卡使用约 1 秒的服务端采样，避免 0.1 秒轮询压垮浏览器；0.1 秒刷新只保留在 tmux 本机监控 pane。
+
 日常代码未变化、只想复用已经构建的 `dist` 时可以追加 `--skip-build`。修改 frontend
 后不要使用该选项，否则浏览器看到的仍会是旧 bundle。
 
