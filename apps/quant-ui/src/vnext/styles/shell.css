@@ -613,10 +613,8 @@
 }
 
 .vnext-tab-menu {
-  position: absolute;
-  z-index: 80;
-  top: 34px;
-  right: 4px;
+  position: fixed;
+  z-index: 400;
   width: 170px;
   padding: 5px;
   border: 1px solid var(--vnx-line-strong);
@@ -848,10 +846,32 @@
   width: 100%;
   min-height: 36px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 82px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   border-bottom: 1px solid var(--vnx-line-soft);
   background: transparent;
+}
+
+.vnext-task-actions {
+  display: flex;
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.vnext-task-actions button {
+  min-height: 25px;
+  padding: 0 7px;
+  border: 1px solid var(--vnx-line-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vnx-text-soft);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.vnext-task-actions .vnext-purge-job {
+  border-color: color-mix(in srgb, var(--vnx-danger) 56%, var(--vnx-line-strong));
+  color: var(--vnx-danger);
 }
 
 .vnext-task-main {
@@ -1035,6 +1055,32 @@
   grid-column: 1 / -1;
   margin: 0;
   color: var(--vnx-muted);
+}
+
+.vnext-resource-grid .vnext-gpu-card {
+  grid-column: span 2;
+  padding: 11px;
+  border: 1px solid var(--vnx-line-soft);
+  background: var(--vnx-surface-2);
+}
+
+.vnext-gpu-card i {
+  display: block;
+  height: 5px;
+  margin: 8px 0 5px;
+  overflow: hidden;
+  background: var(--vnx-track);
+}
+
+.vnext-gpu-card i b {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--vnx-accent), var(--vnx-realtime));
+}
+
+.vnext-gpu-card em {
+  color: var(--vnx-muted);
+  font: 9px var(--vnx-font-mono);
 }
 
 .vnext-dock-empty,

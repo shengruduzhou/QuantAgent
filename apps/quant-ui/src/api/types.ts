@@ -212,11 +212,14 @@ export interface StrategyDraft {
   invalidationCriteria: string;
   marketPanelPath: string;
   labelsPath: string;
+  fundamentalsRoot?: string | null;
+  valuationPath?: string | null;
+  disclosuresPath?: string | null;
   sectorMapPath?: string | null;
   trainingDatasetPath?: string | null;
   synthesizedFactorsPath?: string | null;
   outputDir: string;
-  factorLibrary: "basic" | "alpha101" | "alpha181" | "cicc_ashare80";
+  factorLibrary: "all_reviewed" | "basic" | "alpha101" | "alpha181" | "cicc_ashare80";
   model: "ridge" | "ft_transformer";
   horizons: string;
   primaryHorizon: number;
@@ -224,6 +227,12 @@ export interface StrategyDraft {
   nSplits: number;
   requireGpu: boolean;
   topK: number;
+  topKCandidates: number[];
+  stockSelectionModes: Array<"none" | "fundamental">;
+  fundamentalSelectionThreshold: number;
+  factorScreeningMode: "off" | "pretrain";
+  doTMode: "off" | "daily_swing" | "intraday";
+  minutePanelPath?: string | null;
   maxWeightPerName: number;
   maxSectorWeight: number;
   maxTurnover: number;
@@ -282,6 +291,9 @@ export interface StrategyDefaults {
     labelsPath?: string | null;
     trainingDatasetPath?: string | null;
     sectorMapPath?: string | null;
+    fundamentalsRoot?: string | null;
+    valuationPath?: string | null;
+    disclosuresPath?: string | null;
   };
   evidence: Array<{ field: string; path: string; sizeBytes: number; modifiedAt: string }>;
   selectionRule: string;
@@ -617,4 +629,20 @@ export interface SystemOverview {
     manifestCoverage?: number;
     indexedAt: string;
   };
+}
+
+export interface SystemResources {
+  cpuPercent?: number | null;
+  memoryPercent?: number | null;
+  memoryUsedBytes?: number | null;
+  memoryTotalBytes?: number | null;
+  gpus: Array<{
+    index: number;
+    name: string;
+    utilizationPercent?: number | null;
+    memoryUsedMiB?: number | null;
+    memoryTotalMiB?: number | null;
+    temperatureC?: number | null;
+    powerDrawW?: number | null;
+  }>;
 }

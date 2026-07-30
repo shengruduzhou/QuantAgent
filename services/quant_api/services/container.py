@@ -46,11 +46,17 @@ class ServiceContainer:
         backtests = BacktestAdapter(resolved, indexer)
         events = EventBroker()
         connections = ConnectionManager()
+        factors = FactorAdapter(resolved)
+
+        def invalidate_runtime() -> None:
+            indexer.invalidate()
+            factors.invalidate()
+
         return cls(
             settings=resolved,
             indexer=indexer,
             backtests=backtests,
-            factors=FactorAdapter(resolved),
+            factors=factors,
             models=ModelAdapter(resolved),
             selections=SelectionAdapter(resolved),
             do_t=DoTAdapter(resolved),
@@ -62,7 +68,7 @@ class ServiceContainer:
             jobs=JobManager(
                 resolved,
                 events,
-                indexer.invalidate,
+                invalidate_runtime,
                 connection_environment=connections.environment_for,
             ),
             cleanup=RuntimeCleanupService(resolved),

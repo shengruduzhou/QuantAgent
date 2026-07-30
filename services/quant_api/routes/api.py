@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from typing import Any
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -221,6 +223,63 @@ async def system_overview(request: Request) -> dict:
         "runtime": svc.indexer.stats(),
     }
     return response(data, status="ready" if latest_backtest or latest_model else "partial")
+
+
+@router.get("/system/resources")
+async def system_resources() -> dict:
+    """Return bounded host telemetry; never expose arbitrary shell execution."""
+
+    payload: dict[str, Any] = {
+        "cpuPercent": None,
+        "memoryPercent": None,
+        "memoryUsedBytes": None,
+        "memoryTotalBytes": None,
+        "gpus": [],
+    }
+    try:
+        import psutil
+
+        memory = psutil.virtual_memory()
+        payload.update({
+            "cpuPercent": float(psutil.cpu_percent(interval=None)),
+            "memoryPercent": float(memory.percent),
+            "memoryUsedBytes": int(memory.used),
+            "memoryTotalBytes": int(memory.total),
+        })
+    except (ImportError, OSError):
+        pass
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = [item.strip() for item in line.split(",")]
+                if len(fields) != 7:
+                    continue
+                payload["gpus"].append({
+                    "index": int(fields[0]),
+                    "name": fields[1],
+                    "utilizationPercent": float(fields[2]),
+                    "memoryUsedMiB": float(fields[3]),
+                    "memoryTotalMiB": float(fields[4]),
+                    "temperatureC": float(fields[5]),
+                    "powerDrawW": float(fields[6]),
+                })
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return response(
+        payload,
+        status="ready" if payload["gpus"] or payload["cpuPercent"] is not None else "unavailable",
+    )
 
 
 @router.get("/system/runtime-index")
@@ -476,6 +535,17 @@ async def stock_t_analysis(request: Request, backtest_id: str, symbol: str, sour
 async def list_factors(request: Request, query: str | None = None) -> dict:
     data = services(request).factors.list(query)
     return response(data, status="ready" if data else "empty")
+
+
+@router.get("/factors/correlation")
+async def factor_correlation(
+    request: Request,
+    names: str = Query("", max_length=500),
+) -> dict:
+    data = services(request).factors.correlation(
+        [item.strip() for item in names.split(",") if item.strip()]
+    )
+    return response(data, status="ready" if data.get("matrix") else "empty")
 
 
 @router.get("/factors/{factor_name}")
@@ -740,6 +810,8 @@ async def save_strategy(request: Request, body: StrategyDraft) -> dict:
 @router.post("/strategies/launch")
 async def launch_strategy(request: Request, body: StrategyDraft) -> dict:
     service_container = services(request)
+    run_output = f"{body.output_dir.rstrip('/')}/runs/run_{uuid4().hex[:12]}"
+    body = body.model_copy(update={"output_dir": run_output})
     validation = service_container.strategies.validate(body)
     launch = validation["launch"]
     if not validation["valid"] or not launch["armed"]:
@@ -812,6 +884,11 @@ async def create_factor_discovery_job(request: Request, body: JobRequest) -> dic
     return _create_job(request, "factor-discovery", body)
 
 
+@router.post("/jobs/factor-evaluation")
+async def create_factor_evaluation_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "factor-evaluation", body)
+
+
 @router.post("/jobs/infer")
 async def create_infer_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "infer", body)
@@ -824,7 +901,7 @@ async def create_governance_job(request: Request, body: JobRequest) -> dict:
 
 @router.post("/jobs/{job_type}/validate")
 async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
-    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "governance", "strategy-pipeline"}:
+    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "factor-evaluation", "governance", "strategy-pipeline"}:
         raise HTTPException(404, "job type not found")
     try:
         return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))
@@ -843,6 +920,22 @@ async def list_jobs(request: Request) -> dict:
 async def cancel_job(request: Request, job_id: str) -> dict:
     try:
         return response(services(request).jobs.cancel(job_id))
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@router.delete("/jobs/{job_id}")
+async def purge_job(
+    request: Request,
+    job_id: str,
+    delete_outputs: bool = Query(False, alias="deleteOutputs"),
+) -> dict:
+    try:
+        return response(
+            services(request).jobs.purge(job_id, delete_outputs=delete_outputs)
+        )
     except KeyError:
         raise HTTPException(404, "job not found")
     except ValueError as exc:

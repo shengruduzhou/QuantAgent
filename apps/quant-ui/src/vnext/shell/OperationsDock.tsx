@@ -11,8 +11,8 @@ import {
   WarningCircle,
   XCircle,
 } from "@phosphor-icons/react";
-import { apiPost } from "../../api/client";
-import type { JobSummary, SystemOverview } from "../../api/types";
+import { apiDelete, apiPost } from "../../api/client";
+import type { JobSummary, SystemOverview, SystemResources } from "../../api/types";
 import { useApi } from "../../hooks/useApi";
 import type { JobEventStreamState } from "../../hooks/useJobEvents";
 import { formatBytes, formatDate } from "../../utils/format";
@@ -45,6 +45,7 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
   const [cancelError, setCancelError] = useState("");
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0];
   const logs = useApi<string[]>(["vnext-job-logs", selectedJob?.id], open && tab === "logs" && selectedJob ? `/jobs/${selectedJob.id}/logs` : null, { limit: 600 }, { refetchInterval: selectedJob && ["queued", "running"].includes(selectedJob.status) ? 2_000 : false });
+  const resources = useApi<SystemResources>(["vnext-system-resources"], open && tab === "resources" ? "/system/resources" : null, undefined, { refetchInterval: 1_000 });
   const activeCount = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status)).length;
   const failedJobs = jobs.filter((job) => job.status === "failed");
   const riskEventCount = Object.values(overview?.risk.eventCounts ?? {}).reduce((sum, count) => sum + count, 0);
@@ -63,6 +64,24 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
     } catch (error) {
       setCancelError(error instanceof Error ? error.message : "Cancel failed");
     }
+  };
+
+  const purgeJob = async (job: JobSummary): Promise<void> => {
+    setCancelError("");
+    try {
+      await apiDelete(`/jobs/${job.id}?deleteOutputs=true`);
+      if (selectedJobId === job.id) setSelectedJobId("");
+      await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : "Stop and purge failed");
+    }
+  };
+
+  const commandLabel = (commandId: string): string => {
+    if (commandId === "run-full-real-training-v7") return "V7 Strategy Pipeline";
+    if (commandId === "train-v8-deep") return "V8 Deep GPU Model";
+    if (commandId === "evaluate-factor-library-v7") return "All-factor Evaluation";
+    return commandId;
   };
 
   const beginResize = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -105,11 +124,14 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
                 <div key={job.id} className={`vnext-task-row ${job.id === selectedJob?.id ? "active" : ""}`}>
                   <button type="button" className="vnext-task-main" onClick={() => setSelectedJobId(job.id)} onDoubleClick={() => openPath(`/training?job=${job.id}`)}>
                     <span className={`vnext-job-state state-${job.status}`} />
-                    <span><strong>{job.commandId}</strong><small>{job.id} · {formatDate(job.createdAt)}</small></span>
+                    <span><strong>{commandLabel(job.commandId)}</strong><small>{job.commandId} · {job.id} · {formatDate(job.createdAt)}</small></span>
                     <em>{job.progress === null || job.progress === undefined ? "—" : `${Math.round(job.progress * 100)}%`}</em>
                     <b>{job.status}</b>
                   </button>
-                  {["queued", "running", "cancelling"].includes(job.status) ? <button type="button" className="vnext-cancel-job" onClick={() => void cancelJob(job)}><XCircle size={14} /> Cancel</button> : <span />}
+                  <div className="vnext-task-actions">
+                    {["queued", "running", "cancelling"].includes(job.status) ? <button type="button" className="vnext-cancel-job" onClick={() => void cancelJob(job)}><XCircle size={14} />停止</button> : null}
+                    <button type="button" className="vnext-purge-job" onClick={() => void purgeJob(job)}><XCircle size={14} />{["queued", "running", "cancelling"].includes(job.status) ? "停止并清除" : "清除"}</button>
+                  </div>
                 </div>
               )) : <p className="vnext-dock-empty">没有持久化任务。任务状态不会由前端模拟。</p>}
               {cancelError ? <p className="vnext-dock-error">{cancelError}</p> : null}
@@ -135,11 +157,21 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
 
           {tab === "resources" ? (
             <div className="vnext-resource-grid">
+              <span><small>CPU</small><strong>{resources.data?.data.cpuPercent == null ? "UNAVAILABLE" : `${resources.data.data.cpuPercent.toFixed(0)}%`}</strong></span>
+              <span><small>RAM</small><strong>{resources.data?.data.memoryPercent == null ? "UNAVAILABLE" : `${resources.data.data.memoryPercent.toFixed(0)}%`}</strong></span>
               <span><small>Runtime size</small><strong>{formatBytes(overview?.runtime.totalSizeBytes)}</strong></span>
               <span><small>Artifacts</small><strong>{overview?.runtime.artifactCount?.toLocaleString() ?? "—"}</strong></span>
               <span><small>Runs</small><strong>{overview?.runtime.runCount ?? "—"}</strong></span>
               <span><small>Manifest coverage</small><strong>{overview?.runtime.manifestCoverage === undefined ? "UNAVAILABLE" : `${Math.round(overview.runtime.manifestCoverage * 100)}%`}</strong></span>
-              <p>GPU/CPU/RAM telemetry is not exposed by the current API and is intentionally marked unavailable.</p>
+              {(resources.data?.data.gpus ?? []).map((gpu) => (
+                <span className="vnext-gpu-card" key={gpu.index}>
+                  <small>GPU {gpu.index} · {gpu.name}</small>
+                  <strong>{gpu.utilizationPercent == null ? "—" : `${gpu.utilizationPercent.toFixed(0)}%`}</strong>
+                  <i><b style={{ width: `${Math.max(0, Math.min(100, gpu.utilizationPercent ?? 0))}%` }} /></i>
+                  <em>{gpu.memoryUsedMiB ?? "—"} / {gpu.memoryTotalMiB ?? "—"} MiB · {gpu.temperatureC ?? "—"}°C</em>
+                </span>
+              ))}
+              {!resources.data?.data.gpus.length ? <p>GPU telemetry unavailable. GPU-required training will fail closed; use the tmux 0.1s NVIDIA monitor for high-frequency inspection.</p> : null}
             </div>
           ) : null}
         </div>

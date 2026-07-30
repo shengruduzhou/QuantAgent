@@ -367,7 +367,7 @@
   margin: 0;
   padding: 16px;
   overflow: auto;
-  color: #9fd8c5;
+  color: var(--vnx-success);
   font: 10px/17px var(--vnx-font-mono);
   white-space: pre-wrap;
 }

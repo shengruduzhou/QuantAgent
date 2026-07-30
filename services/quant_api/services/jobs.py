@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from threading import RLock, Thread
@@ -32,6 +33,7 @@ class JobRecord:
     outputPaths: list[str] = field(default_factory=list)
     error: str | None = None
     logPath: str | None = None
+    ownedOutputPaths: list[str] = field(default_factory=list)
 
 
 COMMANDS: dict[str, dict[str, Any]] = {
@@ -138,6 +140,24 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "conditional_controls": {"allow_network": "use_llm"},
         "credential_providers": {"openai"},
     },
+    "evaluate-factor-library-v7": {
+        "type": "factor-evaluation",
+        "entrypoint": "scripts/evaluate_factor_library_v7.py",
+        "required": {"market_panel_path", "labels_path", "output_dir"},
+        "allowed": {
+            "market_panel_path", "labels_path", "output_dir", "factor_library",
+            "horizon_days", "calibration_days", "holdout_days",
+            "min_finite_ratio", "min_abs_rank_ic", "min_abs_rank_icir",
+            "min_abs_monotonicity", "max_pairwise_correlation",
+        },
+        "path_inputs": {"market_panel_path", "labels_path"},
+        "path_outputs": {"output_dir"},
+        "choices": {
+            "factor_library": {
+                "all_reviewed", "basic", "alpha101", "alpha181", "cicc_ashare80",
+            },
+        },
+    },
     "predict-alpha-v7": {
         "type": "infer",
         "required": {"model_dir", "feature_dataset", "output"},
@@ -184,16 +204,23 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "required": {"market_panel_path", "labels_path", "output_dir"},
         "allowed": {
             "market_panel_path", "labels_path", "output_dir", "sector_map_path",
+            "fundamentals_root", "valuation_path", "disclosures_path",
             "training_dataset_path", "synthesized_factors_path", "factor_library",
             "model", "horizons", "primary_horizon", "split_mode", "n_splits",
             "require_gpu", "top_k", "max_weight_per_name", "max_sector_weight",
             "max_turnover", "objective", "weighting", "initial_cash",
             "benchmark_symbol", "acceptance_max_drawdown",
-            "acceptance_min_sharpe",
+            "acceptance_min_sharpe", "top_k_candidates",
+            "stock_selection_modes", "fundamental_selection_threshold",
+            "factor_screening_mode", "objective_excess_weight",
+            "objective_annual_weight", "objective_drawdown_weight",
+            "do_t_mode", "minute_panel_path",
         },
         "path_inputs": {
             "market_panel_path", "labels_path", "sector_map_path",
             "training_dataset_path", "synthesized_factors_path",
+            "fundamentals_root", "valuation_path", "disclosures_path",
+            "minute_panel_path",
         },
         "path_outputs": {"output_dir"},
         "option_aliases": {
@@ -202,15 +229,19 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "sector_map_path": "sector-map",
             "training_dataset_path": "training-dataset",
             "synthesized_factors_path": "synthesized-factors",
+            "valuation_path": "valuation",
+            "disclosures_path": "disclosures",
             "max_weight_per_name": "max-weight",
             "max_sector_weight": "max-sector",
         },
         "choices": {
-            "factor_library": {"basic", "alpha101", "alpha181", "cicc_ashare80"},
+            "factor_library": {"all_reviewed", "basic", "alpha101", "alpha181", "cicc_ashare80"},
             "model": {"ridge", "ft_transformer"},
             "split_mode": {"rolling", "expanding"},
             "objective": {"max_expected_alpha", "mean_variance", "min_variance"},
             "weighting": {"equal", "rank", "softmax"},
+            "factor_screening_mode": {"off", "evaluate_only", "pretrain"},
+            "do_t_mode": {"off", "intraday", "daily_swing", "both"},
         },
     },
     # ---- H-031 governed operational / full-universe data commands -----------
@@ -592,12 +623,18 @@ class JobManager:
         self._jobs: dict[str, JobRecord] = {}
         self._processes: dict[str, subprocess.Popen] = {}
         self._cancel_requested: set[str] = set()
+        self._purged: set[str] = set()
         self._load()
 
     def submit(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         spec, normalized = self._validate(job_type, command_id, parameters)
         job_id = f"job_{uuid4().hex[:16]}"
         log_path = self.settings.jobs_root / f"{job_id}.log"
+        declared_outputs = [
+            Path(str(normalized[key]))
+            for key in spec["path_outputs"]
+            if normalized.get(key) not in (None, "")
+        ]
         record = JobRecord(
             id=job_id,
             type=job_type,
@@ -606,6 +643,14 @@ class JobManager:
             createdAt=_now(),
             message="queued",
             logPath=project_relative(self.settings, log_path),
+            outputPaths=[
+                project_relative(self.settings, path) for path in declared_outputs
+            ],
+            ownedOutputPaths=[
+                project_relative(self.settings, path)
+                for path in declared_outputs
+                if not path.exists()
+            ],
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -627,6 +672,11 @@ class JobManager:
             warnings.append("Factor discovery writes research candidates only; registration and training remain separate human-gated steps")
             if parameters.get("use_llm"):
                 warnings.append("LLM network execution is armed for this research job")
+        if command_id == "evaluate-factor-library-v7":
+            warnings.extend([
+                "Every materialised factor is evaluated from PIT-labelled data; the registry is not mutated",
+                "Selection is frozen on an early calibration window; later dates remain an untouched holdout",
+            ])
         if command_id == "run-full-real-training-v7":
             warnings.extend([
                 "End-to-end strategy pipeline remains research/paper only; no live order route is enabled",
@@ -669,7 +719,8 @@ class JobManager:
         if missing:
             raise ValueError(f"missing required parameters: {sorted(missing)}")
         for key, choices in spec.get("choices", {}).items():
-            if parameters.get(key) not in choices:
+            value = parameters.get(key)
+            if value is not None and value not in choices:
                 raise ValueError(f"{key} must be one of {sorted(choices)}")
         conditional_controls = spec.get("conditional_controls", {})
         for control_key in spec.get("control", set()):
@@ -722,6 +773,57 @@ class JobManager:
             except OSError:
                 pass
         return public
+
+    def purge(self, job_id: str, *, delete_outputs: bool = False) -> dict[str, Any]:
+        """Stop a job and remove its operational trace and owned outputs."""
+
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                raise KeyError(job_id)
+            process = self._processes.pop(job_id, None)
+            owned_outputs = list(record.ownedOutputPaths)
+            self._cancel_requested.add(job_id)
+            self._purged.add(job_id)
+            self._jobs.pop(job_id, None)
+            self._persist()
+        if process is not None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except OSError:
+                pass
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        log_path = self.settings.jobs_root / f"{job_id}.log"
+        log_path.unlink(missing_ok=True)
+        removed_outputs: list[str] = []
+        output_errors: list[str] = []
+        if delete_outputs:
+            for value in owned_outputs:
+                try:
+                    path = safe_project_path(self.settings, value)
+                    runtime = self.settings.runtime_root.resolve()
+                    resolved = path.resolve()
+                    if resolved == runtime or runtime not in resolved.parents:
+                        raise ValueError("owned output is outside the bounded Runtime subtree")
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink(missing_ok=True)
+                    removed_outputs.append(value)
+                except (OSError, ValueError) as exc:
+                    output_errors.append(f"{value}: {exc}")
+        return {
+            "id": job_id,
+            "status": "purged",
+            "traceRemoved": True,
+            "outputsRemoved": bool(delete_outputs and not output_errors),
+            "removedOutputs": removed_outputs,
+            "outputErrors": output_errors,
+            "sharedOutputsPreserved": True,
+        }
 
     def logs(self, job_id: str, limit: int = 500) -> list[str]:
         with self._lock:
@@ -776,7 +878,8 @@ class JobManager:
         log_path: Path,
     ) -> None:
         with self._lock:
-            if job_id in self._cancel_requested or self._jobs[job_id].status == "cancelled":
+            record = self._jobs.get(job_id)
+            if record is None or job_id in self._cancel_requested or record.status == "cancelled":
                 return
         self._update(job_id, status="running", startedAt=_now(), progress=0.0, message="running")
         entrypoint = spec.get("entrypoint")
@@ -817,22 +920,28 @@ class JobManager:
             with log_path.open("w", encoding="utf-8") as handle:
                 handle.write(f"$ {' '.join(command)}\n")
                 handle.flush()
-                process = subprocess.Popen(
-                    command,
-                    cwd=self.settings.project_root,
-                    env=self._process_environment(spec),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
                 with self._lock:
+                    if job_id in self._purged or job_id not in self._jobs:
+                        return
+                    process = subprocess.Popen(
+                        command,
+                        cwd=self.settings.project_root,
+                        env=self._process_environment(spec),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
                     self._processes[job_id] = process
                     cancel_requested = job_id in self._cancel_requested
                 if cancel_requested:
                     process.terminate()
                 assert process.stdout is not None
                 for line in process.stdout:
+                    with self._lock:
+                        if job_id in self._purged:
+                            process.terminate()
+                            break
                     handle.write(line)
                     handle.flush()
                     progress = _progress_from_line(line)
@@ -846,6 +955,9 @@ class JobManager:
             with self._lock:
                 self._processes.pop(job_id, None)
                 cancelled = job_id in self._cancel_requested
+                purged = job_id in self._purged
+            if purged:
+                return
             outputs = [
                 project_relative(self.settings, value)
                 for key, value in parameters.items()
@@ -876,6 +988,9 @@ class JobManager:
             with self._lock:
                 self._processes.pop(job_id, None)
                 cancelled = job_id in self._cancel_requested
+                purged = job_id in self._purged
+            if purged:
+                return
             if cancelled:
                 self._update(job_id, status="cancelled", finishedAt=_now(), message="cancelled")
             else:
@@ -920,7 +1035,9 @@ class JobManager:
 
     def _update(self, job_id: str, **changes: Any) -> None:
         with self._lock:
-            record = self._jobs[job_id]
+            record = self._jobs.get(job_id)
+            if record is None or job_id in self._purged:
+                return
             for key, value in changes.items():
                 setattr(record, key, value)
             self._persist()
@@ -964,6 +1081,7 @@ class JobManager:
     def _public(record: JobRecord) -> dict[str, Any]:
         data = asdict(record)
         data.pop("logPath", None)
+        data.pop("ownedOutputPaths", None)
         return data
 
 

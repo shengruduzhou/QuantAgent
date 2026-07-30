@@ -69,6 +69,12 @@ interface FactorReview {
   liveExecution: false;
 }
 
+interface FactorCorrelation {
+  factors: string[];
+  matrix: Array<{ factor: string; values: Record<string, number | null> }>;
+  source?: string | null;
+}
+
 type UtilityFilter = "all" | "active" | "candidate" | "rejected" | "unevaluated";
 type UtilityClass = Exclude<UtilityFilter, "all">;
 type FactorView = "hypothesis" | "formula" | "validation" | "pipeline" | "correlation" | "lineage";
@@ -147,6 +153,11 @@ export function FactorCenterPage(): JSX.Element {
   const [discoveryError, setDiscoveryError] = useState("");
   const [discoveryArmed, setDiscoveryArmed] = useState(false);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [evaluationOpen, setEvaluationOpen] = useState(false);
+  const [evaluationConfig, setEvaluationConfig] = useState<JobLaunchPayload>(() => mutableTemplate("factor-evaluation"));
+  const [evaluationValidation, setEvaluationValidation] = useState<JobValidation | null>(null);
+  const [evaluationError, setEvaluationError] = useState("");
+  const [evaluationBusy, setEvaluationBusy] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState("");
@@ -158,6 +169,7 @@ export function FactorCenterPage(): JSX.Element {
   const detail = useApi<Factor>(["factor", selectedName], selectedName ? `/factors/${encodeURIComponent(selectedName)}` : null);
   const metricsQuery = useApi<FactorBacktest>(["factor-backtest", selectedName], selectedName ? `/factors/${encodeURIComponent(selectedName)}/backtest` : null);
   const reviewsQuery = useApi<FactorReview[]>(["factor-reviews", selectedName], selectedName ? `/factors/${encodeURIComponent(selectedName)}/reviews` : null);
+  const correlationQuery = useApi<FactorCorrelation>(["factor-correlation", ...compareIds], compareIds.length > 1 ? "/factors/correlation" : null, { names: compareIds.join(",") });
   const factor = detail.data?.data;
   const metrics = metricsQuery.data?.data;
   const reviews = Array.isArray(reviewsQuery.data?.data) ? reviewsQuery.data.data : [];
@@ -193,6 +205,7 @@ export function FactorCenterPage(): JSX.Element {
   const activeStage = workflow.find((stage) => stage.id === selectedStage) ?? workflow[0];
   const activeDiscoveryJobs = jobList.filter((job) => job.type === "factor-discovery" && ["queued", "running"].includes(job.status));
   const latestDiscoveryJob = jobList.find((job) => job.type === "factor-discovery");
+  const latestEvaluationJob = jobList.find((job) => job.type === "factor-evaluation");
 
   const icOption = useMemo<EChartsOption>(() => ({
     animationDuration: 240,
@@ -250,6 +263,39 @@ export function FactorCenterPage(): JSX.Element {
     }
   };
 
+  const setEvaluationParameter = (key: string, value: string | number): void => {
+    setEvaluationConfig((current) => ({ ...current, parameters: { ...current.parameters, [key]: value } }));
+    setEvaluationValidation(null);
+  };
+
+  const validateEvaluation = async (): Promise<void> => {
+    setEvaluationBusy(true);
+    setEvaluationError("");
+    try {
+      const result = await apiPost<JobValidation>("/jobs/factor-evaluation/validate", evaluationConfig);
+      setEvaluationValidation(result.data);
+    } catch (error) {
+      setEvaluationError(error instanceof Error ? error.message : "Factor evaluation validation failed");
+    } finally {
+      setEvaluationBusy(false);
+    }
+  };
+
+  const launchEvaluation = async (): Promise<void> => {
+    if (!evaluationValidation?.valid) return;
+    setEvaluationBusy(true);
+    setEvaluationError("");
+    try {
+      await apiPost<JobSummary>("/jobs/factor-evaluation", evaluationConfig);
+      await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
+      setEvaluationOpen(false);
+    } catch (error) {
+      setEvaluationError(error instanceof Error ? error.message : "Factor evaluation launch failed");
+    } finally {
+      setEvaluationBusy(false);
+    }
+  };
+
   const submitReview = async (action: FactorReview["action"]): Promise<void> => {
     if (!selectedName || reviewNote.trim().length < 3) {
       setReviewError("请先填写至少 3 个字符的复核说明。");
@@ -287,6 +333,7 @@ export function FactorCenterPage(): JSX.Element {
         context="research / paper only"
         actions={<>
           <button type="button" onClick={() => navigate("/runtime?view=cleanup")}><Broom size={14} />产物治理</button>
+          <button type="button" onClick={() => setEvaluationOpen(true)}><ChartLineUp size={14} />全因子评估</button>
           <button type="button" className="primary" onClick={() => setDiscoveryOpen(true)}><Sparkle size={14} />新建发现实验</button>
         </>}
       />
@@ -338,7 +385,7 @@ export function FactorCenterPage(): JSX.Element {
             {factor && activeView === "formula" ? <FormulaView factor={factor} /> : null}
             {factor && activeView === "validation" ? <ValidationView metrics={metrics} loading={metricsQuery.isLoading} icOption={icOption} decayOption={decayOption} /> : null}
             {factor && activeView === "pipeline" ? <PipelineView workflow={workflow} selectedStage={selectedStage} setSelectedStage={setSelectedStage} /> : null}
-            {factor && activeView === "correlation" ? <ComparisonView factor={factor} factors={list.filter((item) => compareIds.includes(item.name))} onOpenDiscovery={() => setDiscoveryOpen(true)} /> : null}
+            {factor && activeView === "correlation" ? <ComparisonView factor={factor} factors={list.filter((item) => compareIds.includes(item.name))} correlation={correlationQuery.data?.data} onOpenEvaluation={() => setEvaluationOpen(true)} /> : null}
             {factor && activeView === "lineage" ? <LineageView factor={factor} /> : null}
           </WorkbenchPanel>
 
@@ -394,6 +441,17 @@ export function FactorCenterPage(): JSX.Element {
         launch={() => void launchDiscovery()}
         close={() => setDiscoveryOpen(false)}
         activeJob={latestDiscoveryJob}
+      /> : null}
+      {evaluationOpen ? <EvaluationDrawer
+        config={evaluationConfig}
+        setParameter={setEvaluationParameter}
+        validation={evaluationValidation}
+        error={evaluationError}
+        busy={evaluationBusy}
+        validate={() => void validateEvaluation()}
+        launch={() => void launchEvaluation()}
+        close={() => setEvaluationOpen(false)}
+        activeJob={latestEvaluationJob}
       /> : null}
     </div>
   );
@@ -476,12 +534,15 @@ function PipelineView({ workflow, selectedStage, setSelectedStage, compact = fal
   </div>;
 }
 
-function ComparisonView({ factor, factors, onOpenDiscovery }: { factor: Factor; factors: Factor[]; onOpenDiscovery: () => void }): JSX.Element {
+function ComparisonView({ factor, factors, correlation, onOpenEvaluation }: { factor: Factor; factors: Factor[]; correlation?: FactorCorrelation; onOpenEvaluation: () => void }): JSX.Element {
   const rows = factors.length ? factors : [factor];
   return <div className="factor-comparison-view">
-    <TruthNotice tone="ai">比较篮最多 4 个候选。当前 API 未持久化 pairwise correlation 时，界面明确显示缺口，不生成估算值。</TruthNotice>
-    <div className="factor-compare-table"><table><thead><tr><th>因子</th><th>来源</th><th>PIT</th><th>频率</th><th>Horizon</th><th>下游使用</th><th>相关性</th></tr></thead><tbody>{rows.map((item) => <tr key={item.name}><td><strong>{item.displayName ?? item.name}</strong><small>{item.category ?? "unclassified"}</small></td><td>{item.sourceKind}</td><td>{item.pitSafe === true ? "通过" : item.pitSafe === false ? "失败" : "待审计"}</td><td>{item.frequency ?? "—"}</td><td>{item.horizonDays ? `${item.horizonDays}D` : "—"}</td><td>{[item.usedInTraining && "train", item.usedInSelection && "selection", item.usedInRisk && "risk"].filter(Boolean).join(" · ") || "none"}</td><td>artifact 缺失</td></tr>)}</tbody></table></div>
-    <ActionableState compact title="相关性矩阵尚未持久化" detail="运行发现评估会检查 max_reference_correlation / max_sota_correlation；结果写入 artifact 后再可视化。" icon={Scales} primary={{ label: "配置发现评估", onClick: onOpenDiscovery }} />
+    <TruthNotice tone="ai">比较篮最多 4 个候选。相关性只读取全因子评估持久化的校准期矩阵，不在浏览器估算，也不使用最终 holdout 调参。</TruthNotice>
+    <div className="factor-compare-table"><table><thead><tr><th>因子</th><th>来源</th><th>PIT</th><th>频率</th><th>Horizon</th><th>下游使用</th>{rows.map((item) => <th key={item.name}>{item.name}</th>)}</tr></thead><tbody>{rows.map((item) => {
+      const matrixRow = correlation?.matrix.find((entry) => entry.factor === item.name);
+      return <tr key={item.name}><td><strong>{item.displayName ?? item.name}</strong><small>{item.category ?? "unclassified"}</small></td><td>{item.sourceKind}</td><td>{item.pitSafe === true ? "通过" : item.pitSafe === false ? "失败" : "待审计"}</td><td>{item.frequency ?? "—"}</td><td>{item.horizonDays ? `${item.horizonDays}D` : "—"}</td><td>{[item.usedInTraining && "train", item.usedInSelection && "selection", item.usedInRisk && "risk"].filter(Boolean).join(" · ") || "none"}</td>{rows.map((column) => <td key={column.name}>{column.name === item.name ? "1.000" : matrixRow?.values[column.name] == null ? "—" : Number(matrixRow.values[column.name]).toFixed(3)}</td>)}</tr>;
+    })}</tbody></table></div>
+    {!correlation?.matrix.length ? <ActionableState compact title="相关性矩阵尚未持久化" detail="运行全因子评估，系统会输出覆盖率、RankIC、ICIR、单调性和去冗余矩阵。" icon={Scales} primary={{ label: "配置全因子评估", onClick: onOpenEvaluation }} /> : <TruthNotice>来源：{correlation.source}</TruthNotice>}
   </div>;
 }
 
@@ -527,6 +588,31 @@ function DiscoveryDrawer({ config, setParameter, validation, error, busy, armed,
     {error ? <div className="factor-discovery-error"><WarningCircle size={17} /><span>{error}</span></div> : null}
     <label className="factor-arm"><input type="checkbox" checked={armed} disabled={!validation?.valid} onChange={(event) => setArmed(event.target.checked)} /><span><strong>Arm research launch</strong><small>仅生成研究候选；不会注册、训练或下单。</small></span></label>
     <footer><button type="button" onClick={close}>取消</button><button type="button" onClick={validate} disabled={busy}><ShieldCheck size={14} />{busy ? "校验中…" : "验证配置"}</button><button type="button" className="primary" onClick={launch} disabled={busy || !validation?.valid || !armed}><Play size={14} weight="fill" />启动发现任务</button></footer>
+  </aside></div>;
+}
+
+function EvaluationDrawer({ config, setParameter, validation, error, busy, validate, launch, close, activeJob }: { config: JobLaunchPayload; setParameter: (key: string, value: string | number) => void; validation: JobValidation | null; error: string; busy: boolean; validate: () => void; launch: () => void; close: () => void; activeJob?: JobSummary }): JSX.Element {
+  const params = config.parameters;
+  return <div className="factor-discovery-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><aside className="factor-discovery-drawer" role="dialog" aria-modal="true" aria-label="全因子评估配置">
+    <header><div><span>ALL-FACTOR SCREENING / CALIBRATION → HOLDOUT</span><h2>全因子实验评估</h2><p>合并 Alpha101、Alpha181、CICC A-share 80 与基础因子；先评估，再按 Gate 去冗余，最终 holdout 不参与配置。</p></div><button type="button" aria-label="关闭全因子评估配置" onClick={close}><X size={16} /></button></header>
+    {activeJob && ["queued", "running"].includes(activeJob.status) ? <div className="factor-active-job"><ChartLineUp size={17} /><span><strong>{activeJob.commandId}</strong><small>{activeJob.id} · {activeJob.status} · {activeJob.progress == null ? "progress unavailable" : `${Math.round(activeJob.progress * 100)}%`}</small></span></div> : null}
+    <section className="factor-discovery-form">
+      <label className="wide"><span>Market panel</span><input value={String(params.market_panel_path ?? "")} onChange={(event) => setParameter("market_panel_path", event.target.value)} /></label>
+      <label className="wide"><span>Labels</span><input value={String(params.labels_path ?? "")} onChange={(event) => setParameter("labels_path", event.target.value)} /></label>
+      <label className="wide"><span>Output directory</span><input value={String(params.output_dir ?? "")} onChange={(event) => setParameter("output_dir", event.target.value)} /></label>
+      <label><span>因子集合</span><select value={String(params.factor_library ?? "all_reviewed")} onChange={(event) => setParameter("factor_library", event.target.value)}><option value="all_reviewed">全混合 · 全部已审查</option><option value="alpha181">Alpha181 对照</option><option value="alpha101">Alpha101 对照</option><option value="cicc_ashare80">CICC A-share 80 对照</option><option value="basic">Basic 对照</option></select></label>
+      <label><span>校准交易日</span><input type="number" min="60" max="2000" step="20" value={Number(params.calibration_days ?? 252)} onChange={(event) => setParameter("calibration_days", Number(event.target.value))} /></label>
+      <label><span>最终 holdout 日</span><input type="number" min="20" max="500" step="10" value={Number(params.holdout_days ?? 60)} onChange={(event) => setParameter("holdout_days", Number(event.target.value))} /></label>
+      <label><span>最低 |RankIC|</span><input type="number" min="0" max=".3" step=".005" value={Number(params.min_abs_rank_ic ?? .01)} onChange={(event) => setParameter("min_abs_rank_ic", Number(event.target.value))} /></label>
+      <label><span>最低 |ICIR|</span><input type="number" min="0" max="5" step=".05" value={Number(params.min_abs_rank_icir ?? .25)} onChange={(event) => setParameter("min_abs_rank_icir", Number(event.target.value))} /></label>
+      <label><span>最低覆盖率</span><input type="number" min=".1" max="1" step=".05" value={Number(params.min_finite_ratio ?? .8)} onChange={(event) => setParameter("min_finite_ratio", Number(event.target.value))} /></label>
+      <label><span>最大因子相关性</span><input type="number" min=".3" max=".99" step=".01" value={Number(params.max_pairwise_correlation ?? .85)} onChange={(event) => setParameter("max_pairwise_correlation", Number(event.target.value))} /></label>
+    </section>
+    <section className="factor-discovery-flow"><span><Stack size={14} />全部因子</span><FlowArrow size={14} /><span><ChartLineUp size={14} />RankIC / ICIR</span><FlowArrow size={14} /><span><Scales size={14} />相关去冗余</span><FlowArrow size={14} /><span><ShieldCheck size={14} />Holdout</span></section>
+    {validation ? <div className="factor-validation-result"><CheckCircle size={17} /><span><strong>后端验证通过</strong><small>{validation.entrypoint} · {validation.outputPaths.join(", ")}</small>{validation.warnings.map((warning) => <em key={warning}>{warning}</em>)}</span></div> : null}
+    {error ? <div className="factor-discovery-error"><WarningCircle size={17} /><span>{error}</span></div> : null}
+    <TruthNotice tone="warning">评估结果只生成研究候选与拒绝原因；不会自动注册、训练或下单。</TruthNotice>
+    <footer><button type="button" onClick={close}>取消</button><button type="button" onClick={validate} disabled={busy}><ShieldCheck size={14} />{busy ? "校验中…" : "验证配置"}</button><button type="button" className="primary" onClick={launch} disabled={busy || !validation?.valid}><Play size={14} weight="fill" />启动全因子评估</button></footer>
   </aside></div>;
 }
 

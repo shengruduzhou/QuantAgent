@@ -42,25 +42,34 @@ const DEFAULT_DRAFT: StrategyDraft = {
   invalidationCriteria: "任一 OOS Gate 失败、最大回撤超过 15%、Sharpe 低于 1.0，或因子相关性/漂移证据失效时，停止晋级并重新研究。",
   marketPanelPath: "runtime/data/gold/full_universe/adjusted_market_panel.parquet",
   labelsPath: "runtime/data/gold/full_universe/labels.parquet",
+  fundamentalsRoot: "",
+  valuationPath: "",
+  disclosuresPath: "",
   sectorMapPath: "",
   trainingDatasetPath: "",
   synthesizedFactorsPath: "",
   outputDir: "runtime/reports/strategy_studio/a_share_multi_factor",
-  factorLibrary: "alpha181",
-  model: "ridge",
+  factorLibrary: "all_reviewed",
+  model: "ft_transformer",
   horizons: "1,5,20,60,120",
   primaryHorizon: 5,
   splitMode: "rolling",
   nSplits: 4,
-  requireGpu: false,
+  requireGpu: true,
   topK: 30,
+  topKCandidates: [10, 20, 30, 50, 80],
+  stockSelectionModes: ["none", "fundamental"],
+  fundamentalSelectionThreshold: 0.5,
+  factorScreeningMode: "pretrain",
+  doTMode: "daily_swing",
+  minutePanelPath: "",
   maxWeightPerName: 0.08,
   maxSectorWeight: 0.30,
   maxTurnover: 0.50,
   objective: "max_expected_alpha",
   weighting: "rank",
   initialCash: 1_000_000,
-  benchmarkSymbol: "",
+  benchmarkSymbol: "000300.SH",
   objectiveWeights: { excessReturn: 0.45, annualReturn: 0.30, drawdownControl: 0.25 },
   riskLimits: { maxDrawdown: 0.15, maxTurnover: 0.50, minSharpe: 1.0 },
   humanApproved: false,
@@ -181,6 +190,9 @@ export function StrategyStudioPage(): JSX.Element {
       labelsPath: selected.labelsPath ?? current.labelsPath,
       trainingDatasetPath: selected.trainingDatasetPath ?? current.trainingDatasetPath,
       sectorMapPath: selected.sectorMapPath ?? current.sectorMapPath,
+      fundamentalsRoot: selected.fundamentalsRoot ?? current.fundamentalsRoot,
+      valuationPath: selected.valuationPath ?? current.valuationPath,
+      disclosuresPath: selected.disclosuresPath ?? current.disclosuresPath,
     }));
     setValidation(null);
     setSaved(null);
@@ -238,9 +250,9 @@ export function StrategyStudioPage(): JSX.Element {
       />
       <WorkbenchMetricStrip metrics={[
         { label: "因子库", value: draft.factorLibrary.toUpperCase(), detail: draft.synthesizedFactorsPath ? "含审核后的合成因子" : "native reviewed library", tone: "ai", icon: Graph },
-        { label: "模型", value: draft.model === "ft_transformer" ? "FT-T" : "RIDGE", detail: `${draft.nSplits} folds · ${draft.splitMode}`, tone: "info", icon: Brain },
+        { label: "模型", value: draft.model === "ft_transformer" ? "V8 DEEP GPU" : "V7 CLASSICAL", detail: `${draft.nSplits} folds · ${draft.splitMode}`, tone: "info", icon: Brain },
         { label: "主周期", value: `${draft.primaryHorizon}D`, detail: draft.horizons, tone: "info", icon: ArrowsClockwise },
-        { label: "持仓", value: String(draft.topK), detail: `单票 ≤ ${(draft.maxWeightPerName * 100).toFixed(0)}%`, tone: "positive", icon: Target },
+        { label: "持仓搜索", value: `${draft.topKCandidates.length} 组`, detail: draft.topKCandidates.join(" / "), tone: "positive", icon: Target },
         { label: "回撤 Gate", value: `≤ ${(draft.riskLimits.maxDrawdown * 100).toFixed(0)}%`, detail: `Sharpe ≥ ${draft.riskLimits.minSharpe.toFixed(1)}`, tone: "warning", icon: ShieldCheck },
         { label: "运行状态", value: job?.status.toUpperCase() ?? "DRAFT", detail: job?.id ?? saved?.version ?? "not persisted", tone: job?.status === "failed" ? "danger" : running ? "ai" : "neutral", icon: Lightning },
       ]} />
@@ -256,19 +268,38 @@ export function StrategyStudioPage(): JSX.Element {
             <Field label="失效条件" wide><textarea value={draft.invalidationCriteria} onChange={(event) => update("invalidationCriteria", event.target.value)} /></Field>
             <Field label="Market panel" wide><input className="mono" value={draft.marketPanelPath} onChange={(event) => update("marketPanelPath", event.target.value)} /></Field>
             <Field label="Labels" wide><input className="mono" value={draft.labelsPath} onChange={(event) => update("labelsPath", event.target.value)} /></Field>
+            <Field label="基本面 PIT 根目录" wide><input className="mono" value={draft.fundamentalsRoot ?? ""} onChange={(event) => update("fundamentalsRoot", event.target.value)} /></Field>
+            <Field label="估值 PIT" wide><input className="mono" value={draft.valuationPath ?? ""} onChange={(event) => update("valuationPath", event.target.value)} /></Field>
+            <Field label="披露日 PIT" wide><input className="mono" value={draft.disclosuresPath ?? ""} onChange={(event) => update("disclosuresPath", event.target.value)} /></Field>
             <Field label="模型">
               <select value={draft.model} onChange={(event) => update("model", event.target.value as StrategyDraft["model"])}>
-                <option value="ridge">Ridge baseline</option><option value="ft_transformer">FT-Transformer</option>
+                <option value="ft_transformer">V8 Deep GPU Model · FT-Transformer</option><option value="ridge">V7 Classical Baseline · Ridge</option>
               </select>
             </Field>
             <Field label="因子库">
               <select value={draft.factorLibrary} onChange={(event) => update("factorLibrary", event.target.value as StrategyDraft["factorLibrary"])}>
-                <option value="alpha181">Alpha181</option><option value="alpha101">Alpha101</option><option value="cicc_ashare80">CICC A-share 80</option><option value="basic">Basic</option>
+                <option value="all_reviewed">全混合 · 全部已审查因子</option><option value="alpha181">Alpha181</option><option value="alpha101">Alpha101</option><option value="cicc_ashare80">CICC A-share 80</option><option value="basic">Basic</option>
               </select>
             </Field>
             <Field label="Horizon"><input value={draft.horizons} onChange={(event) => update("horizons", event.target.value)} /></Field>
             <Field label="主周期"><input type="number" min={1} max={252} value={draft.primaryHorizon} onChange={(event) => update("primaryHorizon", Number(event.target.value))} /></Field>
             <Field label="Top K"><input type="number" min={5} max={500} value={draft.topK} onChange={(event) => update("topK", Number(event.target.value))} /></Field>
+            <Field label="Top K 候选（逗号分隔）" wide><input value={draft.topKCandidates.join(",")} onChange={(event) => update("topKCandidates", event.target.value.split(",").map(Number).filter((value) => Number.isFinite(value) && value > 0))} /></Field>
+            <Field label="选股实验">
+              <select value={draft.stockSelectionModes.includes("fundamental") ? "both" : "none"} onChange={(event) => update("stockSelectionModes", event.target.value === "both" ? ["none", "fundamental"] : ["none"])}>
+                <option value="both">无预筛选 vs 基本面选股</option><option value="none">仅无预筛选基线</option>
+              </select>
+            </Field>
+            <Field label="基本面入围分位"><input type="number" step="0.05" min="0.05" max="1" value={draft.fundamentalSelectionThreshold} onChange={(event) => update("fundamentalSelectionThreshold", Number(event.target.value))} /></Field>
+            <Field label="因子筛选">
+              <select value={draft.factorScreeningMode} onChange={(event) => update("factorScreeningMode", event.target.value as StrategyDraft["factorScreeningMode"])}><option value="pretrain">训练前实验筛选</option><option value="off">关闭（仅作对照）</option></select>
+            </Field>
+            <Field label="T+1 做T模式">
+              <select value={draft.doTMode} onChange={(event) => update("doTMode", event.target.value as StrategyDraft["doTMode"])}><option value="daily_swing">日线波段做T</option><option value="intraday">分钟级做T（需要分钟数据）</option><option value="off">关闭对照</option></select>
+            </Field>
+            <Field label="分钟数据路径" wide><input className="mono" value={draft.minutePanelPath ?? ""} onChange={(event) => update("minutePanelPath", event.target.value)} disabled={draft.doTMode !== "intraday"} /></Field>
+            <Field label="训练设备"><select value={draft.requireGpu ? "required" : "optional"} onChange={(event) => update("requireGpu", event.target.value === "required")}><option value="required">强制 GPU（缺失即失败）</option><option value="optional">允许 CPU（仅对照）</option></select></Field>
+            <Field label="基准指数"><input value={draft.benchmarkSymbol ?? ""} onChange={(event) => update("benchmarkSymbol", event.target.value)} /></Field>
             <Field label="组合目标">
               <select value={draft.objective} onChange={(event) => update("objective", event.target.value as StrategyDraft["objective"])}>
                 <option value="max_expected_alpha">最大预期 Alpha</option><option value="mean_variance">均值-方差</option><option value="min_variance">最小方差</option>
@@ -289,7 +320,7 @@ export function StrategyStudioPage(): JSX.Element {
           <ObjectiveSlider label="最大超额" value={draft.objectiveWeights.excessReturn} onChange={(value) => updateObjective("excessReturn", value)} />
           <ObjectiveSlider label="最大年化" value={draft.objectiveWeights.annualReturn} onChange={(value) => updateObjective("annualReturn", value)} />
           <ObjectiveSlider label="最小回撤" value={draft.objectiveWeights.drawdownControl} onChange={(value) => updateObjective("drawdownControl", value)} />
-          <TruthNotice>权重只决定研究排序；真实结果必须来自隔离的滚动 OOS、成本后回测与风控证据。</TruthNotice>
+          <TruthNotice>三项目标通常冲突，不能承诺全部“拉满”。系统会在早期 OOS 上生成 Pareto 前沿，再用完全隔离的后段 holdout 验证候选；权重仅用于前沿内排序。</TruthNotice>
         </WorkbenchPanel>
 
         <WorkbenchPanel eyebrow="PIPELINE CONTROL" title="训练—回测—风控闭环" meta={stream.connected ? "SSE connected" : job ? "stream reconnectable" : "waiting for launch"} className="strategy-pipeline-panel">

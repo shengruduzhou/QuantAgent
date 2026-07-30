@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import csv
 from datetime import datetime, timezone
 import inspect
 import json
@@ -32,6 +33,48 @@ class FactorAdapter:
                 or needle in str(item.get("category") or "").lower()
             ]
         return sorted(catalog, key=lambda item: item["name"])
+
+    def invalidate(self) -> None:
+        self._catalog = None
+        self._metrics = None
+
+    def correlation(self, names: list[str]) -> dict[str, Any]:
+        selected = list(dict.fromkeys(name for name in names if name))[:4]
+        roots = (
+            self.settings.runtime_root / "reports" / "factor_evaluation",
+            self.settings.runtime_root / "reports" / "strategy_studio",
+        )
+        paths = [
+            path
+            for root in roots
+            if root.exists()
+            for path in root.glob("**/factor_correlation.csv")
+        ]
+        if not paths:
+            return {"factors": selected, "matrix": [], "source": None}
+        source = max(paths, key=lambda item: item.stat().st_mtime)
+        with source.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        matrix: list[dict[str, object]] = []
+        for row in rows:
+            factor = str(
+                row.get("factor_name")
+                or row.get("")
+                or next(iter(row.values()), "")
+            )
+            if selected and factor not in selected:
+                continue
+            values = {
+                name: _float(row.get(name))
+                for name in (selected or [key for key in row if key])
+                if name != factor
+            }
+            matrix.append({"factor": factor, "values": values})
+        return {
+            "factors": selected,
+            "matrix": matrix,
+            "source": str(source.relative_to(self.settings.project_root)),
+        }
 
     def get(self, name: str) -> dict[str, Any] | None:
         return self._build_catalog().get(name)
@@ -316,6 +359,27 @@ class FactorAdapter:
             name = str(row.get("factor") or "")
             if name:
                 self._metrics.setdefault(name, {}).update({key: value for key, value in row.items() if value not in (None, "")})
+        evaluation_roots = (
+            self.settings.runtime_root / "reports" / "factor_evaluation",
+            self.settings.runtime_root / "reports" / "strategy_studio",
+        )
+        for root in evaluation_roots:
+            if not root.exists():
+                continue
+            for path in root.glob("**/factor_summary.csv"):
+                for row in read_csv_rows(path):
+                    name = str(row.get("factor_name") or "")
+                    if not name:
+                        continue
+                    normalized = dict(row)
+                    normalized.setdefault("rank_ic_5d", row.get("rank_ic"))
+                    normalized.setdefault("ic_5d", row.get("ic"))
+                    normalized.setdefault("icir_5d", row.get("rank_icir"))
+                    normalized["verdict"] = (
+                        "validated" if str(row.get("selected")).lower() == "true"
+                        else "rejected"
+                    )
+                    self._metrics.setdefault(name, {}).update(normalized)
         return self._metrics
 
     def _merge_synthesized(
