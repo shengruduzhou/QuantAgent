@@ -149,9 +149,20 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     label_end_columns = [c for c in labels.columns if c.startswith("label_end_")]
     if not label_columns:
         raise ValueError("labels frame is missing forward_return_* columns; rerun build-labels-v7")
-    desired_horizons = tuple(h for h in config.horizons if f"forward_return_{h}d" in labels.columns) or tuple(
-        int(c.split("_")[2].rstrip("d")) for c in label_columns
-    )
+    missing_horizons = [
+        int(horizon)
+        for horizon in config.horizons
+        if f"forward_return_{int(horizon)}d" not in labels.columns
+    ]
+    if missing_horizons:
+        missing_columns = ", ".join(
+            f"forward_return_{horizon}d" for horizon in missing_horizons
+        )
+        raise ValueError(
+            "labels frame is missing requested horizon columns: "
+            f"{missing_columns}; rebuild labels or change the requested horizons"
+        )
+    desired_horizons = tuple(int(horizon) for horizon in config.horizons)
     label_keep = ["symbol", "trade_date", *[f"forward_return_{h}d" for h in desired_horizons]]
     label_keep.extend(c for c in label_end_columns if c in labels.columns)
     labels_subset = labels[[c for c in label_keep if c in labels.columns]].copy()

@@ -9,6 +9,7 @@ import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
+import { useVNextChartPalette } from "../vnext/theme";
 
 interface DoTSource {
   id: string;
@@ -65,6 +66,7 @@ interface DoTAnalysis {
 
 export function TPlusOnePage(): JSX.Element {
   const navigate = useNavigate();
+  const chartPalette = useVNextChartPalette();
   const sources = useApi<DoTSource[]>(["t1-sources"], "/do-t/sources");
   const [sourceId, setSourceId] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -94,17 +96,17 @@ export function TPlusOnePage(): JSX.Element {
   const waterfall = useMemo<EChartsOption>(() => ({
     animation: false,
     grid: { left: 52, right: 16, top: 20, bottom: 50 },
-    tooltip: { trigger: "axis", backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
+    tooltip: { trigger: "axis", backgroundColor: chartPalette.tooltip, borderColor: chartPalette.tooltipBorder, textStyle: { color: chartPalette.tooltipText } },
     xAxis: {
       type: "category",
       data: (data?.pairs ?? []).slice(0, 80).map((pair) => `${pair.tradeDate?.slice(5, 10)} ${pair.symbol.slice(0, 6)}`),
-      axisLabel: { color: "#71879a", fontSize: 9, hideOverlap: true, formatter: (value: string) => value.slice(0, 5) },
-      axisLine: { lineStyle: { color: "#20364a" } },
+      axisLabel: { color: chartPalette.text, fontSize: 10, hideOverlap: true, formatter: (value: string) => value.slice(0, 5) },
+      axisLine: { lineStyle: { color: chartPalette.axis } },
     },
     yAxis: {
       type: "value",
-      axisLabel: { color: "#71879a", fontSize: 10 },
-      splitLine: { lineStyle: { color: "#14283a" } },
+      axisLabel: { color: chartPalette.text, fontSize: 10 },
+      splitLine: { lineStyle: { color: chartPalette.grid } },
     },
     dataZoom: [
       { type: "inside", zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false, start: (data?.pairs.length ?? 0) > 40 ? 50 : 0, end: 100 },
@@ -114,11 +116,11 @@ export function TPlusOnePage(): JSX.Element {
       type: "bar",
       data: (data?.pairs ?? []).slice(0, 80).map((pair) => ({
         value: pair.netPnl ?? 0,
-        itemStyle: { color: (pair.netPnl ?? 0) >= 0 ? "#28c79a" : "#ef5c63" },
+        itemStyle: { color: (pair.netPnl ?? 0) >= 0 ? chartPalette.positive : chartPalette.negative },
       })),
       barMaxWidth: 12,
     }],
-  }), [data?.pairs]);
+  }), [chartPalette, data?.pairs]);
 
   if (sources.isLoading) return <StateView state="loading" />;
   if (!sources.data?.data.length) return <EmptyTPlusOneWorkspace navigate={navigate} />;

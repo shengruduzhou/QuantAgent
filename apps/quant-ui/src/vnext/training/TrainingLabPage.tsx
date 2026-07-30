@@ -133,14 +133,14 @@ export function TrainingLabPage(): JSX.Element {
 
   return (
     <div className="vnext-training-lab">
-      <header className="vnext-training-title"><div><span>TRAINING WORKSTATION</span><h1>Training Lab</h1><p>Schema-driven configuration · persisted Jobs · live metrics · logs · lineage</p></div><div><strong>{jobList.filter((job) => job.type === "train" && ["queued", "running"].includes(job.status)).length}</strong><span>active training runs</span></div></header>
+      <header className="vnext-training-title"><div><span>TRAINING WORKSTATION</span><h1>训练实验室</h1><p>结构化配置 · 持久任务 · 实时指标 · 日志 · 模型血缘</p></div><div><strong>{jobList.filter((job) => job.type === "train" && ["queued", "running"].includes(job.status)).length}</strong><span>活动训练任务</span></div></header>
       <div className="vnext-training-layout">
         <TrainingNavigator models={modelList} jobs={jobList} selectedModelId={selectedModelId} selectedJobId={selectedJobId} compareIds={compareIds} query={query} setQuery={setQuery} selectModel={setModel} selectJob={setJob} toggleCompare={toggleCompare} />
         <main>
           <TrainingComparison ids={compareIds} comparison={comparison.data?.data} loading={comparison.isLoading} clear={() => setCompareIds([])} />
           <section className={`vnext-config-inspector ${configExpanded ? "expanded" : "collapsed"}`}>
             <header>
-              <div><span>CONFIGURATION INSPECTOR</span><h2>train-v8-deep</h2></div>
+              <div><span>CONFIGURATION INSPECTOR</span><h2>V8 深度模型 · GPU <small>train-v8-deep</small></h2></div>
               <div className="vnext-config-header-actions">
                 {configExpanded ? <nav>{(["form", "yaml", "diff", "validation"] as ConfigView[]).map((item) => <button type="button" key={item} className={configView === item ? "active" : ""} onClick={() => setConfigView(item)}>{item}</button>)}</nav> : null}
                 <button type="button" className="vnext-config-toggle" aria-expanded={configExpanded} onClick={() => setConfigExpanded((current) => !current)}>
@@ -149,7 +149,7 @@ export function TrainingLabPage(): JSX.Element {
               </div>
             </header>
             {!configExpanded ? <div className="vnext-config-summary"><span><small>Dataset</small><strong>{shortPath(String(config.parameters.dataset_path ?? "UNAVAILABLE"))}</strong></span><span><small>Horizon</small><strong>{String(config.parameters.horizon_class ?? "UNAVAILABLE")}</strong></span><span><small>Epochs / batch</small><strong>{String(config.parameters.max_epochs ?? "—")} / {String(config.parameters.batch_size ?? "—")}</strong></span><span><small>Runtime</small><strong>{config.parameters.require_gpu ? "GPU REQUIRED" : "CPU ALLOWED"}</strong></span></div> : null}
-            {configExpanded && configView === "form" ? <div className="vnext-config-form">{configFields.map((field) => <label key={field.key}><span><small>{field.group}</small>{field.label}</span>{field.type === "boolean" ? <input type="checkbox" checked={Boolean(config.parameters[field.key])} onChange={(event) => setParameter(field.key, event.target.checked)} /> : <input type={field.type} value={String(config.parameters[field.key] ?? "")} onChange={(event) => setParameter(field.key, field.type === "number" ? Number(event.target.value) : event.target.value)} />}</label>)}</div> : null}
+            {configExpanded && configView === "form" ? <div className="vnext-config-form">{configFields.map((field) => <label key={field.key}><span><small>{field.group}</small>{field.label}</span>{field.type === "boolean" ? <input type="checkbox" checked={field.key === "require_gpu" ? true : Boolean(config.parameters[field.key])} disabled={field.key === "require_gpu"} aria-label={field.key === "require_gpu" ? "GPU required and locked" : field.label} onChange={(event) => setParameter(field.key, event.target.checked)} /> : <input type={field.type} value={String(config.parameters[field.key] ?? "")} onChange={(event) => setParameter(field.key, field.type === "number" ? Number(event.target.value) : event.target.value)} />}</label>)}</div> : null}
             {configExpanded && configView === "yaml" ? <pre className="vnext-config-code">{yaml}</pre> : null}
             {configExpanded && configView === "diff" ? <div className="vnext-config-diff"><p>Current draft is compared with the canonical `train-v8-deep` template.</p><pre>{diffTemplate(config)}</pre></div> : null}
             {configExpanded && configView === "validation" ? <div className={validation ? "vnext-config-validation passed" : "vnext-config-validation"}><strong>{validation ? "Backend validation passed" : validationError ? "Validation failed" : "Not validated"}</strong><p>{validation ? `${validation.entrypoint} · outputs: ${validation.outputPaths.join(", ") || "none"}` : validationError || "Validate checks command allowlist, required parameters, input existence and runtime output boundaries."}</p>{validation?.warnings.map((warning) => <small key={warning}>{warning}</small>)}</div> : null}

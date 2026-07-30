@@ -75,7 +75,7 @@ test("VNext dashboard separates decision states from the primary canvas", async 
   installFetchMock();
   renderApp("/");
 
-  expect(await screen.findByRole("heading", { name: "今日决策总览" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "今日决策总览" }, { timeout: 3_000 })).toBeInTheDocument();
   expect(screen.getByText("Portfolio State")).toBeInTheDocument();
   expect(screen.getByText("Model State")).toBeInTheDocument();
   expect(screen.getByText("Risk State")).toBeInTheDocument();
@@ -129,7 +129,7 @@ test("supports duplicate workspace instances and a real split pane", async () =>
 
   const rail = await screen.findByLabelText("QuantAgent 模块栏");
   fireEvent.click(within(rail).getByTitle("训练实验室 · Training Lab"));
-  expect(await screen.findByRole("heading", { name: "Training Lab" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "训练实验室" })).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "管理 训练实验室 标签" }));
   fireEvent.click(screen.getByRole("button", { name: /复制实例/ }));
@@ -138,6 +138,22 @@ test("supports duplicate workspace instances and a real split pane", async () =>
   fireEvent.click(screen.getAllByRole("button", { name: "管理 训练实验室 标签" })[0]);
   fireEvent.click(screen.getByRole("button", { name: /在右侧打开/ }));
   expect(await screen.findByLabelText(/训练实验室 分屏工作区/)).toBeInTheDocument();
+});
+
+test("control center reports API and connector unavailability truthfully", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    detail: "Quant API unavailable",
+  }), {
+    status: 503,
+    headers: { "Content-Type": "application/json" },
+  })));
+
+  renderApp("/settings?view=jobs");
+
+  expect(await screen.findByRole("heading", { name: "控制中心" })).toBeInTheDocument();
+  expect(screen.getByText("API unavailable")).toBeInTheDocument();
+  expect(await screen.findByText("连接器状态不可用")).toBeInTheDocument();
+  expect(screen.queryByText("API ready")).not.toBeInTheDocument();
 });
 
 test("renders explicit empty state without fabricated data", async () => {

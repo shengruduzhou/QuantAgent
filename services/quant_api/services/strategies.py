@@ -114,12 +114,14 @@ class StrategyService:
             "minutePanelPath": draft.minute_panel_path,
         }
         resolved_inputs: dict[str, str] = {}
+        resolved_paths: dict[str, Path] = {}
         for key, value in inputs.items():
             if not value:
                 continue
             try:
                 path = safe_project_path(self.settings, value)
                 resolved_inputs[key] = project_relative(self.settings, path)
+                resolved_paths[key] = path
                 if not path.exists():
                     if key in {"marketPanelPath", "labelsPath"} or (
                         key == "minutePanelPath" and draft.do_t_mode in {"intraday", "both"}
@@ -131,6 +133,30 @@ class StrategyService:
                         )
             except ValueError as exc:
                 errors.append(f"{key}: {exc}")
+        labels_path = resolved_paths.get("labelsPath")
+        if labels_path is not None and labels_path.exists():
+            try:
+                import pyarrow.dataset as parquet_dataset
+
+                label_columns = set(
+                    parquet_dataset.dataset(labels_path, format="parquet").schema.names
+                )
+            except Exception as exc:
+                errors.append(
+                    "labelsPath: unreadable Parquet schema; rebuild the label artifact "
+                    f"({type(exc).__name__})"
+                )
+            else:
+                requested = {
+                    f"forward_return_{int(value)}d"
+                    for value in draft.horizons.split(",")
+                }
+                missing = sorted(requested - label_columns)
+                if missing:
+                    errors.append(
+                        "labelsPath: missing requested horizon columns "
+                        f"{', '.join(missing)}; rebuild labels or remove those Horizons"
+                    )
         try:
             output = safe_project_path(self.settings, draft.output_dir)
             runtime = self.settings.runtime_root.resolve()
@@ -152,6 +178,25 @@ class StrategyService:
             warnings.append(
                 "Top-K 将逐候选执行同一成本后回测，再从 Pareto 前沿按研究偏好选冠军。"
             )
+        if (
+            draft.fundamental_selection_mode == "auto"
+            and "fundamental" in draft.stock_selection_modes
+        ):
+            candidate_count = len(set(draft.top_k_candidates)) * (
+                (1 if "none" in draft.stock_selection_modes else 0)
+                + len(set(draft.fundamental_threshold_candidates))
+                * len(set(draft.fundamental_blend_candidates))
+            )
+            warnings.append(
+                "基本面权重、入围分位和 Top-K 将只在早期滚动 OOS 上搜索 "
+                f"{candidate_count} 组；参数冻结后，最终 holdout 只验收一次。"
+            )
+        warnings.append(
+            "过拟合闸门："
+            f"PBO ≤ {draft.max_pbo:.2f}、"
+            f"DSR probability ≥ {draft.min_dsr_probability:.2f}、"
+            f"SPA p-value ≤ {draft.max_spa_pvalue:.2f}；任一失败即阻止晋级。"
+        )
         if not draft.benchmark_symbol:
             warnings.append("未指定 benchmarkSymbol；无法验证最大超额目标。")
         if draft.do_t_mode in {"daily_swing", "both"}:
@@ -218,7 +263,17 @@ class StrategyService:
             "top_k": draft.top_k,
             "top_k_candidates": draft.top_k_candidates,
             "stock_selection_modes": draft.stock_selection_modes,
+            "fundamental_selection_mode": draft.fundamental_selection_mode,
             "fundamental_selection_threshold": draft.fundamental_selection_threshold,
+            "fundamental_blend_weight": draft.fundamental_blend_weight,
+            "fundamental_threshold_candidates": draft.fundamental_threshold_candidates,
+            "fundamental_blend_candidates": draft.fundamental_blend_candidates,
+            "selection_max_candidates": draft.selection_max_candidates,
+            "selection_min_oos_days": draft.selection_min_oos_days,
+            "selection_min_holdout_days": draft.selection_min_holdout_days,
+            "max_pbo": draft.max_pbo,
+            "min_dsr_probability": draft.min_dsr_probability,
+            "max_spa_pvalue": draft.max_spa_pvalue,
             "factor_screening_mode": draft.factor_screening_mode,
             "do_t_mode": draft.do_t_mode,
             "max_weight_per_name": draft.max_weight_per_name,

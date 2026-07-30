@@ -14,10 +14,10 @@
   gap: 11px;
   margin: 8px;
   padding: 10px 12px;
-  border: 1px solid #655126;
+  border: 1px solid color-mix(in srgb, var(--vnx-warning) 48%, var(--vnx-line));
   border-left: 3px solid var(--state-warning);
   background: rgba(231, 165, 58, .055);
-  color: #d3a956;
+  color: var(--vnx-warning);
 }
 
 .training-scope-banner > span,
@@ -33,8 +33,8 @@
 
 .training-scope-banner small {
   margin-top: 5px;
-  color: #98835a;
-  font-size: 8px;
+  color: var(--vnx-muted);
+  font-size: 10px;
   line-height: 1.55;
 }
 
@@ -50,6 +50,34 @@
 .control-center-v2 .settings-jobs td {
   max-width: 360px;
   overflow-wrap: anywhere;
+}
+
+.settings-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-job-actions button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+  white-space: nowrap;
+}
+
+.settings-job-actions button.danger {
+  color: var(--vnx-danger);
+}
+
+.settings-job-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
 }
 
 .control-center-v2 .connection-vault-panel {

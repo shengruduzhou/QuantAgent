@@ -30,6 +30,8 @@
   --vnx-warning: #d9a441;
   --vnx-danger: #e7656e;
   --vnx-info: #6d9fe8;
+  --vnx-track: var(--vnx-line-soft);
+  --vnx-accent: var(--vnx-primary);
   --terminal-canvas: var(--vnx-canvas);
   --terminal-panel: var(--vnx-surface-1);
   --terminal-panel-raised: var(--vnx-surface-2);
@@ -46,6 +48,26 @@
   --vnx-space-4: 16px;
   --vnx-space-5: 20px;
   --vnx-row: 38px;
+  /* Semantic bridge for legacy domain pages rendered inside VNext. */
+  --bg: var(--vnx-canvas);
+  --surface: var(--vnx-surface-1);
+  --surface-2: var(--vnx-surface-2);
+  --surface-3: var(--vnx-surface-3);
+  --surface-raised: var(--vnx-elevated);
+  --border: var(--vnx-line);
+  --border-soft: var(--vnx-line-soft);
+  --text: var(--vnx-text);
+  --muted: var(--vnx-muted);
+  --muted-2: var(--vnx-muted-2);
+  --blue: var(--vnx-primary);
+  --cyan: var(--vnx-realtime);
+  --green: var(--vnx-success);
+  --red: var(--vnx-danger);
+  --amber: var(--vnx-warning);
+  --blue-soft: color-mix(in srgb, var(--vnx-primary) 13%, transparent);
+  --green-soft: color-mix(in srgb, var(--vnx-success) 12%, transparent);
+  --red-soft: color-mix(in srgb, var(--vnx-danger) 12%, transparent);
+  --amber-soft: color-mix(in srgb, var(--vnx-warning) 12%, transparent);
   color: var(--vnx-text);
   font: 13px/1.45 var(--vnx-font-sans);
   color-scheme: dark;
@@ -167,6 +189,12 @@
 .vnext-shell .mono {
   font-family: var(--vnx-font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* 100% zoom readability floor for dense institutional metadata. */
+.vnext-shell small {
+  font-size: 10px !important;
+  line-height: 1.4;
 }
 
 .vnext-shell .tone-positive {

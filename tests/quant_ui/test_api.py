@@ -158,6 +158,23 @@ def test_job_validation_is_read_only_and_checks_real_inputs(quant_ui_settings) -
     assert "GPU availability" in result.json()["data"]["warnings"][0]
     assert request(app, "GET", "/api/jobs").json()["data"] == jobs_before
 
+    cpu_fallback = request(
+        app,
+        "POST",
+        "/api/jobs/train/validate",
+        json={
+            "commandId": "train-v8-deep",
+            "parameters": {
+                "dataset_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+                "silver_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+                "output_dir": "runtime/reports/v8/deep/cpu_not_allowed",
+                "require_gpu": False,
+            },
+        },
+    )
+    assert cpu_fallback.status_code == 422
+    assert "require_gpu=true" in cpu_fallback.text
+
     invalid = request(
         app,
         "POST",

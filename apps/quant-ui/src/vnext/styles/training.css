@@ -213,6 +213,13 @@
   white-space: nowrap;
 }
 
+.vnext-config-inspector h2 small {
+  margin-left: 6px;
+  color: var(--vnx-muted);
+  font: 10px/1 var(--vnx-font-mono);
+  letter-spacing: .02em;
+}
+
 .vnext-training-navigator > header button {
   border: 0;
   background: transparent;

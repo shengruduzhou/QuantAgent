@@ -58,8 +58,38 @@ class StrategyDraft(StrategyModel):
         default_factory=lambda: ["none", "fundamental"],
         alias="stockSelectionModes",
     )
+    fundamental_selection_mode: Literal["auto", "fixed", "off"] = Field(
+        "auto", alias="fundamentalSelectionMode"
+    )
     fundamental_selection_threshold: float = Field(
         0.50, ge=0.0, le=1.0, alias="fundamentalSelectionThreshold"
+    )
+    fundamental_blend_weight: float = Field(
+        0.40, ge=0.0, le=1.0, alias="fundamentalBlendWeight"
+    )
+    fundamental_threshold_candidates: list[float] = Field(
+        default_factory=lambda: [0.25, 0.40, 0.55],
+        alias="fundamentalThresholdCandidates",
+    )
+    fundamental_blend_candidates: list[float] = Field(
+        default_factory=lambda: [0.20, 0.40, 0.60],
+        alias="fundamentalBlendCandidates",
+    )
+    selection_max_candidates: int = Field(
+        64, ge=2, le=128, alias="selectionMaxCandidates"
+    )
+    selection_min_oos_days: int = Field(
+        80, ge=20, le=1_260, alias="selectionMinOosDays"
+    )
+    selection_min_holdout_days: int = Field(
+        20, ge=10, le=504, alias="selectionMinHoldoutDays"
+    )
+    max_pbo: float = Field(0.25, ge=0.0, le=1.0, alias="maxPbo")
+    min_dsr_probability: float = Field(
+        0.95, ge=0.0, le=1.0, alias="minDsrProbability"
+    )
+    max_spa_pvalue: float = Field(
+        0.05, ge=0.0, le=1.0, alias="maxSpaPValue"
     )
     factor_screening_mode: Literal["off", "evaluate_only", "pretrain"] = Field(
         "pretrain", alias="factorScreeningMode"
@@ -86,6 +116,17 @@ class StrategyDraft(StrategyModel):
             return [int(item) for item in value.split(",") if item]
         return value
 
+    @field_validator(
+        "fundamental_threshold_candidates",
+        "fundamental_blend_candidates",
+        mode="before",
+    )
+    @classmethod
+    def parse_float_candidates(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [float(item) for item in value.split(",") if item]
+        return value
+
     @field_validator("stock_selection_modes", mode="before")
     @classmethod
     def parse_stock_selection_modes(cls, value: object) -> object:
@@ -98,6 +139,8 @@ class StrategyDraft(StrategyModel):
         horizons = {int(value) for value in self.horizons.split(",")}
         if self.primary_horizon not in horizons:
             raise ValueError("primaryHorizon must be included in horizons")
+        if self.model == "ft_transformer" and not self.require_gpu:
+            raise ValueError("FT-Transformer strategy training requires GPU")
         if self.max_turnover > self.risk_limits.max_turnover:
             raise ValueError("portfolio maxTurnover cannot exceed the risk limit")
         if any(value < 5 or value > 500 for value in self.top_k_candidates):
@@ -108,6 +151,57 @@ class StrategyDraft(StrategyModel):
             raise ValueError("topKCandidates is bounded to 12 unique values")
         if not self.stock_selection_modes:
             raise ValueError("stockSelectionModes must include at least one mode")
+        if len(set(self.stock_selection_modes)) != len(self.stock_selection_modes):
+            raise ValueError("stockSelectionModes cannot contain duplicates")
+        if self.fundamental_selection_mode == "off" and "fundamental" in self.stock_selection_modes:
+            raise ValueError(
+                "stockSelectionModes cannot include fundamental when fundamentalSelectionMode is off"
+            )
+        if self.fundamental_selection_mode == "auto":
+            if not self.fundamental_threshold_candidates:
+                raise ValueError("fundamentalThresholdCandidates cannot be empty in auto mode")
+            if not self.fundamental_blend_candidates:
+                raise ValueError("fundamentalBlendCandidates cannot be empty in auto mode")
+        if any(
+            value <= 0.0 or value >= 1.0
+            for value in self.fundamental_threshold_candidates
+        ):
+            raise ValueError(
+                "fundamentalThresholdCandidates must remain strictly between 0 and 1"
+            )
+        if any(
+            value <= 0.0 or value > 1.0
+            for value in self.fundamental_blend_candidates
+        ):
+            raise ValueError(
+                "fundamentalBlendCandidates must remain in (0, 1]"
+            )
+        if len(set(self.fundamental_threshold_candidates)) > 8:
+            raise ValueError("fundamentalThresholdCandidates is bounded to 8 unique values")
+        if len(set(self.fundamental_blend_candidates)) > 8:
+            raise ValueError("fundamentalBlendCandidates is bounded to 8 unique values")
+        fundamental_variants = 0
+        if "fundamental" in self.stock_selection_modes:
+            fundamental_variants = (
+                len(set(self.fundamental_threshold_candidates))
+                * len(set(self.fundamental_blend_candidates))
+                if self.fundamental_selection_mode == "auto"
+                else 1
+            )
+        baseline_variants = 1 if "none" in self.stock_selection_modes else 0
+        total_candidates = (
+            len(set(self.top_k_candidates))
+            * (fundamental_variants + baseline_variants)
+        )
+        if total_candidates > self.selection_max_candidates:
+            raise ValueError(
+                "automatic portfolio search exceeds selectionMaxCandidates: "
+                f"{total_candidates} > {self.selection_max_candidates}"
+            )
+        if self.selection_min_holdout_days >= self.selection_min_oos_days:
+            raise ValueError(
+                "selectionMinHoldoutDays must be smaller than selectionMinOosDays"
+            )
         if self.do_t_mode in {"intraday", "both"} and not self.minute_panel_path:
             raise ValueError("minutePanelPath is required for intraday Do-T modes")
         return self

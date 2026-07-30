@@ -768,6 +768,70 @@ def run_full_real_training_v7(
     min_symbols: int = typer.Option(2, "--min-symbols"),
     min_dates: int = typer.Option(5, "--min-dates"),
     top_k: int = typer.Option(30, "--top-k"),
+    top_k_candidates: str = typer.Option(
+        "10,20,30,50,80",
+        "--top-k-candidates",
+        help="Bounded Top-K candidates evaluated on the early OOS selection segment.",
+    ),
+    stock_selection_modes: str = typer.Option(
+        "none,fundamental",
+        "--stock-selection-modes",
+        help="none,fundamental keeps a no-fundamental ablation baseline.",
+    ),
+    fundamental_selection_mode: str = typer.Option(
+        "auto",
+        "--fundamental-selection-mode",
+        help="auto | fixed | off",
+    ),
+    fundamental_selection_threshold: float = typer.Option(
+        0.50,
+        "--fundamental-selection-threshold",
+        min=0.0,
+        max=1.0,
+    ),
+    fundamental_blend_weight: float = typer.Option(
+        0.40,
+        "--fundamental-blend-weight",
+        min=0.0,
+        max=1.0,
+    ),
+    fundamental_threshold_candidates: str = typer.Option(
+        "0.25,0.40,0.55",
+        "--fundamental-threshold-candidates",
+    ),
+    fundamental_blend_candidates: str = typer.Option(
+        "0.20,0.40,0.60",
+        "--fundamental-blend-candidates",
+    ),
+    selection_max_candidates: int = typer.Option(
+        64,
+        "--selection-max-candidates",
+        min=2,
+        max=128,
+    ),
+    selection_min_oos_days: int = typer.Option(
+        80,
+        "--selection-min-oos-days",
+        min=20,
+    ),
+    selection_min_holdout_days: int = typer.Option(
+        20,
+        "--selection-min-holdout-days",
+        min=10,
+    ),
+    max_pbo: float = typer.Option(0.25, "--max-pbo", min=0.0, max=1.0),
+    min_dsr_probability: float = typer.Option(
+        0.95,
+        "--min-dsr-probability",
+        min=0.0,
+        max=1.0,
+    ),
+    max_spa_pvalue: float = typer.Option(
+        0.05,
+        "--max-spa-pvalue",
+        min=0.0,
+        max=1.0,
+    ),
     top_k_ratio: float | None = typer.Option(0.10, "--top-k-ratio"),
     min_selection_pressure: float = typer.Option(3.0, "--min-selection-pressure"),
     fail_if_top_k_covers_universe: bool = typer.Option(
@@ -784,6 +848,15 @@ def run_full_real_training_v7(
     max_turnover: float = typer.Option(0.50, "--max-turnover"),
     optimizer_backend: str = typer.Option("auto", "--optimizer-backend", help="auto | deterministic | cvxpy"),
     objective: str = typer.Option("max_expected_alpha", "--objective"),
+    objective_excess_weight: float = typer.Option(
+        0.45, "--objective-excess-weight", min=0.0, max=1.0
+    ),
+    objective_annual_weight: float = typer.Option(
+        0.30, "--objective-annual-weight", min=0.0, max=1.0
+    ),
+    objective_drawdown_weight: float = typer.Option(
+        0.25, "--objective-drawdown-weight", min=0.0, max=1.0
+    ),
     cash_floor: float = typer.Option(0.0, "--cash-floor"),
     weighting: str = typer.Option("rank", "--weighting", help="equal | rank | softmax"),
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash"),
@@ -836,7 +909,11 @@ def run_full_real_training_v7(
         "--capital-tier",
         help="Capital-tier ladder, e.g. '1e6:0.10,1e7:0.05,1e8:0.02'. Empty disables tiering.",
     ),
-    factor_library: str = typer.Option("alpha181", "--factor-library", help="basic | alpha101 | alpha181 | cicc_ashare80"),
+    factor_library: str = typer.Option(
+        "all_reviewed",
+        "--factor-library",
+        help="all_reviewed | basic | alpha101 | alpha181 | cicc_ashare80",
+    ),
     factor_screening_mode: str = typer.Option(
         "off",
         "--factor-screening-mode",
@@ -881,6 +958,11 @@ def run_full_real_training_v7(
     from quantagent.training.v7_predictor import predict_v7_alpha
 
     horizons_tuple = tuple(int(item) for item in parse_csv_tuple(horizons))
+    if primary_horizon not in horizons_tuple:
+        raise typer.BadParameter(
+            "primary-horizon must be included in horizons; "
+            f"received primary={primary_horizon}, horizons={list(horizons_tuple)}"
+        )
     top_k_values = sorted({
         int(item)
         for item in top_k_candidates.split(",")
@@ -895,6 +977,66 @@ def run_full_real_training_v7(
     ))
     if not selection_modes or set(selection_modes) - {"none", "fundamental"}:
         raise typer.BadParameter("stock-selection-modes must contain none and/or fundamental")
+    resolved_fundamental_mode = fundamental_selection_mode.strip().lower()
+    if resolved_fundamental_mode not in {"auto", "fixed", "off"}:
+        raise typer.BadParameter(
+            "fundamental-selection-mode must be auto, fixed, or off"
+        )
+    if (
+        resolved_fundamental_mode == "off"
+        and "fundamental" in selection_modes
+    ):
+        raise typer.BadParameter(
+            "stock-selection-modes cannot include fundamental when "
+            "fundamental-selection-mode is off"
+        )
+    threshold_values = sorted({
+        float(item)
+        for item in fundamental_threshold_candidates.split(",")
+        if item.strip()
+    })
+    blend_values = sorted({
+        float(item)
+        for item in fundamental_blend_candidates.split(",")
+        if item.strip()
+    })
+    if any(value <= 0.0 or value >= 1.0 for value in threshold_values):
+        raise typer.BadParameter(
+            "fundamental-threshold-candidates must remain strictly between 0 and 1"
+        )
+    if any(value <= 0.0 or value > 1.0 for value in blend_values):
+        raise typer.BadParameter(
+            "fundamental-blend-candidates must remain in (0, 1]"
+        )
+    fundamental_grid = (
+        [(threshold, weight) for threshold in threshold_values for weight in blend_values]
+        if resolved_fundamental_mode == "auto"
+        else [(float(fundamental_selection_threshold), float(fundamental_blend_weight))]
+        if resolved_fundamental_mode == "fixed"
+        else []
+    )
+    if "fundamental" in selection_modes and not fundamental_grid:
+        raise typer.BadParameter(
+            "fundamental selection requires at least one threshold/weight candidate"
+        )
+    search_variants = (
+        (1 if "none" in selection_modes else 0)
+        + (len(fundamental_grid) if "fundamental" in selection_modes else 0)
+    )
+    candidate_count = len(top_k_values) * search_variants
+    if candidate_count < 2:
+        raise typer.BadParameter(
+            "portfolio selection requires at least two candidates for overfitting governance"
+        )
+    if candidate_count > selection_max_candidates:
+        raise typer.BadParameter(
+            "portfolio search exceeds selection-max-candidates: "
+            f"{candidate_count} > {selection_max_candidates}"
+        )
+    if selection_min_holdout_days >= selection_min_oos_days:
+        raise typer.BadParameter(
+            "selection-min-holdout-days must be smaller than selection-min-oos-days"
+        )
     screening_mode = factor_screening_mode.strip().lower()
     if screening_mode not in {"off", "evaluate_only", "pretrain"}:
         raise typer.BadParameter("factor-screening-mode must be off, evaluate_only, or pretrain")
@@ -1099,6 +1241,8 @@ def run_full_real_training_v7(
     def build_candidate_weights(
         candidate_predictions: "pd.DataFrame",
         candidate_top_k: int,
+        *,
+        candidate_state_path: Path | None = None,
     ):
         return build_v7_target_weights(
             candidate_predictions,
@@ -1131,102 +1275,180 @@ def run_full_real_training_v7(
                 capital_tier_overrides=capital_tier_overrides,
             ),
             timing_plan=timing_plan_frame,
-            position_state_path=position_state_path,
+            position_state_path=candidate_state_path,
         )
 
     portfolio_selection_predictions, portfolio_holdout_predictions, portfolio_split = (
-        _split_portfolio_selection_holdout(predictions_frame)
+        _split_portfolio_selection_holdout(
+            predictions_frame,
+            minimum_selection_dates=selection_min_oos_days,
+            minimum_holdout_dates=selection_min_holdout_days,
+        )
     )
     candidates: list[dict[str, object]] = []
     candidate_errors: list[dict[str, object]] = []
     for stock_mode in selection_modes:
-        try:
-            selected_predictions, selection_evidence = _apply_stock_selection_mode(
-                portfolio_selection_predictions,
-                training_dataset,
-                stock_mode,
-                threshold=fundamental_selection_threshold,
+        variants: list[tuple[float, float]] = (
+            [(0.0, 0.0)]
+            if stock_mode == "none"
+            else list(fundamental_grid)
+        )
+        for threshold_value, blend_weight in variants:
+            variant_id = (
+                "none"
+                if stock_mode == "none"
+                else (
+                    f"fund_q{round(threshold_value * 100):02d}"
+                    f"_w{round(blend_weight * 100):02d}"
+                )
             )
-        except ValueError as exc:
-            candidate_errors.append({
-                "selectionMode": stock_mode,
-                "status": "failed",
-                "error": str(exc),
-            })
-            continue
-        for candidate_top_k in top_k_values:
-            candidate_id = f"{stock_mode}_top_{candidate_top_k}"
             try:
-                candidate_weights = build_candidate_weights(
-                    selected_predictions,
-                    candidate_top_k,
+                selected_predictions, selection_evidence = _apply_stock_selection_mode(
+                    portfolio_selection_predictions,
+                    training_dataset,
+                    stock_mode,
+                    threshold=threshold_value,
+                    blend_weight=blend_weight,
                 )
-                if candidate_weights.target_weights.empty:
-                    raise ValueError("candidate produced no target weights")
-                weights_frame = candidate_weights.target_weights.copy()
-                if "trade_date" in weights_frame.columns:
-                    weights_frame = weights_frame.set_index("trade_date")
-                candidate_dir = output_dir / "portfolio_search" / candidate_id
-                candidate_market = _restrict_market_for_paper(
-                    market_panel_frame,
-                    weights_frame,
-                    benchmark_symbol=benchmark_symbol,
-                )
-                candidate_sim = simulate_ashare_target_weights(
-                    weights_frame,
-                    candidate_market,
-                    AShareExecutionSimulationConfig(
-                        initial_cash=initial_cash,
-                        min_order_value_yuan=min_order_value_yuan,
-                        audit_log_dir=str(candidate_dir / "audit"),
-                    ),
-                )
-                candidate_report = write_paper_report(
-                    candidate_sim,
-                    market_panel=candidate_market,
-                    config=PaperReportConfig(
-                        initial_cash=initial_cash,
-                        benchmark_symbol=benchmark_symbol,
-                        output_dir=candidate_dir,
-                    ),
-                )
-                candidates.append({
-                    "id": candidate_id,
-                    "status": "evaluated",
-                    "selectionMode": stock_mode,
-                    "topK": candidate_top_k,
-                    "metrics": candidate_report.summary,
-                    "selectionEvidence": selection_evidence,
-                })
-            except (ValueError, RuntimeError) as exc:
+            except ValueError as exc:
                 candidate_errors.append({
-                    "id": candidate_id,
                     "selectionMode": stock_mode,
-                    "topK": candidate_top_k,
+                    "fundamentalThreshold": threshold_value,
+                    "fundamentalBlendWeight": blend_weight,
                     "status": "failed",
                     "error": str(exc),
                 })
+                continue
+            for candidate_top_k in top_k_values:
+                candidate_id = f"{variant_id}_top_{candidate_top_k}"
+                candidate_dir = output_dir / "portfolio_search" / candidate_id
+                try:
+                    candidate_state_path = (
+                        candidate_dir / "position_state.parquet"
+                        if holding_period_mode != "off"
+                        else None
+                    )
+                    candidate_weights = build_candidate_weights(
+                        selected_predictions,
+                        candidate_top_k,
+                        candidate_state_path=candidate_state_path,
+                    )
+                    if candidate_weights.target_weights.empty:
+                        raise ValueError("candidate produced no target weights")
+                    weights_frame = candidate_weights.target_weights.copy()
+                    if "trade_date" in weights_frame.columns:
+                        weights_frame = weights_frame.set_index("trade_date")
+                    candidate_market = _restrict_market_for_paper(
+                        market_panel_frame,
+                        weights_frame,
+                        benchmark_symbol=benchmark_symbol,
+                    )
+                    candidate_sim = simulate_ashare_target_weights(
+                        weights_frame,
+                        candidate_market,
+                        AShareExecutionSimulationConfig(
+                            initial_cash=initial_cash,
+                            min_order_value_yuan=min_order_value_yuan,
+                            audit_log_dir=str(candidate_dir / "audit"),
+                        ),
+                    )
+                    candidate_report = write_paper_report(
+                        candidate_sim,
+                        market_panel=candidate_market,
+                        config=PaperReportConfig(
+                            initial_cash=initial_cash,
+                            benchmark_symbol=benchmark_symbol,
+                            output_dir=candidate_dir,
+                        ),
+                    )
+                    candidate_returns = (
+                        pd.to_numeric(candidate_sim.nav, errors="coerce")
+                        .sort_index()
+                        .pct_change()
+                        .replace([float("inf"), float("-inf")], float("nan"))
+                        .dropna()
+                    )
+                    candidates.append({
+                        "id": candidate_id,
+                        "status": "evaluated",
+                        "selectionMode": stock_mode,
+                        "fundamentalThreshold": threshold_value,
+                        "fundamentalBlendWeight": blend_weight,
+                        "topK": candidate_top_k,
+                        "metrics": candidate_report.summary,
+                        "selectionEvidence": selection_evidence,
+                        "_returns": candidate_returns,
+                    })
+                except (ValueError, RuntimeError) as exc:
+                    candidate_errors.append({
+                        "id": candidate_id,
+                        "selectionMode": stock_mode,
+                        "fundamentalThreshold": threshold_value,
+                        "fundamentalBlendWeight": blend_weight,
+                        "topK": candidate_top_k,
+                        "status": "failed",
+                        "error": str(exc),
+                    })
     if not candidates:
         raise ValueError(f"every portfolio candidate failed: {candidate_errors}")
     champion, portfolio_frontier = _select_portfolio_frontier(
         candidates,
         objective_weights=objective_weights,
     )
+    from quantagent.research.selection_governance import (
+        NestedSelectionConfig,
+        evaluate_frozen_candidate,
+    )
+
+    candidate_returns = pd.concat(
+        {
+            str(candidate["id"]): candidate["_returns"]
+            for candidate in candidates
+            if isinstance(candidate.get("_returns"), pd.Series)
+        },
+        axis=1,
+        join="inner",
+    ).dropna(how="all")
+    governance = evaluate_frozen_candidate(
+        candidate_returns,
+        selected_candidate=str(champion["id"]),
+        config=NestedSelectionConfig(
+            max_pbo=max_pbo,
+            min_dsr_probability=min_dsr_probability,
+            max_spa_pvalue=max_spa_pvalue,
+        ),
+        cumulative_trials=len(candidates),
+        minimum_observed_days=selection_min_oos_days,
+    )
+    governance_path = output_dir / "portfolio_search" / "selection_governance.json"
+    governance_path.parent.mkdir(parents=True, exist_ok=True)
+    governance_path.write_text(
+        json_dump(governance.to_dict()),
+        encoding="utf-8",
+    )
+    if not governance.accepted:
+        raise ValueError(
+            "portfolio candidate rejected by overfitting governance: "
+            + "; ".join(governance.rejection_reasons)
+        )
     final_predictions, final_selection_evidence = _apply_stock_selection_mode(
         portfolio_holdout_predictions,
         training_dataset,
         str(champion["selectionMode"]),
-        threshold=fundamental_selection_threshold,
+        threshold=float(champion.get("fundamentalThreshold", 0.0)),
+        blend_weight=float(champion.get("fundamentalBlendWeight", 0.0)),
     )
     predictions_frame = final_predictions
     weights_result = build_candidate_weights(
         predictions_frame,
         int(champion["topK"]),
+        candidate_state_path=position_state_path,
     )
     weights_result.diagnostics["portfolio_selection"] = {
         "split": portfolio_split,
         "champion": _public_portfolio_candidate(champion),
         "paretoFrontier": portfolio_frontier,
+        "overfittingGovernance": governance.to_dict(),
         "failures": candidate_errors,
         "finalSelectionEvidence": final_selection_evidence,
     }
@@ -1395,6 +1617,7 @@ def run_full_real_training_v7(
             "split": portfolio_split,
             "champion": _public_portfolio_candidate(champion),
             "paretoFrontier": portfolio_frontier,
+            "overfittingGovernance": governance.to_dict(),
             "failures": candidate_errors,
         },
         "do_t": do_t_status,
@@ -1462,10 +1685,12 @@ def _apply_stock_selection_mode(
     mode: str,
     *,
     threshold: float,
+    blend_weight: float,
 ) -> tuple["pd.DataFrame", dict[str, object]]:
     if mode == "none":
         return predictions.copy(), {
             "mode": "none",
+            "fundamentalBlendWeight": 0.0,
             "rowsBefore": int(len(predictions)),
             "rowsAfter": int(len(predictions)),
             "selectionApplied": False,
@@ -1522,11 +1747,56 @@ def _apply_stock_selection_mode(
     ].copy()
     if selected.empty:
         raise ValueError("fundamental stock selection removed the entire OOS universe")
+    if not 0.0 <= float(blend_weight) <= 1.0:
+        raise ValueError("fundamental blend weight must remain in [0, 1]")
+    prediction_source = (
+        "risk_adjusted_prediction"
+        if "risk_adjusted_prediction" in selected.columns
+        else "prediction"
+        if "prediction" in selected.columns
+        else next(
+            (
+                column
+                for column in selected.columns
+                if str(column).startswith("alpha_")
+            ),
+            None,
+        )
+    )
+    if prediction_source is None:
+        raise ValueError(
+            "fundamental blending requires prediction, risk_adjusted_prediction, "
+            "or alpha_*"
+        )
+    selected[prediction_source] = pd.to_numeric(
+        selected[prediction_source], errors="coerce"
+    )
+    model_rank = selected.groupby("trade_date")[prediction_source].rank(
+        method="average",
+        pct=True,
+    )
+    fundamental_rank = pd.to_numeric(
+        selected["composite_rank"], errors="coerce"
+    )
+    blended_prediction = (
+        (1.0 - float(blend_weight)) * model_rank
+        + float(blend_weight) * fundamental_rank
+    )
+    selected["prediction"] = blended_prediction
+    if "risk_adjusted_prediction" in selected.columns:
+        selected["risk_adjusted_prediction"] = blended_prediction
+    selected = selected.dropna(subset=["prediction"])
+    if selected.empty:
+        raise ValueError("fundamental blending produced no finite predictions")
     selected = selected.drop(columns=["composite_rank", "metric_completeness"])
     return selected, {
         "mode": "fundamental",
         "selectionApplied": True,
         "threshold": float(threshold),
+        "fundamentalBlendWeight": float(blend_weight),
+        "modelRankWeight": float(1.0 - blend_weight),
+        "predictionSource": str(prediction_source),
+        "blendPolicy": "cross-sectional model rank × PIT within-sector fundamental rank",
         "inputMetrics": sorted(available_inputs),
         "rowsBefore": int(len(predictions)),
         "rowsAfter": int(len(selected)),

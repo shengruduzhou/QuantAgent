@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { Database, ListChecks, PlugsConnected, TerminalWindow, WarningCircle } from "@phosphor-icons/react";
+import { Link } from "react-router-dom";
 import type { BacktestSummary, EquityPoint, JobSummary, Page, RiskOverview, SystemOverview, Trade } from "../../api/types";
 import { useApi } from "../../hooks/useApi";
 import { StateView } from "../../components/StateView";
@@ -66,7 +68,23 @@ export function VNextDashboard(): JSX.Element {
   }, [data, jobItems, riskEventCount]);
 
   if (overview.isLoading) return <StateView state="loading" detail="正在读取 Portfolio、Model、Risk、Task 与 Runtime 状态。" />;
-  if (overview.isError || !data || !riskData) return <StateView state="error" detail={overview.error?.message ?? "System decision state unavailable"} />;
+  if (overview.isError || !data || !riskData) {
+    return (
+      <div className="vnext-dashboard">
+        <header className="vnext-dashboard-title">
+          <div><span>INSTITUTIONAL DECISION DASHBOARD</span><h1>今日决策总览</h1><p>系统保持真实 unavailable 状态；连接恢复前不填充模拟净值、模型或风险数据。</p></div>
+          <div><strong>API OFFLINE</strong><span>Decision state unavailable</span></div>
+        </header>
+        <section className="vnext-dashboard-unavailable" aria-label="Dashboard 恢复步骤">
+          <article className="critical"><WarningCircle size={24} weight="duotone" /><span><strong>Quant API 未连接</strong><small>{overview.error?.message ?? "无法读取 /api/system/overview"}</small></span><em>BLOCKED</em></article>
+          <article><TerminalWindow size={24} weight="duotone" /><span><strong>启动持久工作台</strong><small>使用 tmux 启动器保持策略研究、任务日志和 GPU 监控持续运行。</small></span><Link to="/settings">查看启动命令</Link></article>
+          <article><Database size={24} weight="duotone" /><span><strong>核对 Runtime</strong><small>连接后读取真实 artifact、manifest、freshness 与 lineage，不递归伪造结果。</small></span><Link to="/runtime">打开 Runtime</Link></article>
+          <article><ListChecks size={24} weight="duotone" /><span><strong>恢复执行队列</strong><small>持久任务会在 API 恢复后重新索引；失败或运行中任务可停止并清除。</small></span><Link to="/settings?view=jobs">打开任务</Link></article>
+          <article><PlugsConnected size={24} weight="duotone" /><span><strong>检查数据连接器</strong><small>API 密钥只进入当前服务进程内存，不写入浏览器、Runtime 或任务日志。</small></span><Link to="/settings">检查连接</Link></article>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="vnext-dashboard">
