@@ -274,6 +274,135 @@ def _write_runtime_fixture(settings: ApiSettings) -> None:
     ignored_cache.mkdir()
     (ignored_cache / "cached.parquet").write_bytes(b"cache")
 
+    _write_fusion_fixture(runtime)
+
     logs = runtime / "logs"
     logs.mkdir(parents=True)
     (logs / "quant_ui_fixture.log").write_text("first line\nlast line\n", encoding="utf-8")
+
+
+def _write_fusion_fixture(runtime: Path) -> None:
+    """A completed factor-fusion search, exactly as the CLI would write it."""
+    run = runtime / "reports" / "fusion" / "fixture_search"
+    run.mkdir(parents=True)
+    summary = {
+        "generatedAt": "2026-01-06T00:00:00+00:00",
+        "nTrials": 4,
+        "pbo": 0.18,
+        "benchmarkMode": "index:000300.SH",
+        "horizonDays": 5,
+        "topK": 30,
+        "transactionCostBps": 8.0,
+        "factorNames": ["alpha001", "alpha002"],
+        "foldWindows": [{
+            "foldIndex": "0",
+            "trainStart": "2024-01-02",
+            "trainEnd": "2025-06-30",
+            "testStart": "2025-07-10",
+            "testEnd": "2025-12-31",
+        }],
+        "frontier": ["ic_weighted", "equal"],
+        "preferenceWeights": {
+            "excessReturn": 0.4,
+            "annualReturn": 0.2,
+            "maxDrawdown": 0.25,
+            "robustness": 0.15,
+        },
+        "candidateCount": 4,
+        "evaluatedCandidateCount": 4,
+    }
+    (run / "fusion_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False), encoding="utf-8"
+    )
+
+    def _candidate(
+        candidate_id: str, label: str, scheme: str, control: bool, excess: float,
+        annual: float, drawdown: float, robustness: float,
+    ) -> dict:
+        return {
+            "id": candidate_id,
+            "label": label,
+            "scheme": scheme,
+            "isControl": control,
+            "weights": {"alpha001": 0.7, "alpha002": 0.3},
+            "metrics": {
+                "observations": 120,
+                "annualReturn": annual,
+                "excessReturn": excess,
+                "benchmarkAnnualReturn": 0.05,
+                "maxDrawdown": drawdown,
+                "sharpe": 1.1,
+                "calmar": 1.4,
+                "averageTurnover": 0.22,
+                "costDrag": 0.004,
+                "winRate": 0.55,
+                "robustness": robustness,
+            },
+            "robustnessBreakdown": {
+                "foldConsistency": 0.7,
+                "overfittingResistance": 0.82,
+                "deflatedSharpeProbability": 0.61,
+                "regimeConsistency": 0.66,
+                "pbo": 0.18,
+            },
+            "folds": [{
+                "foldIndex": 0,
+                "trainStart": "2024-01-02",
+                "trainEnd": "2025-06-30",
+                "testStart": "2025-07-10",
+                "testEnd": "2025-12-31",
+                "weights": {"alpha001": 0.7, "alpha002": 0.3},
+                "metrics": {"observations": 120, "excessReturn": excess},
+            }],
+        }
+
+    candidates = [
+        _candidate("ic_weighted", "IC 加权", "ic_weighted", False, 0.14, 0.19, 0.11, 0.68),
+        _candidate("equal", "等权基线", "equal", True, 0.04, 0.09, 0.06, 0.55),
+        _candidate("random_00", "随机对照 #1", "random_simplex", True, -0.02, 0.03, 0.15, 0.31),
+        # A single-factor baseline the blend beats: without one, the council has
+        # no way to tell whether fusion added anything.
+        _candidate("single_alpha002", "单因子 alpha002", "single_factor", True, 0.06, 0.11, 0.13, 0.42),
+    ]
+    (run / "fusion_candidates.json").write_text(
+        json.dumps(candidates, ensure_ascii=False), encoding="utf-8"
+    )
+    (run / "fusion_ranking.json").write_text(
+        json.dumps([
+            {"id": "ic_weighted", "preferenceScore": 0.71, "contributions": {
+                "excessReturn": 0.4, "annualReturn": 0.2, "maxDrawdown": 0.06, "robustness": 0.05,
+            }},
+            {"id": "equal", "preferenceScore": 0.29, "contributions": {
+                "excessReturn": 0.0, "annualReturn": 0.0, "maxDrawdown": 0.25, "robustness": 0.04,
+            }},
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run / "fusion_nav.csv").write_text(
+        "trade_date,ic_weighted,equal,random_00\n"
+        "2025-07-10,1.0,1.0,1.0\n"
+        "2025-09-30,1.08,1.03,0.99\n"
+        "2025-12-31,1.19,1.09,0.97\n",
+        encoding="utf-8",
+    )
+    (run / "manifest.json").write_text(
+        json.dumps({
+            "artifact": "factor_fusion_search",
+            "schemaVersion": 1,
+            "generatedAt": "2026-01-06T00:00:00+00:00",
+            "contentHash": "abcdef0123456789",
+            "nTrials": 4,
+            "benchmarkMode": "index:000300.SH",
+            "factorNames": ["alpha001", "alpha002"],
+            "horizonDays": 5,
+            "topK": 30,
+            "folds": summary["foldWindows"],
+            "files": {
+                "summary": "fusion_summary.json",
+                "candidates": "fusion_candidates.json",
+                "ranking": "fusion_ranking.json",
+                "nav": "fusion_nav.csv",
+            },
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )

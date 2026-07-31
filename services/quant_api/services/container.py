@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from services.quant_api.adapters.backtests import BacktestAdapter
 from services.quant_api.adapters.do_t import DoTAdapter
 from services.quant_api.adapters.factors import FactorAdapter
+from services.quant_api.adapters.fusion import FusionAdapter
 from services.quant_api.adapters.models import ModelAdapter
 from services.quant_api.adapters.risk import RiskAdapter
 from services.quant_api.adapters.selection import SelectionAdapter
@@ -12,6 +13,7 @@ from services.quant_api.config import ApiSettings, default_settings
 from services.quant_api.events import EventBroker
 from services.quant_api.runtime_indexer import RuntimeIndexer
 from services.quant_api.services.connections import ConnectionManager
+from services.quant_api.services.council import CouncilService
 from services.quant_api.services.data_manager import DataManagerService
 from services.quant_api.services.governance import GovernanceService
 from services.quant_api.services.jobs import JobManager
@@ -26,6 +28,7 @@ class ServiceContainer:
     indexer: RuntimeIndexer
     backtests: BacktestAdapter
     factors: FactorAdapter
+    fusion: FusionAdapter
     models: ModelAdapter
     selections: SelectionAdapter
     do_t: DoTAdapter
@@ -38,6 +41,7 @@ class ServiceContainer:
     cleanup: RuntimeCleanupService
     vnpy_parity: VnpyParityService
     governance: GovernanceService
+    council: CouncilService
 
     @classmethod
     def create(cls, settings: ApiSettings | None = None) -> "ServiceContainer":
@@ -47,16 +51,19 @@ class ServiceContainer:
         events = EventBroker()
         connections = ConnectionManager()
         factors = FactorAdapter(resolved)
+        fusion = FusionAdapter(resolved)
 
         def invalidate_runtime() -> None:
             indexer.invalidate()
             factors.invalidate()
+            fusion.invalidate()
 
         return cls(
             settings=resolved,
             indexer=indexer,
             backtests=backtests,
             factors=factors,
+            fusion=fusion,
             models=ModelAdapter(resolved),
             selections=SelectionAdapter(resolved),
             do_t=DoTAdapter(resolved),
@@ -74,6 +81,7 @@ class ServiceContainer:
             cleanup=RuntimeCleanupService(resolved),
             vnpy_parity=VnpyParityService(),
             governance=GovernanceService(resolved),
+            council=CouncilService(resolved, fusion),
         )
 
     def start(self) -> None:

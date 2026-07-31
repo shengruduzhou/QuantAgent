@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from services.quant_api.adapters.utils import page_slice
 from services.quant_api.config import safe_project_path
 from services.quant_api.runtime_indexer.parsers import parser_for
-from services.quant_api.schemas.models import CleanupRequest, FactorReviewRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
+from services.quant_api.schemas.models import CleanupRequest, CouncilOverrideRequest, FactorReviewRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
 from services.quant_api.schemas.strategy import ConnectionRequest, StrategyDraft
 
 
@@ -531,6 +531,104 @@ async def stock_t_analysis(request: Request, backtest_id: str, symbol: str, sour
     )
 
 
+@router.get("/fusion/runs")
+async def list_fusion_runs(request: Request) -> dict:
+    data = services(request).fusion.list()
+    return response(
+        data,
+        status="ready" if data else "empty",
+        issues=[] if data else [{
+            "code": "no_fusion_runs",
+            "message": "尚无因子融合搜索产物。在因子融合工场配置并启动一次搜索后再回到此处。",
+            "recoverable": True,
+        }],
+    )
+
+
+@router.get("/fusion/runs/{run_id}")
+async def get_fusion_run(request: Request, run_id: str) -> dict:
+    try:
+        data = services(request).fusion.detail(run_id)
+    except KeyError:
+        raise HTTPException(404, "fusion run not found")
+    return response(data, status="ready" if data["candidates"] else "empty")
+
+
+@router.get("/fusion/runs/{run_id}/nav")
+async def get_fusion_nav(
+    request: Request,
+    run_id: str,
+    limit: int = Query(4_000, le=20_000),
+) -> dict:
+    try:
+        data = services(request).fusion.navs(run_id, limit)
+    except KeyError:
+        raise HTTPException(404, "fusion run not found")
+    return response(data, status="ready" if data else "empty")
+
+
+@router.get("/fusion/runs/{run_id}/compare")
+async def compare_fusion_candidates(
+    request: Request,
+    run_id: str,
+    candidates: str = Query("", max_length=500),
+) -> dict:
+    ids = [item.strip() for item in candidates.split(",") if item.strip()]
+    try:
+        data = services(request).fusion.compare(run_id, ids)
+    except KeyError as exc:
+        raise HTTPException(404, f"candidate not found: {exc}")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return response(data)
+
+
+@router.get("/council/roster")
+async def council_roster(request: Request) -> dict:
+    return response(services(request).council.roster())
+
+
+@router.get("/council/review/fusion/{run_id}")
+async def council_review_fusion(
+    request: Request,
+    run_id: str,
+    candidate: str | None = None,
+) -> dict:
+    try:
+        data = services(request).council.review_fusion_run(run_id, candidate)
+    except KeyError as exc:
+        raise HTTPException(404, f"subject not found: {exc}")
+    return response(data)
+
+
+@router.get("/council/overrides")
+async def council_overrides(
+    request: Request,
+    subjectType: str | None = None,
+    subjectId: str | None = None,
+) -> dict:
+    data = services(request).council.overrides(
+        subject_type=subjectType, subject_id=subjectId
+    )
+    return response(data, status="ready" if data else "empty")
+
+
+@router.post("/council/overrides")
+async def create_council_override(request: Request, body: CouncilOverrideRequest) -> dict:
+    try:
+        data = services(request).council.record_override(
+            subject_type=body.subject_type,
+            subject_id=body.subject_id,
+            role_id=body.role_id,
+            verdict=body.verdict,
+            reason=body.reason,
+            author=body.author,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return response(data)
+
+
 @router.get("/factors")
 async def list_factors(request: Request, query: str | None = None) -> dict:
     data = services(request).factors.list(query)
@@ -899,9 +997,19 @@ async def create_governance_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "governance", body)
 
 
+@router.post("/jobs/fusion-search")
+async def create_fusion_search_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "fusion-search", body)
+
+
+@router.post("/jobs/t-plus-one-research")
+async def create_t_plus_one_research_job(request: Request, body: JobRequest) -> dict:
+    return _create_job(request, "t-plus-one-research", body)
+
+
 @router.post("/jobs/{job_type}/validate")
 async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
-    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "factor-evaluation", "governance", "strategy-pipeline"}:
+    if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "factor-evaluation", "fusion-search", "t-plus-one-research", "governance", "strategy-pipeline"}:
         raise HTTPException(404, "job type not found")
     try:
         return response(services(request).jobs.validate(job_type, body.command_id, body.parameters))
@@ -920,6 +1028,26 @@ async def list_jobs(request: Request) -> dict:
 async def cancel_job(request: Request, job_id: str) -> dict:
     try:
         return response(services(request).jobs.cancel(job_id))
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@router.post("/jobs/{job_id}/pause")
+async def pause_job(request: Request, job_id: str) -> dict:
+    try:
+        return response(services(request).jobs.pause(job_id))
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(request: Request, job_id: str) -> dict:
+    try:
+        return response(services(request).jobs.resume(job_id))
     except KeyError:
         raise HTTPException(404, "job not found")
     except ValueError as exc:

@@ -7,6 +7,7 @@ import {
   Database,
   FileText,
   Flask,
+  Gavel,
   Gear,
   Graph,
   HardDrives,
@@ -17,6 +18,7 @@ import {
   ShieldCheck,
   ShieldStar,
   SlidersHorizontal,
+  Sparkle,
   Strategy,
 } from "@phosphor-icons/react";
 
@@ -42,6 +44,7 @@ export const vnextModules: VNextModule[] = [
   { id: "dashboard", path: "/", label: "决策总览", caption: "Decision Dashboard", group: "research", icon: ChartLineUp, keywords: "dashboard overview portfolio model risk operations 总览" },
   { id: "data", path: "/runtime?view=data", label: "数据实验室", caption: "Data Lab", group: "research", icon: Database, keywords: "data dataset provider tickflow coverage quarantine 数据" },
   { id: "factor", path: "/factors", label: "因子实验室", caption: "Factor Lab", group: "research", icon: Atom, keywords: "factor alpha ic 因子" },
+  { id: "fusion", path: "/fusion", label: "因子融合工场", caption: "Alpha Foundry", group: "research", icon: Sparkle, keywords: "fusion blend pareto frontier robustness pbo dsr 融合 前沿 稳健" },
   { id: "strategy-studio", path: "/strategy", label: "策略实验室", caption: "Strategy Studio", group: "research", icon: Strategy, keywords: "strategy authoring factor model portfolio backtest risk 策略 编写 回测 风控" },
   { id: "training", path: "/training", label: "训练实验室", caption: "Training Lab", group: "research", icon: HardDrives, keywords: "training experiment run gpu checkpoint 训练" },
   { id: "model", path: "/models", label: "模型注册表", caption: "Model Registry", group: "research", icon: Brain, keywords: "model registry prediction 模型" },
@@ -49,6 +52,7 @@ export const vnextModules: VNextModule[] = [
   { id: "chart", path: "/stock-replay", label: "图表工作站", caption: "Chart Workstation", group: "trading", icon: ChartLine, keywords: "market chart kline replay stock k线 行情" },
   { id: "selection", path: "/selection", label: "选股决策", caption: "Selection Decisions", group: "trading", icon: SlidersHorizontal, keywords: "selection prediction target weights ranking 选股 决策" },
   { id: "t1", path: "/t-plus-one", label: "T+1 分析", caption: "Compliant Overlay", group: "trading", icon: SlidersHorizontal, keywords: "t+1 analysis position trading" },
+  { id: "council", path: "/council", label: "决策议事会", caption: "Decision Council", group: "control", icon: Gavel, keywords: "council agent veto override audit evidence 议事会 否决 推翻 审计" },
   { id: "risk", path: "/risk", label: "风险管理", caption: "Risk Manager", group: "control", icon: ShieldCheck, keywords: "risk gate kill switch exposure 风控" },
   { id: "pipeline", path: "/runtime?view=lineage", label: "Pipeline", caption: "Lineage & Runs", group: "control", icon: Graph, keywords: "pipeline graph lineage task artifact" },
   { id: "tasks", path: "/settings?view=jobs", label: "任务中心", caption: "Task Center", group: "control", icon: ListBullets, keywords: "jobs task logs events 任务" },

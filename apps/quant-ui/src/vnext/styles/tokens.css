@@ -1,35 +1,138 @@
+/* ===========================================================================
+   ATLAS design foundation — the single semantic source for the workstation.
+
+   Every colour, size and motion value the product uses is declared here, for
+   all three themes, under the same token names. Pages never hard-code a hex
+   value; if a page needs a colour that is not in this file, the colour is
+   missing from the system and belongs here first.
+
+   Colour semantics are split into three non-overlapping families so that a
+   colour never means two things at once:
+
+     ui.*        interaction and system state   azure / violet / cyan / amber
+     status.*    governance verdicts            emerald / amber / crimson
+     market.*    A-share price direction        red = up, green = down
+
+   The market family is the odd one out on purpose: mainland convention is red
+   for up and green for down, the inverse of Western charts. It is confined to
+   numeric price and return cells. Status green and market green therefore never
+   appear in the same context — status colours always carry a text label.
+   =========================================================================== */
+
 .vnext-shell {
-  --vnx-canvas: #070b0f;
-  --vnx-canvas-top: #0a1219;
-  --vnx-shell: #0a1015;
-  --vnx-command: #0a1015;
-  --vnx-surface-1: #0d141a;
-  --vnx-surface-2: #111a21;
-  --vnx-surface-3: #16212a;
-  --vnx-surface-selected: #17273a;
-  --vnx-input: #080e13;
-  --vnx-code: #05090d;
-  --vnx-elevated: #111a21;
-  --vnx-backdrop: rgba(1, 4, 7, .72);
-  --vnx-shadow: rgba(0, 0, 0, .5);
-  --vnx-line: #26333d;
-  --vnx-line-soft: #1a252d;
-  --vnx-line-strong: #3a4c5a;
-  --vnx-text: #e5edf1;
-  --vnx-text-bright: #f1f5f7;
-  --vnx-text-soft: #b9c6cd;
-  --vnx-muted: #83939d;
-  --vnx-muted-2: #657681;
-  --vnx-primary: #6ea6ff;
-  --vnx-primary-strong: #a9c8ff;
-  --vnx-primary-surface: #1a3554;
-  --vnx-realtime: #43c1ce;
-  --vnx-positive: #d95864;
-  --vnx-negative: #30ad83;
-  --vnx-success: #38b58e;
-  --vnx-warning: #d9a441;
-  --vnx-danger: #e7656e;
-  --vnx-info: #6d9fe8;
+  /* ---------------------------------------------------------- identity --- */
+  --atlas-brand-from: #6f8dff;
+  --atlas-brand-to: #a98bff;
+  /* The brand mark always sits on the saturated gradient, so its ink is the
+     same in every theme. It is a token so the "no literal hex" rule holds. */
+  --atlas-brand-ink: #ffffff;
+  --atlas-glow: rgba(91, 157, 255, .28);
+  --atlas-agent-glow: rgba(169, 139, 255, .26);
+
+  /* ------------------------------------------------------------ canvas --- */
+  --vnx-canvas: #06090e;
+  --vnx-canvas-top: #0a1118;
+  --vnx-shell: #080d13;
+  --vnx-command: #080d13;
+  --vnx-surface-1: #0c1219;
+  --vnx-surface-2: #111922;
+  --vnx-surface-3: #17212c;
+  --vnx-surface-selected: #16283d;
+  --vnx-input: #070c11;
+  --vnx-code: #04070b;
+  --vnx-elevated: #131c26;
+  --vnx-backdrop: rgba(2, 5, 9, .74);
+  --vnx-shadow: rgba(0, 0, 0, .55);
+
+  /* -------------------------------------------------------------- line --- */
+  --vnx-line: #223040;
+  --vnx-line-soft: #172230;
+  --vnx-line-strong: #35485c;
+  --vnx-hairline: rgba(148, 178, 208, .12);
+
+  /* -------------------------------------------------------------- text --- */
+  --vnx-text: #e6eef5;
+  --vnx-text-bright: #f6fafd;
+  --vnx-text-soft: #b3c3d1;
+  --vnx-muted: #7f919f;
+  --vnx-muted-2: #61737f;
+
+  /* ------------------------------------------------------ ui semantics --- */
+  --vnx-primary: #5b9dff;              /* interactive: links, selection, focus */
+  --vnx-primary-strong: #a5c8ff;
+  --vnx-primary-surface: #16304e;
+  --vnx-agent: #a98bff;                /* multi-agent / model reasoning        */
+  --vnx-agent-surface: #241f45;
+  --vnx-realtime: #3ec9e0;             /* live streams and telemetry           */
+  --vnx-realtime-surface: #0f2f38;
+
+  /* -------------------------------------------------- status semantics --- */
+  --vnx-success: #2fb98d;
+  --vnx-warning: #e0a838;
+  --vnx-danger: #ec5f6a;
+  --vnx-info: #5b9dff;
+  --state-verified: #2fb98d;
+  --state-warning: #e0a838;
+  --state-critical: #ec5f6a;
+  --state-stale: #a47b43;
+  --state-unavailable: #71879a;
+
+  /* -------------------------------------------------- market semantics --- */
+  --market-up: #f0525f;
+  --market-down: #22b889;
+  --market-flat: #7f919f;
+  --market-bid: #f0a7c2;
+  --market-ask: #8ad9a3;
+  --trade-buy: var(--market-up);
+  --trade-sell: var(--market-down);
+  --trade-t-buy: #6f9dff;
+  --trade-t-sell: #b779ff;
+  /* Legacy aliases: `positive`/`negative` mean price direction, not goodness. */
+  --vnx-positive: var(--market-up);
+  --vnx-negative: var(--market-down);
+
+  /* -------------------------------------------------------- data viz ----- */
+  --viz-1: #5b9dff;
+  --viz-2: #2fb98d;
+  --viz-3: #e0a838;
+  --viz-4: #a98bff;
+  --viz-5: #3ec9e0;
+  --viz-6: #ef7d63;
+  --viz-7: #7e93a8;
+  --viz-8: #d08fc4;
+  --viz-grid: rgba(148, 178, 208, .10);
+  --viz-axis: #35485c;
+
+  /* ------------------------------------------------------------- type --- */
+  --vnx-font-sans: "Inter Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --vnx-font-mono: "JetBrains Mono Variable", "Noto Sans CJK SC", "Microsoft YaHei", ui-monospace, monospace;
+  --vnx-text-micro: 10px;
+  --vnx-text-small: 11px;
+  --vnx-text-body: 13px;
+  --vnx-text-lead: 15px;
+  --vnx-text-title: 19px;
+  --vnx-text-display: 25px;
+  --vnx-tracking-micro: .08em;
+
+  /* ------------------------------------------------------ shape/space --- */
+  --vnx-radius-sm: 3px;
+  --vnx-radius: 5px;
+  --vnx-radius-lg: 8px;
+  --vnx-space-1: 4px;
+  --vnx-space-2: 8px;
+  --vnx-space-3: 12px;
+  --vnx-space-4: 16px;
+  --vnx-space-5: 20px;
+  --vnx-space-6: 28px;
+  --vnx-row: 38px;
+  --vnx-rail: 2px;
+
+  /* ---------------------------------------------------------- motion --- */
+  --vnx-ease: cubic-bezier(.22, .61, .36, 1);
+  --vnx-fast: 120ms;
+  --vnx-normal: 200ms;
+
+  /* -------------------------------------------- bridges for legacy CSS --- */
   --vnx-track: var(--vnx-line-soft);
   --vnx-accent: var(--vnx-primary);
   --terminal-canvas: var(--vnx-canvas);
@@ -38,17 +141,8 @@
   --terminal-border: var(--vnx-line);
   --terminal-border-strong: var(--vnx-line-strong);
   --terminal-selection: var(--vnx-surface-selected);
-  --vnx-font-sans: "Inter Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-  --vnx-font-mono: "JetBrains Mono Variable", "Noto Sans CJK SC", "Microsoft YaHei", ui-monospace, monospace;
-  --vnx-radius-sm: 3px;
-  --vnx-radius: 5px;
-  --vnx-space-1: 4px;
-  --vnx-space-2: 8px;
-  --vnx-space-3: 12px;
-  --vnx-space-4: 16px;
-  --vnx-space-5: 20px;
-  --vnx-row: 38px;
-  /* Semantic bridge for legacy domain pages rendered inside VNext. */
+  --terminal-focus: var(--vnx-primary);
+  --focus: 0 0 0 2px color-mix(in srgb, var(--vnx-primary) 32%, transparent);
   --bg: var(--vnx-canvas);
   --surface: var(--vnx-surface-1);
   --surface-2: var(--vnx-surface-2);
@@ -59,6 +153,8 @@
   --text: var(--vnx-text);
   --muted: var(--vnx-muted);
   --muted-2: var(--vnx-muted-2);
+  --shadow: var(--vnx-shadow);
+  --mono: var(--vnx-font-mono);
   --blue: var(--vnx-primary);
   --cyan: var(--vnx-realtime);
   --green: var(--vnx-success);
@@ -68,88 +164,143 @@
   --green-soft: color-mix(in srgb, var(--vnx-success) 12%, transparent);
   --red-soft: color-mix(in srgb, var(--vnx-danger) 12%, transparent);
   --amber-soft: color-mix(in srgb, var(--vnx-warning) 12%, transparent);
+  --iw-ai: var(--vnx-agent);
+  --iw-ai-surface: var(--vnx-agent-surface);
+  --iw-cyan: var(--vnx-realtime);
+  --iw-positive: var(--vnx-success);
+  --iw-warning: var(--vnx-warning);
+  --iw-danger: var(--vnx-danger);
+  --ux-cyan: var(--vnx-realtime);
+  --ux-border: var(--vnx-line);
+  --ux-panel: var(--vnx-surface-2);
+  --ux-text-soft: var(--vnx-text-soft);
+
   color: var(--vnx-text);
-  font: 13px/1.45 var(--vnx-font-sans);
+  font: var(--vnx-text-body)/1.45 var(--vnx-font-sans);
   color-scheme: dark;
 }
 
+/* --------------------------------------------------------------------------
+   Dawn — a warmer, lower-contrast night for long sessions. Same token names,
+   same meanings; only the luminance and warmth change.
+   -------------------------------------------------------------------------- */
 .vnext-shell.theme-dawn {
-  --vnx-canvas: #0f1820;
-  --vnx-canvas-top: #172632;
-  --vnx-shell: #13202a;
-  --vnx-command: #14232d;
-  --vnx-surface-1: #17252f;
-  --vnx-surface-2: #1c2d38;
-  --vnx-surface-3: #233743;
-  --vnx-surface-selected: #213b50;
-  --vnx-input: #111d25;
-  --vnx-code: #0e1920;
-  --vnx-elevated: #1c2d38;
+  --vnx-canvas: #0e1720;
+  --vnx-canvas-top: #17242f;
+  --vnx-shell: #121e28;
+  --vnx-command: #13212b;
+  --vnx-surface-1: #16232d;
+  --vnx-surface-2: #1b2b36;
+  --vnx-surface-3: #223541;
+  --vnx-surface-selected: #20394e;
+  --vnx-input: #101c24;
+  --vnx-code: #0d181f;
+  --vnx-elevated: #1b2b36;
   --vnx-backdrop: rgba(5, 12, 17, .68);
-  --vnx-shadow: rgba(0, 0, 0, .38);
-  --vnx-line: #344955;
-  --vnx-line-soft: #263945;
-  --vnx-line-strong: #4a6572;
-  --vnx-text: #edf5f7;
+  --vnx-shadow: rgba(0, 0, 0, .40);
+  --vnx-line: #324753;
+  --vnx-line-soft: #253844;
+  --vnx-line-strong: #486370;
+  --vnx-hairline: rgba(163, 195, 215, .14);
+  --vnx-text: #ecf4f7;
   --vnx-text-bright: #f7fbfc;
-  --vnx-text-soft: #c8d6dc;
-  --vnx-muted: #96a9b3;
-  --vnx-muted-2: #91a7b1;
-  --vnx-primary: #67b5ff;
-  --vnx-primary-strong: #b5d9ff;
-  --vnx-primary-surface: #1f4664;
-  --vnx-realtime: #4fd0c8;
+  --vnx-text-soft: #c6d5db;
+  --vnx-muted: #94a7b2;
+  --vnx-muted-2: #8299a4;
+  --vnx-primary: #63b0ff;
+  --vnx-primary-strong: #b2d7ff;
+  --vnx-primary-surface: #1e4463;
+  --vnx-agent: #b49aff;
+  --vnx-agent-surface: #2a2550;
+  --vnx-realtime: #4bcfc7;
+  --vnx-realtime-surface: #123a40;
+  --viz-1: #63b0ff;
+  --viz-2: #35c295;
+  --viz-3: #e6b24a;
+  --viz-4: #b49aff;
+  --viz-5: #4bcfc7;
+  --viz-6: #f28a70;
+  --viz-7: #8ea3b6;
+  --viz-8: #d79ecd;
+  --viz-grid: rgba(163, 195, 215, .12);
+  --viz-axis: #486370;
 }
 
+/* --------------------------------------------------------------------------
+   Day — for projectors, printing and shared screens. Contrast ratios are lifted
+   rather than simply inverted, so status and market colours stay legible on
+   white without changing meaning.
+   -------------------------------------------------------------------------- */
 .vnext-shell.theme-day {
-  --vnx-canvas: #e9f0f3;
-  --vnx-canvas-top: #f6fafb;
+  --vnx-canvas: #eaeff3;
+  --vnx-canvas-top: #f7fafb;
   --vnx-shell: #f7fafb;
   --vnx-command: #ffffff;
   --vnx-surface-1: #ffffff;
-  --vnx-surface-2: #f1f6f8;
-  --vnx-surface-3: #e5eef2;
-  --vnx-surface-selected: #dcecf8;
-  --vnx-input: #f4f8fa;
-  --vnx-code: #14232c;
+  --vnx-surface-2: #f2f6f9;
+  --vnx-surface-3: #e6edf2;
+  --vnx-surface-selected: #dbe9f8;
+  --vnx-input: #f5f8fa;
+  --vnx-code: #142430;
   --vnx-elevated: #ffffff;
-  --vnx-backdrop: rgba(25, 43, 53, .32);
-  --vnx-shadow: rgba(31, 58, 71, .2);
-  --vnx-line: #c4d3da;
-  --vnx-line-soft: #d9e4e9;
-  --vnx-line-strong: #9fb5bf;
-  --vnx-text: #172832;
-  --vnx-text-bright: #0b1b23;
-  --vnx-text-soft: #344b56;
-  --vnx-muted: #607681;
-  --vnx-muted-2: #526a75;
-  --vnx-primary: #176bc2;
-  --vnx-primary-strong: #124f91;
-  --vnx-primary-surface: #dbeaf7;
-  --vnx-realtime: #087e88;
-  --vnx-positive: #c63c4a;
-  --vnx-negative: #168166;
-  --vnx-success: #168166;
-  --vnx-warning: #9a6812;
-  --vnx-danger: #c63c4a;
-  --vnx-info: #286eb5;
-  --terminal-focus: #176bc2;
-  --state-warning: #9a6812;
-  --state-critical: #c63c4a;
-  --state-verified: #168166;
-  --state-stale: #8d6c32;
-  --state-unavailable: #70838c;
+  --vnx-backdrop: rgba(24, 42, 54, .32);
+  --vnx-shadow: rgba(30, 55, 72, .18);
+  --vnx-line: #c6d4dd;
+  --vnx-line-soft: #dbe5eb;
+  --vnx-line-strong: #9db2bf;
+  --vnx-hairline: rgba(45, 78, 100, .14);
+  --vnx-text: #16262f;
+  --vnx-text-bright: #0a1920;
+  --vnx-text-soft: #324854;
+  --vnx-muted: #5c7280;
+  --vnx-muted-2: #4d6572;
+  --vnx-primary: #1667c4;
+  --vnx-primary-strong: #0f4d94;
+  --vnx-primary-surface: #d9e8f8;
+  --vnx-agent: #6d45c4;
+  --vnx-agent-surface: #e9e1fa;
+  --vnx-realtime: #077e88;
+  --vnx-realtime-surface: #d5eef0;
+  --vnx-success: #10795e;
+  --vnx-warning: #8f6210;
+  --vnx-danger: #c03846;
+  --vnx-info: #1667c4;
+  --state-verified: #10795e;
+  --state-warning: #8f6210;
+  --state-critical: #c03846;
+  --state-stale: #866430;
+  --state-unavailable: #63767f;
+  --market-up: #c8323f;
+  --market-down: #0f7a5e;
+  --market-flat: #5c7280;
+  --market-bid: #a8455e;
+  --market-ask: #2c7a53;
+  --trade-t-buy: #2f5fc4;
+  --trade-t-sell: #7a45c0;
+  --viz-1: #1667c4;
+  --viz-2: #10795e;
+  --viz-3: #8f6210;
+  --viz-4: #6d45c4;
+  --viz-5: #077e88;
+  --viz-6: #c05a37;
+  --viz-7: #566b78;
+  --viz-8: #9c4a8c;
+  --viz-grid: rgba(45, 78, 100, .12);
+  --viz-axis: #9db2bf;
   color-scheme: light;
 }
 
+/* --------------------------------------------------------------------- density */
 .vnext-shell.density-compact {
   --vnx-space-2: 6px;
   --vnx-space-3: 9px;
   --vnx-space-4: 12px;
   --vnx-space-5: 16px;
+  --vnx-space-6: 20px;
   --vnx-row: 32px;
 }
 
+/* ------------------------------------------------------------------- resets */
 .vnext-shell *,
 .vnext-shell *::before,
 .vnext-shell *::after {
@@ -169,7 +320,10 @@
 .vnext-shell .vnext-workspace,
 .vnext-shell .vnext-workspace-tabs,
 .vnext-shell .vnext-operations-dock {
-  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  transition:
+    background-color var(--vnx-normal) var(--vnx-ease),
+    border-color var(--vnx-normal) var(--vnx-ease),
+    color var(--vnx-normal) var(--vnx-ease);
 }
 
 .vnext-shell button,
@@ -181,7 +335,8 @@
 .vnext-shell a:focus-visible,
 .vnext-shell input:focus-visible,
 .vnext-shell select:focus-visible,
-.vnext-shell textarea:focus-visible {
+.vnext-shell textarea:focus-visible,
+.vnext-shell [tabindex]:focus-visible {
   outline: 2px solid var(--vnx-primary);
   outline-offset: 1px;
 }
@@ -193,16 +348,17 @@
 
 /* 100% zoom readability floor for dense institutional metadata. */
 .vnext-shell small {
-  font-size: 10px !important;
+  font-size: var(--vnx-text-micro) !important;
   line-height: 1.4;
 }
 
+/* Direction tones are market semantics: red up, green down. */
 .vnext-shell .tone-positive {
-  color: var(--vnx-positive) !important;
+  color: var(--market-up) !important;
 }
 
 .vnext-shell .tone-negative {
-  color: var(--vnx-negative) !important;
+  color: var(--market-down) !important;
 }
 
 .vnext-shell .spin {
@@ -211,6 +367,28 @@
 
 @keyframes vnext-spin {
   to { transform: rotate(360deg); }
+}
+
+/* --------------------------------------------------------------- scrollbars */
+.vnext-shell ::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.vnext-shell ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.vnext-shell ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--vnx-line-strong) 70%, transparent);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 6px;
+}
+
+.vnext-shell ::-webkit-scrollbar-thumb:hover {
+  background: var(--vnx-line-strong);
+  background-clip: content-box;
 }
 
 @media (prefers-reduced-motion: reduce) {

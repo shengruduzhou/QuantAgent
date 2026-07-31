@@ -10,6 +10,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
 import { useVNextChartPalette } from "../vnext/theme";
+import { TTradingResearchPanel } from "../vnext/tplusone/TTradingResearchPanel";
 
 interface DoTSource {
   id: string;
@@ -214,6 +215,8 @@ export function TPlusOnePage(): JSX.Element {
           ) : <StateView state="empty" />}
         </Panel>
       </section>
+
+      <TTradingResearchPanel />
     </div>
   );
 }
@@ -241,6 +244,8 @@ function EmptyTPlusOneWorkspace({ navigate }: { navigate: ReturnType<typeof useN
         <ActionableState compact title="没有 T+1 做 T artifact" detail="先检查 do_t 成交与库存产物，再从受治理 overlay 生成逐对证据。" icon={ArrowsClockwise} primary={{ label: "检查 Runtime", onClick: () => navigate("/runtime?kind=do_t") }} secondary={{ label: "检查任务", onClick: () => navigate("/settings?view=jobs") }} />
       </WorkbenchPanel>
     </section>
+
+    <TTradingResearchPanel />
   </div>;
 }
 

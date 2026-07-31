@@ -1,0 +1,375 @@
+/* Alpha Foundry — factor-fusion search workstation. Composed from tokens.css
+   and foundation.css primitives; no literal colours. */
+
+.vnext-shell .alpha-foundry-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-4);
+  padding: var(--vnx-space-4);
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------ charts */
+
+.vnext-shell .foundry-frontier-chart {
+  width: 100%;
+  height: 320px;
+}
+
+.vnext-shell .foundry-nav-chart {
+  width: 100%;
+  height: 240px;
+}
+
+.vnext-shell .foundry-weight-chart {
+  width: 100%;
+  height: 180px;
+}
+
+/* ------------------------------------------------------------------ ledger */
+
+.vnext-shell .foundry-ledger {
+  min-width: 720px;
+}
+
+.vnext-shell .foundry-ledger tbody tr {
+  cursor: pointer;
+}
+
+.vnext-shell .foundry-ledger td strong {
+  color: var(--vnx-text-bright);
+  font-weight: 600;
+  margin-right: var(--vnx-space-2);
+}
+
+.vnext-shell .foundry-robustness {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  min-width: 58px;
+}
+
+.vnext-shell .foundry-robustness .atlas-meter {
+  width: 52px;
+}
+
+.vnext-shell .foundry-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vnx-space-1);
+  font-size: var(--vnx-text-micro);
+  color: var(--vnx-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--vnx-tracking-micro);
+  cursor: pointer;
+}
+
+/* -------------------------------------------------------------------- form */
+
+.vnext-shell .foundry-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.vnext-shell .foundry-form:disabled {
+  opacity: .62;
+}
+
+.vnext-shell .foundry-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--vnx-space-2) var(--vnx-space-3);
+}
+
+.vnext-shell .foundry-form textarea {
+  resize: vertical;
+  min-height: 54px;
+}
+
+.vnext-shell .foundry-check {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--vnx-space-2);
+  flex-wrap: wrap;
+}
+
+.vnext-shell .foundry-check input {
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  accent-color: var(--vnx-primary);
+}
+
+.vnext-shell .foundry-check small {
+  flex-basis: 100%;
+}
+
+/* The trial-count notice is the page's central honesty affordance, so it gets
+   the agent accent rather than a neutral background. */
+.vnext-shell .foundry-trials {
+  display: flex;
+  gap: var(--vnx-space-2);
+  padding: var(--vnx-space-2) var(--vnx-space-3);
+  border: 1px solid color-mix(in srgb, var(--vnx-agent) 34%, var(--vnx-line));
+  border-left-width: var(--vnx-rail);
+  border-left-color: var(--vnx-agent);
+  border-radius: var(--vnx-radius-sm);
+  background: color-mix(in srgb, var(--vnx-agent) 9%, transparent);
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .foundry-trials strong {
+  color: var(--vnx-agent);
+  font-family: var(--vnx-font-mono);
+}
+
+.vnext-shell .foundry-trials code {
+  font-family: var(--vnx-font-mono);
+  color: var(--vnx-text-bright);
+}
+
+/* -------------------------------------------------------------- preference */
+
+.vnext-shell .foundry-preference {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  padding-top: var(--vnx-space-2);
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .foundry-preference > small {
+  color: var(--vnx-muted-2);
+}
+
+.vnext-shell .foundry-slider {
+  display: grid;
+  grid-template-columns: 82px 1fr 42px;
+  align-items: center;
+  gap: var(--vnx-space-2);
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .foundry-slider input[type="range"] {
+  accent-color: var(--vnx-primary);
+}
+
+.vnext-shell .foundry-slider strong {
+  text-align: right;
+  color: var(--vnx-text-bright);
+}
+
+/* ----------------------------------------------------------------- actions */
+
+.vnext-shell .foundry-actions {
+  display: flex;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-3);
+}
+
+.vnext-shell .foundry-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-2);
+  padding: var(--vnx-space-2);
+  border: 1px solid color-mix(in srgb, var(--vnx-danger) 42%, var(--vnx-line));
+  border-radius: var(--vnx-radius-sm);
+  background: color-mix(in srgb, var(--vnx-danger) 10%, transparent);
+  color: var(--vnx-danger);
+  font-size: var(--vnx-text-small);
+}
+
+/* --------------------------------------------------------------- live job */
+
+.vnext-shell .foundry-job {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-3);
+  padding-top: var(--vnx-space-3);
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .foundry-job code {
+  font-family: var(--vnx-font-mono);
+  font-size: var(--vnx-text-micro);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .foundry-console {
+  max-height: 148px;
+  overflow-y: auto;
+  padding: var(--vnx-space-2);
+  border: 1px solid var(--vnx-line-soft);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-code);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vnext-shell .foundry-console span {
+  color: var(--vnx-muted-2);
+  font-size: var(--vnx-text-small);
+}
+
+/* -------------------------------------------------------------- run list */
+
+.vnext-shell .foundry-run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-1);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.vnext-shell .foundry-run-list button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--vnx-space-2);
+  border: 1px solid var(--vnx-line-soft);
+  border-left: var(--vnx-rail) solid transparent;
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--vnx-fast) var(--vnx-ease);
+}
+
+.vnext-shell .foundry-run-list button:hover {
+  border-color: var(--vnx-line-strong);
+}
+
+.vnext-shell .foundry-run-list button.selected {
+  border-left-color: var(--vnx-primary);
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .foundry-run-list strong {
+  font-size: var(--vnx-text-small);
+  font-weight: 600;
+}
+
+/* -------------------------------------------------------------- inspector */
+
+.vnext-shell .foundry-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--vnx-space-3);
+  margin: 0 0 var(--vnx-space-3);
+}
+
+.vnext-shell .foundry-metrics > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vnext-shell .foundry-metrics dt {
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .foundry-metrics dd {
+  margin: 0;
+}
+
+.vnext-shell .foundry-robustness-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  padding: var(--vnx-space-3) 0;
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .foundry-robustness-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px var(--vnx-space-2);
+  align-items: baseline;
+}
+
+.vnext-shell .foundry-robustness-row strong {
+  display: block;
+  font-size: var(--vnx-text-small);
+  font-weight: 600;
+  color: var(--vnx-text);
+}
+
+.vnext-shell .foundry-robustness-row small {
+  color: var(--vnx-muted-2);
+}
+
+.vnext-shell .foundry-robustness-row .atlas-meter {
+  grid-column: 1 / -1;
+}
+
+.vnext-shell .foundry-weights {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  padding-top: var(--vnx-space-3);
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .foundry-folds {
+  min-width: 380px;
+  margin-top: var(--vnx-space-3);
+}
+
+@media (max-width: 900px) {
+  .vnext-shell .foundry-form-grid,
+  .vnext-shell .foundry-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ------------------------------------------------- T+1 research launcher */
+
+.vnext-shell .tplus-research-panel .tplus-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--vnx-space-2) var(--vnx-space-3);
+}
+
+.vnext-shell .tplus-research-panel .atlas-field.wide {
+  grid-column: 1 / -1;
+}
+
+.vnext-shell .tplus-cost-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-3);
+  padding-top: var(--vnx-space-3);
+  border-top: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .tplus-actions {
+  display: flex;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-3);
+}
+
+.vnext-shell .tplus-research-panel .iw-truth-notice strong {
+  color: var(--vnx-warning);
+}

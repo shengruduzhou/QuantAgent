@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from threading import RLock, Thread
@@ -157,6 +158,44 @@ COMMANDS: dict[str, dict[str, Any]] = {
                 "all_reviewed", "basic", "alpha101", "alpha181", "cicc_ashare80",
             },
         },
+    },
+    "research-intraday-t-trading": {
+        # A-share has no true T+0. This command's only honest framing is the
+        # sellable-inventory one: intraday round trips are bounded by yesterday's
+        # closing position, which is why `holdings_csv` is required rather than
+        # optional. Removing it would silently manufacture T+0 capability.
+        "type": "t-plus-one-research",
+        "entrypoint": "scripts/intraday_dot_ev_backtest.py",
+        "required": {"minute_dir", "holdings_csv", "market_panel", "output_dir"},
+        "allowed": {
+            "minute_dir", "holdings_csv", "market_panel", "output_dir",
+            "start", "end", "train_end", "validation_end", "order_notional_yuan",
+            "horizon_minutes", "backend", "edge_cost_multiple",
+            "min_round_trips_enable", "maker_only", "slippage_bps", "spread_bps",
+            "commission_rate", "max_symbols", "cache_table",
+        },
+        "path_inputs": {"minute_dir", "holdings_csv", "market_panel"},
+        "path_outputs": {"output_dir", "cache_table"},
+        "control": set(),
+        "choices": {"backend": {"lightgbm", "xgboost", "catboost", "sklearn"}},
+    },
+    "search-factor-fusion": {
+        "type": "fusion-search",
+        "required": {"factor_panel_path", "forward_returns_path", "factor_names", "output_dir"},
+        "allowed": {
+            "factor_panel_path", "forward_returns_path", "factor_names", "output_dir",
+            "forward_column", "horizon_days", "top_k", "n_folds", "embargo_days",
+            "min_train_days", "min_test_days", "transaction_cost_bps",
+            "include_genetic", "random_controls", "single_factor_baselines", "seed",
+            "benchmark_path", "benchmark_symbol", "preference_excess_return",
+            "preference_annual_return", "preference_drawdown_control",
+            "preference_robustness",
+        },
+        "path_inputs": {"factor_panel_path", "forward_returns_path", "benchmark_path"},
+        "path_outputs": {"output_dir"},
+        # `n_trials` is intentionally absent: it is derived from the enumerated
+        # search space so an operator cannot deflate their own Sharpe ratio.
+        "dual_boolean_options": {"include_genetic"},
     },
     "predict-alpha-v7": {
         "type": "infer",
@@ -787,6 +826,7 @@ class JobManager:
                 raise ValueError(f"job {job_id} already finished with status {record.status}")
             self._cancel_requested.add(job_id)
             process = self._processes.get(job_id)
+            was_paused = record.status == "paused"
             if process is None:
                 record.status = "cancelled"
                 record.message = "cancelled before process start"
@@ -798,10 +838,57 @@ class JobManager:
             public = self._public(record)
         self._emit(record)
         if process is not None:
+            _terminate(process, was_paused=was_paused)
+        return public
+
+    def pause(self, job_id: str) -> dict[str, Any]:
+        """Suspend a running job's process without losing its progress.
+
+        Uses SIGSTOP rather than termination so a long search can yield the
+        machine to a higher-priority run and then continue from where it was.
+        The process keeps its memory, so a paused job still holds RAM and GPU
+        allocations — this is a scheduling control, not a resource release.
+        """
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                raise KeyError(job_id)
+            if record.status != "running":
+                raise ValueError(f"job {job_id} is {record.status}, only a running job can be paused")
+            process = self._processes.get(job_id)
+            if process is None:
+                raise ValueError(f"job {job_id} has no live process to pause")
             try:
-                process.terminate()
-            except OSError:
-                pass
+                process.send_signal(signal.SIGSTOP)
+            except OSError as exc:
+                raise ValueError(f"could not pause job {job_id}: {exc}") from exc
+            record.status = "paused"
+            record.message = "paused by operator; process suspended, memory retained"
+            self._persist()
+            public = self._public(record)
+        self._emit(record)
+        return public
+
+    def resume(self, job_id: str) -> dict[str, Any]:
+        """Continue a paused job from exactly where it was suspended."""
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                raise KeyError(job_id)
+            if record.status != "paused":
+                raise ValueError(f"job {job_id} is {record.status}, only a paused job can be resumed")
+            process = self._processes.get(job_id)
+            if process is None:
+                raise ValueError(f"job {job_id} has no live process to resume")
+            try:
+                process.send_signal(signal.SIGCONT)
+            except OSError as exc:
+                raise ValueError(f"could not resume job {job_id}: {exc}") from exc
+            record.status = "running"
+            record.message = "resumed by operator"
+            self._persist()
+            public = self._public(record)
+        self._emit(record)
         return public
 
     def purge(self, job_id: str, *, delete_outputs: bool = False) -> dict[str, Any]:
@@ -812,17 +899,18 @@ class JobManager:
             if record is None:
                 raise KeyError(job_id)
             process = self._processes.pop(job_id, None)
+            was_paused = record.status == "paused"
             owned_outputs = list(record.ownedOutputPaths)
             self._cancel_requested.add(job_id)
             self._purged.add(job_id)
             self._jobs.pop(job_id, None)
             self._persist()
         if process is not None:
+            # Same trap as cancel: a suspended process ignores SIGTERM until it
+            # is continued, and purge would then block on wait().
+            _terminate(process, was_paused=was_paused)
             try:
-                process.terminate()
                 process.wait(timeout=5)
-            except OSError:
-                pass
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
@@ -911,7 +999,11 @@ class JobManager:
             record = self._jobs.get(job_id)
             if record is None or job_id in self._cancel_requested or record.status == "cancelled":
                 return
-        self._update(job_id, status="running", startedAt=_now(), progress=0.0, message="running")
+        # `startedAt` is stamped here, but the job is not reported as `running`
+        # until its process is registered below. Flipping the status first left a
+        # window where an operator could see "running" and have pause rejected
+        # for having no process to signal.
+        self._update(job_id, status="starting", startedAt=_now(), progress=0.0, message="starting")
         entrypoint = spec.get("entrypoint")
         command = (
             [sys.executable, str(self.settings.project_root / entrypoint)]
@@ -964,6 +1056,8 @@ class JobManager:
                     )
                     self._processes[job_id] = process
                     cancel_requested = job_id in self._cancel_requested
+                # Only now is there something to pause, cancel or signal.
+                self._update(job_id, status="running", message="running")
                 if cancel_requested:
                     process.terminate()
                 assert process.stdout is not None
@@ -1091,7 +1185,7 @@ class JobManager:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._jobs = {item["id"]: JobRecord(**item) for item in payload}
             for record in self._jobs.values():
-                if record.status in {"queued", "running", "cancelling"}:
+                if record.status in {"queued", "starting", "running", "paused", "cancelling"}:
                     record.status = "failed"
                     record.finishedAt = _now()
                     record.error = "API process restarted before job completed"
@@ -1113,6 +1207,24 @@ class JobManager:
         data.pop("logPath", None)
         data.pop("ownedOutputPaths", None)
         return data
+
+
+def _terminate(process: subprocess.Popen, *, was_paused: bool) -> None:
+    """Terminate a job process, resuming it first if it was suspended.
+
+    A SIGSTOP'd process does not act on SIGTERM until it runs again, so
+    terminating a paused job without SIGCONT leaves it stopped forever while the
+    log reader blocks on its stdout pipe. Continue first, then terminate.
+    """
+    if was_paused:
+        try:
+            process.send_signal(signal.SIGCONT)
+        except OSError:
+            pass
+    try:
+        process.terminate()
+    except OSError:
+        pass
 
 
 def _now() -> str:

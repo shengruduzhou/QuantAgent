@@ -1,0 +1,177 @@
+/* Decision council — role-scoped verdicts with visible evidence. */
+
+.vnext-shell .council-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-4);
+  padding: var(--vnx-space-4);
+}
+
+.vnext-shell .council-findings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-3);
+}
+
+.vnext-shell .council-finding {
+  padding: var(--vnx-space-3) var(--vnx-space-4);
+  padding-left: calc(var(--vnx-space-4) + var(--vnx-rail));
+  background: var(--vnx-surface-2);
+}
+
+.vnext-shell .council-finding > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--vnx-space-3);
+  margin-bottom: var(--vnx-space-2);
+}
+
+.vnext-shell .council-finding > header strong {
+  display: block;
+  font-size: var(--vnx-text-lead);
+  font-weight: 600;
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .council-finding > header small {
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .council-headline {
+  margin: 0 0 var(--vnx-space-1);
+  font-size: var(--vnx-text-body);
+  font-weight: 600;
+  color: var(--vnx-text);
+}
+
+.vnext-shell .council-detail {
+  margin: 0 0 var(--vnx-space-2);
+  max-width: 78ch;
+  color: var(--vnx-text-soft);
+  font-size: var(--vnx-text-small);
+}
+
+/* ---------------------------------------------------------------- evidence */
+
+.vnext-shell .council-evidence summary {
+  cursor: pointer;
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+  color: var(--vnx-primary);
+}
+
+.vnext-shell .council-evidence dl {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 2px var(--vnx-space-3);
+  margin: var(--vnx-space-2) 0 0;
+  padding: var(--vnx-space-2);
+  border: 1px solid var(--vnx-line-soft);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-code);
+  font-size: var(--vnx-text-micro);
+}
+
+.vnext-shell .council-evidence dl > div {
+  display: contents;
+}
+
+.vnext-shell .council-evidence dt {
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .council-evidence dd {
+  margin: 0;
+  color: var(--vnx-text-soft);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- override */
+
+.vnext-shell .council-override-record {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-2);
+  padding: var(--vnx-space-2);
+  border: 1px solid color-mix(in srgb, var(--vnx-agent) 38%, var(--vnx-line));
+  border-left: var(--vnx-rail) solid var(--vnx-agent);
+  border-radius: var(--vnx-radius-sm);
+  background: color-mix(in srgb, var(--vnx-agent) 9%, transparent);
+}
+
+.vnext-shell .council-override-record strong {
+  display: block;
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .council-override-record small {
+  display: block;
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .council-finding > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--vnx-space-3);
+  margin-top: var(--vnx-space-3);
+  padding-top: var(--vnx-space-2);
+  border-top: 1px solid var(--vnx-line-soft);
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .council-override-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  margin-top: var(--vnx-space-3);
+  padding: var(--vnx-space-3);
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-1);
+}
+
+.vnext-shell .council-override-form textarea {
+  resize: vertical;
+}
+
+.vnext-shell .council-error {
+  margin: 0;
+  color: var(--vnx-danger);
+  font-size: var(--vnx-text-small);
+}
+
+/* --------------------------------------------------------------- audit log */
+
+.vnext-shell .council-audit {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.vnext-shell .council-audit li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--vnx-space-2);
+  border: 1px solid var(--vnx-line-soft);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-2);
+}
+
+.vnext-shell .council-audit p {
+  margin: 0;
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-soft);
+}

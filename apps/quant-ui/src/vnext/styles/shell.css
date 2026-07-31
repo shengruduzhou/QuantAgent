@@ -935,8 +935,43 @@
   background: var(--vnx-success);
 }
 
+/* A live process that is advancing gets the realtime accent and a pulse; a
+   suspended one keeps its dot but stops moving, matching what it is doing. */
+.vnext-job-state.state-running,
+.vnext-job-state.state-starting {
+  background: var(--vnx-realtime);
+  animation: vnext-job-pulse 1.6s var(--vnx-ease) infinite;
+}
+
+.vnext-job-state.state-succeeded {
+  background: var(--vnx-success);
+  animation: none;
+}
+
+.vnext-job-state.state-paused {
+  background: var(--vnx-warning);
+}
+
+.vnext-job-state.state-cancelling {
+  background: var(--vnx-muted-2);
+}
+
 .vnext-job-state.state-failed {
   background: var(--vnx-danger);
+}
+
+@keyframes vnext-job-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+
+.vnext-pause-job,
+.vnext-resume-job {
+  color: var(--vnx-text-soft);
+}
+
+.vnext-resume-job {
+  color: var(--vnx-realtime);
 }
 
 .vnext-task-list strong,
@@ -1287,4 +1322,55 @@
 @media (max-width: 760px) {
   .vnext-shell { min-width: 680px; }
   .vnext-workspace-name { display: none; }
+}
+
+/* ===========================================================================
+   ATLAS identity layer.
+
+   The shell's chrome carries the platform's signature so a screenshot is
+   recognisable without a logo: a brand-gradient mark, hairline separators that
+   read as instrument panel seams, and a single luminous rail marking whatever
+   is currently governing the workspace.
+   =========================================================================== */
+
+.vnext-shell .vnext-rail-brand > span {
+  background: linear-gradient(135deg, var(--atlas-brand-from), var(--atlas-brand-to));
+  color: var(--atlas-brand-ink);
+  letter-spacing: .04em;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--atlas-brand-to) 40%, transparent);
+}
+
+/* The active module gets the signal rail rather than a heavier fill, so the
+   rail stays scannable at a glance even with 20 modules registered. */
+.vnext-shell .vnext-module-row.active {
+  background: var(--vnx-surface-selected);
+  box-shadow: inset var(--vnx-rail) 0 var(--vnx-primary);
+}
+
+.vnext-shell .vnext-module-row.active .vnext-module-link {
+  color: var(--vnx-text-bright);
+}
+
+/* A hairline of brand light under the command bar: the one place the identity
+   colour appears as light rather than as a control. */
+.vnext-shell .vnext-commandbar {
+  position: relative;
+}
+
+.vnext-shell .vnext-commandbar::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--atlas-brand-from) 55%, transparent),
+    color-mix(in srgb, var(--atlas-brand-to) 35%, transparent) 38%,
+    transparent 72%
+  );
+  pointer-events: none;
+}
+
+.vnext-shell.theme-day .vnext-commandbar::after {
+  opacity: .8;
 }

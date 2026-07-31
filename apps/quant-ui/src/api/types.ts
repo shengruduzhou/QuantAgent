@@ -696,3 +696,169 @@ export interface SystemResources {
     powerDrawW?: number | null;
   }>;
 }
+
+/* ---------------------------------------------------------------- fusion --- */
+
+/** One evaluated blend from a factor-fusion search. */
+export interface FusionCandidate {
+  id: string;
+  label: string;
+  scheme: string;
+  /** Controls never read the training segment; they exist to be beaten. */
+  isControl: boolean;
+  weights: Record<string, number>;
+  metrics: {
+    observations: number;
+    annualReturn: number;
+    excessReturn: number;
+    benchmarkAnnualReturn: number;
+    maxDrawdown: number;
+    sharpe: number;
+    calmar: number;
+    averageTurnover: number;
+    costDrag: number;
+    winRate: number;
+    robustness: number;
+  };
+  robustnessBreakdown: {
+    foldConsistency: number;
+    overfittingResistance: number;
+    deflatedSharpeProbability: number;
+    regimeConsistency: number;
+    pbo: number | null;
+  };
+  folds: Array<{
+    foldIndex: number;
+    trainStart: string;
+    trainEnd: string;
+    testStart: string;
+    testEnd: string;
+    weights: Record<string, number>;
+    metrics: Record<string, number>;
+  }>;
+  onFrontier: boolean;
+  preferenceRank: number | null;
+  preferenceScore: number | null;
+}
+
+export interface FusionRunSummary {
+  id: string;
+  name: string;
+  path: string;
+  generatedAt: string | null;
+  contentHash: string | null;
+  nTrials: number | null;
+  pbo: number | null;
+  benchmarkMode: string | null;
+  horizonDays: number | null;
+  topK: number | null;
+  transactionCostBps: number | null;
+  factorNames: string[];
+  frontierSize: number;
+  candidateCount: number | null;
+  evaluatedCandidateCount: number | null;
+  foldCount: number;
+}
+
+export interface FusionRunDetail {
+  id: string;
+  path: string;
+  summary: {
+    generatedAt?: string;
+    nTrials?: number;
+    pbo?: number | null;
+    benchmarkMode?: string;
+    horizonDays?: number;
+    topK?: number;
+    transactionCostBps?: number;
+    factorNames?: string[];
+    foldWindows?: Array<{
+      foldIndex: string;
+      trainStart: string;
+      trainEnd: string;
+      testStart: string;
+      testEnd: string;
+    }>;
+    frontier?: string[];
+    preferenceWeights?: Record<string, number>;
+    candidateCount?: number;
+    evaluatedCandidateCount?: number;
+  };
+  manifest: Record<string, unknown>;
+  ranking: Array<{
+    id: string;
+    preferenceScore: number;
+    contributions: Record<string, number>;
+  }>;
+  candidates: FusionCandidate[];
+}
+
+export type FusionNavRow = Record<string, string | number | null>;
+
+/* --------------------------------------------------------------- council --- */
+
+export type CouncilVerdict = "pass" | "warn" | "blocked" | "unknown";
+
+export interface CouncilRole {
+  id: string;
+  label: string;
+  domain: string;
+  /** What this agent is allowed to block — it may not block outside it. */
+  vetoScope: string;
+  veto: boolean;
+}
+
+export interface CouncilRoster {
+  roles: CouncilRole[];
+  thresholds: Record<string, number>;
+  protocol: string;
+}
+
+export interface CouncilOverride {
+  subjectType: string;
+  subjectId: string;
+  roleId: string;
+  verdict: Exclude<CouncilVerdict, "unknown">;
+  reason: string;
+  author: string;
+  recordedAt: string;
+}
+
+export interface CouncilFinding {
+  roleId: string;
+  verdict: CouncilVerdict;
+  headline: string;
+  detail: string;
+  evidence: Record<string, unknown>;
+  nextAction: string;
+  /** Present when a human overruled this agent; the original verdict is kept. */
+  override?: {
+    verdict: Exclude<CouncilVerdict, "unknown">;
+    reason: string;
+    author: string;
+    recordedAt: string;
+    replacedVerdict: CouncilVerdict;
+  };
+}
+
+export interface CouncilReview {
+  subject: {
+    type: string;
+    id: string;
+    path: string | null;
+    candidateId: string | null;
+    candidateLabel: string | null;
+  };
+  roles: CouncilRole[];
+  thresholds: Record<string, number>;
+  findings: CouncilFinding[];
+  decision: {
+    state: "PROMOTABLE" | "PROMOTABLE_WITH_WARNINGS" | "INSUFFICIENT_EVIDENCE" | "BLOCKED";
+    summary: string;
+    blockedRoles: string[];
+    unknownRoles: string[];
+    warnedRoles: string[];
+    overriddenRoles: string[];
+  };
+  overrides: CouncilOverride[];
+}

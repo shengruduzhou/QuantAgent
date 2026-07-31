@@ -1,55 +1,97 @@
-# QuantAgent Institutional Workbench — Design QA
+# QuantAgent ATLAS Workstation — Design QA
 
-## Reference and comparison
+## Scope of this pass
 
-- Primary reference: `docs/quant_ui_design_concepts/02-research-workbench.png` (`1487 × 1058`).
-- Supporting references: `01-institutional-command-grid.png` for dense metrics/exposure/blotter patterns and `03-signal-observatory.png` for model health, selection funnel, risk, and evidence patterns.
-- Implementation state: `/strategy`, cloud-browser viewport `1365 × 936`, VNext `dawn` theme.
-- Comparison method: the primary reference and the implementation screenshot were inspected together in one visual comparison pass after the final CSS and interaction changes.
+This pass replaced the workstation's ad-hoc colour handling with a single
+semantic foundation, added the platform's own visual identity, and shipped two
+new first-class modules (Alpha Foundry, Decision Council) built entirely from
+that foundation.
 
-The implementation intentionally keeps the reference's compact shell, permanent module rail, command bar, workspace tabs, dense metric strip, central operating canvas, right-side inspector, and persistent operations dock. Strategy configuration replaces the reference's stock replay chart because the page's primary job is governed research configuration, but the information hierarchy and operator workflow remain equivalent.
+Reference material remains `docs/quant_ui_design_concepts/*.png` for density and
+information hierarchy. The visual identity is **not** taken from any external
+product: it is defined in `apps/quant-ui/src/vnext/styles/tokens.css` and
+documented in `docs/research/institutional_quant_reference_architecture.md`.
 
-## Visible QA findings
+## Design system
 
-| Severity | Finding | Resolution | Result |
-|---|---|---|---|
-| P0 | Strategy form allowed a `primaryHorizon` outside the declared horizon set. | Replaced the arbitrary numeric control with a value constrained to the active horizon set; legacy drafts normalize before validation. | Passed |
-| P0 | API errors exposed an entire FastAPI input payload and obscured the actionable field. | API client now strips `input`, extracts field paths, and displays compact repair guidance. | Passed |
-| P0 | Strategy API fields did not all reach the formal CLI signature. | Restored the full API → job allowlist → CLI contract and added signature/serialization tests. | Passed |
-| P1 | Dashboard was almost blank when Quant API was unavailable. | Added an honest recovery workstation with actions for tmux startup, Runtime, tasks, and connectors. | Passed |
-| P1 | Day/dawn themes inherited fixed dark colors on legacy pages. | Added semantic token aliases and theme-aware charts, code blocks, controls, status bars, and T+1 states. | Passed |
-| P1 | Task-tab ellipsis actions were effectively hidden and the menu could overflow. | Made the trigger discoverable, bounded the menu, added a header, Escape/outside-click handling, and explicit pin/duplicate/split/close actions. | Passed |
-| P1 | Settings could say `API ready` while the API request had failed; connectors could spin indefinitely. | Status now reports `API unavailable`, and connectors render a truthful unavailable state. | Passed |
-| P1 | Training terminology made the V7 pipeline and V8 deep model look like competing versions. | Training page now identifies `V8 深度模型 · GPU` and keeps `train-v8-deep` as the command identifier; strategy copy separates the V7 pipeline/baseline role. | Passed |
-| P2 | Small labels and mixed theme contrast reduced legibility. | Raised critical text floors, strengthened muted text, and normalized input, table, console, and action colors. | Passed |
-| P2 | T+1 evidence canvas used excessive empty space and fixed chart colors. | Reduced empty height and made axes, tooltips, grids, and A-share red-up/green-down semantics theme-aware. | Passed |
+| Layer | File | Rule |
+|---|---|---|
+| Tokens | `vnext/styles/tokens.css` | The only place a colour, size, or duration is defined. All three themes declare the same token names. |
+| Primitives | `vnext/styles/foundation.css` | Seven reusable primitives: surface, eyebrow, figure, chip, grid, meter, empty state. |
+| Charts | `vnext/theme.ts` | `useVNextChartPalette()` mirrors the `--viz-*` ramp so charts and CSS never drift. |
+| Identity | `vnext/styles/shell.css` (identity layer) | Brand-gradient mark, signal rail on the active module, hairline of brand light under the command bar. |
 
-## Interaction coverage
+### Colour semantics — three non-overlapping families
 
-- Global shell: module rail, command search, workspace tabs, visible tab menu, pin/duplicate/split/close controls, theme menu, compact density, operations dock.
-- Dashboard: API-offline recovery state and four operator recovery actions.
-- Strategy: factor library, constrained horizons, Top-K search, automatic/fixed/off fundamental modes, selection ablation, screening order, T+1 mode, locked GPU mode, Pareto objective weights, validation/save/launch/cancel controls, Human Gate, council and telemetry states.
-- Factor lab: catalog filters, full-factor evaluation entry, discovery entry, 12-stage evidence lifecycle, inspector empty state.
-- Training lab: experiment/run navigator, configuration summary/editor, GPU-required state, metrics tabs, validation/start/cancel/clone controls, lineage and console states.
-- Task center: tmux command, job templates, allowlisted JSON, launch feedback, queue, stop, delete, connection vault, API-unavailable state.
-- T+1: inventory/fill evidence chain, failure thresholds, next actions, no-artifact state.
-- Resources: CPU/RAM/Runtime facts, GPU telemetry graph contract, and explicit fail-closed unavailable state.
+| Family | Palette | Used for |
+|---|---|---|
+| `ui.*` | azure / violet / cyan / amber | Interaction, agent reasoning, live telemetry, attention |
+| `status.*` | emerald / amber / crimson | Governance verdicts — always accompanied by a text label |
+| `market.*` | **red = up, green = down** | A-share price and return cells only |
 
-## Theme and accessibility checks
+Status green and market green are different colours with different meanings.
+They are kept apart by context: status colours appear only on labelled chips and
+rails, market colours only on numeric price/return cells. This is checked by the
+council UI test, which asserts a verdict chip renders its label text.
 
-- Verified `night`, `dawn`, and `day` theme selection and persisted `data-theme`.
-- Day and dawn states retain readable headings, body text, code, warnings, badges, and form controls.
-- Primary controls remain keyboard reachable; tab menus expose `aria-expanded`, close on Escape/outside click, and keep destructive actions visually distinct.
-- A-share market semantics use red for positive moves and green for negative moves where direction is encoded.
+## Fixed in this pass
 
-## Console and environment
+| Severity | Finding | Resolution |
+|---|---|---|
+| P0 | Deflated Sharpe was computed from annualised Sharpe ratios where the estimator expects per-period ones. A strategy with annualised Sharpe 3.78 scored DSR ≈ 0.00002, so the robustness term was dead and could not distinguish any candidate. | `deflated_sharpe_probability` now converts to per-period before calling, with the reasoning recorded in the docstring. Robustness now separates a real signal (0.99) from noise (0.38). A regression test asserts the term is non-trivial so it cannot silently die again. |
+| P0 | A job reported `running` before its process was registered, so `pause` and `cancel` could be rejected on a job the operator could see running. | Added a `starting` state; status becomes `running` only after `Popen` succeeds and the process is registered. |
+| P1 | `theme.css` defined market and state colours at `:root` with fixed dark values, so day and dawn themes inherited dark-only colours on legacy pages. | Every cross-cutting token (`--market-*`, `--state-*`, `--iw-*`, `--ux-*`, `--focus`) is now declared inside `.vnext-shell` for all three themes. |
+| P1 | Chart series colours were chosen per page, so two charts on one screen could use unrelated palettes. | `VNextChartPalette` gained a `series` ramp plus named accents, mirroring `--viz-1…8`. |
+| P2 | No shared primitives existed, so each new page reinvented panels, chips, and tables. | `foundation.css` primitives; both new modules use them exclusively. |
 
-- No application-origin uncaught errors were observed during the final page traversal.
-- Cloud preview cannot reach the local Quant API and therefore correctly renders `API ERROR` / unavailable states. The only browser-console errors were emitted by the browser metadata extension, not by QuantAgent.
-- Backend actions were validated separately through real FastAPI/CLI/component tests; unavailable preview data was never replaced with fabricated metrics.
+## Honesty affordances (verified by test)
 
-## Final verification
+These are design decisions with test coverage, not just copy:
 
-- Python full suite: `1920 passed, 51 skipped`.
-- Frontend final check: `17` files and `43` tests passed.
-- TypeScript and the final Vite production build passed.
+- **Controls are visually marked.** Unfitted baselines render with a dashed chip
+  and muted row text so they cannot be mistaken for a result.
+  (`marks control candidates so they cannot be read as a result`)
+- **Trial count is shown before launch** and is derived from the enumerated
+  search space; the launch payload contains no `n_trials`.
+  (`launching a search posts the governed command without a trial count`)
+- **Missing evidence renders as "无估计" / "证据不足"**, never as a pass.
+  (`a missing PBO estimate is reported as no evidence, never as a pass`)
+- **Overrides preserve what they replaced.** The original verdict stays on
+  screen beside the override, with author and timestamp.
+  (`an override keeps the original verdict visible next to it`)
+- **Empty states explain the missing artifact and the next action**, and never
+  fill space with placeholder numbers.
+  (`shows an actionable empty state instead of fabricated metrics`)
+
+## Accessibility and theming
+
+- All three themes (`night`, `dawn`, `day`) declare the full token set; no page
+  relies on a token that only exists in one theme.
+- Focus rings are a single token-driven rule applied to buttons, links, inputs,
+  selects, textareas and `[tabindex]` elements.
+- Wide content (candidate ledger, fold tables) scrolls inside
+  `.atlas-scroll-x`; the page body never scrolls horizontally.
+- `prefers-reduced-motion` disables the job-state pulse and all transitions.
+- The 10px floor on `small` is retained for dense metadata legibility.
+
+## Verification
+
+- Backend: `178 passed` across `tests/quant_ui/` and `tests/test_fusion_search.py`
+  (49 of them new in this pass), plus the full suite run separately.
+- Frontend: `19 files, 61 tests passed`; TypeScript clean; Vite production build clean.
+- No fabricated metrics were introduced: every number the new modules render
+  comes from a persisted artifact, and both modules render an explicit
+  unavailable state when the Quant API is unreachable.
+
+## Known limits
+
+- Drawdown in the Alpha Foundry is measured on a rebalance-frequency NAV, not a
+  daily one, because the panel supplies forward returns rather than daily marks.
+  The UI states this; it is a lower bound on daily-marked drawdown.
+- `CouncilThresholds` are this platform's research bars, not an industry
+  standard. They are visible to the operator and actually enforced, but must not
+  be cited as an external benchmark.
+- `selection_governance.py` passes annualised Sharpes to
+  `deflated_sharpe_ratio`, the same units mismatch corrected in the fusion path.
+  It was left unchanged in this pass to avoid altering an existing governance
+  result without a separate review.

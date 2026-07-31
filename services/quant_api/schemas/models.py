@@ -278,5 +278,20 @@ class Job(ApiModel):
     error: str | None = None
 
 
+class CouncilOverrideRequest(ApiModel):
+    """A human overruling one council agent, with a durable reason.
+
+    The reason is mandatory and length-checked: an override without a stated
+    justification is indistinguishable from suppressing the finding.
+    """
+
+    subject_type: str = Field(alias="subjectType", pattern=r"^[a-z_]{3,32}$")
+    subject_id: str = Field(alias="subjectId", min_length=1, max_length=128)
+    role_id: str = Field(alias="roleId", pattern=r"^[a-z_]{3,32}$")
+    verdict: Literal["pass", "warn", "blocked"]
+    reason: str = Field(min_length=8, max_length=2_000)
+    author: str = Field(min_length=1, max_length=120)
+
+
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")

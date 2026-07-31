@@ -6,6 +6,8 @@ import {
   CaretUp,
   ChartBar,
   ListMagnifyingGlass,
+  Pause,
+  Play,
   Pulse,
   TerminalWindow,
   WarningCircle,
@@ -17,6 +19,9 @@ import { useApi } from "../../hooks/useApi";
 import type { JobEventStreamState } from "../../hooks/useJobEvents";
 import { formatBytes, formatDate } from "../../utils/format";
 import type { WorkspaceDockTab } from "../workspace/types";
+
+/** A job holding a live process: it can still be paused, resumed or stopped. */
+const ACTIVE_STATUSES = ["queued", "starting", "running", "paused", "cancelling"];
 
 const dockTabs: Array<{ id: WorkspaceDockTab; label: string; icon: typeof Bell }> = [
   { id: "tasks", label: "Tasks", icon: ListMagnifyingGlass },
@@ -44,9 +49,9 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
   const [selectedJobId, setSelectedJobId] = useState(jobs[0]?.id ?? "");
   const [cancelError, setCancelError] = useState("");
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0];
-  const logs = useApi<string[]>(["vnext-job-logs", selectedJob?.id], open && tab === "logs" && selectedJob ? `/jobs/${selectedJob.id}/logs` : null, { limit: 600 }, { refetchInterval: selectedJob && ["queued", "running"].includes(selectedJob.status) ? 2_000 : false });
+  const logs = useApi<string[]>(["vnext-job-logs", selectedJob?.id], open && tab === "logs" && selectedJob ? `/jobs/${selectedJob.id}/logs` : null, { limit: 600 }, { refetchInterval: selectedJob && ["queued", "starting", "running"].includes(selectedJob.status) ? 2_000 : false });
   const resources = useApi<SystemResources>(["vnext-system-resources"], open && tab === "resources" ? "/system/resources" : null, undefined, { refetchInterval: 1_000 });
-  const activeCount = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status)).length;
+  const activeCount = jobs.filter((job) => ACTIVE_STATUSES.includes(job.status)).length;
   const failedJobs = jobs.filter((job) => job.status === "failed");
   const riskEventCount = Object.values(overview?.risk.eventCounts ?? {}).reduce((sum, count) => sum + count, 0);
   const alertCount = failedJobs.length + riskEventCount;
@@ -63,6 +68,16 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
       await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
     } catch (error) {
       setCancelError(error instanceof Error ? error.message : "Cancel failed");
+    }
+  };
+
+  const setJobRunState = async (job: JobSummary, action: "pause" | "resume"): Promise<void> => {
+    setCancelError("");
+    try {
+      await apiPost(`/jobs/${job.id}/${action}`, {});
+      await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : `${action} failed`);
     }
   };
 
@@ -129,8 +144,10 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
                     <b>{job.status}</b>
                   </button>
                   <div className="vnext-task-actions">
-                    {["queued", "running", "cancelling"].includes(job.status) ? <button type="button" className="vnext-cancel-job" onClick={() => void cancelJob(job)}><XCircle size={14} />停止</button> : null}
-                    <button type="button" className="vnext-purge-job" onClick={() => void purgeJob(job)}><XCircle size={14} />{["queued", "running", "cancelling"].includes(job.status) ? "停止并清除" : "清除"}</button>
+                    {job.status === "running" ? <button type="button" className="vnext-pause-job" onClick={() => void setJobRunState(job, "pause")}><Pause size={14} />暂停</button> : null}
+                    {job.status === "paused" ? <button type="button" className="vnext-resume-job" onClick={() => void setJobRunState(job, "resume")}><Play size={14} />继续</button> : null}
+                    {ACTIVE_STATUSES.includes(job.status) ? <button type="button" className="vnext-cancel-job" onClick={() => void cancelJob(job)}><XCircle size={14} />停止</button> : null}
+                    <button type="button" className="vnext-purge-job" onClick={() => void purgeJob(job)}><XCircle size={14} />{ACTIVE_STATUSES.includes(job.status) ? "停止并清除" : "清除"}</button>
                   </div>
                 </div>
               )) : <p className="vnext-dock-empty">没有持久化任务。任务状态不会由前端模拟。</p>}

@@ -1,0 +1,375 @@
+/* ===========================================================================
+   ATLAS foundation primitives.
+
+   Reusable building blocks in the platform's visual language. Everything here
+   is composed from tokens.css — no literal colours. The vocabulary is small on
+   purpose: a research operator should be able to read any screen after learning
+   these seven ideas.
+
+     .atlas-surface     a panel, with an optional accent rail
+     .atlas-eyebrow     a micro-label that names a region
+     .atlas-figure      a number that is meant to be compared
+     .atlas-chip        a compact state token with a text label
+     .atlas-grid        the dense metric/record grid
+     .atlas-meter       a bounded quantity rendered as a bar
+     .atlas-empty       an honest empty state with a next action
+   =========================================================================== */
+
+/* --------------------------------------------------------------- surfaces */
+
+.vnext-shell .atlas-surface {
+  position: relative;
+  background: var(--vnx-surface-1);
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius);
+  overflow: hidden;
+}
+
+/* The signal rail: a 2px luminous edge marking the active or governing item.
+   It is the platform's one consistent "this is live / this is selected" cue. */
+.vnext-shell .atlas-surface[data-rail]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--vnx-rail);
+  background: var(--vnx-primary);
+}
+
+.vnext-shell .atlas-surface[data-rail="agent"]::before { background: var(--vnx-agent); }
+.vnext-shell .atlas-surface[data-rail="live"]::before { background: var(--vnx-realtime); }
+.vnext-shell .atlas-surface[data-rail="warning"]::before { background: var(--vnx-warning); }
+.vnext-shell .atlas-surface[data-rail="danger"]::before { background: var(--vnx-danger); }
+.vnext-shell .atlas-surface[data-rail="success"]::before { background: var(--vnx-success); }
+
+.vnext-shell .atlas-surface-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--vnx-space-3);
+  padding: var(--vnx-space-3) var(--vnx-space-4);
+  border-bottom: 1px solid var(--vnx-line-soft);
+  background: linear-gradient(var(--vnx-surface-2), var(--vnx-surface-1));
+}
+
+.vnext-shell .atlas-surface-header h3 {
+  margin: 0;
+  font-size: var(--vnx-text-lead);
+  font-weight: 600;
+  color: var(--vnx-text-bright);
+  letter-spacing: -.01em;
+}
+
+.vnext-shell .atlas-surface-body {
+  padding: var(--vnx-space-4);
+}
+
+/* ----------------------------------------------------------- micro-labels */
+
+.vnext-shell .atlas-eyebrow {
+  display: block;
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+  color: var(--vnx-muted);
+  font-family: var(--vnx-font-mono);
+}
+
+/* --------------------------------------------------------------- figures */
+
+.vnext-shell .atlas-figure {
+  font-family: var(--vnx-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--vnx-text-title);
+  font-weight: 600;
+  color: var(--vnx-text-bright);
+  line-height: 1.15;
+}
+
+.vnext-shell .atlas-figure.small { font-size: var(--vnx-text-lead); }
+.vnext-shell .atlas-figure.large { font-size: var(--vnx-text-display); }
+
+/* ----------------------------------------------------------------- chips */
+
+.vnext-shell .atlas-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vnx-space-1);
+  padding: 2px var(--vnx-space-2);
+  border: 1px solid var(--vnx-line);
+  border-radius: 999px;
+  background: var(--vnx-surface-2);
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--vnx-text-soft);
+  white-space: nowrap;
+}
+
+.vnext-shell .atlas-chip[data-tone="primary"] {
+  border-color: color-mix(in srgb, var(--vnx-primary) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-primary) 14%, transparent);
+  color: var(--vnx-primary-strong);
+}
+
+.vnext-shell .atlas-chip[data-tone="agent"] {
+  border-color: color-mix(in srgb, var(--vnx-agent) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-agent) 14%, transparent);
+  color: var(--vnx-agent);
+}
+
+.vnext-shell .atlas-chip[data-tone="success"] {
+  border-color: color-mix(in srgb, var(--vnx-success) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-success) 14%, transparent);
+  color: var(--vnx-success);
+}
+
+.vnext-shell .atlas-chip[data-tone="warning"] {
+  border-color: color-mix(in srgb, var(--vnx-warning) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-warning) 14%, transparent);
+  color: var(--vnx-warning);
+}
+
+.vnext-shell .atlas-chip[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--vnx-danger) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-danger) 14%, transparent);
+  color: var(--vnx-danger);
+}
+
+.vnext-shell .atlas-chip[data-tone="live"] {
+  border-color: color-mix(in srgb, var(--vnx-realtime) 46%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-realtime) 14%, transparent);
+  color: var(--vnx-realtime);
+}
+
+/* A control is not a result: mark it so the eye never reads it as an outcome. */
+.vnext-shell .atlas-chip[data-tone="control"] {
+  border-style: dashed;
+  color: var(--vnx-muted);
+}
+
+/* ------------------------------------------------------------------ grid */
+
+.vnext-shell .atlas-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--vnx-text-small);
+}
+
+.vnext-shell .atlas-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--vnx-space-2) var(--vnx-space-3);
+  text-align: left;
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+  color: var(--vnx-muted);
+  background: var(--vnx-surface-2);
+  border-bottom: 1px solid var(--vnx-line);
+  white-space: nowrap;
+}
+
+.vnext-shell .atlas-grid td {
+  padding: var(--vnx-space-2) var(--vnx-space-3);
+  border-bottom: 1px solid var(--vnx-line-soft);
+  color: var(--vnx-text-soft);
+  vertical-align: middle;
+}
+
+.vnext-shell .atlas-grid td.num,
+.vnext-shell .atlas-grid th.num {
+  text-align: right;
+  font-family: var(--vnx-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.vnext-shell .atlas-grid tbody tr:hover td {
+  background: color-mix(in srgb, var(--vnx-primary) 6%, transparent);
+}
+
+.vnext-shell .atlas-grid tbody tr[aria-selected="true"] td {
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .atlas-grid tbody tr[data-control="true"] td {
+  color: var(--vnx-muted);
+}
+
+/* ----------------------------------------------------------------- meter */
+
+.vnext-shell .atlas-meter {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--vnx-line-soft);
+  overflow: hidden;
+}
+
+.vnext-shell .atlas-meter > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--vnx-primary);
+  transition: width var(--vnx-normal) var(--vnx-ease);
+}
+
+.vnext-shell .atlas-meter[data-tone="agent"] > i { background: var(--vnx-agent); }
+.vnext-shell .atlas-meter[data-tone="success"] > i { background: var(--vnx-success); }
+.vnext-shell .atlas-meter[data-tone="warning"] > i { background: var(--vnx-warning); }
+.vnext-shell .atlas-meter[data-tone="danger"] > i { background: var(--vnx-danger); }
+
+/* ----------------------------------------------------------- empty state */
+
+.vnext-shell .atlas-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+  align-items: flex-start;
+  padding: var(--vnx-space-5);
+  border: 1px dashed var(--vnx-line);
+  border-radius: var(--vnx-radius);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .atlas-empty strong {
+  color: var(--vnx-text-bright);
+  font-size: var(--vnx-text-lead);
+  font-weight: 600;
+}
+
+.vnext-shell .atlas-empty p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--vnx-muted);
+}
+
+/* --------------------------------------------------------------- buttons */
+
+.vnext-shell .atlas-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vnx-space-1);
+  padding: var(--vnx-space-1) var(--vnx-space-3);
+  min-height: 28px;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+  font-size: var(--vnx-text-small);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--vnx-fast) var(--vnx-ease),
+    border-color var(--vnx-fast) var(--vnx-ease),
+    color var(--vnx-fast) var(--vnx-ease);
+}
+
+.vnext-shell .atlas-action:hover:not(:disabled) {
+  border-color: var(--vnx-line-strong);
+  background: var(--vnx-surface-3);
+  color: var(--vnx-text-bright);
+}
+
+.vnext-shell .atlas-action:disabled {
+  opacity: .48;
+  cursor: not-allowed;
+}
+
+.vnext-shell .atlas-action[data-variant="primary"] {
+  border-color: color-mix(in srgb, var(--vnx-primary) 55%, var(--vnx-line));
+  background: color-mix(in srgb, var(--vnx-primary) 18%, transparent);
+  color: var(--vnx-primary-strong);
+}
+
+.vnext-shell .atlas-action[data-variant="primary"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vnx-primary) 28%, transparent);
+}
+
+.vnext-shell .atlas-action[data-variant="danger"] {
+  border-color: color-mix(in srgb, var(--vnx-danger) 50%, var(--vnx-line));
+  color: var(--vnx-danger);
+}
+
+.vnext-shell .atlas-action[data-variant="danger"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vnx-danger) 16%, transparent);
+}
+
+/* ---------------------------------------------------------------- fields */
+
+.vnext-shell .atlas-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-1);
+  min-width: 0;
+}
+
+.vnext-shell .atlas-field > span {
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .atlas-field input,
+.vnext-shell .atlas-field select,
+.vnext-shell .atlas-field textarea {
+  padding: var(--vnx-space-1) var(--vnx-space-2);
+  min-height: 28px;
+  border: 1px solid var(--vnx-line);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-input);
+  color: var(--vnx-text);
+  font-size: var(--vnx-text-small);
+}
+
+.vnext-shell .atlas-field input:hover,
+.vnext-shell .atlas-field select:hover {
+  border-color: var(--vnx-line-strong);
+}
+
+.vnext-shell .atlas-field small {
+  color: var(--vnx-muted-2);
+}
+
+/* --------------------------------------------------------------- layout */
+
+.vnext-shell .atlas-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: var(--vnx-space-4);
+  align-items: start;
+}
+
+@media (max-width: 1180px) {
+  .vnext-shell .atlas-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.vnext-shell .atlas-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-4);
+  min-width: 0;
+}
+
+.vnext-shell .atlas-row {
+  display: flex;
+  align-items: center;
+  gap: var(--vnx-space-2);
+  flex-wrap: wrap;
+}
+
+/* Wide content must scroll inside its own container, never the page body. */
+.vnext-shell .atlas-scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}

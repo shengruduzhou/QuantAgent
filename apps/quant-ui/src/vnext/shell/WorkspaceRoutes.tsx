@@ -5,6 +5,8 @@ import { StateView } from "../../components/StateView";
 const VNextDashboard = lazy(() => import("../dashboard/VNextDashboard").then((module) => ({ default: module.VNextDashboard })));
 const TrainingLab = lazy(() => import("../training/TrainingLabPage").then((module) => ({ default: module.TrainingLabPage })));
 const StrategyStudio = lazy(() => import("../strategy/StrategyStudioPage").then((module) => ({ default: module.StrategyStudioPage })));
+const DecisionCouncil = lazy(() => import("../council/DecisionCouncilPage").then((module) => ({ default: module.DecisionCouncilPage })));
+const AlphaFoundry = lazy(() => import("../fusion/AlphaFoundryPage").then((module) => ({ default: module.AlphaFoundryPage })));
 const StockReplay = lazy(() => import("../../pages/StockReplayPage").then((module) => ({ default: module.StockReplayPage })));
 const Backtests = lazy(() => import("../../pages/BacktestLabPage").then((module) => ({ default: module.BacktestLabPage })));
 const TPlusOne = lazy(() => import("../../pages/TPlusOnePage").then((module) => ({ default: module.TPlusOnePage })));
@@ -26,6 +28,8 @@ export function WorkspaceRoutes({ location }: { location: string }): JSX.Element
         <Route path="/" element={<VNextDashboard />} />
         <Route path="/training" element={<TrainingLab />} />
         <Route path="/strategy" element={<StrategyStudio />} />
+        <Route path="/fusion" element={<AlphaFoundry />} />
+        <Route path="/council" element={<DecisionCouncil />} />
         <Route path="/stock-replay" element={<StockReplay />} />
         <Route path="/backtests" element={<Backtests />} />
         <Route path="/t-plus-one" element={<TPlusOne />} />

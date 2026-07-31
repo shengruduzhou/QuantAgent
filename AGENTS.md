@@ -150,6 +150,51 @@ git diff --check
 - TradingView public pages：sentiment / attention context，不作为基本面或行情真值。
 - Policy、announcement、news 原文必须保留 `source / published_at / available_at / raw_hash / confidence` 并进入 `EvidenceStore`。
 
+## ATLAS 设计系统 / Design System
+
+- `apps/quant-ui/src/vnext/styles/tokens.css` 是**唯一** semantic 颜色/字号/间距/动效
+  来源，三主题（night / dawn / day）定义同一套 token 名。页面禁止写死 hex；
+  缺少的颜色先补进 tokens，再在页面使用。
+- 颜色语义分三族，互不重叠：`ui.*`（交互与系统态：azure / violet / cyan / amber）、
+  `status.*`（治理裁决：emerald / amber / crimson）、`market.*`（A 股涨跌：**红涨绿跌**）。
+  market 色只用于价格与收益数字单元格；status 色必须带文字标签。
+- `foundation.css` 提供七个基础原语：`atlas-surface`（可带 `data-rail` 信号轨）、
+  `atlas-eyebrow`、`atlas-figure`、`atlas-chip`、`atlas-grid`、`atlas-meter`、
+  `atlas-empty`。新页面优先组合这些原语，不要新造一套。
+- 图表颜色统一取 `useVNextChartPalette()` 的 `series` / `primary` / `agent` 等，
+  与 `--viz-*` token 一一对应；禁止页面内写死只在深色下可读的配色。
+
+## 因子融合工场 / Alpha Foundry（ATLAS L2）
+
+- 融合搜索唯一入口 = `quantagent.fusion` + governed command `search-factor-fusion`。
+- **`n_trials` 由枚举的搜索空间决定，任何 API/CLI/UI 都不得提供该参数**；
+  它直接进入 Deflated Sharpe 的收缩项，可声明的试验次数等于可伪造的显著性。
+- 拟合方案（`ic_weighted` / `ic_ir_weighted` / `inverse_volatility` / `genetic`）
+  只能读训练段；对照方案（`equal` / `random_simplex` / `single_factor`）不读训练段，
+  但**必须计入试验次数**，事后删除对照来美化 DSR 属于造假。
+- 产出的是 **Pareto 前沿**而非单一最优；偏好权重只对前沿内候选排序，
+  不改变候选生成、也不改变谁进入前沿。
+- 回撤按调仓频率净值序列计算（每 horizon 日一期），UI 必须说明这是日频回撤的下界。
+- 基准缺省为 `universe_equal_weight` 时必须标注它包含不可交易标的，会高估超额。
+
+## 决策议事会 / Decision Council（ATLAS L5）
+
+- 七个角色（data_quality / factor_integrity / model_validation / fusion_search /
+  portfolio_risk / execution_realism / governance）各自只在 `vetoScope` 内否决。
+- 每条裁决必须附带 `evidence`（它实际读取的字段）；**证据缺失记 `unknown`，
+  永远不记 `pass`**；`unknown` 不阻塞研究，但也不算放行。
+- 人工可推翻任一角色，但推翻必须带 author + 至少 8 字理由，写入
+  `runtime/jobs/**/council_overrides.jsonl` append-only 日志；
+  原裁决与推翻记录并列保存，代码中没有删除路径。
+
+## 任务控制 / Job control
+
+- 状态机：`queued → starting → running ⇄ paused → succeeded|failed|cancelled`。
+  `starting` 表示进程尚未注册，此时 pause/cancel 无信号可发；status 只有在
+  `Popen` 成功并登记进程后才变为 `running`。
+- `pause` 用 SIGSTOP、`resume` 用 SIGCONT：这是**调度**控制，不释放 RAM/GPU，
+  UI 必须如实说明暂停的进程仍占用显存。
+
 ## Strategy Workbench / 策略实验室
 
 - 策略 Web 启动统一走 `quantagent.strategy.v1` manifest 与
