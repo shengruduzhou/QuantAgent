@@ -21,6 +21,7 @@ from quantagent.portfolio.multi_horizon_blender import (
     DEFAULT_HORIZON_WEIGHTS,
     MultiHorizonBlendConfig,
     blend_multi_horizon_predictions,
+    resolve_horizon_blend_config,
 )
 from quantagent.portfolio.position_age_tracker import PositionAgeTracker
 from quantagent.portfolio.timing_gate import TimingGateConfig, apply_timing_gate
@@ -136,6 +137,84 @@ def test_blender_handles_lifecycle_decay_with_short_bias():
     out = blend_multi_horizon_predictions(preds, theme_signals=theme)
     # DECAY puts ~0.40 weight on 1d, ~0.35 on 5d → blended pulled toward 0.1.
     assert out.blended.iloc[0]["prediction"] > 0.0
+
+
+def test_adaptive_horizon_blend_learns_on_early_oos_and_freezes_before_holdout():
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    symbols = [f"S{index:02d}" for index in range(8)]
+    rows: list[dict[str, object]] = []
+    for date_index, date in enumerate(dates):
+        for symbol_index, symbol in enumerate(symbols):
+            cross_section = float(symbol_index - 3.5)
+            rows.extend([
+                {
+                    "trade_date": date,
+                    "symbol": symbol,
+                    "horizon": 5,
+                    "prediction": cross_section + date_index * 0.001,
+                    "forward_return_5d": cross_section,
+                },
+                {
+                    "trade_date": date,
+                    "symbol": symbol,
+                    "horizon": 20,
+                    "prediction": -cross_section,
+                    "forward_return_20d": cross_section,
+                },
+            ])
+    predictions = pd.DataFrame(rows)
+
+    config, diagnostics = resolve_horizon_blend_config(
+        predictions,
+        method="adaptive_oos",
+        primary_horizon=5,
+        holdout_days=10,
+    )
+
+    assert dict(config.horizon_weights) == {5: 1.0}
+    assert diagnostics["source"] == "early_oos_rank_ic"
+    assert diagnostics["frozenBeforeHoldout"] is True
+    assert diagnostics["forwardLabelPurgeApplied"] is True
+    assert diagnostics["purgeByHorizon"][5]["purgeDays"] == 5
+    assert diagnostics["holdoutStart"] == dates[-10].strftime("%Y-%m-%d")
+
+    tampered_holdout = predictions.copy()
+    holdout_dates = set(dates[-10:])
+    mask = tampered_holdout["trade_date"].isin(holdout_dates)
+    tampered_holdout.loc[mask, "prediction"] *= -100
+    for column in ("forward_return_5d", "forward_return_20d"):
+        tampered_holdout.loc[mask, column] = 999.0
+    frozen_config, frozen_diagnostics = resolve_horizon_blend_config(
+        tampered_holdout,
+        method="adaptive_oos",
+        primary_horizon=5,
+        holdout_days=10,
+    )
+
+    assert frozen_config.horizon_weights == config.horizon_weights
+    assert frozen_diagnostics["horizonWeights"] == diagnostics["horizonWeights"]
+
+
+def test_declared_horizon_preset_filters_to_available_prediction_horizons():
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    predictions = _make_predictions_multi_horizon(
+        list(dates),
+        ["A", "B"],
+        [1, 5, 20],
+    )
+
+    config, diagnostics = resolve_horizon_blend_config(
+        predictions,
+        method="balanced",
+        primary_horizon=5,
+        holdout_days=10,
+    )
+    result = blend_multi_horizon_predictions(predictions, config=config)
+
+    assert set(dict(config.horizon_weights)) == {1, 5, 20}
+    assert sum(dict(config.horizon_weights).values()) == pytest.approx(1.0)
+    assert diagnostics["source"] == "declared_preset"
+    assert result.diagnostics["fallback_rows"] == 0
 
 
 # ----- Phase 3.2 — dynamic top_k ---------------------------------------------

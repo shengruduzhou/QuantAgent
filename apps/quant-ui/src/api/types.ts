@@ -221,8 +221,10 @@ export interface StrategyDraft {
   outputDir: string;
   factorLibrary: "all_reviewed" | "basic" | "alpha101" | "alpha181" | "cicc_ashare80";
   model: "ridge" | "ft_transformer";
+  researchPreset: "stable_alpha" | "drawdown_first" | "annual_growth" | "transparent_baseline" | "custom";
   horizons: string;
   primaryHorizon: number;
+  horizonBlendMethod: "adaptive_oos" | "balanced" | "short_tactical" | "long_fundamental" | "primary_only";
   splitMode: "rolling" | "expanding";
   nSplits: number;
   requireGpu: boolean;
@@ -261,17 +263,44 @@ export interface DecisionCouncilMember {
   responsibility: string;
   status: "ready" | "approved" | "waiting" | "blocked";
   veto: boolean;
+  finding?: string;
+  nextAction?: string;
+  issueCount?: number;
+  issueCodes?: string[];
+}
+
+export interface StrategyValidationIssue {
+  code: string;
+  severity: "blocking" | "warning" | "info";
+  title: string;
+  detail: string;
+  field?: string;
+  action?: {
+    kind: string;
+    label: string;
+  };
+  evidence?: {
+    requestedHorizons?: number[];
+    availableHorizons?: number[];
+    missingHorizons?: number[];
+    candidateCount?: number;
+    candidateLimit?: number;
+    method?: string;
+  };
 }
 
 export interface StrategyValidation {
   valid: boolean;
   errors: string[];
   warnings: string[];
+  issues?: StrategyValidationIssue[];
+  requestedHorizons?: number[];
+  availableHorizons?: number[];
   resolvedInputs: Record<string, string>;
   launch: {
     jobType: "strategy-pipeline";
     commandId: "run-full-real-training-v7";
-  parameters: Record<string, string | number | boolean | Array<string | number>>;
+    parameters: Record<string, string | number | boolean | Array<string | number>>;
     armed: boolean;
   };
   decisionCouncil: DecisionCouncilMember[];
@@ -305,8 +334,19 @@ export interface StrategyDefaults {
     valuationPath?: string | null;
     disclosuresPath?: string | null;
   };
+  options?: Record<string, StrategyInputOption[]>;
   evidence: Array<{ field: string; path: string; sizeBytes: number; modifiedAt: string }>;
   selectionRule: string;
+}
+
+export interface StrategyInputOption {
+  field: string;
+  path: string;
+  exists: boolean;
+  isDirectory: boolean;
+  sizeBytes: number;
+  modifiedAt: string | null;
+  availableHorizons: number[];
 }
 
 export interface SearchEntity {

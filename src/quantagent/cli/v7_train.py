@@ -886,6 +886,14 @@ def run_full_real_training_v7(
         "--multi-horizon-blend/--no-multi-horizon-blend",
         help="Blend multi-horizon predictions instead of filtering to --primary-horizon.",
     ),
+    horizon_blend_method: str = typer.Option(
+        "adaptive_oos",
+        "--horizon-blend-method",
+        help=(
+            "adaptive_oos | balanced | short_tactical | long_fundamental | "
+            "primary_only"
+        ),
+    ),
     dynamic_top_k: bool = typer.Option(
         False,
         "--dynamic-top-k/--no-dynamic-top-k",
@@ -962,6 +970,18 @@ def run_full_real_training_v7(
         raise typer.BadParameter(
             "primary-horizon must be included in horizons; "
             f"received primary={primary_horizon}, horizons={list(horizons_tuple)}"
+        )
+    resolved_horizon_blend_method = horizon_blend_method.strip().lower()
+    if resolved_horizon_blend_method not in {
+        "adaptive_oos",
+        "balanced",
+        "short_tactical",
+        "long_fundamental",
+        "primary_only",
+    }:
+        raise typer.BadParameter(
+            "horizon-blend-method must be adaptive_oos, balanced, "
+            "short_tactical, long_fundamental, or primary_only"
         )
     top_k_values = sorted({
         int(item)
@@ -1179,26 +1199,42 @@ def run_full_real_training_v7(
     typer.echo(json_dump({"progress": 0.48, "stage": "training", "message": "walk-forward training completed"}))
 
     raw_predictions = read_frame(Path(training_result.artifact_paths["predictions"]))
-    if multi_horizon_blend and "horizon" in raw_predictions.columns and raw_predictions["horizon"].nunique() > 1:
+    if (
+        multi_horizon_blend
+        and resolved_horizon_blend_method != "primary_only"
+        and "horizon" in raw_predictions.columns
+        and raw_predictions["horizon"].nunique() > 1
+    ):
         from quantagent.portfolio.multi_horizon_blender import (
-            MultiHorizonBlendConfig,
             blend_multi_horizon_predictions,
+            resolve_horizon_blend_config,
         )
 
+        blend_config, blend_policy = resolve_horizon_blend_config(
+            raw_predictions,
+            method=resolved_horizon_blend_method,
+            primary_horizon=primary_horizon,
+            holdout_days=selection_min_holdout_days,
+        )
         blend_result = blend_multi_horizon_predictions(
             raw_predictions,
-            config=MultiHorizonBlendConfig(primary_horizon=primary_horizon),
+            config=blend_config,
         )
         predictions_frame = blend_result.blended.copy()
         predictions_frame["sample_role"] = "validation"
         predictions_frame["fold_id"] = 0
-        blender_diagnostics = blend_result.diagnostics
+        blender_diagnostics = {**blend_result.diagnostics, **blend_policy}
     else:
         predictions_frame = _load_oos_predictions(
             Path(training_result.artifact_paths["predictions"]),
             primary_horizon=primary_horizon,
         )
-        blender_diagnostics = {"status": "skipped", "reason": "single_horizon_or_disabled"}
+        blender_diagnostics = {
+            "status": "skipped",
+            "reason": "single_horizon_or_primary_only",
+            "method": resolved_horizon_blend_method,
+            "primaryHorizon": int(primary_horizon),
+        }
     predictions_path = output_dir / "predictions" / "predictions.parquet"
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
     written_predictions = write_frame(predictions_frame, predictions_path)
