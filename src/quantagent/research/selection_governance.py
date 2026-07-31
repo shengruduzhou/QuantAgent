@@ -181,8 +181,56 @@ class FrozenSelectionGateReport:
 
 
 def _safe_sharpe(series: pd.Series, periods_per_year: int) -> float:
+    """Annualised Sharpe for candidate *ranking*, worst-possible when undefined.
+
+    The sentinel is deliberate here.  Fold selection is an ``argmax`` over the
+    candidate family, so a candidate whose Sharpe does not exist (no rows, or a
+    zero-variance book that never trades) has to lose that comparison rather
+    than be skipped.  It must never reach a statistic computed *across* the
+    family -- use :func:`_family_sharpes` for that.
+    """
     value = sharpe_ratio(series.dropna(), periods_per_year=periods_per_year)
     return float(value) if np.isfinite(value) else -1e9
+
+
+def _family_sharpes(returns: pd.DataFrame, periods_per_year: int) -> np.ndarray:
+    """Per-period candidate Sharpes for the deflated-Sharpe selection benchmark.
+
+    Two things differ from :func:`_safe_sharpe`, both because
+    ``deflated_sharpe_ratio`` reads this sample as a *distribution* rather than
+    as scores to rank:
+
+    * Candidates whose Sharpe is undefined are dropped, not replaced by a
+      sentinel.  The selection-bias benchmark is driven by
+      ``var(candidate_sharpes)``, so a single ``-1e9`` placeholder makes that
+      variance -- and hence the benchmark -- an artifact of the placeholder,
+      and the gate returns 0.0 for every champion however strong.
+    * Sharpes are per-period.  ``deflated_sharpe_ratio`` re-annualises the
+      expected maximum itself, so handing it annualised inputs inflates the
+      benchmark by ``sqrt(periods_per_year)`` -- an independent route to the
+      same dead gate.
+
+    This sample carries *dispersion only*.  Trials that were run but whose
+    Sharpe is not in it -- dropped degenerates, and earlier candidates that
+    ``cumulative_trials`` accounts for but that were never re-measured on this
+    window -- are declared to ``deflated_sharpe_ratio`` through its ``n_trials``
+    argument instead.  They are deliberately not imputed here: padding the
+    sample with the family median (or any constant) collapses its variance and
+    inverts the correction, making a wider search look *safer*.
+
+    Fewer than two measurable candidates leaves the dispersion unestimable; the
+    caller then sees a non-finite DSR and rejects on that.
+    """
+    scale = np.sqrt(float(periods_per_year))
+    observed = [
+        float(value) / scale
+        for value in (
+            sharpe_ratio(returns[column].dropna(), periods_per_year=periods_per_year)
+            for column in returns.columns
+        )
+        if np.isfinite(value)
+    ]
+    return np.asarray(observed, dtype=float)
 
 
 def _subset_label_times(
@@ -286,16 +334,13 @@ def nested_purged_select(
         returns,
         n_partitions=_resolve_pbo_partitions(cfg.pbo_partitions, len(returns)),
     )
-    candidate_sharpes = np.asarray(
-        [_safe_sharpe(returns[column], cfg.periods_per_year) for column in returns.columns]
-    )
-    trial_count = max(len(candidate_sharpes), int(cumulative_trials or 0))
-    if trial_count > len(candidate_sharpes):
-        candidate_sharpes = np.concatenate(
-            [candidate_sharpes, np.full(trial_count - len(candidate_sharpes), np.nanmedian(candidate_sharpes))]
-        )
+    trial_count = max(int(returns.shape[1]), int(cumulative_trials or 0))
+    candidate_sharpes = _family_sharpes(returns, cfg.periods_per_year)
     dsr = deflated_sharpe_ratio(
-        returns[selected_candidate], candidate_sharpes, periods_per_year=cfg.periods_per_year
+        returns[selected_candidate],
+        candidate_sharpes,
+        periods_per_year=cfg.periods_per_year,
+        n_trials=trial_count,
     )
     bench = (
         benchmark_returns.reindex(returns.index).fillna(0.0)
@@ -379,24 +424,13 @@ def evaluate_frozen_candidate(
         returns.fillna(0.0),
         n_partitions=_resolve_pbo_partitions(cfg.pbo_partitions, len(returns)),
     )
-    candidate_sharpes = np.asarray(
-        [_safe_sharpe(returns[column], cfg.periods_per_year) for column in returns.columns]
-    )
-    trial_count = max(len(candidate_sharpes), int(cumulative_trials or 0))
-    if trial_count > len(candidate_sharpes):
-        candidate_sharpes = np.concatenate(
-            [
-                candidate_sharpes,
-                np.full(
-                    trial_count - len(candidate_sharpes),
-                    np.nanmedian(candidate_sharpes),
-                ),
-            ]
-        )
+    trial_count = max(int(returns.shape[1]), int(cumulative_trials or 0))
+    candidate_sharpes = _family_sharpes(returns, cfg.periods_per_year)
     dsr = deflated_sharpe_ratio(
         selected,
         candidate_sharpes,
         periods_per_year=cfg.periods_per_year,
+        n_trials=trial_count,
     )
     bench = (
         benchmark_returns.reindex(returns.index).fillna(0.0)
