@@ -36,8 +36,10 @@ def _strategy_payload() -> dict:
         "outputDir": "runtime/reports/strategy_studio/fixture",
         "factorLibrary": "all_reviewed",
         "model": "ft_transformer",
+        "researchPreset": "stable_alpha",
         "horizons": "1,5,20",
         "primaryHorizon": 5,
+        "horizonBlendMethod": "adaptive_oos",
         "splitMode": "rolling",
         "nSplits": 4,
         "requireGpu": True,
@@ -90,6 +92,7 @@ def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_u
     assert data["launch"]["commandId"] == "run-full-real-training-v7"
     assert data["launch"]["armed"] is True
     assert data["launch"]["parameters"]["market_panel_path"].endswith("market_panel.parquet")
+    assert data["launch"]["parameters"]["horizon_blend_method"] == "adaptive_oos"
     assert data["launch"]["parameters"]["acceptance_max_drawdown"] == 0.15
     assert data["launch"]["parameters"]["acceptance_min_sharpe"] == 1.0
     assert data["launch"]["parameters"]["factor_library"] == "all_reviewed"
@@ -189,6 +192,18 @@ def test_strategy_horizon_contract_fails_before_launch_and_checks_label_schema(
     result = missing_label.json()["data"]
     assert result["valid"] is False
     assert any("forward_return_10d" in error for error in result["errors"])
+    issue = next(
+        item
+        for item in result["issues"]
+        if item["code"] == "missing_horizon_columns"
+    )
+    assert issue["severity"] == "blocking"
+    assert issue["evidence"]["availableHorizons"] == [1, 5, 20]
+    assert issue["evidence"]["missingHorizons"] == [10]
+    council = {member["id"]: member for member in result["decisionCouncil"]}
+    assert council["data_quality"]["status"] == "blocked"
+    assert council["model_validation"]["status"] == "blocked"
+    assert council["risk"]["status"] == "ready"
 
 
 def test_strategy_auto_search_is_bounded_and_gpu_training_is_fail_closed(
@@ -239,8 +254,90 @@ def test_strategy_cli_signature_contains_every_allowlisted_search_parameter() ->
         "objective_excess_weight",
         "objective_annual_weight",
         "objective_drawdown_weight",
+        "horizon_blend_method",
     }
     assert expected <= set(parameters)
+
+
+def test_strategy_defaults_expose_selectable_inputs_and_prefer_label_coverage(
+    quant_ui_settings,
+) -> None:
+    narrow = (
+        quant_ui_settings.runtime_root
+        / "data"
+        / "gold"
+        / "full_universe"
+        / "labels.parquet"
+    )
+    wide = quant_ui_settings.runtime_root / "data" / "v7" / "labels.parquet"
+    _write_labels(narrow, horizons=(1, 5))
+    _write_labels(wide, horizons=(1, 5, 20, 60, 120))
+    app = create_app(quant_ui_settings)
+
+    response = request(app, "GET", "/api/strategies/defaults")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["selected"]["labelsPath"] == "runtime/data/v7/labels.parquet"
+    label_options = data["options"]["labelsPath"]
+    assert {item["path"] for item in label_options} == {
+        "runtime/data/gold/full_universe/labels.parquet",
+        "runtime/data/v7/labels.parquet",
+    }
+    assert next(
+        item
+        for item in label_options
+        if item["path"] == "runtime/data/v7/labels.parquet"
+    )["availableHorizons"] == [1, 5, 20, 60, 120]
+    assert len(data["options"]["fundamentalsRoot"]) == 2
+
+
+def test_label_rebuild_and_horizon_blend_are_allowlisted_without_free_shell() -> None:
+    labels = COMMANDS["build-labels-v7"]
+    assert labels["type"] == "data"
+    assert labels["required"] == {"market_panel_path", "output_path", "horizons"}
+    assert labels["option_aliases"] == {
+        "market_panel_path": "market-panel",
+        "output_path": "output",
+    }
+    strategy = COMMANDS["run-full-real-training-v7"]
+    assert "horizon_blend_method" in strategy["allowed"]
+    assert strategy["choices"]["horizon_blend_method"] == {
+        "adaptive_oos",
+        "balanced",
+        "short_tactical",
+        "long_fundamental",
+        "primary_only",
+    }
+
+
+def test_excess_return_objective_requires_a_benchmark(quant_ui_settings) -> None:
+    labels = (
+        quant_ui_settings.runtime_root
+        / "data"
+        / "v7"
+        / "gold"
+        / "labels"
+        / "labels.parquet"
+    )
+    _write_labels(labels)
+    app = create_app(quant_ui_settings)
+
+    response = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={**_strategy_payload(), "benchmarkSymbol": ""},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["valid"] is False
+    issue = next(
+        item for item in data["issues"] if item["code"] == "benchmark_missing"
+    )
+    assert issue["severity"] == "blocking"
+    assert issue["action"]["kind"] == "set_benchmark"
 
 
 def test_strategy_launch_fails_closed_without_human_gate_or_real_inputs(quant_ui_settings) -> None:

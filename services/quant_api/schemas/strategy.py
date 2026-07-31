@@ -44,8 +44,22 @@ class StrategyDraft(StrategyModel):
     output_dir: str = Field(alias="outputDir")
     factor_library: Literal["all_reviewed", "basic", "alpha101", "alpha181", "cicc_ashare80"] = Field("all_reviewed", alias="factorLibrary")
     model: Literal["ridge", "ft_transformer"] = "ridge"
+    research_preset: Literal[
+        "stable_alpha",
+        "drawdown_first",
+        "annual_growth",
+        "transparent_baseline",
+        "custom",
+    ] = Field("stable_alpha", alias="researchPreset")
     horizons: str = Field("1,5,20,60,120", pattern=r"^\d+(,\d+)*$")
     primary_horizon: int = Field(5, ge=1, le=252, alias="primaryHorizon")
+    horizon_blend_method: Literal[
+        "adaptive_oos",
+        "balanced",
+        "short_tactical",
+        "long_fundamental",
+        "primary_only",
+    ] = Field("adaptive_oos", alias="horizonBlendMethod")
     split_mode: Literal["rolling", "expanding"] = Field("rolling", alias="splitMode")
     n_splits: int = Field(4, ge=2, le=20, alias="nSplits")
     require_gpu: bool = Field(False, alias="requireGpu")

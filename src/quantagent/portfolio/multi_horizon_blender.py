@@ -46,6 +46,24 @@ DEFAULT_HORIZON_WEIGHTS: tuple[tuple[int, float], ...] = (
     (120, 0.15),
 )
 
+HORIZON_BLEND_PRESETS: dict[str, tuple[tuple[int, float], ...]] = {
+    "balanced": DEFAULT_HORIZON_WEIGHTS,
+    "short_tactical": (
+        (1, 0.25),
+        (5, 0.35),
+        (20, 0.25),
+        (60, 0.10),
+        (120, 0.05),
+    ),
+    "long_fundamental": (
+        (1, 0.03),
+        (5, 0.07),
+        (20, 0.25),
+        (60, 0.35),
+        (120, 0.30),
+    ),
+}
+
 # Per-stage horizon mix overrides. Keys must match
 # ``ThemeProfile.lifecycle_stage`` values.
 _LIFECYCLE_OVERRIDES: dict[str, tuple[tuple[int, float], ...]] = {
@@ -91,6 +109,205 @@ def _resolve_weights(
     if override is None:
         return base
     return _normalise_weights(override)
+
+
+def _available_horizons(predictions: pd.DataFrame) -> list[int]:
+    if "horizon" not in predictions.columns:
+        return []
+    values = pd.to_numeric(predictions["horizon"], errors="coerce").dropna().astype(int)
+    return sorted({120 if value == 126 else int(value) for value in values})
+
+
+def _preset_weights_for_available(
+    preset: tuple[tuple[int, float], ...],
+    available: Iterable[int],
+    primary_horizon: int,
+) -> tuple[tuple[int, float], ...]:
+    available_set = {int(value) for value in available}
+    filtered = [(horizon, weight) for horizon, weight in preset if horizon in available_set]
+    if not filtered:
+        if int(primary_horizon) not in available_set:
+            raise ValueError("no configured horizon is present in predictions")
+        filtered = [(int(primary_horizon), 1.0)]
+    normalised = _normalise_weights(filtered)
+    return tuple((horizon, normalised[horizon]) for horizon in sorted(normalised))
+
+
+def _early_oos_rank_ic_scores(
+    predictions: pd.DataFrame,
+    *,
+    holdout_days: int,
+) -> tuple[dict[int, float], dict[int, dict[str, float | int]], dict[str, object]]:
+    frame = predictions.copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame["horizon"] = pd.to_numeric(frame["horizon"], errors="coerce")
+    frame["prediction"] = pd.to_numeric(frame["prediction"], errors="coerce")
+    frame = frame.dropna(subset=["trade_date", "horizon", "prediction"])
+    frame["horizon"] = frame["horizon"].astype(int).replace({126: 120})
+    dates = sorted(pd.Timestamp(value) for value in frame["trade_date"].unique())
+    minimum_calibration_days = 10
+    if len(dates) < int(holdout_days) + minimum_calibration_days:
+        return {}, {}, {
+            "fallbackReason": "insufficient_oos_dates",
+            "oosDays": len(dates),
+            "requiredDays": int(holdout_days) + minimum_calibration_days,
+        }
+
+    holdout_index = len(dates) - int(holdout_days)
+    holdout_start = dates[holdout_index]
+    scores: dict[int, float] = {}
+    evidence: dict[int, dict[str, float | int]] = {}
+    purge_evidence: dict[int, dict[str, object]] = {}
+    calibration_ends: list[pd.Timestamp] = []
+    for horizon, horizon_frame in frame.groupby("horizon", sort=True):
+        # A forward_return_Hd observed at date t contains information through
+        # t+H. Purge the H dates immediately before final holdout so adaptive
+        # weights cannot learn from returns realised inside that holdout.
+        safe_end_index = holdout_index - int(horizon)
+        if safe_end_index <= 0:
+            purge_evidence[int(horizon)] = {
+                "purgeDays": int(horizon),
+                "status": "insufficient_pre_holdout_history",
+            }
+            continue
+        safe_dates = set(dates[:safe_end_index])
+        subset = horizon_frame.loc[
+            horizon_frame["trade_date"].isin(safe_dates)
+        ].copy()
+        if subset.empty:
+            continue
+        calibration_end = pd.Timestamp(subset["trade_date"].max())
+        calibration_ends.append(calibration_end)
+        purge_evidence[int(horizon)] = {
+            "purgeDays": int(horizon),
+            "calibrationEnd": calibration_end.strftime("%Y-%m-%d"),
+            "status": "applied",
+        }
+        target_column = f"forward_return_{int(horizon)}d"
+        if target_column not in subset.columns:
+            continue
+        subset[target_column] = pd.to_numeric(subset[target_column], errors="coerce")
+        daily_ic: list[float] = []
+        for _, day in subset.dropna(subset=[target_column]).groupby("trade_date", sort=True):
+            if len(day) < 3:
+                continue
+            value = day["prediction"].corr(day[target_column], method="spearman")
+            if pd.notna(value):
+                daily_ic.append(float(value))
+        if len(daily_ic) < 3:
+            continue
+        mean_ic = float(np.mean(daily_ic))
+        std_ic = float(np.std(daily_ic, ddof=1)) if len(daily_ic) > 1 else 0.0
+        score = max(mean_ic, 0.0) * np.sqrt(len(daily_ic)) / max(std_ic, 0.02)
+        scores[int(horizon)] = float(score)
+        evidence[int(horizon)] = {
+            "meanRankIc": mean_ic,
+            "rankIcStd": std_ic,
+            "observations": len(daily_ic),
+            "score": float(score),
+        }
+
+    return scores, evidence, {
+        "calibrationStart": dates[0].strftime("%Y-%m-%d"),
+        "calibrationEnd": (
+            max(calibration_ends).strftime("%Y-%m-%d")
+            if calibration_ends
+            else None
+        ),
+        "holdoutStart": holdout_start.strftime("%Y-%m-%d"),
+        "holdoutDays": int(holdout_days),
+        "frozenBeforeHoldout": True,
+        "forwardLabelPurgeApplied": True,
+        "purgeByHorizon": purge_evidence,
+    }
+
+
+def resolve_horizon_blend_config(
+    predictions: pd.DataFrame,
+    *,
+    method: str,
+    primary_horizon: int,
+    holdout_days: int,
+) -> tuple[MultiHorizonBlendConfig, dict[str, object]]:
+    """Resolve a declared horizon-mix policy without reading final holdout labels.
+
+    ``adaptive_oos`` learns non-negative RankIC/ICIR-style weights only from
+    the early OOS segment, then freezes those weights before the final holdout.
+    All other modes are deterministic, auditable presets.
+    """
+
+    resolved_method = str(method).strip().lower()
+    allowed = {*HORIZON_BLEND_PRESETS, "adaptive_oos", "primary_only"}
+    if resolved_method not in allowed:
+        raise ValueError(f"horizon blend method must be one of {sorted(allowed)}")
+    available = _available_horizons(predictions)
+    if not available:
+        raise ValueError("multi-horizon predictions are missing horizon values")
+
+    diagnostics: dict[str, object] = {
+        "method": resolved_method,
+        "availableHorizons": available,
+        "primaryHorizon": int(primary_horizon),
+    }
+    if resolved_method == "primary_only":
+        weights = ((int(primary_horizon), 1.0),)
+        diagnostics |= {
+            "source": "declared_primary_horizon",
+            "horizonWeights": [{"horizon": int(primary_horizon), "weight": 1.0}],
+        }
+        return MultiHorizonBlendConfig(
+            horizon_weights=weights,
+            primary_horizon=int(primary_horizon),
+        ), diagnostics
+
+    if resolved_method == "adaptive_oos":
+        scores, evidence, split = _early_oos_rank_ic_scores(
+            predictions,
+            holdout_days=int(holdout_days),
+        )
+        positive = {horizon: score for horizon, score in scores.items() if score > 0}
+        if positive:
+            total = sum(positive.values())
+            weights = tuple(
+                (horizon, score / total)
+                for horizon, score in sorted(positive.items())
+            )
+            diagnostics |= {
+                "source": "early_oos_rank_ic",
+                "rankIcByHorizon": evidence,
+                **split,
+            }
+        else:
+            weights = _preset_weights_for_available(
+                HORIZON_BLEND_PRESETS["balanced"],
+                available,
+                primary_horizon,
+            )
+            diagnostics |= {
+                "source": "balanced_fallback",
+                "rankIcByHorizon": evidence,
+                **split,
+                "fallbackReason": split.get(
+                    "fallbackReason",
+                    "no_positive_early_oos_rank_ic",
+                ),
+            }
+    else:
+        weights = _preset_weights_for_available(
+            HORIZON_BLEND_PRESETS[resolved_method],
+            available,
+            primary_horizon,
+        )
+        diagnostics["source"] = "declared_preset"
+
+    diagnostics["horizonWeights"] = [
+        {"horizon": horizon, "weight": float(weight)}
+        for horizon, weight in weights
+    ]
+    return MultiHorizonBlendConfig(
+        horizon_weights=weights,
+        primary_horizon=int(primary_horizon),
+    ), diagnostics
 
 
 def blend_multi_horizon_predictions(
@@ -242,6 +459,8 @@ __all__ = [
     "MultiHorizonBlendConfig",
     "MultiHorizonBlendResult",
     "DEFAULT_HORIZON_WEIGHTS",
+    "HORIZON_BLEND_PRESETS",
+    "resolve_horizon_blend_config",
     "blend_multi_horizon_predictions",
     "attach_blender_metadata",
 ]

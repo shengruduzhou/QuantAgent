@@ -22,6 +22,21 @@ DECISION_COUNCIL = (
     ("human_gate", "Human Gate", "最终研究启动授权"),
 )
 
+HORIZON_COLUMN = re.compile(r"^forward_return_(\d+)d$")
+
+
+def _parquet_horizons(path: Path) -> list[int]:
+    import pyarrow.dataset as parquet_dataset
+
+    columns = parquet_dataset.dataset(path, format="parquet").schema.names
+    return sorted(
+        {
+            int(match.group(1))
+            for column in columns
+            if (match := HORIZON_COLUMN.fullmatch(column))
+        }
+    )
+
 
 class StrategyService:
     def __init__(self, settings: ApiSettings) -> None:
@@ -74,34 +89,92 @@ class StrategyService:
         }
         selected: dict[str, str | None] = {}
         evidence: list[dict[str, Any]] = []
+        options: dict[str, list[dict[str, Any]]] = {}
         for field, candidates in groups.items():
-            found: list[tuple[float, Path, str]] = []
+            found: list[tuple[int, float, str]] = []
+            field_options: list[dict[str, Any]] = []
             for candidate in candidates:
                 path = safe_project_path(self.settings, candidate)
                 is_expected_input = path.is_dir() if field == "fundamentalsRoot" else path.is_file()
-                if not is_expected_input:
-                    continue
-                stat = path.stat()
-                found.append((stat.st_mtime, path, candidate))
-                evidence.append(
-                    {
+                available_horizons: list[int] = []
+                if is_expected_input and field == "labelsPath":
+                    try:
+                        available_horizons = _parquet_horizons(path)
+                    except Exception:
+                        available_horizons = []
+                if is_expected_input:
+                    stat = path.stat()
+                    modified_at = datetime.fromtimestamp(
+                        stat.st_mtime,
+                        timezone.utc,
+                    ).isoformat(timespec="seconds")
+                    option = {
                         "field": field,
                         "path": candidate,
+                        "exists": True,
+                        "isDirectory": path.is_dir(),
                         "sizeBytes": stat.st_size,
-                        "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                        "modifiedAt": modified_at,
+                        "availableHorizons": available_horizons,
                     }
-                )
-            found.sort(reverse=True, key=lambda item: item[0])
+                    evidence.append(option)
+                    coverage_score = len(available_horizons) if field == "labelsPath" else 0
+                    found.append((coverage_score, stat.st_mtime, candidate))
+                else:
+                    option = {
+                        "field": field,
+                        "path": candidate,
+                        "exists": False,
+                        "isDirectory": field == "fundamentalsRoot",
+                        "sizeBytes": 0,
+                        "modifiedAt": None,
+                        "availableHorizons": [],
+                    }
+                field_options.append(option)
+            found.sort(reverse=True, key=lambda item: (item[0], item[1]))
             selected[field] = found[0][2] if found else None
+            options[field] = field_options
         return {
             "selected": selected,
-            "evidence": sorted(evidence, key=lambda item: item["modifiedAt"], reverse=True),
-            "selectionRule": "newest existing canonical path; no recursive scan of large Runtime",
+            "options": options,
+            "evidence": sorted(
+                evidence,
+                key=lambda item: item["modifiedAt"] or "",
+                reverse=True,
+            ),
+            "selectionRule": (
+                "labels prefer the widest available horizon schema, then newest; "
+                "other inputs prefer newest existing canonical path"
+            ),
         }
 
     def validate(self, draft: StrategyDraft) -> dict[str, Any]:
-        errors: list[str] = []
-        warnings: list[str] = []
+        issues: list[dict[str, Any]] = []
+
+        def add_issue(
+            code: str,
+            severity: str,
+            title: str,
+            detail: str,
+            *,
+            field: str | None = None,
+            action: dict[str, str] | None = None,
+            evidence: dict[str, Any] | None = None,
+        ) -> None:
+            issue: dict[str, Any] = {
+                "code": code,
+                "severity": severity,
+                "title": title,
+                "detail": detail,
+            }
+            if field:
+                issue["field"] = field
+            if action:
+                issue["action"] = action
+            if evidence:
+                issue["evidence"] = evidence
+            issues.append(issue)
+
         inputs = {
             "marketPanelPath": draft.market_panel_path,
             "labelsPath": draft.labels_path,
@@ -115,6 +188,9 @@ class StrategyService:
         }
         resolved_inputs: dict[str, str] = {}
         resolved_paths: dict[str, Path] = {}
+        required_paths = {"marketPanelPath", "labelsPath"}
+        if draft.do_t_mode in {"intraday", "both"}:
+            required_paths.add("minutePanelPath")
         for key, value in inputs.items():
             if not value:
                 continue
@@ -123,60 +199,162 @@ class StrategyService:
                 resolved_inputs[key] = project_relative(self.settings, path)
                 resolved_paths[key] = path
                 if not path.exists():
-                    if key in {"marketPanelPath", "labelsPath"} or (
-                        key == "minutePanelPath" and draft.do_t_mode in {"intraday", "both"}
-                    ):
-                        errors.append(f"{key}: input path does not exist")
-                    else:
-                        warnings.append(
-                            f"{key}: optional input path does not exist; dependent candidate will fail closed."
+                    required = key in required_paths
+                    fundamental_input = key in {
+                        "fundamentalsRoot",
+                        "trainingDatasetPath",
+                    } and "fundamental" in draft.stock_selection_modes
+                    if required or not fundamental_input:
+                        add_issue(
+                            f"{key}_missing",
+                            "blocking" if required else "warning",
+                            "必需输入不存在" if required else "可选输入不可用",
+                            (
+                                f"{key}: input path does not exist"
+                                if required
+                                else (
+                                    f"{key}: optional input path does not exist; "
+                                    "dependent candidate will fail closed."
+                                )
+                            ),
+                            field=key,
+                            action={
+                                "kind": "choose_input",
+                                "label": "选择可用输入",
+                            },
                         )
             except ValueError as exc:
-                errors.append(f"{key}: {exc}")
+                add_issue(
+                    f"{key}_unsafe",
+                    "blocking",
+                    "输入路径不安全",
+                    f"{key}: {exc}",
+                    field=key,
+                )
+
+        requested_horizons = sorted(
+            {int(value) for value in draft.horizons.split(",")}
+        )
+        available_horizons: list[int] = []
         labels_path = resolved_paths.get("labelsPath")
         if labels_path is not None and labels_path.exists():
             try:
-                import pyarrow.dataset as parquet_dataset
-
-                label_columns = set(
-                    parquet_dataset.dataset(labels_path, format="parquet").schema.names
-                )
+                available_horizons = _parquet_horizons(labels_path)
             except Exception as exc:
-                errors.append(
-                    "labelsPath: unreadable Parquet schema; rebuild the label artifact "
-                    f"({type(exc).__name__})"
+                add_issue(
+                    "labels_unreadable",
+                    "blocking",
+                    "Labels 无法读取",
+                    (
+                        "labelsPath: unreadable Parquet schema; rebuild the label artifact "
+                        f"({type(exc).__name__})"
+                    ),
+                    field="labelsPath",
+                    action={"kind": "rebuild_labels", "label": "重建 Labels"},
                 )
             else:
-                requested = {
-                    f"forward_return_{int(value)}d"
-                    for value in draft.horizons.split(",")
-                }
-                missing = sorted(requested - label_columns)
-                if missing:
-                    errors.append(
-                        "labelsPath: missing requested horizon columns "
-                        f"{', '.join(missing)}; rebuild labels or remove those Horizons"
+                missing_horizons = sorted(
+                    set(requested_horizons) - set(available_horizons)
+                )
+                if missing_horizons:
+                    missing_columns = [
+                        f"forward_return_{horizon}d"
+                        for horizon in missing_horizons
+                    ]
+                    add_issue(
+                        "missing_horizon_columns",
+                        "blocking",
+                        "Labels 缺少研究周期",
+                        (
+                            "labelsPath: missing requested horizon columns "
+                            f"{', '.join(missing_columns)}; rebuild labels or remove "
+                            "those Horizons"
+                        ),
+                        field="horizons",
+                        action={
+                            "kind": "resolve_horizons",
+                            "label": "选择修复方式",
+                        },
+                        evidence={
+                            "requestedHorizons": requested_horizons,
+                            "availableHorizons": available_horizons,
+                            "missingHorizons": missing_horizons,
+                        },
                     )
         try:
             output = safe_project_path(self.settings, draft.output_dir)
             runtime = self.settings.runtime_root.resolve()
             if output != runtime and runtime not in output.parents:
-                errors.append("outputDir must remain inside runtime")
+                add_issue(
+                    "output_outside_runtime",
+                    "blocking",
+                    "输出目录越界",
+                    "outputDir must remain inside runtime",
+                    field="outputDir",
+                )
         except ValueError as exc:
-            errors.append(f"outputDir: {exc}")
-        if not draft.human_approved:
-            warnings.append("Human Gate 尚未授权；可保存草稿和验证，但不能启动。")
-        if draft.model == "ft_transformer" and not draft.require_gpu:
-            warnings.append("FT-Transformer 未强制 GPU；运行时可能降级或失败，取决于训练实现。")
-        if "fundamental" in draft.stock_selection_modes and not (
-            draft.fundamentals_root or draft.training_dataset_path
-        ):
-            warnings.append(
-                "基本面选股候选缺少 PIT 财务输入；该候选将 fail closed，无筛选基线仍可比较。"
+            add_issue(
+                "output_path_unsafe",
+                "blocking",
+                "输出目录不安全",
+                f"outputDir: {exc}",
+                field="outputDir",
             )
+
+        if not draft.human_approved:
+            add_issue(
+                "human_gate_pending",
+                "warning",
+                "等待 Human Gate",
+                "Human Gate 尚未授权；可保存草稿和验证，但不能启动。",
+                field="humanApproved",
+                action={"kind": "arm_human_gate", "label": "人工确认后授权"},
+            )
+        if draft.model == "ft_transformer" and not draft.require_gpu:
+            add_issue(
+                "gpu_not_enforced",
+                "warning",
+                "GPU 契约未锁定",
+                "FT-Transformer 未强制 GPU；运行时将 fail closed。",
+                field="requireGpu",
+            )
+
+        fundamentals_path = resolved_paths.get("fundamentalsRoot")
+        training_path = resolved_paths.get("trainingDatasetPath")
+        fundamentals_available = bool(
+            (fundamentals_path and fundamentals_path.is_dir())
+            or (training_path and training_path.is_file())
+        )
+        if (
+            "fundamental" in draft.stock_selection_modes
+            and not fundamentals_available
+        ):
+            has_baseline = "none" in draft.stock_selection_modes
+            add_issue(
+                "fundamentals_missing",
+                "warning" if has_baseline else "blocking",
+                "基本面候选缺少 PIT 输入",
+                (
+                    "基本面选股候选缺少 PIT 财务输入；该候选将 fail closed，"
+                    + (
+                        "无筛选基线仍可比较。"
+                        if has_baseline
+                        else "且没有无筛选基线可回退。"
+                    )
+                ),
+                field="fundamentalsRoot",
+                action={
+                    "kind": "resolve_fundamentals",
+                    "label": "选择目录或关闭基本面候选",
+                },
+            )
+
         if len(set(draft.top_k_candidates)) > 1:
-            warnings.append(
-                "Top-K 将逐候选执行同一成本后回测，再从 Pareto 前沿按研究偏好选冠军。"
+            add_issue(
+                "pareto_top_k_protocol",
+                "info",
+                "Top-K 使用同成本候选赛",
+                "Top-K 将逐候选执行同一成本后回测，再从 Pareto 前沿按研究偏好选冠军。",
             )
         if (
             draft.fundamental_selection_mode == "auto"
@@ -187,25 +365,197 @@ class StrategyService:
                 + len(set(draft.fundamental_threshold_candidates))
                 * len(set(draft.fundamental_blend_candidates))
             )
-            warnings.append(
-                "基本面权重、入围分位和 Top-K 将只在早期滚动 OOS 上搜索 "
-                f"{candidate_count} 组；参数冻结后，最终 holdout 只验收一次。"
+            add_issue(
+                "bounded_early_oos_search",
+                "info",
+                "参数只在早期 OOS 学习",
+                (
+                    "基本面权重、入围分位和 Top-K 将只在早期滚动 OOS 上搜索 "
+                    f"{candidate_count} 组；参数冻结后，最终 holdout 只验收一次。"
+                ),
+                evidence={
+                    "candidateCount": candidate_count,
+                    "candidateLimit": draft.selection_max_candidates,
+                },
             )
-        warnings.append(
-            "过拟合闸门："
-            f"PBO ≤ {draft.max_pbo:.2f}、"
-            f"DSR probability ≥ {draft.min_dsr_probability:.2f}、"
-            f"SPA p-value ≤ {draft.max_spa_pvalue:.2f}；任一失败即阻止晋级。"
+
+        blend_details = {
+            "adaptive_oos": (
+                "以早期 OOS 横截面 RankIC/稳定性学习非负权重；"
+                "按各周期清除 forward-label 重叠区，并在最终 holdout 前冻结。"
+            ),
+            "balanced": "以 20D/60D 中周期为主的固定审计权重。",
+            "short_tactical": "以 1D/5D 短周期为主，强调战术响应。",
+            "long_fundamental": "以 20D/60D/120D 中长周期为主，强调基本面兑现。",
+            "primary_only": "仅使用主周期，作为最易解释的消融基线。",
+        }
+        add_issue(
+            "horizon_blend_policy",
+            "info",
+            "周期融合已声明",
+            blend_details[draft.horizon_blend_method],
+            evidence={"method": draft.horizon_blend_method},
+        )
+
+        add_issue(
+            "overfit_gates",
+            "info",
+            "过拟合闸门",
+            (
+                f"PBO ≤ {draft.max_pbo:.2f}、"
+                f"DSR probability ≥ {draft.min_dsr_probability:.2f}、"
+                f"SPA p-value ≤ {draft.max_spa_pvalue:.2f}；任一失败即阻止晋级。"
+            ),
         )
         if not draft.benchmark_symbol:
-            warnings.append("未指定 benchmarkSymbol；无法验证最大超额目标。")
+            add_issue(
+                "benchmark_missing",
+                "blocking" if draft.objective_weights.excess_return > 0 else "warning",
+                "缺少超额收益基准",
+                "未指定 benchmarkSymbol；无法验证最大超额目标。",
+                field="benchmarkSymbol",
+                action={"kind": "set_benchmark", "label": "使用沪深 300"},
+            )
         if draft.do_t_mode in {"daily_swing", "both"}:
-            warnings.append("日线波段使用 ATR timing gate 与持有期软锁，不冒充盘中成交能力。")
-        warnings.append("优化目标是研究偏好，不是收益承诺；验收只读取真实 OOS/回测产物。")
+            add_issue(
+                "daily_swing_contract",
+                "info",
+                "T+1 日线能力边界",
+                "日线波段使用 ATR timing gate 与持有期软锁，不冒充盘中成交能力。",
+            )
+        add_issue(
+            "research_only",
+            "info",
+            "研究目标不是收益承诺",
+            "优化权重只表达研究偏好；验收只读取真实 OOS 与成本后回测产物。",
+        )
+        add_issue(
+            "public_principles_only",
+            "info",
+            "原创且可审计的系统边界",
+            (
+                "架构吸收公开可验证的机构工程原则，并由本项目独立实现；"
+                "不声称访问或复制任何机构未公开的私有系统。"
+            ),
+        )
+
+        errors = [
+            issue["detail"]
+            for issue in issues
+            if issue["severity"] == "blocking"
+        ]
+        warnings = [
+            issue["detail"]
+            for issue in issues
+            if issue["severity"] == "warning"
+        ]
+        role_issue_codes = {
+            "data_quality": {
+                "marketPanelPath_missing",
+                "labelsPath_missing",
+                "labels_unreadable",
+                "missing_horizon_columns",
+                "fundamentals_missing",
+            },
+            "factor_research": {
+                "fundamentals_missing",
+                "horizon_blend_policy",
+            },
+            "model_validation": {
+                "missing_horizon_columns",
+                "gpu_not_enforced",
+                "overfit_gates",
+            },
+            "portfolio": {
+                "pareto_top_k_protocol",
+                "bounded_early_oos_search",
+                "benchmark_missing",
+            },
+            "backtest": {
+                "minutePanelPath_missing",
+                "daily_swing_contract",
+                "benchmark_missing",
+            },
+            "risk": {
+                "overfit_gates",
+                "benchmark_missing",
+                "research_only",
+            },
+            "challenger": {
+                "bounded_early_oos_search",
+                "overfit_gates",
+                "public_principles_only",
+            },
+            "human_gate": {"human_gate_pending"},
+        }
+        next_actions = {
+            "data_quality": "核对 PIT、覆盖率与 Labels schema",
+            "factor_research": "检查融合权重和因子冗余证据",
+            "model_validation": "复核滚动切分、embargo 与 holdout 隔离",
+            "portfolio": "复核 Pareto 候选、集中度和换手",
+            "backtest": "复核 A 股撮合、成本、涨跌停与 T+1",
+            "risk": "复核回撤、压力场景与 kill switch",
+            "challenger": "提交反证、敏感性和替代解释",
+            "human_gate": "人工核对研究范围后决定是否授权",
+        }
+        decision_council: list[dict[str, Any]] = []
+        for role_id, label, responsibility in DECISION_COUNCIL:
+            relevant = [
+                issue
+                for issue in issues
+                if issue["code"] in role_issue_codes[role_id]
+            ]
+            blocking = [
+                issue for issue in relevant if issue["severity"] == "blocking"
+            ]
+            if role_id == "human_gate":
+                status = "approved" if draft.human_approved else "waiting"
+            else:
+                status = "blocked" if blocking else "ready"
+            primary_issue = blocking[0] if blocking else next(
+                (
+                    issue
+                    for issue in relevant
+                    if issue["severity"] == "warning"
+                ),
+                None,
+            )
+            decision_council.append(
+                {
+                    "id": role_id,
+                    "label": label,
+                    "responsibility": responsibility,
+                    "status": status,
+                    "veto": role_id
+                    in {
+                        "data_quality",
+                        "model_validation",
+                        "risk",
+                        "challenger",
+                        "human_gate",
+                    },
+                    "finding": (
+                        primary_issue["title"]
+                        if primary_issue
+                        else "当前契约无角色级阻塞"
+                    ),
+                    "nextAction": (
+                        primary_issue.get("action", {}).get("label")
+                        if primary_issue
+                        else next_actions[role_id]
+                    ) or next_actions[role_id],
+                    "issueCount": len(relevant),
+                    "issueCodes": [issue["code"] for issue in relevant],
+                }
+            )
+
         return {
             "valid": not errors,
             "errors": errors,
             "warnings": warnings,
+            "issues": issues,
+            "requestedHorizons": requested_horizons,
+            "availableHorizons": available_horizons,
             "resolvedInputs": resolved_inputs,
             "launch": {
                 "jobType": "strategy-pipeline",
@@ -213,16 +563,7 @@ class StrategyService:
                 "parameters": self.launch_parameters(draft),
                 "armed": draft.human_approved and not errors,
             },
-            "decisionCouncil": [
-                {
-                    "id": role_id,
-                    "label": label,
-                    "responsibility": responsibility,
-                    "status": "ready" if not errors and role_id != "human_gate" else "approved" if role_id == "human_gate" and draft.human_approved else "blocked" if errors else "waiting",
-                    "veto": role_id in {"data_quality", "model_validation", "risk", "challenger", "human_gate"},
-                }
-                for role_id, label, responsibility in DECISION_COUNCIL
-            ],
+            "decisionCouncil": decision_council,
         }
 
     def save(self, draft: StrategyDraft) -> dict[str, Any]:
@@ -257,6 +598,7 @@ class StrategyService:
             "model": draft.model,
             "horizons": draft.horizons,
             "primary_horizon": draft.primary_horizon,
+            "horizon_blend_method": draft.horizon_blend_method,
             "split_mode": draft.split_mode,
             "n_splits": draft.n_splits,
             "require_gpu": draft.require_gpu,

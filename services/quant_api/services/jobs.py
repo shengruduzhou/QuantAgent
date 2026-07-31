@@ -187,6 +187,17 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "path_inputs": {"provider_uri", "symbols_file"},
         "path_outputs": {"output_root"},
     },
+    "build-labels-v7": {
+        "type": "data",
+        "required": {"market_panel_path", "output_path", "horizons"},
+        "allowed": {"market_panel_path", "output_path", "horizons"},
+        "path_inputs": {"market_panel_path"},
+        "path_outputs": {"output_path"},
+        "option_aliases": {
+            "market_panel_path": "market-panel",
+            "output_path": "output",
+        },
+    },
     "build-fundamentals-v7": {
         "type": "data",
         "required": {"start_date", "end_date", "provider", "fundamentals_root", "allow_network"},
@@ -207,6 +218,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "fundamentals_root", "valuation_path", "disclosures_path",
             "training_dataset_path", "synthesized_factors_path", "factor_library",
             "model", "horizons", "primary_horizon", "split_mode", "n_splits",
+            "horizon_blend_method",
             "require_gpu", "top_k", "max_weight_per_name", "max_sector_weight",
             "max_turnover", "objective", "weighting", "initial_cash",
             "benchmark_symbol", "acceptance_max_drawdown",
@@ -248,6 +260,13 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "factor_screening_mode": {"off", "evaluate_only", "pretrain"},
             "fundamental_selection_mode": {"auto", "fixed", "off"},
             "do_t_mode": {"off", "intraday", "daily_swing", "both"},
+            "horizon_blend_method": {
+                "adaptive_oos",
+                "balanced",
+                "short_tactical",
+                "long_fundamental",
+                "primary_only",
+            },
         },
     },
     # ---- H-031 governed operational / full-universe data commands -----------
