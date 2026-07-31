@@ -44,16 +44,48 @@ def deflated_sharpe_ratio(
     returns: pd.Series,
     candidate_sharpes: np.ndarray,
     periods_per_year: int = 252,
+    *,
+    n_trials: int | None = None,
 ) -> float:
-    """Deflated SR: PSR threshold inflated by max-of-N selection bias."""
+    """Deflated SR: PSR threshold inflated by max-of-N selection bias.
+
+    ``candidate_sharpes`` must be **per-period**, not annualised: the expected
+    maximum is re-annualised here before it becomes the PSR benchmark. Passing
+    annualised Sharpes inflates the benchmark by ``sqrt(periods_per_year)`` and
+    returns 0.0 for every champion. Every entry must be finite -- a placeholder
+    substituted for an undefined Sharpe would set ``var_sr``, and so the whole
+    benchmark, by itself.
+
+    The two inputs to the Bailey & Lopez de Prado benchmark are separate and
+    must be supplied separately:
+
+    * ``candidate_sharpes`` estimates the cross-trial *dispersion* of Sharpes.
+      Only trials whose Sharpe was actually measured belong in it.
+    * ``n_trials`` is *how many* trials were run, defaulting to the size of
+      that sample. Declare it whenever the search tried more configurations
+      than are represented in ``candidate_sharpes``.
+
+    Do not conflate them by padding the sample up to the trial count.  A
+    constant pad shrinks ``var(candidate_sharpes)`` like ``1/n_trials`` while
+    the order-statistic term grows only like ``sqrt(log n_trials)``, so the
+    benchmark *falls* towards zero and declaring more data mining makes the
+    gate easier to pass -- backwards for a multiple-testing correction.  With
+    the two passed separately the benchmark is non-decreasing in ``n_trials``,
+    so the returned probability is non-increasing in it.
+    """
     clean = returns.dropna()
     n = len(clean)
+    if n_trials is not None and int(n_trials) < candidate_sharpes.size:
+        raise ValueError(
+            "n_trials cannot be smaller than the measured candidate sample: "
+            f"n_trials={int(n_trials)}, candidate_sharpes={candidate_sharpes.size}"
+        )
     if n < 4 or candidate_sharpes.size < 2:
         return np.nan
     var_sr = float(np.var(candidate_sharpes, ddof=1))
     if var_sr <= 0:
         return np.nan
-    n_trials = candidate_sharpes.size
+    n_trials = candidate_sharpes.size if n_trials is None else int(n_trials)
     euler_mascheroni = 0.5772156649
     expected_max = np.sqrt(var_sr) * (
         (1.0 - euler_mascheroni) * _normal_ppf(1.0 - 1.0 / n_trials)
