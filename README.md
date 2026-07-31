@@ -280,3 +280,11 @@ git diff --check
 ```
 
 `git diff --check` 在 Windows checkout 可能报告 CRLF warning；真正 whitespace error 必须修复。
+
+## System launch code
+cd /home/shanhefu/QuantAgent
+git switch main
+git pull --ff-only origin main
+
+python3 -m pip install -e ".[web]"
+./scripts/run_quant_ui_tmux.sh   --runtime /home/shanhefu/QuantAgent/runtime   --host 127.0.0.1   --port 8000
