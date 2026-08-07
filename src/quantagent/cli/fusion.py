@@ -13,12 +13,23 @@ would make the deflated Sharpe ratio meaningless.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Optional
 
 import pandas as pd
 import typer
 
 from quantagent.cli._utils import app, default_reports_root
+
+
+# Factor panels often carry labels beside features for convenience. A typo in
+# --factor-names must not silently promote those future values into predictors.
+# Keep this deliberately narrow: reject semantic label/target names, not every
+# feature containing words such as "return" (momentum/lagged return is valid).
+_LEAKAGE_FACTOR_NAME = re.compile(
+    r"^(?:forward[_-]?return(?:s)?(?:_|$)|future[_-]?return(?:s)?(?:_|$)|label(?:_|$)|target(?:_|$)|y(?:_|$))",
+    re.IGNORECASE,
+)
 
 
 def _read_panel(path: Path) -> pd.DataFrame:
@@ -39,6 +50,15 @@ def _resolve_forward_column(frame: pd.DataFrame, requested: str) -> str:
     chosen = sorted(candidates)[0]
     typer.echo(f"forward column '{requested}' not found; using '{chosen}'")
     return chosen
+
+
+def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
+    blocked = sorted(name for name in names if _LEAKAGE_FACTOR_NAME.search(name))
+    if blocked:
+        raise typer.BadParameter(
+            "factor_names contains label/forward-looking columns and is blocked fail-closed: "
+            f"{blocked}. Use only features observable at the decision timestamp."
+        )
 
 
 @app.command("search-factor-fusion")
@@ -77,6 +97,7 @@ def search_factor_fusion(
     names = tuple(name.strip() for name in factor_names.split(",") if name.strip())
     if not names:
         raise typer.BadParameter("factor_names resolved to an empty list")
+    _validate_factor_names_for_leakage(names)
 
     factor_panel = _read_panel(factor_panel_path)
     forward_panel = _read_panel(forward_returns_path)

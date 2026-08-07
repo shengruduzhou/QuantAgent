@@ -112,27 +112,48 @@ class TestVerdicts:
 
 class TestGates:
     def test_significant_but_immaterial_gain_is_refused(self):
-        """A stable +0.001 IC clears any t-test and is still not worth carrying.
+        """A stable +0.001 IC can be significant and still fail materiality.
 
-        This is the failure the materiality floor exists for: on the additive
-        process the OOF stack is reliably a hair better than the baseline and
-        would otherwise be promoted on statistical significance alone.
+        This is a gate unit test, so it constructs the paired OOS evidence
+        directly instead of assuming a particular stochastic end-to-end model
+        run will always produce a tiny significant gain on every library/CPU
+        version. End-to-end acceptance/rejection remains covered above.
         """
-        panel, regime = _panel("additive", seed=11)
+        import quantagent.research.model_comparison as mc
 
-        permissive = run_model_comparison(
-            panel,
-            ["f1", "f2", "f3"],
-            config=_config(min_ic_delta=0.0, min_net_return_delta=0.0),
-            regime_by_date=regime,
+        dates = pd.bdate_range("2024-01-02", periods=160)
+        # Tiny deterministic variation keeps the HAC variance finite while the
+        # paired mean remains ~+0.001 and highly significant.
+        delta = 0.001 + 0.00015 * np.sin(np.arange(len(dates)) / 5.0)
+        baseline = mc.ArmResult(
+            name=LINEAR_BASELINE,
+            model_class="rank_weighted_additive",
+            feature_summary={},
+            status="measured",
+            selection_metrics={"net_annual_return": 0.10},
+            fold_ic={0: 0.020, 1: 0.021, 2: 0.019, 3: 0.020},
+            daily_ic=pd.Series(np.zeros(len(dates)), index=dates),
         )
-        strict = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+        challenger = mc.ArmResult(
+            name="ensemble_stack",
+            model_class="ensemble",
+            feature_summary={},
+            status="measured",
+            selection_metrics={"net_annual_return": 0.12},
+            fold_ic={0: 0.021, 1: 0.022, 2: 0.020, 3: 0.021},
+            daily_ic=pd.Series(delta, index=dates),
         )
 
-        # Same data, same folds; only the materiality floor differs.
-        assert permissive.champion != strict.champion
-        assert strict.champion == LINEAR_BASELINE
+        permissive = mc._incremental_test(
+            challenger, baseline, _config(min_ic_delta=0.0)
+        )
+        strict = mc._incremental_test(challenger, baseline, _config())
+
+        assert permissive.passes
+        assert permissive.ic_delta_t_stat > 2.0
+        assert 0.0 < permissive.ic_delta < _config().min_ic_delta
+        assert not strict.passes
+        assert any("materiality floor" in reason for reason in strict.reasons)
 
     def test_reasons_name_every_failed_gate(self):
         panel, regime = _panel("noise", seed=23)

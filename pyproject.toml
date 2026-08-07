@@ -20,6 +20,10 @@ dependencies = [
   # here is what broke CI collection in a clean environment while passing on
   # developer machines that had it installed transitively.
   "requests>=2.31,<3",
+  # Dataset-build memory preflight imports psutil inside the governed training
+  # CLI. This is a safety dependency, not merely a web extra: without it the
+  # full-universe command cannot refuse an OOM-sized build before execution.
+  "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -43,9 +47,6 @@ web = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
   "httpx>=0.27",
-  # Per-job CPU/RSS accounting. Without it a long training reports no resource
-  # usage at all, which is the difference between "still working" and "stuck".
-  "psutil>=5.9",
 ]
 test = [
   "pytest>=8.2",

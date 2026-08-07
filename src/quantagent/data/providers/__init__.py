@@ -1,6 +1,7 @@
 from quantagent.data.providers.base import ProviderRequest, ProviderResult
 from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
 from quantagent.data.providers.disclosure_provider import DisclosureWebProvider
+from quantagent.data.providers.fuyao_provider import FuyaoProvider
 from quantagent.data.providers.local_csv_provider import LocalCsvProvider
 from quantagent.data.providers.mock_provider import MockProvider
 from quantagent.data.providers.news_provider import NewsWebProvider
@@ -13,6 +14,7 @@ from quantagent.data.providers.v7_research_provider import LocalV7ResearchProvid
 __all__ = [
     "AkShareLiveProvider",
     "DisclosureWebProvider",
+    "FuyaoProvider",
     "ProviderRequest",
     "ProviderResult",
     "MockProvider",

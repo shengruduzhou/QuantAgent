@@ -14,6 +14,7 @@ from quantagent.cli._utils import app
 
 # Stable/governed command surfaces.
 from quantagent.cli import fusion  # noqa: F401,E402
+from quantagent.cli import fuyao  # noqa: F401,E402
 from quantagent.cli import governance  # noqa: F401,E402
 from quantagent.cli import paper  # noqa: F401,E402
 from quantagent.cli import v7_backtest  # noqa: F401,E402
