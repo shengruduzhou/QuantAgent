@@ -1,10 +1,22 @@
-import { DownloadSimple, FileText, ShieldCheck, TrendUp, WarningCircle } from "@phosphor-icons/react";
+import { DownloadSimple, FileHtml, FileText, ShieldCheck, TrendUp, WarningCircle } from "@phosphor-icons/react";
 import type { BacktestSummary, RiskOverview, SystemOverview } from "../api/types";
 import { downloadJson } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { formatNumber, formatPercent } from "../utils/format";
+
+function downloadOfflineHtml(name: string, report: Record<string, unknown>): void {
+  const payload = JSON.stringify(report).replace(/</g, "\\u003c");
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QuantAgent Research Report</title><style>body{font:14px system-ui;margin:0;background:#0b0f14;color:#e6edf3}main{max-width:1100px;margin:auto;padding:28px}.card{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:18px;margin:12px 0}pre{white-space:pre-wrap;word-break:break-word;color:#c9d1d9}small{color:#8b949e}</style></head><body><main><small>QuantAgent · Offline Research Report · 非投资建议</small><h1>Research Evidence Report</h1><div class="card"><p>由已持久化 runtime artifact 生成；缺失字段不会推断或模拟补齐。文件不包含 API Key。</p></div><div class="card"><pre id="payload"></pre></div></main><script>const data=${payload};document.getElementById('payload').textContent=JSON.stringify(data,null,2);</script></body></html>`;
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
 export function ReportsPage(): JSX.Element {
   const overview = useApi<SystemOverview>(["reports-overview"], "/system/overview");
@@ -18,10 +30,17 @@ export function ReportsPage(): JSX.Element {
 
   const report = {
     generatedFrom: "QuantAgent persisted runtime artifacts",
+    generatedAt: new Date().toISOString(),
     latestBacktest: latest,
     risk: risk.data?.data,
     model: data.latestModel,
     selection: data.latestSelection,
+    evidenceCompleteness: {
+      backtest: Boolean(latest),
+      risk: Boolean(risk.data?.data),
+      model: Boolean(data.latestModel),
+      selection: Boolean(data.latestSelection),
+    },
     limitations: [
       "No live orders are generated.",
       "Missing per-trade factor attribution remains unavailable.",
@@ -37,7 +56,10 @@ export function ReportsPage(): JSX.Element {
           <h2>{latest?.name ?? "当前量化研究状态"}</h2>
           <p>基于真实 runtime artifact 自动汇总。该报告用于研究复盘、模型诊断与风险讨论，不构成投资建议。</p>
         </div>
-        <button className="primary-button" onClick={() => downloadJson("quantagent-research-report.json", report)}><DownloadSimple size={16} /> 导出报告数据</button>
+        <div className="report-export-actions">
+          <button className="secondary-button" onClick={() => downloadJson("quantagent-research-report.json", report)}><DownloadSimple size={16} /> 导出 JSON</button>
+          <button className="primary-button" onClick={() => downloadOfflineHtml("quantagent-research-report.html", report)}><FileHtml size={16} /> 离线 HTML</button>
+        </div>
       </section>
 
       <section className="report-grid">
@@ -51,6 +73,15 @@ export function ReportsPage(): JSX.Element {
             QuantAgent UI 只消费 target weights、回测、模型和风险产物。Agent 与 optimizer 不生成订单，
             QMT live trading 未通过 UI 暴露，所有任务路径限制在项目 runtime。
           </ReportParagraph>
+        </Panel>
+
+        <Panel title="证据完整度" eyebrow="Evidence Completeness">
+          <ul className="report-list">
+            <li><strong>Backtest</strong><span>{latest ? "已持久化" : "缺失"}</span></li>
+            <li><strong>Risk</strong><span>{risk.data?.data ? "已持久化" : "缺失"}</span></li>
+            <li><strong>Model</strong><span>{data.latestModel ? "已持久化" : "缺失"}</span></li>
+            <li><strong>Selection</strong><span>{data.latestSelection ? "已持久化" : "缺失"}</span></li>
+          </ul>
         </Panel>
 
         <Panel title="收益来源归因" eyebrow="Return Attribution">

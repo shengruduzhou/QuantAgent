@@ -46,6 +46,8 @@ export const vnextModules: VNextModule[] = [
   { id: "dashboard", path: "/", label: "决策总览", caption: "Decision Dashboard", group: "research", icon: ChartLineUp, keywords: "dashboard overview portfolio model risk operations 总览" },
   { id: "data", path: "/runtime?view=data", label: "数据实验室", caption: "Data Lab", group: "research", icon: Database, keywords: "data dataset provider tickflow coverage quarantine 数据" },
   { id: "market-intelligence", path: "/market-intelligence", label: "市场情报台", caption: "Market Intelligence", group: "research", icon: Fire, keywords: "fuyao financial api market intelligence hot stock dragon tiger industry concept financial 行情 热榜 龙虎榜 行业 概念 财务" },
+  { id: "market-playbooks", path: "/market-playbooks", label: "市场研究剧本", caption: "Fuyao Research Playbooks", group: "research", icon: Flask, keywords: "fuyao playbook research report breakout momentum reversal cashflow attention limitup dragon tiger 研究 剧本 报告 突破 动量 反转" },
+  { id: "fund-research", path: "/funds", label: "基金研究", caption: "Fund / ETF / REITs", group: "research", icon: ChartLine, keywords: "fund etf reit nav holdings holders return 基金 净值 持仓 持有人 收益" },
   { id: "factor", path: "/factors", label: "因子实验室", caption: "Factor Lab", group: "research", icon: Atom, keywords: "factor alpha ic 因子" },
   { id: "fusion", path: "/fusion", label: "因子融合工场", caption: "Alpha Foundry", group: "research", icon: Sparkle, keywords: "fusion blend pareto frontier robustness pbo dsr 融合 前沿 稳健" },
   { id: "strategy-studio", path: "/strategy", label: "策略实验室", caption: "Strategy Studio", group: "research", icon: Strategy, keywords: "strategy authoring factor model portfolio backtest risk 策略 编写 回测 风控" },

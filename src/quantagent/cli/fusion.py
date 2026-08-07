@@ -61,6 +61,20 @@ def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
         )
 
 
+def _validate_benchmark_contract(benchmark_path: Optional[Path], benchmark_symbol: str) -> None:
+    missing: list[str] = []
+    if benchmark_path is None:
+        missing.append("--benchmark-path")
+    if not benchmark_symbol.strip():
+        missing.append("--benchmark-symbol")
+    if missing:
+        raise typer.BadParameter(
+            "governed factor-fusion search requires an explicit benchmark; missing "
+            + ", ".join(missing)
+            + ". Equal-weight fallback remains exploratory only."
+        )
+
+
 @app.command("search-factor-fusion")
 def search_factor_fusion(
     factor_panel_path: Path = typer.Option(..., exists=True, dir_okay=False),
@@ -98,6 +112,7 @@ def search_factor_fusion(
     if not names:
         raise typer.BadParameter("factor_names resolved to an empty list")
     _validate_factor_names_for_leakage(names)
+    _validate_benchmark_contract(benchmark_path, benchmark_symbol)
 
     factor_panel = _read_panel(factor_panel_path)
     forward_panel = _read_panel(forward_returns_path)
@@ -110,29 +125,27 @@ def search_factor_fusion(
             f"factor columns missing from the panel: {missing}"
         )
 
-    benchmark_returns = None
-    if benchmark_path is not None:
-        benchmark_frame = _read_panel(benchmark_path)
-        if "trade_date" not in benchmark_frame.columns:
-            raise typer.BadParameter("benchmark file must contain a trade_date column")
-        value_column = next(
-            (
-                column
-                for column in ("benchmark_return", "forward_return", "return")
-                if column in benchmark_frame.columns
-            ),
-            None,
+    benchmark_frame = _read_panel(benchmark_path)  # type: ignore[arg-type]
+    if "trade_date" not in benchmark_frame.columns:
+        raise typer.BadParameter("benchmark file must contain a trade_date column")
+    value_column = next(
+        (
+            column
+            for column in ("benchmark_return", "forward_return", "return")
+            if column in benchmark_frame.columns
+        ),
+        None,
+    )
+    if value_column is None:
+        raise typer.BadParameter(
+            "benchmark file must contain benchmark_return, forward_return or return"
         )
-        if value_column is None:
-            raise typer.BadParameter(
-                "benchmark file must contain benchmark_return, forward_return or return"
-            )
-        benchmark_returns = (
-            benchmark_frame.assign(trade_date=pd.to_datetime(benchmark_frame["trade_date"]))
-            .set_index("trade_date")[value_column]
-            .astype(float)
-            .sort_index()
-        )
+    benchmark_returns = (
+        benchmark_frame.assign(trade_date=pd.to_datetime(benchmark_frame["trade_date"]))
+        .set_index("trade_date")[value_column]
+        .astype(float)
+        .sort_index()
+    )
 
     config = FusionSearchConfig(
         factor_names=names,
@@ -147,7 +160,7 @@ def search_factor_fusion(
         random_controls=random_controls,
         single_factor_baselines=single_factor_baselines,
         seed=seed,
-        benchmark_symbol=benchmark_symbol,
+        benchmark_symbol=benchmark_symbol.strip().upper(),
         preference=ObjectivePreference(
             excess_return=preference_excess_return,
             annual_return=preference_annual_return,
