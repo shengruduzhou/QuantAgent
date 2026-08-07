@@ -37,7 +37,7 @@ training = [
   "scikit-learn>=1.5",
 ]
 research = [
-  "pyqlib>=0.9.6",
+  "pyqlib>=0.9.7,<0.10",
   "vectorbt>=0.26",
 ]
 optimization = [
@@ -62,7 +62,7 @@ all = [
   "torch>=2.3",
   "transformers>=4.43",
   "scikit-learn>=1.5",
-  "pyqlib>=0.9.6",
+  "pyqlib>=0.9.7,<0.10",
   "vectorbt>=0.26",
   "cvxpy>=1.4",
   "fastapi>=0.115",
