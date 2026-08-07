@@ -108,12 +108,14 @@ class MarketDataService:
             "lastPrice": snapshot.get("last_price"),
             "priceChange": snapshot.get("price_change"),
             "changePercent": snapshot.get("price_change_ratio_pct"),
-            "open": snapshot.get("open_price"),
-            "high": snapshot.get("high_price"),
-            "low": snapshot.get("low_price"),
-            "prevClose": snapshot.get("prev_price"),
+            # Fuyao currently documents open/high/low/prev; keep the *_price
+            # aliases for compatibility with older cached/exported snapshots.
+            "open": snapshot.get("open") if snapshot.get("open") is not None else snapshot.get("open_price"),
+            "high": snapshot.get("high") if snapshot.get("high") is not None else snapshot.get("high_price"),
+            "low": snapshot.get("low") if snapshot.get("low") is not None else snapshot.get("low_price"),
+            "prevClose": snapshot.get("prev") if snapshot.get("prev") is not None else snapshot.get("prev_price"),
             "volume": snapshot.get("volume"),
-            "amount": snapshot.get("amount") or snapshot.get("turnover"),
+            "amount": snapshot.get("amount") if snapshot.get("amount") is not None else snapshot.get("turnover"),
             "asOf": snapshot.get("available_at"),
         }
 
