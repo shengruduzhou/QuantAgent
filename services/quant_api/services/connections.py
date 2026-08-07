@@ -25,6 +25,22 @@ CONNECTIONS: tuple[ConnectionSpec, ...] = (
         note="A股行情采集；会话密钥仅注入白名单数据任务。",
     ),
     ConnectionSpec(
+        id="hithink",
+        label="同花顺 Fuyao",
+        variables=("HITHINK_FINANCE_API_KEY",),
+        capabilities=(
+            "daily",
+            "market_dump",
+            "pit_fundamentals",
+            "valuations",
+            "calendar",
+            "index_sector",
+            "fund",
+            "special_data",
+        ),
+        note="同花顺官方 A 股数据；统一 Key 只注入 allowlisted 后端数据任务，不回传浏览器。",
+    ),
+    ConnectionSpec(
         id="tushare",
         label="TuShare",
         variables=("TUSHARE_TOKEN",),
