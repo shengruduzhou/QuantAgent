@@ -108,8 +108,26 @@ def full_panel(strat_daily: pd.Series, nav: pd.Series, benches: dict[str, pd.Ser
 
 def classify_strategy(panel: dict, *, multi_window_ok: bool | None = None,
                       phase_std: float | None = None, max_weight: float | None = None,
-                      primary: str = "all_a") -> tuple[str, list[str]]:
-    """User's selection logic -> label + flags."""
+                      primary: str = "all_a",
+                      style_attribution: dict | None = None) -> tuple[str, list[str]]:
+    """User's selection logic -> label + flags.
+
+    ``style_attribution`` is a
+    :meth:`quantagent.backtest.factor_model_attribution.AttributionReport.as_dict`
+    payload. When it is supplied and its strictest measured level is FF3 or
+    Carhart, that level's alpha replaces the CAPM alpha in the decision.
+
+    Without it this function promotes on a single-benchmark Jensen alpha, which
+    Fama & French (1992) is the paper that refutes: over 1963-1990 the
+    beta-return relation is flat, and size plus book-to-market capture the
+    cross-section that beta does not. On a concentrated, small-tilted,
+    momentum-driven A-share book — which is what this repository builds — a
+    positive CAPM alpha is the *expected* reading whether or not the model found
+    anything. Carhart (1997) closes the same loop for momentum specifically: the
+    persistence that looked like skill was one-year momentum. So a
+    ``production_candidate`` label backed only by CAPM is now flagged rather
+    than silently trusted.
+    """
     flags: list[str] = []
     cagr = panel.get("cagr") or 0.0
     alpha = panel.get(f"alpha_{primary}")
@@ -123,6 +141,30 @@ def classify_strategy(panel: dict, *, multi_window_ok: bool | None = None,
     if phase_std is not None and panel.get(f"excess_{primary}") is not None \
             and phase_std >= abs(panel.get(f"excess_{primary}") or 0):
         flags.append("phase_unstable")
+
+    alpha_basis = "capm"
+    if style_attribution:
+        strictest = str(style_attribution.get("strictestMeasured", "none"))
+        levels = style_attribution.get("levels", {}) or {}
+        level = levels.get(strictest) if strictest in {"ff3", "carhart4"} else None
+        if level and level.get("alphaAnnual") is not None:
+            alpha = float(level["alphaAnnual"])
+            alpha_basis = strictest
+            if not style_attribution.get("survivesStyleControls", False):
+                flags.append(f"alpha_does_not_survive_{strictest}")
+            factor_status = (style_attribution.get("factorSet", {}) or {}).get("status", {})
+            if factor_status.get("SMB") == "approximate":
+                flags.append("smb_from_current_snapshot_shares:size_control_is_soft")
+        else:
+            missing = sorted(
+                name
+                for name, entry in levels.items()
+                if entry.get("status") == "unavailable"
+            )
+            flags.append("style_controls_unavailable:" + ",".join(missing or ["all"]))
+    else:
+        flags.append("capm_only:size_value_momentum_uncontrolled")
+    flags.append(f"alpha_basis:{alpha_basis}")
 
     a = alpha if alpha is not None else 0.0
     # primary categorisation
@@ -138,4 +180,14 @@ def classify_strategy(panel: dict, *, multi_window_ok: bool | None = None,
         label = "production_candidate"
     else:
         label = "beta_strategy" if (beta or 0) > 0.7 else "research_signal"
+
+    # A promotion resting on an uncontrolled or refuted alpha is demoted rather
+    # than annotated. The flag alone would be read past; the label is what the
+    # downstream registry and the operator act on.
+    if label == "production_candidate" and alpha_basis == "capm":
+        label = "research_signal"
+        flags.append("demoted:production_claim_needs_ff3_or_carhart_alpha")
+    elif label == "production_candidate" and f"alpha_does_not_survive_{alpha_basis}" in flags:
+        label = "style_exposure"
+        flags.append("demoted:alpha_absorbed_by_size_value_momentum")
     return label, flags

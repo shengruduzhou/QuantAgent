@@ -122,21 +122,97 @@ def test_blender_falls_back_to_primary_horizon_when_missing():
 
 
 def test_blender_handles_lifecycle_decay_with_short_bias():
+    """DECAY must tilt the blend toward the short sleeves.
+
+    Stated as a *cross-sectional* claim, because that is the only kind the
+    blender can answer: it ranks each horizon within each date, so "A scores
+    above B" is meaningful and "A scores 0.07" is not. A one-name panel has no
+    cross-section to rank and every score collapses to 0.0 by construction —
+    which the ``min_cross_section_size`` diagnostic now reports.
+    """
     dates = pd.bdate_range("2024-01-02", periods=1)
-    preds = _make_predictions_multi_horizon(list(dates), ["A"], [1, 5, 20, 60, 120])
-    # Set 1d prediction high; with DECAY override, short horizons dominate.
-    preds.loc[(preds["symbol"] == "A") & (preds["horizon"] == 1), "prediction"] = 0.1
-    preds.loc[(preds["symbol"] == "A") & (preds["horizon"] == 120), "prediction"] = -0.05
+    preds = _make_predictions_multi_horizon(list(dates), ["A", "B"], [1, 5, 20, 60, 120])
+    # A is the short-horizon winner and the long-horizon loser; B is the reverse.
+    short, long = preds["horizon"].isin([1, 5]), preds["horizon"].isin([60, 120])
+    preds.loc[(preds["symbol"] == "A") & short, "prediction"] = 0.10
+    preds.loc[(preds["symbol"] == "B") & short, "prediction"] = -0.10
+    preds.loc[(preds["symbol"] == "A") & long, "prediction"] = -0.10
+    preds.loc[(preds["symbol"] == "B") & long, "prediction"] = 0.10
     theme = pd.DataFrame(
         {
-            "trade_date": dates,
-            "symbol": ["A"],
-            "lifecycle_stage": ["DECAY"],
+            "trade_date": list(dates) * 2,
+            "symbol": ["A", "B"],
+            "lifecycle_stage": ["DECAY", "DECAY"],
         }
     )
+
     out = blend_multi_horizon_predictions(preds, theme_signals=theme)
-    # DECAY puts ~0.40 weight on 1d, ~0.35 on 5d → blended pulled toward 0.1.
-    assert out.blended.iloc[0]["prediction"] > 0.0
+    scores = out.blended.set_index("symbol")["prediction"]
+
+    # DECAY puts 0.40/0.35 on 1d/5d against 0.07/0.03 on 60d/120d, so the
+    # short-horizon winner must rank first.
+    assert scores["A"] > scores["B"]
+    assert out.diagnostics["min_cross_section_size"] == 2
+
+
+def test_blender_weights_are_the_realised_weights():
+    """Declared horizon weights must survive contact with the label scales.
+
+    Each horizon predicts a different label, and a 120-day forward return is an
+    order of magnitude larger than a 1-day one (cross-sectional sigma 0.237 vs
+    0.022 on the gold panel). Summing raw predictions therefore weights horizon
+    ``h`` by ``w_h * sigma_h``: the shipped 10% on 1d realised 1.8% and the 15%
+    on 120d realised 29.3%. Rank-normalising first is what makes the config mean
+    what it says.
+    """
+    dates = pd.bdate_range("2024-01-02", periods=200)
+    symbols = [f"S{index:02d}" for index in range(60)]
+    rng = np.random.default_rng(0)
+    # Cross-sectional sigmas measured on the gold panel's own labels.
+    sigma = {1: 0.0216, 5: 0.0511, 20: 0.1029, 60: 0.1710, 120: 0.2372}
+    rows = []
+    for date in dates:
+        for horizon, scale in sigma.items():
+            # Each horizon ranks the cross-section independently, so the blend's
+            # correlation with a horizon measures that horizon's influence.
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "trade_date": date,
+                        "symbol": symbols,
+                        "horizon": horizon,
+                        "prediction": rng.normal(0.0, scale, len(symbols)),
+                    }
+                )
+            )
+    preds = pd.concat(rows, ignore_index=True)
+
+    def influence(scale_normalisation: str) -> dict[int, float]:
+        blended = blend_multi_horizon_predictions(
+            preds,
+            config=MultiHorizonBlendConfig(scale_normalisation=scale_normalisation),
+        ).blended
+        merged = preds.merge(blended, on=["trade_date", "symbol"], suffixes=("_h", "_b"))
+        return {
+            int(horizon): float(
+                group["prediction_h"].corr(group["prediction_b"], method="spearman")
+            )
+            for horizon, group in merged.groupby("horizon")
+        }
+
+    corrected = influence("cross_sectional_rank")
+    legacy = influence("none")
+
+    # DEFAULT_HORIZON_WEIGHTS declares 20d the heaviest sleeve at 30% and 120d
+    # the lightest of the long ones at 15%.
+    assert corrected[20] > corrected[120], (
+        f"declared 30% on 20d must outrank declared 15% on 120d, got {corrected}"
+    )
+    assert corrected[20] == max(corrected.values())
+    # Summing raw predictions inverts that: the 120d sleeve dominates on scale
+    # alone, and the 1d sleeve all but disappears.
+    assert legacy[120] > legacy[20], f"legacy mode should be 120d-dominated, got {legacy}"
+    assert legacy[1] < corrected[1] / 2.0
 
 
 def test_adaptive_horizon_blend_learns_on_early_oos_and_freezes_before_holdout():

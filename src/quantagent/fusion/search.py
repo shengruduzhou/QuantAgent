@@ -161,6 +161,16 @@ class FusionSearchResult:
     def summary(self) -> dict[str, object]:
         return {
             "generatedAt": self.generated_at,
+            # Declared, not inferred. Every scheme in this package produces a
+            # weight VECTOR, and the score is `sum_j w_j * rank(x_j)` — additive
+            # across factors by construction, whatever the scheme that produced
+            # the weights. The genetic scheme is a nonlinear *optimiser* over an
+            # additive model, which is a different thing again; see
+            # quantagent.models.interactions.ModelClass for the distinctions and
+            # quantagent.research.model_comparison for the arms that do form
+            # interaction terms.
+            "modelClass": "rank_weighted_additive",
+            "representsInteraction": False,
             "nTrials": self.n_trials,
             "pbo": None if not np.isfinite(self.pbo) else round(float(self.pbo), 6),
             "benchmarkMode": self.benchmark_mode,

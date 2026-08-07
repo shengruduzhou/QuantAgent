@@ -50,14 +50,36 @@ DEFAULT_NEGATIVE_FACTOR_HINTS = (
 
 @dataclass(frozen=True)
 class StrictFactorSearchConfig:
-    """Search settings for factor subsets judged by strict backtest objective."""
+    """Search settings for factor subsets judged by strict backtest objective.
+
+    ``subset_beam_search`` was called ``interaction_search`` and its trials were
+    stamped ``interaction_beam``. Both names were wrong in the same way. The beam
+    grows a *set* of factors and scores each set with
+    :func:`build_factor_composite`, which is the equal-weighted mean of
+    sign-flipped centred cross-sectional ranks — an additive model, with no
+    ``x_i x_j`` term at any point. Adding a factor to a subset changes which
+    terms are in the sum; it does not create a product between them.
+
+    The distinction is the one Gu, Kelly & Xiu (2020) measure: their spline GLM
+    is nonlinear per factor and additive across factors, and it buys essentially
+    nothing over plain elastic net, while trees and neural networks — which
+    differ precisely by representing interactions — carry the gains. Calling an
+    additive subset search "interaction search" invites the reader to credit
+    this component with a capability it does not have.
+
+    The old names remain readable as properties so existing artifacts and
+    callers keep working; see :mod:`quantagent.models.interactions` for the
+    constructions that do form real interaction terms.
+    """
 
     top_k_values: tuple[int, ...] = (10, 15, 20, 30)
     prefix_sizes: tuple[int, ...] = (3, 5, 8, 12, 16, 24, 32)
     max_candidate_factors: int = 64
-    interaction_search: bool = True
+    #: Grow factor *subsets* with a beam search. Additive, despite the old name.
+    subset_beam_search: bool = True
     beam_width: int = 6
-    max_interaction_size: int = 0
+    #: Largest subset the beam may grow to. 0 = ``max(prefix_sizes)``.
+    max_subset_size: int = 0
     min_non_null_ratio: float = 0.20
     min_unique_values: int = 10
     regime_filter: str = "all"
@@ -67,6 +89,16 @@ class StrictFactorSearchConfig:
     turnover_penalty: float = 0.02
     cost_penalty: float = 0.50
     decision: StrictPolicySearchConfig = field(default_factory=StrictPolicySearchConfig)
+
+    @property
+    def interaction_search(self) -> bool:
+        """Deprecated alias for :attr:`subset_beam_search`. The search is additive."""
+        return self.subset_beam_search
+
+    @property
+    def max_interaction_size(self) -> int:
+        """Deprecated alias for :attr:`max_subset_size`."""
+        return self.max_subset_size
 
 
 @dataclass(frozen=True)
@@ -117,13 +149,42 @@ class StrictFactorSearchResult:
             "candidate_factors": list(self.candidate_factors),
             "factor_signs": self.factor_signs,
             "regime_filter": self.regime_filter,
+            # Stated on the artifact so a reader never has to infer the model
+            # class from the search's name. See quantagent.models.interactions.
+            "model_class": "rank_weighted_additive",
+            "model_class_note": (
+                "the composite is the equal-weighted mean of sign-flipped centred "
+                "cross-sectional ranks; the beam searches factor SUBSETS and forms "
+                "no x_i*x_j term"
+            ),
+            # `best_score` is the maximum of `n_trials` scores computed on the
+            # SAME window, with no fold split anywhere in this search. It is a
+            # selected maximum and therefore biased upward by construction; how
+            # much depends on the trial count, which is why the count travels
+            # with it. Downstream consumers must treat these factors as a
+            # *hypothesis* and re-validate them out of sample under
+            # quantagent.research.selection_governance before any promotion.
+            "selection": {
+                "oos_validated": False,
+                "n_trials": len(self.trials),
+                "selection_basis": "in_sample_maximum_over_all_trials",
+                "warning": (
+                    "best_score is an in-sample selected maximum over "
+                    f"{len(self.trials)} trials on one window; it carries no "
+                    "out-of-sample evidence and no PBO/DSR/SPA correction"
+                ),
+            },
             "config": {
                 "top_k_values": list(self.config.top_k_values),
                 "prefix_sizes": list(self.config.prefix_sizes),
                 "max_candidate_factors": self.config.max_candidate_factors,
-                "interaction_search": self.config.interaction_search,
+                "subset_beam_search": self.config.subset_beam_search,
                 "beam_width": self.config.beam_width,
-                "max_interaction_size": self.config.max_interaction_size,
+                "max_subset_size": self.config.max_subset_size,
+                # Old keys retained so artifacts written before the rename stay
+                # comparable with ones written after it.
+                "interaction_search": self.config.subset_beam_search,
+                "max_interaction_size": self.config.max_subset_size,
                 "min_non_null_ratio": self.config.min_non_null_ratio,
                 "min_unique_values": self.config.min_unique_values,
                 "regime_filter": self.config.regime_filter,
@@ -413,8 +474,8 @@ def search_strict_factors(
             ev = _eval("ranked_prefix", subset, int(top_k))
             if best_eval is None or ev.score > best_eval.score:
                 best_eval = ev
-    if cfg.interaction_search and ranked:
-        max_size = int(cfg.max_interaction_size) if int(cfg.max_interaction_size) > 0 else max(cfg.prefix_sizes)
+    if cfg.subset_beam_search and ranked:
+        max_size = int(cfg.max_subset_size) if int(cfg.max_subset_size) > 0 else max(cfg.prefix_sizes)
         max_size = max(1, min(max_size, len(ranked)))
         beam: list[tuple[tuple[str, ...], float]] = [
             ((factor,), float(single_best.get(factor, -np.inf)))
@@ -433,7 +494,7 @@ def search_strict_factors(
                     seen.add(new_subset)
                     subset_best = -np.inf
                     for top_k in cfg.top_k_values:
-                        ev = _eval("interaction_beam", new_subset, int(top_k))
+                        ev = _eval("subset_beam", new_subset, int(top_k))
                         subset_best = max(subset_best, ev.score)
                         if best_eval is None or ev.score > best_eval.score:
                             best_eval = ev

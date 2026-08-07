@@ -49,6 +49,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from quantagent.data.ashare import contracts, gold_bridge  # noqa: E402
+from quantagent.data.v7_quality_gates import evaluate_survivorship  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 U0 = REPO / "runtime" / "data" / "u0"
@@ -207,6 +208,16 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
         checks.append({"check": name, "verdict": "PASS" if ok else "FAIL",
                        "detail": detail, "evidence": evidence})
 
+    def add_tri_state(name: str, verdict: str, detail: str, evidence=None) -> None:
+        """PASS / FAIL / UNKNOWN.
+
+        UNKNOWN is not a pass and not a failure: nothing failed, but nothing was
+        demonstrated either. It withholds the certificate exactly as a FAIL does,
+        because a certificate is a positive claim.
+        """
+        checks.append({"check": name, "verdict": verdict, "detail": detail,
+                       "evidence": evidence})
+
     duplicates = int(dataset.duplicated(subset=["symbol", "trade_date"]).sum())
     add("no_duplicate_security_dates", duplicates == 0,
         "each (symbol, trade_date) appears once", {"duplicates": duplicates})
@@ -225,6 +236,26 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
         {"rows": pre})
     add("no_post_delisting_rows", post == 0, "no row follows its delisting date",
         {"rows": post})
+
+    # Every check above is satisfied by a survivorship-biased panel, and
+    # `no_post_delisting_rows` is *helped* by the bias: delete the names that died
+    # and it passes trivially. Measured (DEF-029) by dropping all 261 delisted
+    # names from the shipped 10.9M-row panel — all nine checks returned PASS and
+    # `structurally_valid` stayed True, so `FULL_UNIVERSE_GOLD_READY` was grantable
+    # to a universe containing no dead names at all, which is the one thing its
+    # name asserts. Nothing here asked whether the losers were included.
+    survivorship = evaluate_survivorship(dataset, master=master)
+    verdict = {"pass": "PASS", "fail": "FAIL"}.get(survivorship.status, "UNKNOWN")
+    add_tri_state(
+        "universe_includes_delisted_names", verdict,
+        "the panel contains securities that later died, not only the survivors",
+        {
+            "delisted_names_present": survivorship.delisted_symbols,
+            "undated_delisted_names": survivorship.undated_delisted_symbols,
+            "unknown_sessions": survivorship.unknown_sessions,
+            "detail": survivorship.detail,
+        },
+    )
 
     add("adjustment_mode_declared",
         dataset["adjustment_method"].nunique() == 1,
@@ -254,11 +285,27 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
         "every retained row had a feasible t+1 entry", {"rows": infeasible_kept})
 
     failed = [c["check"] for c in checks if c["verdict"] == "FAIL"]
+    unknown = [c["check"] for c in checks if c["verdict"] == "UNKNOWN"]
+    listing_status, status_basis = gold_bridge.resolve_listing_status(master)
     return {
         "generated": _now(),
         "checks": checks,
         "failed_checks": failed,
-        "structurally_valid": not failed,
+        "unknown_checks": unknown,
+        # An unknown withholds the certificate. This programme has twice paid for
+        # "not checked" being recorded as "checked and clean" (DEF-023, DEF-025).
+        "structurally_valid": not failed and not unknown,
+        # Which master answered, and how. The wrong verdict in Round 18 came from
+        # auditing this artifact against a *different* U0 master than the build
+        # read; `lineage.json` recorded the path, but the certificate — the thing a
+        # reader actually opens — did not say what the master could support.
+        "master_identity": {
+            "securities": int(len(master)),
+            "listing_status_basis": status_basis,
+            "resolved": {str(k): int(v) for k, v in listing_status.value_counts().items()},
+            "delisting_dates_available": int(master["delisting_date"].notna().sum())
+            if "delisting_date" in master.columns else 0,
+        },
         # Flat counts consumed by ReadinessEvaluator.full_universe_gold(). The
         # evaluator defines the interface contract, so the builder satisfies it
         # exactly rather than the tier being taught a second shape.

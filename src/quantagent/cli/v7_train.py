@@ -1935,12 +1935,35 @@ def run_full_real_training_v7(
     typer.echo(json_dump(pipeline_report))
 
 
+def _portfolio_split_purge_days(predictions: "pd.DataFrame") -> int:
+    """Trading days to drop between the selection segment and the holdout.
+
+    The walk-forward splitter already purges the label horizon at every
+    train/validation boundary; this boundary needs the same treatment for the
+    same reason. Predictions carry an H-day forward label, so the label attached
+    to the final selection day resolves H days later — inside the holdout. The
+    simulated book compounds across the seam as well: the positions held on the
+    last selection day are still held into the first holdout days, so the
+    holdout's opening returns are partly the payoff of a decision the selector
+    made while it could see the outcome.
+
+    Derived from the horizons actually present rather than configured, so a run
+    that adds a 120-day sleeve widens its own gap instead of quietly reusing a
+    gap sized for 5-day labels.
+    """
+    if "horizon" not in predictions.columns:
+        return 0
+    horizons = pd.to_numeric(predictions["horizon"], errors="coerce").dropna()
+    return int(horizons.max()) if len(horizons) else 0
+
+
 def _split_portfolio_selection_holdout(
     predictions: "pd.DataFrame",
     *,
     holdout_fraction: float = 0.30,
     minimum_selection_dates: int = 5,
     minimum_holdout_dates: int = 5,
+    purge_days: int | None = None,
 ) -> tuple["pd.DataFrame", "pd.DataFrame", dict[str, object]]:
     if "trade_date" not in predictions.columns:
         raise ValueError("portfolio selection split requires trade_date")
@@ -1951,14 +1974,17 @@ def _split_portfolio_selection_holdout(
         .sort_values()
         .tolist()
     )
-    if len(dates) < required_oos_days(minimum_selection_dates, minimum_holdout_dates):
+    gap = (
+        _portfolio_split_purge_days(predictions) if purge_days is None else max(0, int(purge_days))
+    )
+    if len(dates) < required_oos_days(minimum_selection_dates, minimum_holdout_dates) + gap:
         # A protocol that cannot be executed is a research-condition failure,
         # not a crash: the walk-forward simply did not produce enough OOS days
         # for a nested selection plus a frozen holdout.
         raise reject_insufficient_oos(
             observed_days=len(dates),
             min_selection_days=minimum_selection_dates,
-            min_holdout_days=minimum_holdout_dates,
+            min_holdout_days=minimum_holdout_dates + gap,
         )
     holdout_count = max(
         minimum_holdout_dates,
@@ -1966,21 +1992,29 @@ def _split_portfolio_selection_holdout(
     )
     # The selection segment has to keep one extra day: governance measures the
     # segment in daily returns, and differencing the NAV consumes the first day.
+    # The purge gap comes out of the same budget — it belongs to neither segment.
     holdout_count = min(
         holdout_count,
-        len(dates) - minimum_selection_dates - RETURN_DIFFERENCING_DAYS,
+        len(dates) - minimum_selection_dates - RETURN_DIFFERENCING_DAYS - gap,
     )
-    split_at = len(dates) - holdout_count
+    holdout_start_index = len(dates) - holdout_count
+    split_at = holdout_start_index - gap
     selection_end = pd.Timestamp(dates[split_at - 1])
-    holdout_start = pd.Timestamp(dates[split_at])
+    holdout_start = pd.Timestamp(dates[holdout_start_index])
     normalized = pd.to_datetime(predictions["trade_date"], errors="coerce")
     selection = predictions.loc[normalized <= selection_end].copy()
     holdout = predictions.loc[normalized >= holdout_start].copy()
     return selection, holdout, {
-        "policy": "nested chronological OOS: select on early segment, report acceptance on frozen later segment",
+        "policy": (
+            "nested chronological OOS: select on early segment, purge the label "
+            "horizon at the seam, report acceptance on frozen later segment"
+        ),
         "selectionStart": str(pd.Timestamp(dates[0]).date()),
         "selectionEnd": str(selection_end.date()),
         "selectionDates": int(split_at),
+        "purgeDays": int(gap),
+        "purgeStart": str(pd.Timestamp(dates[split_at]).date()) if gap else None,
+        "purgeEnd": str(pd.Timestamp(dates[holdout_start_index - 1]).date()) if gap else None,
         "holdoutStart": str(holdout_start.date()),
         "holdoutEnd": str(pd.Timestamp(dates[-1]).date()),
         "holdoutDates": int(holdout_count),

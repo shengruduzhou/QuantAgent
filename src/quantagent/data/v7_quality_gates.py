@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from quantagent.data.ashare.gold_bridge import MASK_TRUE, MASK_UNKNOWN
+from quantagent.data.ashare.gold_bridge import MASK_FALSE, MASK_TRUE, MASK_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -650,10 +650,15 @@ def evaluate_survivorship(
     )
     unknown_by_mask: dict[str, int] = {}
     if "unknown_masks" in masked_panel.columns:
-        for entry in masked_panel["unknown_masks"]:
-            for name in str(entry).split(","):
-                if name:
-                    unknown_by_mask[name] = unknown_by_mask.get(name, 0) + 1
+        # Counted column-wise. The Python loop this replaces walked every row, which
+        # was tolerable while survivorship ran once at gold-build time and is not now
+        # that it runs on every training dataset — the same cost `build_masks` was
+        # just vectorised out of.
+        exploded = (
+            masked_panel["unknown_masks"].astype(str).str.split(",").explode()
+        )
+        counts = exploded[exploded.str.len() > 0].value_counts()
+        unknown_by_mask = {str(name): int(count) for name, count in counts.items()}
     undated = sorted(masked_panel.loc[unknown_rows, "symbol"].unique())
     unknown_symbols = tuple(undated[:max_unknown_symbols])
 
@@ -674,6 +679,16 @@ def evaluate_survivorship(
     delisted_symbols = int(
         masked_panel.loc[listing_status == GOLD_LISTING_DELISTED, "symbol"].nunique()
     )
+
+    mismatch = _master_disagrees_with_mask(masked_panel, master, listing_status, post)
+    if mismatch:
+        return SurvivorshipReport(
+            status=GATE_UNKNOWN, total_sessions=total,
+            verified_eligible_sessions=verified, unknown_sessions=unknown_sessions,
+            delisted_symbols=delisted_symbols, undated_delisted_symbols=len(undated),
+            unknown_by_mask=unknown_by_mask, unknown_symbols=unknown_symbols,
+            detail=mismatch,
+        )
 
     if post_delisting_rows:
         symbols = masked_panel.loc[post == MASK_TRUE, "symbol"].nunique()
@@ -717,6 +732,52 @@ def evaluate_survivorship(
 #: Mirrors `gold_bridge.LISTING_STATUS_DELISTED` without importing it at module
 #: scope; `gold_bridge` is already imported here for the mask constants.
 GOLD_LISTING_DELISTED = "delisted"
+
+
+def _master_disagrees_with_mask(
+    panel: pd.DataFrame,
+    master: pd.DataFrame | None,
+    listing_status: pd.Series,
+    post: pd.Series,
+) -> str:
+    """Detect a mask that was not built from the master it is being judged against.
+
+    This is the hazard that produced a wrong verdict about the shipped gold panel:
+    U0 keeps two masters, the artifact was built from one and audited against the
+    other, and the audit answered confidently instead of noticing. A persisted mask
+    carries no record of which master produced it, so the disagreement has to be
+    inferred — and it is inferrable, because the two masters cannot both be right
+    about the same security.
+
+    The tell used here: if the master calls a security delisted but has no date for
+    it, the mask cannot honestly say FALSE for that security's rows. FALSE is a
+    confident "this row is not after the delisting", and nothing in *this* master
+    supports that confidence. So a FALSE there came from somewhere else.
+    """
+    if master is None or "symbol" not in panel.columns:
+        return ""
+    if "delisting_date" not in master.columns:
+        dated = pd.Series(dtype="datetime64[ns]")
+    else:
+        dated = pd.to_datetime(
+            master.set_index(master["symbol"].astype(str))["delisting_date"],
+            errors="coerce",
+        )
+    symbols = panel["symbol"].astype(str)
+    has_date = symbols.isin(set(dated[dated.notna()].index)).to_numpy()
+    undatable_dead = (listing_status == GOLD_LISTING_DELISTED).to_numpy() & ~has_date
+    confident = undatable_dead & (post == MASK_FALSE).to_numpy()
+    if not confident.any():
+        return ""
+    affected = sorted(symbols[confident].unique())
+    return (
+        f"掩码与传入的 master 不一致：{len(affected)} 个标的（例如 "
+        f"{', '.join(affected[:3])}）在这个 master 里是「已退市且无退市日期」，"
+        f"但面板的 mask_post_delisting 对它们给出了确定的 FALSE —— "
+        "这个 master 支撑不了那个确定性，所以掩码不是由它构建的。"
+        "用构建该产物时真正使用的 master（见 lineage.json 的 inputs.security_master）"
+        "重新审计；拿另一个 master 得到的结论衡量的是两者的差异，不是产物本身。"
+    )
 
 
 def _resolve_panel_listing_status(

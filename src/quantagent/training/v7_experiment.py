@@ -245,6 +245,8 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     if config.model == "ft_transformer":
         return _run_ft_transformer_experiment(data, feature_columns, quality.to_dict(), config)
     coefficients: dict[str, dict[str, float]] = {}
+    standardised_coefficients: dict[str, dict[str, float]] = {}
+    non_converged_fits: list[dict[str, object]] = []
     boosters: dict[str, object] = {}
     all_predictions: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, object]] = []
@@ -291,9 +293,28 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
                 )
                 last_artifact = booster
             else:
-                coef, intercept = _fit_linear(train[feature_columns], train[label_column], config, backend)
-                prediction = _predict_linear(test[feature_columns], coef, intercept)
-                coefficients[str(horizon)] = {column: float(value) for column, value in zip(feature_columns, coef)} | {"intercept": float(intercept)}
+                fit = _fit_linear(train[feature_columns], train[label_column], config, backend)
+                prediction = _predict_linear(test[feature_columns], fit.coef, fit.intercept)
+                coefficients[str(horizon)] = {
+                    column: float(value) for column, value in zip(feature_columns, fit.coef)
+                } | {"intercept": float(fit.intercept)}
+                # Dominance is a *relative* statement about which feature carries
+                # the blend, so it has to be read off coefficients that share a
+                # unit. Original-space coefficients do not: a feature measured in
+                # yuan always looks negligible next to one measured in ranks.
+                standardised_coefficients[str(horizon)] = {
+                    column: float(value)
+                    for column, value in zip(feature_columns, fit.standardised_coef)
+                }
+                if not fit.converged:
+                    non_converged_fits.append(
+                        {
+                            "horizon": int(horizon),
+                            "fold_id": int(fold.fold_id),
+                            "backend": backend,
+                            "iterations": int(fit.iterations),
+                        }
+                    )
             fold_cols = ["trade_date", "symbol", label_column]
             if "forward_return_1d" in test.columns and "forward_return_1d" != label_column:
                 fold_cols.append("forward_return_1d")
@@ -321,7 +342,12 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         fold_metrics,
         coefficients,
         feature_importance=_feature_importance(boosters, feature_columns) if boosters else None,
+        dominance_coefficients=standardised_coefficients or None,
     )
+    if non_converged_fits:
+        # A fit that ran out of iterations is a *model* problem, not a rejected
+        # hypothesis: record it so the two are not read as the same event.
+        metrics["non_converged_linear_fits"] = non_converged_fits
     metrics |= _training_manifest_metrics(prediction_frame, feature_columns, config.model)
     metrics |= _dataset_audit_metrics(data, quality)
     adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{config.horizons[0]}d"
@@ -806,27 +832,190 @@ def _resolve_backend(model: str, allow_downgrade: bool) -> str:
     raise ValueError(f"unsupported V7 model: {model}")
 
 
-def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig, backend: str) -> tuple[np.ndarray, float]:
+@dataclass(frozen=True)
+class LinearFit:
+    """A fitted penalised linear model in two coordinate systems.
+
+    ``coef``/``intercept`` live in the **original** feature space, which is the
+    published artifact contract: ``quantagent.training.v7_predictor`` scores a
+    frame as ``x @ coef + intercept`` with no scaler on the side.
+    ``standardised_coef`` lives in the unit-variance space the fit actually
+    happened in, and is the only one of the two whose magnitudes are comparable
+    across features — ``single_factor_dominance`` must read that one.
+    """
+
+    coef: np.ndarray
+    intercept: float
+    standardised_coef: np.ndarray
+    center: np.ndarray
+    scale: np.ndarray
+    converged: bool
+    iterations: int
+
+    def as_pair(self) -> tuple[np.ndarray, float]:
+        return self.coef, self.intercept
+
+
+def _standardisation(x_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Train-segment centre and scale, with degenerate columns left untouched.
+
+    A column that is constant, all-NaN, or non-finite gets ``scale = 1`` so it
+    contributes a zero standardised column instead of an infinity.
+    """
+    with np.errstate(invalid="ignore"):
+        center = np.nanmean(x_values, axis=0)
+        scale = np.nanstd(x_values, axis=0)
+    center = np.nan_to_num(center, nan=0.0, posinf=0.0, neginf=0.0)
+    scale = np.nan_to_num(scale, nan=0.0, posinf=0.0, neginf=0.0)
+    scale[~np.isfinite(scale) | (scale <= 1e-12)] = 1.0
+    return center, scale
+
+
+def _fit_elastic_net(
+    z: np.ndarray,
+    centred_y: np.ndarray,
+    *,
+    l1: float,
+    l2: float,
+    max_iter: int = 2000,
+    tol: float = 1e-8,
+) -> tuple[np.ndarray, bool, int]:
+    """ISTA on the standardised design with a Lipschitz-derived step size.
+
+    The previous implementation used a hard-coded ``lr = 0.05`` on the *raw*
+    design matrix. Proximal gradient descent only converges for a step below
+    ``1/L`` where ``L`` is the largest eigenvalue of the Hessian; on a panel
+    carrying a turnover column measured in yuan that bound is around ``1e-17``,
+    so 0.05 overflowed to NaN within a handful of iterations and the fit
+    returned silently unusable coefficients. Standardising first puts ``L``
+    near 1, and deriving the step from the Gram matrix keeps it valid for any
+    feature set rather than for one that happened to be tested.
+    """
+    n_samples, n_features = z.shape
+    # Standardise the target as well as the design, glmnet-style, and undo it on
+    # the way out. Without it the penalty is scale-equivariant but the *solver*
+    # is not: ``l2`` enters the Lipschitz constant, so a target measured in
+    # percent rather than in decimals shrinks the step size by the same factor
+    # and the iteration budget silently stops short of the solution. Scaling
+    # here keeps the Hessian O(1) whatever the label units.
+    y_scale = float(np.std(centred_y))
+    if not np.isfinite(y_scale) or y_scale <= 1e-15:
+        y_scale = 1.0
+    centred_y = centred_y / y_scale
+    gram = z.T @ z / max(1, n_samples)
+    target = z.T @ centred_y / max(1, n_samples)
+    # glmnet's lambda_max convention: the smallest l1 penalty that zeroes every
+    # coefficient. Expressing the penalty as a fraction of it makes ``alpha``
+    # scale-free. Without this, the shipped default of 1.0 sat orders of
+    # magnitude above the gradient of a daily-return target (|target| ~ 1e-3),
+    # so every coefficient was soft-thresholded to exactly zero and the backend
+    # returned a constant prediction for any dataset — the fit "succeeded" and
+    # carried no information.
+    lambda_max = float(np.max(np.abs(target))) if n_features else 0.0
+    if lambda_max > 0.0:
+        l1 = l1 * lambda_max
+        l2 = l2 * lambda_max
+    try:
+        lipschitz = float(np.linalg.eigvalsh(gram).max()) + l2
+    except np.linalg.LinAlgError:  # pragma: no cover - defensive
+        lipschitz = float(np.trace(gram)) + l2
+    if not np.isfinite(lipschitz) or lipschitz <= 0.0:
+        lipschitz = 1.0
+    step = 1.0 / lipschitz
+    coef = np.zeros(n_features, dtype=float)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_iter + 1):
+        gradient = gram @ coef - target + l2 * coef
+        proposal = coef - step * gradient
+        threshold = step * l1
+        updated = np.sign(proposal) * np.maximum(np.abs(proposal) - threshold, 0.0)
+        delta = float(np.max(np.abs(updated - coef))) if n_features else 0.0
+        coef = updated
+        if not np.all(np.isfinite(coef)):
+            raise ValueError(
+                "elastic-net fit diverged to a non-finite coefficient; this is a "
+                "pipeline failure, not a research result"
+            )
+        if delta <= tol:
+            converged = True
+            break
+    return coef * y_scale, converged, iterations
+
+
+def _fit_linear(x: pd.DataFrame, y: pd.Series, config: V7TrainingConfig, backend: str) -> LinearFit:
+    """Fit ridge / elastic net on the **standardised** training segment.
+
+    Standardisation is not cosmetic here. Both penalties are applied to the
+    coefficient vector, so on an unstandardised design the effective shrinkage
+    on a feature is inversely proportional to that feature's units: a raw
+    ``amount`` column in yuan sits ~10 orders of magnitude above a rank-style
+    momentum column, and the ridge solve — via ``pinv``'s singular-value cutoff
+    — discarded the momentum direction entirely. Measured on a synthetic panel
+    whose only true signal was the small-scale column, the unstandardised fit
+    recovered rank IC 0.012 against 0.271 for the same estimator on the same
+    data after scaling. That baseline is the control every tree-versus-linear
+    comparison in this repository is scored against, so a crippled control
+    silently manufactures evidence for nonlinearity.
+
+    Gu, Kelly & Xiu (2020) standardise for the same reason, cross-sectionally
+    ranking every characteristic period-by-period onto ``[-1, 1]`` before any
+    estimator sees it.
+    """
     x_values = x.to_numpy(dtype=float)
-    y_values = y.to_numpy(dtype=float)
-    mean_x = np.nanmean(x_values, axis=0)
-    mean_y = float(np.nanmean(y_values))
-    x_values = np.nan_to_num(x_values, nan=0.0, posinf=0.0, neginf=0.0)
-    centred_x = x_values - mean_x
+    y_values = np.nan_to_num(y.to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    center, scale = _standardisation(x_values)
+    z = np.nan_to_num(x_values, nan=np.nan, posinf=np.nan, neginf=np.nan)
+    z = (z - center) / scale
+    z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+    mean_y = float(np.mean(y_values))
     centred_y = y_values - mean_y
+
     if backend == "elastic_net":
-        coef = np.zeros(centred_x.shape[1])
-        l1 = config.alpha * config.l1_ratio
-        l2 = config.alpha * (1.0 - config.l1_ratio)
-        lr = 0.05
-        for _ in range(250):
-            gradient = centred_x.T @ (centred_x @ coef - centred_y) / max(1, len(centred_x)) + l2 * coef
-            coef = np.sign(coef - lr * gradient) * np.maximum(np.abs(coef - lr * gradient) - lr * l1, 0.0)
+        standardised_coef, converged, iterations = _fit_elastic_net(
+            z,
+            centred_y,
+            l1=config.alpha * config.l1_ratio,
+            l2=config.alpha * (1.0 - config.l1_ratio),
+        )
     else:
-        eye = config.alpha * np.eye(centred_x.shape[1])
-        coef = np.linalg.pinv(centred_x.T @ centred_x + eye) @ centred_x.T @ centred_y
-    intercept = mean_y - float(np.dot(coef, mean_x))
-    return coef, intercept
+        gram = z.T @ z
+        penalty = config.alpha * np.eye(gram.shape[0])
+        rhs = z.T @ centred_y
+        try:
+            standardised_coef = np.linalg.solve(gram + penalty, rhs)
+        except np.linalg.LinAlgError:
+            standardised_coef = np.linalg.lstsq(gram + penalty, rhs, rcond=None)[0]
+        converged, iterations = True, 1
+
+    if not np.all(np.isfinite(standardised_coef)):
+        raise ValueError(
+            f"{backend} fit produced non-finite coefficients; this is a pipeline "
+            "failure, not a research result"
+        )
+    if not np.any(np.abs(standardised_coef) > 0.0):
+        # Every coefficient shrunk to exactly zero. The model then emits one
+        # constant for the whole cross-section, rank IC is undefined, and the
+        # downstream metric layer fills the undefined value with 0.0 — which
+        # reads as "the hypothesis was tested and found worthless" when in fact
+        # nothing was tested. Fail loudly and name the knob.
+        raise ValueError(
+            f"{backend} fit shrank every coefficient to zero (alpha={config.alpha}, "
+            f"l1_ratio={config.l1_ratio}); the model is degenerate, not rejected. "
+            "Lower --alpha (it is a fraction of the penalty that zeroes all "
+            "coefficients, so it belongs in (0, 1))."
+        )
+    coef = standardised_coef / scale
+    intercept = mean_y - float(np.dot(coef, center))
+    return LinearFit(
+        coef=coef,
+        intercept=intercept,
+        standardised_coef=standardised_coef,
+        center=center,
+        scale=scale,
+        converged=converged,
+        iterations=iterations,
+    )
 
 
 def _predict_linear(x: pd.DataFrame, coef: np.ndarray, intercept: float) -> np.ndarray:
@@ -2035,6 +2224,7 @@ def _aggregate_metrics(
     fold_metrics: list[dict[str, object]],
     coefficients: dict[str, dict[str, float]],
     feature_importance: dict[str, dict[str, float]] | None = None,
+    dominance_coefficients: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, object]:
     rank_ics = [float(item["rank_ic_mean"]) for item in fold_metrics]
     net_returns = [float(item["net_return"]) for item in fold_metrics]
@@ -2044,7 +2234,15 @@ def _aggregate_metrics(
     sharpes = [float(item.get("sharpe", 0.0)) for item in fold_metrics]
     drawdowns = [float(item["max_drawdown"]) for item in fold_metrics]
     n_days_total = int(sum(item.get("n_days", 0) for item in fold_metrics))
-    dominance = _single_factor_dominance(coefficients) if coefficients else _booster_dominance(feature_importance or {})
+    # Prefer the standardised coefficients when the caller has them: dominance
+    # compares coefficient magnitudes across features, which is only meaningful
+    # once those features share a unit.
+    dominance_source = dominance_coefficients or coefficients
+    dominance = (
+        _single_factor_dominance(dominance_source)
+        if dominance_source
+        else _booster_dominance(feature_importance or {})
+    )
     avg_daily = float(np.mean(avg_daily_returns)) if avg_daily_returns else 0.0
     return {
         "rank_ic_mean": float(np.mean(rank_ics)) if rank_ics else 0.0,

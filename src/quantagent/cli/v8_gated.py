@@ -845,9 +845,22 @@ def search_regime_factor_experts_v8(
     top_k_values: str = typer.Option("10,15,20,30"),
     prefix_sizes: str = typer.Option("3,5,8,12,16,24,32"),
     max_candidate_factors: int = typer.Option(64),
-    interaction_search: bool = typer.Option(True, "--interaction-search/--no-interaction-search"),
+    subset_beam_search: bool = typer.Option(
+        True,
+        "--subset-beam-search/--no-subset-beam-search",
+        # The old spelling stays accepted so existing scripts keep running; it
+        # was a misnomer, since the beam grows factor SUBSETS scored by an
+        # additive rank composite and never forms an x_i*x_j term.
+        "--interaction-search/--no-interaction-search",
+        help="grow factor subsets with a beam search (additive composite)",
+    ),
     beam_width: int = typer.Option(6),
-    max_interaction_size: int = typer.Option(0, help="0 = use max(prefix_sizes)"),
+    max_subset_size: int = typer.Option(
+        0,
+        "--max-subset-size",
+        "--max-interaction-size",
+        help="largest subset the beam may reach. 0 = use max(prefix_sizes)",
+    ),
     min_non_null_ratio: float = typer.Option(0.20),
     min_unique_values: int = typer.Option(10),
     candidate_pool_size: int = typer.Option(60),
@@ -935,9 +948,9 @@ def search_regime_factor_experts_v8(
         "top_k_values": _parse_int_tuple(top_k_values),
         "prefix_sizes": _parse_int_tuple(prefix_sizes),
         "max_candidate_factors": int(max_candidate_factors),
-        "interaction_search": bool(interaction_search),
+        "subset_beam_search": bool(subset_beam_search),
         "beam_width": int(beam_width),
-        "max_interaction_size": int(max_interaction_size),
+        "max_subset_size": int(max_subset_size),
         "min_non_null_ratio": float(min_non_null_ratio),
         "min_unique_values": int(min_unique_values),
         "return_weight": float(return_weight),

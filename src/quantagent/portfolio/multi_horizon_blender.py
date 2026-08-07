@@ -83,6 +83,22 @@ class MultiHorizonBlendConfig:
     primary_horizon: int = 5
     collapse_126_into_120: bool = True
     require_all_horizons: bool = False
+    #: How to put horizons on a common scale before the weighted sum.
+    #:
+    #: ``"cross_sectional_rank"`` (default) ranks each horizon's predictions
+    #: within each trade date and maps them onto ``[-1, 1]`` before weighting.
+    #: ``"none"`` reproduces the pre-2026-08 behaviour of summing raw
+    #: predictions, which is retained only so an existing result can be
+    #: reproduced for comparison. See :func:`blend_multi_horizon_predictions`
+    #: for why the raw sum does not do what the weights say.
+    scale_normalisation: str = "cross_sectional_rank"
+
+    def __post_init__(self) -> None:
+        if self.scale_normalisation not in {"cross_sectional_rank", "none"}:
+            raise ValueError(
+                "scale_normalisation must be 'cross_sectional_rank' or 'none', "
+                f"got {self.scale_normalisation!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,59 @@ def _resolve_weights(
     if override is None:
         return base
     return _normalise_weights(override)
+
+
+def _rank_normalise_per_date_horizon(frame: pd.DataFrame) -> pd.Series:
+    """Rank predictions within each ``(trade_date, horizon)`` onto ``[-1, 1]``.
+
+    Without this the weighted sum is not the blend the weights describe. Each
+    horizon's model predicts a *different label*: ``forward_return_1d`` has a
+    cross-sectional standard deviation around 0.022 on this repository's gold
+    panel, ``forward_return_120d`` around 0.237 — an order of magnitude apart,
+    because a 120-day return simply is bigger than a 1-day one. Summing the raw
+    predictions therefore weights each horizon by ``w_h * sigma_h``, not by
+    ``w_h``, and the downstream consumer only ranks on the result, so the
+    dispersion is the entire contribution.
+
+    Measured against the shipped ``DEFAULT_HORIZON_WEIGHTS`` on that panel, the
+    declared mix and the realised mix were:
+
+    ======  ==========  ==========  ======
+    horizon  declared    realised    ratio
+    ======  ==========  ==========  ======
+    1d       10%          1.8%       0.18x
+    5d       20%          8.4%       0.42x
+    20d      30%         25.4%       0.85x
+    60d      25%         35.2%       1.41x
+    120d     15%         29.3%       1.95x
+    ======  ==========  ==========  ======
+
+    So the "balanced" preset was in fact long-horizon dominant, the
+    ``short_tactical`` preset was much less tactical than it reads, and the
+    ``DECAY`` lifecycle override — whose entire purpose is to swing weight onto
+    the 1- and 5-day sleeves so the optimiser unwinds a fading name quickly —
+    was delivering roughly a quarter of the short-horizon influence it declared.
+
+    Ranking per date introduces no lookahead: only rows sharing a trade date are
+    compared. It also discards the predictions' magnitudes, which is the right
+    trade here because the consumer takes ``nlargest`` and never reads a
+    predicted return as a return.
+    """
+    predictions = pd.to_numeric(frame["prediction"], errors="coerce")
+    predictions = predictions.replace([np.inf, -np.inf], np.nan)
+    grouped = predictions.groupby([frame["trade_date"], frame["horizon"]], sort=False)
+    ranks = grouped.rank(method="average")
+    counts = grouped.transform("count")
+    spread = (counts - 1.0).where(counts > 1)
+    return (2.0 * (ranks - 1.0) / spread - 1.0).fillna(0.0)
+
+
+def _min_cross_section_size(frame: pd.DataFrame) -> int:
+    """Smallest number of names any ``(trade_date, horizon)`` slice ranks over."""
+    if frame.empty:
+        return 0
+    sizes = frame.groupby(["trade_date", "horizon"], sort=False)["symbol"].nunique()
+    return int(sizes.min()) if len(sizes) else 0
 
 
 def _available_horizons(predictions: pd.DataFrame) -> list[int]:
@@ -351,6 +420,9 @@ def blend_multi_horizon_predictions(
     if cfg.collapse_126_into_120:
         frame["horizon"] = frame["horizon"].replace({126: 120})
 
+    if cfg.scale_normalisation == "cross_sectional_rank":
+        frame["prediction"] = _rank_normalise_per_date_horizon(frame)
+
     base_weights = _normalise_weights(cfg.horizon_weights)
 
     if theme_signals is not None and not theme_signals.empty:
@@ -446,6 +518,21 @@ def blend_multi_horizon_predictions(
         "blend_mode_counts": {mode: blend_modes.count(mode) for mode in set(blend_modes)},
         "horizon_weights_base": list(cfg.horizon_weights),
         "primary_horizon": primary,
+        "scale_normalisation": cfg.scale_normalisation,
+        # Cross-sectional ranking needs a cross-section. A panel carrying one
+        # name per date normalises every score to 0.0 and the blend carries no
+        # information — correct, but worth seeing rather than discovering later.
+        "min_cross_section_size": _min_cross_section_size(frame),
+        # The blend is a weighted sum across horizons of per-horizon scores. It
+        # is additive by construction: no horizon's weight depends on another
+        # horizon's value. Stated here so a reader is not left to infer the
+        # model class. See quantagent.models.interactions.ModelClass.
+        "model_class": (
+            "rank_weighted_additive"
+            if cfg.scale_normalisation == "cross_sectional_rank"
+            else "linear_additive"
+        ),
+        "weights_are_realised": cfg.scale_normalisation == "cross_sectional_rank",
     }
     return MultiHorizonBlendResult(blended_frame, diagnostics)
 
