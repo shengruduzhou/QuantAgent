@@ -211,6 +211,64 @@ class CouncilService:
             "overrides": overrides,
         }
 
+    def review_strategy_run(self, run_id: str, resolver, runs_service) -> dict[str, Any]:
+        """Review one completed strategy-pipeline run from its own artifacts.
+
+        The council previously only adjudicated fusion searches, leaving the
+        main research loop — the run that actually produces a strategy — with no
+        role-scoped review at all. Each agent reads the run's persisted evidence
+        and returns a verdict in its own scope; missing evidence yields
+        ``unknown``, which never counts as clearance.
+        """
+        record = runs_service.run(run_id)
+        if record is None:
+            raise KeyError(run_id)
+        result = resolver.resolve(record["outputDir"])
+
+        findings = [
+            check(result, self.thresholds)
+            for check in (
+                _run_data_quality,
+                _run_factor_integrity,
+                _run_model_validation,
+                _run_search_statistics,
+                _run_portfolio_risk,
+                _run_execution_realism,
+                _run_governance,
+            )
+        ]
+        overrides = self.overrides(subject_type="strategy_run", subject_id=run_id)
+        latest_override = {
+            item["roleId"]: item
+            for item in sorted(overrides, key=lambda row: str(row.get("recordedAt") or ""))
+        }
+        for finding in findings:
+            override = latest_override.get(finding["roleId"])
+            if override:
+                finding["override"] = {
+                    "verdict": override["verdict"],
+                    "reason": override["reason"],
+                    "author": override["author"],
+                    "recordedAt": override["recordedAt"],
+                    "replacedVerdict": finding["verdict"],
+                }
+
+        return {
+            "subject": {
+                "type": "strategy_run",
+                "id": run_id,
+                "path": record["outputDir"],
+                "strategyId": record.get("strategyId"),
+                "strategyName": record.get("strategyName"),
+                "outcome": (result.get("conclusion") or {}).get("outcome"),
+            },
+            "roles": [dict(role) for role in COUNCIL_ROLES],
+            "thresholds": self.thresholds.as_dict(),
+            "findings": findings,
+            "decision": _aggregate_decision(findings),
+            "overrides": overrides,
+        }
+
     # ---------------------------------------------------------- overrides --
 
     def overrides(
@@ -609,3 +667,225 @@ def _aggregate_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 __all__ = ["COUNCIL_ROLES", "ROLE_IDS", "CouncilService", "CouncilThresholds"]
+
+
+# ---------------------------------------------------------------------------
+# Strategy-run role checks.
+#
+# Each reads the resolved run result and reports inside its own scope. They
+# share one discipline: a check whose input artifact is absent returns
+# ``unknown`` with the field it looked for, never ``pass``.
+# ---------------------------------------------------------------------------
+
+
+def _gate(result: dict[str, Any], name: str) -> dict[str, Any] | None:
+    for gate in ((result.get("acceptance") or {}).get("gates") or []):
+        if gate.get("name") == name:
+            return gate
+    return None
+
+
+def _run_data_quality(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    pit = _gate(result, "no_pit_violations")
+    mock = _gate(result, "no_mock_or_synthetic")
+    symbols = _gate(result, "training_symbols")
+    evidence = {
+        "noPitViolations": pit.get("actual") if pit else None,
+        "noMockOrSynthetic": mock.get("actual") if mock else None,
+        "trainingSymbols": symbols.get("actual") if symbols else None,
+    }
+    if pit is None or mock is None:
+        return _finding(
+            "data_quality", "unknown", "缺少 PIT / 合成数据判定",
+            "验收报告没有写入 no_pit_violations 或 no_mock_or_synthetic，无法确认输入可信。",
+            evidence, "确认运行是否走完验收阶段",
+        )
+    if not pit.get("passed") or not mock.get("passed"):
+        return _finding(
+            "data_quality", "blocked", "输入数据不可信",
+            "存在 PIT 违规或使用了 mock/synthetic 数据，整条链的结论都不成立。",
+            evidence, "修复数据来源后重跑，不得带着该状态晋级",
+        )
+    return _finding(
+        "data_quality", "pass", "PIT 与真实数据校验通过",
+        f"零 PIT 违规，非合成数据，训练覆盖 {evidence['trainingSymbols']} 个标的。",
+        evidence, "无",
+    )
+
+
+def _run_factor_integrity(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    dominance = _gate(result, "single_factor_dominance")
+    features = (result.get("training") or {}).get("featureCount")
+    evidence = {
+        "singleFactorDominance": dominance.get("actual") if dominance else None,
+        "threshold": dominance.get("threshold") if dominance else None,
+        "featureCount": features,
+    }
+    if dominance is None:
+        return _finding(
+            "factor_integrity", "unknown", "未记录单因子支配度",
+            "验收报告缺少 single_factor_dominance，无法判断结论是否由单一因子驱动。",
+            evidence, "确认验收阶段是否完整执行",
+        )
+    if not dominance.get("passed"):
+        return _finding(
+            "factor_integrity", "blocked", "单因子支配度过高",
+            f"实测 {dominance.get('actual')}，超过 {dominance.get('threshold')}；"
+            "组合表现主要来自单一因子，稳健性不足。",
+            evidence, "扩大因子集合或降低该因子权重后重跑",
+        )
+    return _finding(
+        "factor_integrity", "pass", "无单因子支配",
+        f"支配度 {dominance.get('actual')} 在阈值内，特征数 {features}。",
+        evidence, "无",
+    )
+
+
+def _run_model_validation(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    training = result.get("training") or {}
+    folds = training.get("foldCount")
+    days = training.get("evaluatedDays")
+    adverse = training.get("adverseRegimePassed")
+    evidence = {"foldCount": folds, "evaluatedDays": days, "adverseRegimePassed": adverse}
+    if folds is None or days is None:
+        return _finding(
+            "model_validation", "unknown", "缺少训练评估证据",
+            "training/metrics.json 缺失或不完整，无法核对折数与评估窗口。",
+            evidence, "确认训练阶段产物是否写入",
+        )
+    if folds < thresholds.min_folds:
+        return _finding(
+            "model_validation", "blocked", "折数不足",
+            f"仅 {folds} 折，低于 {thresholds.min_folds} 折的最低要求，样本外结论不稳定。",
+            evidence, "提高 nSplits 后重跑",
+        )
+    if adverse is not True:
+        return _finding(
+            "model_validation", "warn", "逆境区间未通过或未评估",
+            "没有确认模型在不利行情下仍有正向横截面信息。",
+            evidence, "检查 adverse_regime_report 并在结论中说明",
+        )
+    return _finding(
+        "model_validation", "pass", "滚动验证与逆境检验通过",
+        f"{folds} 折、{days} 个评估交易日，逆境区间通过。",
+        evidence, "无",
+    )
+
+
+def _run_search_statistics(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    governance = result.get("governance")
+    if governance is None:
+        return _finding(
+            "fusion_search", "unknown", "缺少过拟合治理记录",
+            "selection_governance.json 缺失，无法核对 PBO / DSR / SPA 与试验次数。",
+            {"selectionGovernance": None}, "确认组合选择阶段是否执行",
+        )
+    evidence = {
+        "pbo": governance.get("pbo"),
+        "dsrProbability": governance.get("dsrProbability"),
+        "spaPValue": governance.get("spaPValue"),
+        "cumulativeTrials": governance.get("cumulativeTrials"),
+        "observedDays": governance.get("observedDays"),
+    }
+    if not governance.get("accepted"):
+        return _finding(
+            "fusion_search", "blocked", "过拟合治理否决",
+            "; ".join(governance.get("rejectionReasons") or ["候选未通过统计闸门"]),
+            evidence, "减少候选数量或延长观测窗口后重新预注册",
+        )
+    pbo = governance.get("pbo")
+    if isinstance(pbo, (int, float)) and pbo > thresholds.max_pbo:
+        return _finding(
+            "fusion_search", "warn", "PBO 高于议事会内部阈值",
+            f"PBO {pbo:.4f} 高于议事会阈值 {thresholds.max_pbo}，虽通过运行自身闸门但仍需说明。",
+            evidence, "在研究记录中说明试验计数与选择过程",
+        )
+    return _finding(
+        "fusion_search", "pass", "统计闸门通过",
+        f"PBO {pbo}，DSR {governance.get('dsrProbability')}，"
+        f"计入 {governance.get('cumulativeTrials')} 次试验。",
+        evidence, "无",
+    )
+
+
+def _run_portfolio_risk(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    drawdown_gate = _gate(result, "max_drawdown")
+    backtest = result.get("backtest") or {}
+    measured = backtest.get("maxDrawdown")
+    evidence = {
+        "gateDrawdown": drawdown_gate.get("actual") if drawdown_gate else None,
+        "backtestMaxDrawdown": measured,
+        "councilLimit": thresholds.max_drawdown,
+    }
+    if drawdown_gate is None and measured is None:
+        return _finding(
+            "portfolio_risk", "unknown", "缺少回撤证据",
+            "既没有验收闸门中的 max_drawdown，也没有回测净值序列。",
+            evidence, "确认组合与回测阶段是否产出",
+        )
+    if drawdown_gate is not None and not drawdown_gate.get("passed"):
+        return _finding(
+            "portfolio_risk", "blocked", "回撤超过声明上限",
+            f"实测 {drawdown_gate.get('actual')}，阈值 {drawdown_gate.get('threshold')}。",
+            evidence, "收紧集中度或换手预算后重跑",
+        )
+    if isinstance(measured, (int, float)) and abs(measured) > thresholds.max_drawdown:
+        return _finding(
+            "portfolio_risk", "warn", "回撤高于议事会内部上限",
+            f"回测最大回撤 {measured:.4f} 超过议事会 {thresholds.max_drawdown} 的内部上限。",
+            evidence, "在结论中说明风险预算",
+        )
+    return _finding(
+        "portfolio_risk", "pass", "回撤在声明范围内",
+        f"回测最大回撤 {measured if measured is not None else drawdown_gate.get('actual')}。",
+        evidence, "无",
+    )
+
+
+def _run_execution_realism(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    backtest = result.get("backtest") or {}
+    orders = backtest.get("orderCount")
+    skipped = backtest.get("skippedOrderCount")
+    evidence = {"orderCount": orders, "skippedOrderCount": skipped}
+    if orders is None:
+        return _finding(
+            "execution_realism", "unknown", "缺少撮合记录",
+            "回测报告没有委托计数，无法判断 A 股约束下的可实现性。",
+            evidence, "确认回测阶段是否产出",
+        )
+    total = (orders or 0) + (skipped or 0)
+    if total and (skipped or 0) / total > 0.5:
+        return _finding(
+            "execution_realism", "warn", "过半委托被交易约束拒绝",
+            f"{skipped} / {total} 笔委托因 T+1、涨跌停、停牌、整手或成交量上限被跳过；"
+            "纸面权重与可执行组合差距很大。",
+            evidence, "降低换手或调整标的池，使目标权重可实现",
+        )
+    return _finding(
+        "execution_realism", "pass", "撮合约束下可执行",
+        f"{orders} 笔成交，{skipped} 笔被约束跳过。",
+        evidence, "无",
+    )
+
+
+def _run_governance(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    conclusion = result.get("conclusion") or {}
+    outcome = conclusion.get("outcome")
+    evidence = {"outcome": outcome, "promotable": conclusion.get("promotable")}
+    if outcome in {"no_evidence", "incomplete"}:
+        return _finding(
+            "governance", "unknown", "结论证据不完整",
+            "运行没有产出足以判定的完整证据链。",
+            evidence, "先补齐运行产物再提交评审",
+        )
+    if outcome in {"rejected", "not_accepted"}:
+        return _finding(
+            "governance", "blocked", "未达到晋级条件",
+            "运行已完成但闸门未通过；这是有效的研究结论，不能作为晋级依据。",
+            evidence, "记录该结论并调整研究设计",
+        )
+    return _finding(
+        "governance", "pass", "满足 research/paper 记录要求",
+        "闸门通过且证据齐全；晋级仍需人工复核与独立验证，本裁决不构成 live 授权。",
+        evidence, "人工复核后决定是否进入 paper 跟踪",
+    )

@@ -14,6 +14,12 @@ keeps participation and impact modelling honest.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
+
+from quantagent.domain.orders import (
+    ALLOWED_TRANSITIONS as CANONICAL_ALLOWED,
+    TERMINAL_STATUSES as CANONICAL_TERMINAL,
+    OrderStatus as CanonicalStatus,
+)
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
@@ -46,18 +52,33 @@ REJECTED = "REJECTED"
 ORDER_STATES: tuple[str, ...] = (
     NEW, ACCEPTED, PARTIALLY_FILLED, FILLED, CANCEL_REQUESTED, CANCELLED, REJECTED,
 )
-TERMINAL_STATES: frozenset[str] = frozenset({FILLED, CANCELLED, REJECTED})
 
-#: Legal transitions. Enforced so a fill cannot arrive after a cancel, which is
-#: the bug that silently inflates a simulated book.
+#: Paper's vocabulary expressed in canonical terms. Paper's NEW means "submitted
+#: to the venue, not yet acknowledged", which is canonical SUBMITTED.
+_TO_CANONICAL: dict[str, CanonicalStatus] = {
+    NEW: CanonicalStatus.SUBMITTED,
+    ACCEPTED: CanonicalStatus.ACCEPTED,
+    PARTIALLY_FILLED: CanonicalStatus.PARTIALLY_FILLED,
+    FILLED: CanonicalStatus.FILLED,
+    CANCEL_REQUESTED: CanonicalStatus.CANCEL_REQUESTED,
+    CANCELLED: CanonicalStatus.CANCELLED,
+    REJECTED: CanonicalStatus.REJECTED,
+}
+
+TERMINAL_STATES: frozenset[str] = frozenset(
+    name for name, status in _TO_CANONICAL.items() if status in CANONICAL_TERMINAL
+)
+
+#: Derived from `domain.orders.ALLOWED_TRANSITIONS`, never restated. Paper used
+#: to carry its own table; two tables for one concept drift, and the drift is
+#: only discovered when a fill lands on an order one of them thinks is dead.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    NEW: frozenset({ACCEPTED, REJECTED}),
-    ACCEPTED: frozenset({PARTIALLY_FILLED, FILLED, CANCEL_REQUESTED, CANCELLED, REJECTED}),
-    PARTIALLY_FILLED: frozenset({PARTIALLY_FILLED, FILLED, CANCEL_REQUESTED, CANCELLED}),
-    CANCEL_REQUESTED: frozenset({CANCELLED, FILLED, PARTIALLY_FILLED}),
-    FILLED: frozenset(),
-    CANCELLED: frozenset(),
-    REJECTED: frozenset(),
+    name: frozenset(
+        other
+        for other, other_status in _TO_CANONICAL.items()
+        if other_status in CANONICAL_ALLOWED[status]
+    )
+    for name, status in _TO_CANONICAL.items()
 }
 
 

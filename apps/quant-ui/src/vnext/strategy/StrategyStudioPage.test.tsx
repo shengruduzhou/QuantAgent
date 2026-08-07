@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, expect, test, vi } from "vitest";
-import { StrategyStudioPage } from "./StrategyStudioPage";
+import { DEFAULT_DRAFT, StrategyStudioPage } from "./StrategyStudioPage";
 
 vi.mock("../../components/EChart", () => ({
   EChart: () => <div data-testid="objective-radar" />,
@@ -85,8 +85,27 @@ test("applies named research presets and exposes declared blend policies", () =>
   expect(screen.getByRole("option", { name: "自适应 OOS（以早期 OOS 稳定 RankIC 为主）" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText(/研究方案/), { target: { value: "drawdown_first" } });
 
-  expect(screen.getByLabelText(/最小回撤/)).toHaveValue("0.6");
+  // With no benchmark the excess-return objective cannot be verified, so its
+  // weight is redistributed rather than shipped as an unlaunchable preference.
+  // The preset's intent — drawdown control dominates — must survive that.
+  expect(screen.getByLabelText(/最大超额/)).toHaveValue("0.05");
+  const drawdown = Number((screen.getByLabelText(/最小回撤/) as HTMLInputElement).value);
+  const annual = Number((screen.getByLabelText(/最大年化/) as HTMLInputElement).value);
+  expect(drawdown).toBeGreaterThan(annual);
   expect(screen.getByLabelText("周期混合")).toHaveValue("adaptive_oos");
+});
+
+test("naming a benchmark restores the excess-return objective", () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    status: "empty", issues: [], data: [],
+  }), { status: 200, headers: { "Content-Type": "application/json" } })));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={queryClient}><StrategyStudioPage /></QueryClientProvider>);
+
+  fireEvent.change(screen.getByLabelText(/基准指数/), { target: { value: "000300.SH" } });
+  fireEvent.change(screen.getByLabelText(/研究方案/), { target: { value: "drawdown_first" } });
+
+  expect(screen.getByLabelText(/最小回撤/)).toHaveValue("0.6");
 });
 
 test("shows auto-learning budget and compacts FastAPI validation errors", async () => {
@@ -207,4 +226,25 @@ test("turns a missing horizon block into executable repair choices", async () =>
 
   expect(screen.getByLabelText("Horizon 集合")).toHaveValue("1,5,20");
   expect(screen.getByLabelText("主周期")).toHaveValue("5");
+});
+
+test("the shipped default draft is a configuration that can actually finish", () => {
+  // Both of these defaults used to guarantee a late abort: the nested selection
+  // protocol needs more OOS days than four folds produce, and a full-universe
+  // stock panel holds no index to benchmark against.
+  const OOS_DAYS_PER_FOLD = 20;
+  const projected = DEFAULT_DRAFT.nSplits * OOS_DAYS_PER_FOLD;
+  const required = DEFAULT_DRAFT.selectionMinOosDays + DEFAULT_DRAFT.selectionMinHoldoutDays;
+
+  expect(projected).toBeGreaterThanOrEqual(required);
+  expect(DEFAULT_DRAFT.benchmarkSymbol).toBe("");
+  expect(DEFAULT_DRAFT.objectiveWeights.excessReturn).toBeGreaterThanOrEqual(0);
+  // A benchmark-free default must not also demand excess-return optimisation,
+  // which cannot be verified without one.
+  if (!DEFAULT_DRAFT.benchmarkSymbol) {
+    expect(
+      DEFAULT_DRAFT.objectiveWeights.excessReturn === 0
+      || DEFAULT_DRAFT.universeScope === "pilot",
+    ).toBe(true);
+  }
 });

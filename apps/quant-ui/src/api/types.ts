@@ -158,6 +158,58 @@ export interface DataCoverage {
   warnings: string[];
 }
 
+export interface JobStage {
+  id: string;
+  label: string;
+  startedAt: string;
+  completedAt?: string | null;
+  status: "running" | "completed" | "stopped";
+  message?: string | null;
+  progress?: number | null;
+}
+
+export interface JobResources {
+  cpuPercent?: number | null;
+  rssBytes?: number | null;
+  gpuMemoryMiB?: number | null;
+  threads?: number | null;
+  childProcesses?: number | null;
+  sampledAt?: string | null;
+}
+
+/** A named cause with the evidence it was derived from, never a bare exit code. */
+export interface JobFailure {
+  code: string;
+  title: string;
+  detail: string;
+  remediation: string;
+  retryable: boolean;
+  evidence?: string | null;
+  logTail: string[];
+  exitCode?: number | null;
+  signal?: number | null;
+}
+
+/**
+ * How a run concluded without succeeding.
+ *
+ * `rejected` — a pre-registered gate tested the candidate and refused it. That
+ * is a result, not a fault: the evidence is intact and worth reading.
+ * `blocked` — the run could not be executed as configured, so nothing was
+ * tested. It carries a remediation instead of evidence.
+ */
+export interface JobVerdict {
+  verdict: "rejected" | "blocked";
+  code: string;
+  title: string;
+  stage?: string;
+  reasons: string[];
+  remediation?: string;
+  metrics?: Record<string, unknown>;
+  evidencePaths?: string[];
+  decidedAt?: string;
+}
+
 export interface JobSummary {
   id: string;
   type: string;
@@ -170,6 +222,24 @@ export interface JobSummary {
   message?: string | null;
   outputPaths: string[];
   error?: string | null;
+  parameters?: Record<string, unknown>;
+  labels?: Record<string, string>;
+  retryOf?: string | null;
+  attempt?: number;
+  stage?: string | null;
+  stages?: JobStage[];
+  lastOutputAt?: string | null;
+  resources?: JobResources | null;
+  exitCode?: number | null;
+  exitStatusObserved?: boolean;
+  failure?: JobFailure | null;
+  verdict?: JobVerdict | null;
+  pid?: number | null;
+  workerPid?: number | null;
+  adopted?: boolean;
+  terminal?: boolean;
+  elapsedSeconds?: number | null;
+  canRetry?: boolean;
 }
 
 export interface JobValidation {
@@ -251,6 +321,9 @@ export interface StrategyDraft {
   objective: "max_expected_alpha" | "mean_variance" | "min_variance";
   weighting: "equal" | "rank" | "softmax";
   initialCash: number;
+  universeScope: "full" | "pilot";
+  universeSymbols?: string | null;
+  universeSymbolsFile?: string | null;
   benchmarkSymbol?: string | null;
   objectiveWeights: StrategyObjectiveWeights;
   riskLimits: StrategyRiskLimits;
@@ -286,6 +359,17 @@ export interface StrategyValidationIssue {
     candidateCount?: number;
     candidateLimit?: number;
     method?: string;
+    // Pre-flight arithmetic for the nested selection protocol: what the
+    // configured folds will produce versus what the protocol requires.
+    nSplits?: number;
+    oosDaysPerFold?: number;
+    projectedOosDays?: number;
+    requiredOosDays?: number;
+    minimumSplits?: number;
+    benchmarkSymbol?: string;
+    marketPanelPath?: string;
+    universeSymbolsFile?: string | null;
+    inlineSymbolCount?: number;
   };
 }
 
@@ -317,11 +401,185 @@ export interface StrategyManifestSummary {
   valid: boolean;
   humanApproved: boolean;
   draft: StrategyDraft;
+  versionCount?: number;
+  firstCreatedAt?: string;
+  updatedAt?: string;
+  runCount?: number;
+  lastRun?: StrategyRun | null;
+  versions?: StrategyManifestSummary[];
+  runs?: StrategyRun[];
+}
+
+/** One launched execution of one strategy version. */
+export interface StrategyRun {
+  runId: string;
+  strategyId: string;
+  strategyVersion: string;
+  strategyName: string;
+  jobId: string;
+  outputDir: string;
+  createdAt: string;
+  job?: JobSummary | null;
+}
+
+export interface RunGate {
+  name: string;
+  passed: boolean;
+  actual: unknown;
+  threshold: unknown;
+  reason?: string | null;
+}
+
+export interface RunConclusion {
+  outcome: "accepted" | "not_accepted" | "rejected" | "incomplete" | "no_evidence";
+  headline: string;
+  reasons: string[];
+  remediation: string;
+  promotable: boolean;
+}
+
+export interface RunResult {
+  status: "complete" | "rejected" | "partial" | "empty" | "absent" | "unavailable";
+  outputDir: string;
+  conclusion?: RunConclusion;
+  verdict?: JobVerdict | null;
+  acceptance?: {
+    failures: string[];
+    gates: RunGate[];
+    passedCount: number;
+    totalCount: number;
+    sourcePath: string;
+  } | null;
+  governance?: {
+    accepted: boolean;
+    pbo?: number | null;
+    dsrProbability?: number | null;
+    spaPValue?: number | null;
+    losingFoldRate?: number | null;
+    observedDays?: number | null;
+    cumulativeTrials?: number | null;
+    selectedCandidate?: string | null;
+    rejectionReasons: string[];
+    sourcePath: string;
+  } | null;
+  training?: {
+    backend?: string | null;
+    rankIcMean?: number | null;
+    icir?: number | null;
+    hitRate?: number | null;
+    foldCount?: number | null;
+    featureCount?: number | null;
+    evaluatedDays?: number | null;
+    dataRange?: { start?: string | null; end?: string | null };
+    annualisedReturn?: number | null;
+    annualisedSharpe?: number | null;
+    excessReturnAfterCosts?: number | null;
+    adverseRegimePassed?: boolean | null;
+    executable?: Record<string, unknown> | null;
+    annualisationWarning?: string | null;
+    sourcePath: string;
+  } | null;
+  backtest?: {
+    navPoints: number;
+    nav: Array<{ date: string; nav: number }>;
+    totalReturn?: number | null;
+    maxDrawdown?: number | null;
+    orderCount?: number | null;
+    skippedOrderCount?: number | null;
+    failedOrderCount?: number | null;
+    sourcePath: string;
+  } | null;
+  paper?: {
+    status?: string | null;
+    acceptanceStatus?: string | null;
+    summary?: Record<string, unknown> | null;
+    warnings: string[];
+    sourcePath: string;
+  } | null;
+  candidates?: Array<{
+    id: string;
+    selected: boolean;
+    annualisedReturn?: number | null;
+    netReturnAfterCosts?: number | null;
+    excessReturnAfterCosts?: number | null;
+    maxDrawdown?: number | null;
+    sharpe?: number | null;
+    informationRatio?: number | null;
+    tradeCount?: number | null;
+    skippedOrderCount?: number | null;
+    estimatedCosts?: number | null;
+    acceptanceStatus?: string | null;
+    sourcePath: string;
+  }>;
+  stages?: Array<{ id: string; label: string; present: boolean; path?: string | null; sizeBytes?: number | null }>;
+  artifacts?: Array<{ name: string; path: string; relative: string; sizeBytes: number; extension: string }>;
+  issues?: Array<{ code: string; message: string }>;
+}
+
+export interface StrategyRunDetail extends StrategyRun {
+  result: RunResult;
+}
+
+export interface CouncilRunReview {
+  subject: {
+    type: string;
+    id: string;
+    path: string;
+    strategyId?: string;
+    strategyName?: string;
+    outcome?: string | null;
+  };
+  roles: Array<{ id: string; label: string; domain: string; vetoScope: string; veto: boolean }>;
+  findings: Array<{
+    roleId: string;
+    verdict: "pass" | "warn" | "blocked" | "unknown";
+    headline: string;
+    detail: string;
+    evidence: Record<string, unknown>;
+    nextAction: string;
+    override?: {
+      verdict: string;
+      reason: string;
+      author: string;
+      recordedAt: string;
+      replacedVerdict: string;
+    };
+  }>;
+  decision: { state: string; summary: string; blockedRoles?: string[]; unknownRoles?: string[] };
+  overrides: unknown[];
+}
+
+export interface RunComparison {
+  runs: Array<{
+    runId: string;
+    strategyId: string;
+    strategyName: string;
+    strategyVersion: string;
+    createdAt: string;
+    outputDir: string;
+    outcome?: RunConclusion["outcome"] | null;
+    headline?: string | null;
+    promotable: boolean;
+  }>;
+  metrics: Array<{
+    key: string;
+    label: string;
+    group: string;
+    direction: "higher" | "lower" | null;
+    values: Array<number | string | null>;
+    bestIndex: number | null;
+  }>;
+  gates: Array<{
+    name: string;
+    values: Array<{ passed: boolean; actual: unknown; threshold: unknown } | null>;
+  }>;
+  note?: string;
 }
 
 export interface StrategyLaunchResult {
   job: JobSummary;
   strategy: StrategyManifestSummary;
+  run: StrategyRun;
 }
 
 export interface StrategyDefaults {

@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "defects": {
+    "DEF-025": "audits that could not run reported clean values; producers fabricated the two measurements the strictest gates read",
+    "DEF-026": "the availability stamp fell inside the row's own label window, in 100% of rows, and was the as-of join key for third-party features",
+    "DEF-027": "the survivorship mask read a `status` column one of U0's two masters does not have, so against that master it could not tell the 358 dead names from the 5,530 live ones",
+    "DEF-028": "the audit counted delisted names as those with a bar *after* their delisting, which a correctly-stopped panel has none of — so it reported the healthiest possible panel as the most suspicious"
+  },
+  "sectionA_audits_that_decline": {
+    "frame_columns": [
+      "trade_date",
+      "symbol",
+      "close",
+      "forward_return_1d"
+    ],
+    "pit_audit": {
+      "status": "not_auditable",
+      "violations": null
+    },
+    "provenance_audit": {
+      "status": "not_auditable",
+      "uses_mock_or_synthetic": null
+    },
+    "gate_status_with_fabricated_producer_values": {
+      "no_pit_violations": "pass",
+      "no_mock_or_synthetic": "pass"
+    },
+    "gate_status_without_them": {
+      "no_pit_violations": "unknown",
+      "no_mock_or_synthetic": "unknown"
+    },
+    "measured_passes_on_an_unaudited_run": 0
+  },
+  "sectionB_label_alignment": {
+    "stale_stamp_next_trading_row": {
+      "status": "fail",
+      "violation_rows": 156,
+      "labelled_rows_1d": 156,
+      "share_of_1d_rows_misaligned": 1.0,
+      "rank_ic_of_extra_published_during_label_window": 1.0
+    },
+    "fixed_stamp_own_close": {
+      "status": "pass",
+      "violation_rows": 0,
+      "labelled_rows_1d": 156,
+      "share_of_1d_rows_misaligned": 0.0,
+      "rank_ic_of_extra_published_during_label_window": -0.0,
+      "entry_basis": "trade_date (v7_label_builder: close(t+h)/close(t)-1)"
+    },
+    "dataset_quality_report": {
+      "pit_violation_count": null,
+      "uses_mock_or_synthetic": null,
+      "unknown_gates": [
+        "pit_audit",
+        "provenance_audit"
+      ]
+    }
+  },
+  "sectionC_convention_cost": {
+    "status": "measured",
+    "panel_rows": 386074,
+    "panel_symbols": 800,
+    "panel_start": "2024-08-05",
+    "panel_end": "2026-08-05",
+    "by_feature": {
+      "momentum_5d": {
+        "rank_ic_entry_at_close_t": -0.027856,
+        "rank_ic_entry_at_close_t_plus_1": -0.026742,
+        "share_of_ic_lost_to_the_delay": 0.039991
+      },
+      "momentum_20d": {
+        "rank_ic_entry_at_close_t": -0.031528,
+        "rank_ic_entry_at_close_t_plus_1": -0.028749,
+        "share_of_ic_lost_to_the_delay": 0.088144
+      },
+      "volatility_20d": {
+        "rank_ic_entry_at_close_t": -0.027113,
+        "rank_ic_entry_at_close_t_plus_1": -0.027886,
+        "share_of_ic_lost_to_the_delay": -0.02851
+      },
+      "return_1d": {
+        "rank_ic_entry_at_close_t": -0.014959,
+        "rank_ic_entry_at_close_t_plus_1": -0.003965,
+        "share_of_ic_lost_to_the_delay": 0.734942
+      }
+    }
+  },
+  "sectionD_survivorship_on_the_shipped_gold": {
+    "status": "measured",
+    "master": {
+      "rows": 5894,
+      "listing_status_basis": "status",
+      "resolved": {
+        "listed": 5533,
+        "delisted": 361
+      },
+      "delisting_dates_available": 361
+    },
+    "shipped_gold_artifact": {
+      "rows": 10917401,
+      "symbols": 5790,
+      "mask_post_delisting": {
+        "FALSE": 10917401
+      },
+      "delisted_names_present": 261,
+      "sessions_contributed_by_delisted_names": 424662,
+      "share_of_panel": 0.038898,
+      "delisted_names_with_bars_past_their_delisting_date": 0
+    },
+    "rebuilt_with_the_resolver": {
+      "mask_post_delisting": {
+        "FALSE": 10917401,
+        "UNKNOWN": 0
+      },
+      "survivorship_status": "pass",
+      "survivorship_unknown_sessions": 0,
+      "survivorship_undated_delisted_symbols": 0
+    }
+  }
+}

@@ -15,6 +15,17 @@ from quantagent.quant_math.ashare import (
     suspension_mask,
 )
 from quantagent.backtest.fill_model import AShareFillModel, FillModelConfig
+from quantagent.domain.ledger import CanonicalLedger, mirror_open
+from quantagent.domain.lineage import Lineage
+from quantagent.domain.orders import (
+    Fill,
+    OrderBook,
+    OrderEventType,
+    OrderIntent,
+    RiskDecision,
+    Side,
+    Signal,
+)
 from quantagent.quant_math.transaction_cost import CostModelConfig
 
 
@@ -29,6 +40,12 @@ class BacktestConfig:
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
     fill_model: FillModelConfig = field(default_factory=FillModelConfig)
+    #: Written for every economic event. When None an in-memory ledger is used,
+    #: so the canonical path is exercised even for a throwaway run — the engine
+    #: has no code path that skips it.
+    ledger_path: str | None = None
+    #: Chain of custody stamped onto every entity this run produces.
+    lineage: Lineage = field(default_factory=Lineage)
 
 
 @dataclass
@@ -40,6 +57,10 @@ class BacktestResult:
     diagnostics: dict[str, float]
     rejects: pd.DataFrame = field(default_factory=pd.DataFrame)
     report: dict[str, float] = field(default_factory=dict)
+    #: The canonical record. `trades` is a projection of `ledger`'s fills, not a
+    #: second copy of the truth — reconciliation and replay read this.
+    ledger: CanonicalLedger | None = None
+    order_book: OrderBook | None = None
 
 
 class EventDrivenBacktester:
@@ -71,6 +92,18 @@ class EventDrivenBacktester:
         target_weights = target_weights.sort_index().fillna(0.0)
         dates = target_weights.index.unique()
         symbols = target_weights.columns.tolist()
+
+        ledger = CanonicalLedger(self.config.ledger_path)
+        # Start from whatever the chain already records. This engine's order ids
+        # are content-addressed over (run_id, symbol, session), so re-running with
+        # the same lineage against a populated ledger re-derives ids the file
+        # already holds. Beginning with an empty book appended a second CREATED
+        # and RISK_APPROVED for an order the file recorded as filled, leaving a
+        # chain that no longer replays (DEF-014). Hydrated, the collision is
+        # refused on the write and the file stays readable.
+        book = ledger.replay_book() if len(ledger) else OrderBook()
+        self._ledger = ledger
+        self._book = book
 
         nav = self.config.initial_nav
         cash = nav
@@ -111,6 +144,23 @@ class EventDrivenBacktester:
                 price = float(fill_prices.loc[sym])
                 pos = positions[sym]
                 current_total = pos.total_shares()
+                # What the strategy actually asked for, before tradability was
+                # enforced. `enforce_tradability` pins a blocked exit to the
+                # current *weight*, measured at the signal-day price; re-solving
+                # that weight at a limit-down fill price demands MORE shares, so
+                # a sell the venue refused turned into a buy into the fall.
+                intended_shares = (
+                    float(target.reindex(symbols).fillna(0.0).get(sym, 0.0)) * nav / max(price, 1e-12)
+                )
+                if intended_shares < current_total and not bool(can_sell.get(sym, True)):
+                    blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_down_no_sell"
+                    self._reject(reject_log, fill_date, sym, blocked)
+                    self._record_rejected_intent(
+                        book, ledger, sym, Side.SELL,
+                        abs(int(round(current_total - intended_shares))),
+                        fill_date, price, blocked,
+                    )
+                    continue
                 raw_target = float(tradable_target.reindex(symbols).fillna(0.0).get(sym, 0.0)) * nav / max(price, 1e-12)
                 side_guess = "buy" if raw_target >= current_total else "sell"
                 if side_guess == "buy":
@@ -120,15 +170,39 @@ class EventDrivenBacktester:
                     desired_total = current_total - sell_qty
                 delta = desired_total - current_total
                 if delta == 0:
+                    # `enforce_tradability` already neutralised blocked targets
+                    # above, so a limit-up buy arrives here as a no-op and the
+                    # explicit reject paths below are unreachable. Without this
+                    # the run shows neither a fill nor a reason — the order
+                    # simply vanishes from the audit trail.
+                    intended = float(target.reindex(symbols).fillna(0.0).get(sym, 0.0)) * nav / max(price, 1e-12)
+                    intended_delta = intended - current_total
+                    if intended_delta > 0 and not bool(can_buy.get(sym, True)):
+                        blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_up_no_buy"
+                        self._reject(reject_log, fill_date, sym, blocked)
+                        self._record_rejected_intent(
+                            book, ledger, sym, Side.BUY, abs(int(round(intended_delta))),
+                            fill_date, price, blocked,
+                        )
+                    elif intended_delta < 0 and not bool(can_sell.get(sym, True)):
+                        blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_down_no_sell"
+                        self._reject(reject_log, fill_date, sym, blocked)
+                        self._record_rejected_intent(
+                            book, ledger, sym, Side.SELL, abs(int(round(intended_delta))),
+                            fill_date, price, blocked,
+                        )
                     continue
                 if delta > 0 and bool(fill_flags_up.get(sym, False)):
                     self._reject(reject_log, fill_date, sym, "limit_up_no_buy")
+                    self._record_rejected_intent(book, ledger, sym, Side.BUY, abs(int(delta)), fill_date, price, "limit_up_no_buy")
                     continue
                 if delta < 0 and bool(fill_flags_down.get(sym, False)):
                     self._reject(reject_log, fill_date, sym, "limit_down_no_sell")
+                    self._record_rejected_intent(book, ledger, sym, Side.SELL, abs(int(delta)), fill_date, price, "limit_down_no_sell")
                     continue
                 if bool(fill_flags_susp.get(sym, False)):
                     self._reject(reject_log, fill_date, sym, "suspended")
+                    self._record_rejected_intent(book, ledger, sym, Side.BUY if delta > 0 else Side.SELL, abs(int(delta)), fill_date, price, "suspended")
                     continue
                 state = {
                     "symbol": sym,
@@ -147,20 +221,51 @@ class EventDrivenBacktester:
                 )
                 if not valid:
                     self._reject(reject_log, fill_date, sym, reason)
+                    self._record_rejected_intent(book, ledger, sym, Side.BUY if delta > 0 else Side.SELL, abs(int(delta)), fill_date, price, reason)
                     continue
                 fill = self.fill_model.fill("buy" if delta > 0 else "sell", abs(delta), price, state["volume"])
                 if fill.filled_quantity <= 0:
                     self._reject(reject_log, fill_date, sym, fill.reject_reason or "zero_fill")
+                    self._record_rejected_intent(book, ledger, sym, Side.BUY if delta > 0 else Side.SELL, abs(int(delta)), fill_date, price, fill.reject_reason or "zero_fill")
                     continue
+                # The canonical order exists before any cash moves, so an order
+                # that then fails on cash is still a queryable order with a
+                # reason rather than an absence.
+                canonical = self._open_canonical_order(
+                    book, ledger, sym,
+                    Side.BUY if delta > 0 else Side.SELL,
+                    abs(int(delta)), fill_date, price,
+                )
                 if delta > 0:
-                    cash, traded_shares = self._execute_buy(cash, pos, sym, fill.filled_quantity, fill.fill_price, trade_log, fill_date)
+                    cash, traded_shares, executed = self._execute_buy(cash, pos, sym, fill.filled_quantity, fill.fill_price, trade_log, fill_date, reference_price=price, order=canonical)
                     if traded_shares <= 0:
                         self._reject(reject_log, fill_date, sym, "insufficient_cash")
+                        self._close_canonical_order(
+                            book, ledger, canonical, OrderEventType.REJECTED,
+                            reason="insufficient_cash", trade_date=fill_date,
+                        )
                     else:
-                        release_idx = min(i + (2 if self.config.next_day_fill else 1), len(dates) - 1)
-                        release_dates[sym] = dates[release_idx]
+                        # Settlement must fall strictly after the fill session.
+                        # Clamping this index to the last date used to make the
+                        # final session settle its own purchases, so a buy
+                        # filled that day was immediately sellable — a T+1
+                        # violation that inflated the closing book. With no
+                        # later session in the sample the shares simply never
+                        # become sellable, which is the honest answer.
+                        release_idx = i + (2 if self.config.next_day_fill else 1)
+                        release_dates[sym] = (
+                            dates[release_idx] if release_idx < len(dates) else pd.Timestamp.max
+                        )
+                        self._record_canonical_fill(book, ledger, canonical, executed, fill_date)
                 else:
-                    cash, traded_shares = self._execute_sell(cash, pos, sym, fill.filled_quantity, fill.fill_price, trade_log, fill_date)
+                    cash, traded_shares, executed = self._execute_sell(cash, pos, sym, fill.filled_quantity, fill.fill_price, trade_log, fill_date, reference_price=price, order=canonical)
+                    if traded_shares <= 0:
+                        self._close_canonical_order(
+                            book, ledger, canonical, OrderEventType.REJECTED,
+                            reason="no_sellable_inventory", trade_date=fill_date,
+                        )
+                    else:
+                        self._record_canonical_fill(book, ledger, canonical, executed, fill_date)
             equity = cash + sum(
                 pos.total_shares() * float(daily_prices["close"].get(sym, 0.0))
                 for sym, pos in positions.items()
@@ -200,6 +305,100 @@ class EventDrivenBacktester:
             },
             rejects=rejects,
             report=report,
+            ledger=ledger,
+            order_book=book,
+        )
+
+    # -- canonical entity emission -----------------------------------------
+    def _open_canonical_order(
+        self,
+        book: OrderBook,
+        ledger: CanonicalLedger,
+        symbol: str,
+        side: Side,
+        quantity: int,
+        trade_date: pd.Timestamp,
+        reference_price: float,
+    ):
+        """Signal -> OrderIntent -> Order, all recorded before cash moves."""
+        session = str(pd.Timestamp(trade_date).date())
+        signal = Signal.create(
+            symbol=symbol, trade_date=session, score=0.0, lineage=self.config.lineage,
+        )
+        intent = OrderIntent.create(
+            symbol=symbol, side=side, quantity=quantity, trade_date=session,
+            lineage=signal.lineage, reference_price=reference_price,
+        )
+        order = mirror_open(book, ledger, intent, trade_date=session)
+        # The fast engine applies its constraints upstream (tradability, lots,
+        # price bands), so reaching here *is* the approval. Recording it keeps
+        # the state machine honest rather than letting orders skip a stage.
+        decision = RiskDecision.create(
+            approved=True, rule="fast_engine_pretrade", threshold="tradability+lot+band",
+            measured="passed", reason="passed upstream constraints", lineage=order.lineage,
+        )
+        for event in (OrderEventType.RISK_APPROVED, OrderEventType.SUBMITTED, OrderEventType.ACCEPTED):
+            book.apply(
+                order.order_id, event,
+                risk_decision=decision if event is OrderEventType.RISK_APPROVED else None,
+            )
+            ledger.append(book.history_of(order.order_id)[-1], trade_date=session)
+        return order
+
+    def _record_canonical_fill(
+        self,
+        book: OrderBook,
+        ledger: CanonicalLedger,
+        order,
+        executed: Fill | None,
+        trade_date: pd.Timestamp,
+    ) -> None:
+        if executed is None:
+            return
+        session = str(pd.Timestamp(trade_date).date())
+        event_type = (
+            OrderEventType.FILL
+            if executed.quantity >= order.quantity
+            else OrderEventType.PARTIAL_FILL
+        )
+        book.apply(order.order_id, event_type, fill=executed)
+        ledger.append(book.history_of(order.order_id)[-1], trade_date=session)
+
+    def _close_canonical_order(
+        self,
+        book: OrderBook,
+        ledger: CanonicalLedger,
+        order,
+        event_type: OrderEventType,
+        *,
+        reason: str,
+        trade_date: pd.Timestamp,
+    ) -> None:
+        session = str(pd.Timestamp(trade_date).date())
+        book.apply(order.order_id, event_type, reason=reason)
+        ledger.append(book.history_of(order.order_id)[-1], trade_date=session)
+
+    def _canonical_fill(
+        self,
+        *,
+        order,
+        symbol: str,
+        side: Side,
+        shares: int,
+        price: float,
+        reference_price: float | None,
+        commission: float,
+        transfer: float,
+        stamp: float,
+        date: pd.Timestamp,
+    ) -> Fill:
+        execution_id = f"{order.order_id}-ex{len(order.fills) + 1}"
+        return Fill(
+            execution_id=execution_id, order_id=order.order_id, symbol=symbol, side=side,
+            quantity=int(shares), price=float(price), reference_price=reference_price,
+            commission=float(commission), transfer_fee=float(transfer), stamp_duty=float(stamp),
+            filled_at=str(pd.Timestamp(date).date()),
+            lineage=order.lineage.derive(execution_id=execution_id),
         )
 
     def _execute_buy(
@@ -211,39 +410,50 @@ class EventDrivenBacktester:
         price: float,
         trade_log: list[dict],
         date: pd.Timestamp,
-    ) -> tuple[float, int]:
+        reference_price: float | None = None,
+        order=None,
+    ) -> tuple[float, int, Fill | None]:
         if shares <= 0 or price <= 0:
-            return cash, 0
+            return cash, 0, None
+        # `price` is already the fill model's executed price: it has been moved
+        # away from the reference by spread and impact. Charging
+        # `cost.slippage_bps` on top of it billed the same friction twice — the
+        # engine's effective slippage was ~7 bps while every config declared 5.
+        # Slippage is the price move, and it is recorded, not re-charged.
         gross = shares * price
+        slippage = abs(price - reference_price) * shares if reference_price else 0.0
         commission = max(gross * self.config.cost.commission_bps / 10000.0, self.config.cost.commission_min_rmb)
         transfer = gross * self.config.cost.transfer_fee_bps / 10000.0
-        slippage = gross * self.config.cost.slippage_bps / 10000.0
-        cost_total = gross + commission + transfer + slippage
+        cost_total = gross + commission + transfer
         if cost_total > cash:
             affordable_lots = int(cash // (price * self.config.lot_size)) * self.config.lot_size
             if affordable_lots <= 0:
-                return cash, 0
+                return cash, 0, None
             shares = affordable_lots
             gross = shares * price
+            slippage = abs(price - reference_price) * shares if reference_price else 0.0
             commission = max(gross * self.config.cost.commission_bps / 10000.0, self.config.cost.commission_min_rmb)
             transfer = gross * self.config.cost.transfer_fee_bps / 10000.0
-            slippage = gross * self.config.cost.slippage_bps / 10000.0
-            cost_total = gross + commission + transfer + slippage
+            cost_total = gross + commission + transfer
         cash -= cost_total
         pos.buy(shares)
+        executed = self._canonical_fill(
+            order=order, symbol=symbol, side=Side.BUY, shares=shares, price=price,
+            reference_price=reference_price, commission=commission, transfer=transfer,
+            stamp=0.0, date=date,
+        ) if order is not None else None
+        # The dict row is a projection of the canonical fill, not a parallel
+        # record: derived here so the two can never disagree.
         trade_log.append(
-            {
-                "trade_date": date,
-                "symbol": symbol,
-                "side": "buy",
-                "shares": shares,
-                "price": price,
-                "commission": commission,
-                "transfer_fee": transfer,
+            self._trade_row(executed, date)
+            if executed is not None
+            else {
+                "trade_date": date, "symbol": symbol, "side": "buy", "shares": shares,
+                "price": price, "commission": commission, "transfer_fee": transfer,
                 "slippage": slippage,
             }
         )
-        return cash, shares
+        return cash, shares, executed
 
     def _execute_sell(
         self,
@@ -254,31 +464,56 @@ class EventDrivenBacktester:
         price: float,
         trade_log: list[dict],
         date: pd.Timestamp,
-    ) -> tuple[float, int]:
+        reference_price: float | None = None,
+        order=None,
+    ) -> tuple[float, int, Fill | None]:
         sellable = pos.sell(shares)
         if sellable <= 0 or price <= 0:
-            return cash, 0
+            return cash, 0, None
+        # See `_execute_buy`: the fill price already carries the slippage.
         gross = sellable * price
+        slippage = abs(price - reference_price) * sellable if reference_price else 0.0
         commission = max(gross * self.config.cost.commission_bps / 10000.0, self.config.cost.commission_min_rmb)
         transfer = gross * self.config.cost.transfer_fee_bps / 10000.0
-        slippage = gross * self.config.cost.slippage_bps / 10000.0
         stamp = gross * self.config.cost.sell_stamp_duty_bps / 10000.0
-        proceeds = gross - commission - transfer - slippage - stamp
+        proceeds = gross - commission - transfer - stamp
         cash += proceeds
+        executed = self._canonical_fill(
+            order=order, symbol=symbol, side=Side.SELL, shares=sellable, price=price,
+            reference_price=reference_price, commission=commission, transfer=transfer,
+            stamp=stamp, date=date,
+        ) if order is not None else None
         trade_log.append(
-            {
-                "trade_date": date,
-                "symbol": symbol,
-                "side": "sell",
-                "shares": sellable,
-                "price": price,
-                "commission": commission,
-                "transfer_fee": transfer,
-                "slippage": slippage,
-                "stamp_duty": stamp,
+            self._trade_row(executed, date)
+            if executed is not None
+            else {
+                "trade_date": date, "symbol": symbol, "side": "sell", "shares": sellable,
+                "price": price, "commission": commission, "transfer_fee": transfer,
+                "slippage": slippage, "stamp_duty": stamp,
             }
         )
-        return cash, sellable
+        return cash, sellable, executed
+
+    @staticmethod
+    def _trade_row(fill: Fill, date: pd.Timestamp) -> dict:
+        """Project a canonical fill into the legacy trade-log shape.
+
+        One-way and derived: every field comes from the fill, so the DataFrame
+        cannot drift from the ledger it is rendered from.
+        """
+        row = {
+            "trade_date": date,
+            "symbol": fill.symbol,
+            "side": fill.side.value.lower(),
+            "shares": fill.quantity,
+            "price": fill.price,
+            "commission": fill.commission,
+            "transfer_fee": fill.transfer_fee,
+            "slippage": fill.slippage,
+        }
+        if fill.side is Side.SELL:
+            row["stamp_duty"] = fill.stamp_duty
+        return row
 
     @staticmethod
     def _current_weights(
@@ -297,6 +532,43 @@ class EventDrivenBacktester:
     @staticmethod
     def _reject(log: list[dict], date: pd.Timestamp, symbol: str, reason: str) -> None:
         log.append({"trade_date": date, "symbol": symbol, "reason": reason})
+
+    def _record_rejected_intent(
+        self,
+        book: OrderBook,
+        ledger: CanonicalLedger,
+        symbol: str,
+        side: Side,
+        quantity: int,
+        trade_date: pd.Timestamp,
+        reference_price: float,
+        reason: str,
+    ) -> None:
+        """Put a refused order on the canonical ledger.
+
+        A refusal that exists only in `reject_log` is invisible to replay and to
+        anything reading the ledger, so "every rejected order is queryable" was
+        true of the DataFrame and false of the record of account. The strategy
+        intended this order; the refusal is part of its history.
+        """
+        if quantity <= 0:
+            quantity = 1  # the intent existed even when it rounded to nothing
+        session = str(pd.Timestamp(trade_date).date())
+        signal = Signal.create(
+            symbol=symbol, trade_date=f"{session}-rej-{reason}", score=0.0,
+            lineage=self.config.lineage,
+        )
+        intent = OrderIntent.create(
+            symbol=symbol, side=side, quantity=int(quantity), trade_date=session,
+            lineage=signal.lineage, reference_price=reference_price,
+        )
+        order = mirror_open(book, ledger, intent, trade_date=session)
+        decision = RiskDecision.create(
+            approved=False, rule=reason, threshold="a-share tradability",
+            measured=reason, reason=reason, lineage=order.lineage,
+        )
+        book.apply(order.order_id, OrderEventType.RISK_REJECTED, reason=reason, risk_decision=decision)
+        ledger.append(book.history_of(order.order_id)[-1], trade_date=session)
 
 
 def _performance_report(

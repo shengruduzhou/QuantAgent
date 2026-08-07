@@ -29,6 +29,12 @@ from quantagent.data.v7_auto_range import (
     list_qlib_feature_symbols,
     read_qlib_calendar_range,
 )
+from quantagent.research.verdict import (
+    RETURN_DIFFERENCING_DAYS,
+    ResearchRejection,
+    reject_insufficient_oos,
+    required_oos_days,
+)
 
 
 @app.command("train-alpha-v7")
@@ -737,6 +743,185 @@ def build_target_weights_v7(
     )
 
 
+#: Peak resident memory the dataset build costs per symbol-day row, in bytes.
+#: MEASURED, not estimated: a 400-symbol x 2,562-day build (1.02M rows) of the
+#: `all_reviewed` factor library peaked at 15.3 GiB RSS on 2026-08-02. The
+#: builder materialises many intermediate factor frames at once, which is why
+#: the figure is far above the size of the finished parquet.
+DATASET_BUILD_BYTES_PER_ROW = 15.3 * (2**30) / 1_020_000
+
+#: Leave headroom so a build that fits on paper does not push the box into swap.
+DATASET_BUILD_MEMORY_HEADROOM = 0.80
+
+
+def _assert_dataset_build_fits_in_memory(
+    *,
+    labels_path: Path,
+    symbols: list[str] | tuple[str, ...] | None,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Refuse a dataset build that the machine cannot hold.
+
+    A full-universe build is offered in the web UI, but on a 62 GiB box the
+    5,790-symbol panel needs several times that. Left unchecked the process runs
+    for tens of minutes and is then OOM-killed, which surfaces as an opaque
+    engineering failure rather than "this machine is too small for this scope".
+    """
+    import psutil
+
+    from quantagent.research.verdict import ResearchRejection
+
+    try:
+        import pyarrow.compute as compute
+        import pyarrow.dataset as parquet_dataset
+
+        dataset = parquet_dataset.dataset(labels_path, format="parquet")
+        names = dataset.schema.names
+        if "symbol" not in names or "trade_date" not in names:
+            return {"status": "unknown", "reason": "labels panel lacks symbol/trade_date"}
+        table = dataset.to_table(columns=["symbol", "trade_date"])
+        total_days = int(compute.count_distinct(table.column("trade_date")).as_py())
+        panel_symbols = int(compute.count_distinct(table.column("symbol")).as_py())
+        panel_rows = int(table.num_rows)
+    except Exception as exc:  # pragma: no cover - the build will report it too
+        return {"status": "unknown", "reason": f"{type(exc).__name__}: {exc}"}
+
+    selected = len({str(item) for item in (symbols or []) if str(item).strip()})
+    symbol_count = selected or panel_symbols
+    # Scale the panel's real row count rather than assuming every symbol trades
+    # every day — listings, suspensions and delistings make symbols x days
+    # overstate a full-universe panel by a third.
+    projected_rows = (
+        int(round(panel_rows * (selected / panel_symbols)))
+        if selected and panel_symbols
+        else panel_rows
+    )
+    projected_bytes = projected_rows * DATASET_BUILD_BYTES_PER_ROW
+    available = int(psutil.virtual_memory().available)
+    budget = available * DATASET_BUILD_MEMORY_HEADROOM
+
+    report = {
+        "status": "pass" if projected_bytes <= budget else "blocked",
+        "symbolCount": symbol_count,
+        "tradingDays": total_days,
+        "projectedRows": projected_rows,
+        "projectedPeakGiB": round(projected_bytes / 2**30, 1),
+        "availableGiB": round(available / 2**30, 1),
+        "usableGiB": round(budget / 2**30, 1),
+        "basis": "measured 15.3 GiB peak RSS for 1.02M rows (400 symbols x 2,562 days)",
+    }
+    typer.echo(json_dump({
+        "progress": 0.04,
+        "stage": "resources",
+        "message": (
+            f"dataset build needs ~{report['projectedPeakGiB']} GiB for "
+            f"{symbol_count} symbols x {total_days} days; "
+            f"{report['usableGiB']} GiB usable"
+        ),
+        "resources": report,
+    }))
+    if projected_bytes > budget:
+        raise ResearchRejection(
+            code="insufficient_memory_for_scope",
+            title="本机内存不足以构建该股票池的训练数据集，运行已在开始前中止",
+            reasons=(
+                f"{symbol_count} 只股票、{total_days} 个交易日，实际约 {projected_rows:,} 行，"
+                f"预计峰值约 {report['projectedPeakGiB']} GiB",
+                f"当前可用内存 {report['availableGiB']} GiB，"
+                f"扣除余量后可用 {report['usableGiB']} GiB",
+            ),
+            stage="preflight",
+            verdict="blocked",
+            remediation=(
+                "缩小股票池（--symbols-file），或复用已构建的数据集（--training-dataset），"
+                "或换用内存更大的机器。继续运行只会在数十分钟后被 OOM 杀掉，"
+                "并且看起来像是工程故障而不是规模问题。"
+            ),
+            metrics=report,
+            output_dir=output_dir,
+        )
+    return report
+
+
+def _assert_oos_budget_is_feasible(
+    training_dataset: "pd.DataFrame",
+    training_config: "V7TrainingConfig",
+    *,
+    primary_horizon: int,
+    min_selection_days: int,
+    min_holdout_days: int,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Abort before training when the fold budget cannot meet the protocol.
+
+    The dataset is built at this point, so the usable date span per horizon —
+    after feature warm-up and the label tail — is exactly known. Running the
+    walk-forward first and discovering the shortfall in the portfolio stage
+    costs the entire training run and reports a configuration error as if a
+    research gate had refused the candidate.
+    """
+    import pandas as pd
+
+    from quantagent.research.verdict import block_infeasible_oos_budget, required_oos_days
+    from quantagent.training.splitters import plan_walk_forward
+    from quantagent.training.v7_experiment import (
+        _auto_feature_columns,
+        shared_oos_anchor,
+        walk_forward_split_config,
+    )
+
+    label_column = f"forward_return_{primary_horizon}d"
+    if label_column not in training_dataset.columns:
+        return {"status": "unknown", "reason": f"missing {label_column}"}
+    # Resolved exactly as the trainer will resolve it: a pre-flight that counts
+    # a different feature set counts a different number of usable dates, and
+    # then disagrees with the run it was supposed to predict.
+    feature_columns = list(
+        training_config.feature_columns or _auto_feature_columns(training_dataset)
+    )
+    usable = training_dataset.dropna(subset=[label_column, *feature_columns])
+    anchor_end = shared_oos_anchor(training_dataset, feature_columns, training_config)
+    if anchor_end is not None:
+        usable = usable[pd.to_datetime(usable["trade_date"], errors="coerce") <= anchor_end]
+    usable_days = int(pd.to_datetime(usable["trade_date"], errors="coerce").dropna().nunique())
+
+    split_cfg = walk_forward_split_config(usable, training_config)
+    plan = plan_walk_forward(usable_days, split_cfg)
+    required = required_oos_days(min_selection_days, min_holdout_days)
+
+    budget = {
+        "status": "pass" if plan.oos_days >= required else "blocked",
+        "primaryHorizon": int(primary_horizon),
+        "usableTradingDays": usable_days,
+        "requiredOosDays": required,
+        **plan.as_dict(),
+    }
+    typer.echo(json_dump({
+        "progress": 0.2,
+        "stage": "oos_budget",
+        "message": (
+            f"OOS budget: {plan.achievable_splits}/{plan.requested_splits} folds "
+            f"= {plan.oos_days} days (protocol needs {required})"
+        ),
+        "budget": budget,
+    }))
+    if plan.oos_days < required:
+        raise block_infeasible_oos_budget(
+            achievable_oos_days=plan.oos_days,
+            requested_splits=plan.requested_splits,
+            achievable_splits=plan.achievable_splits,
+            valid_size_days=plan.valid_size_days,
+            min_selection_days=min_selection_days,
+            min_holdout_days=min_holdout_days,
+            trading_days_available=usable_days,
+            trading_days_required=plan.days_needed_for(
+                -(-required // max(1, plan.valid_size_days))
+            ),
+            output_dir=output_dir,
+        )
+    return budget
+
+
 @app.command("run-full-real-training-v7")
 def run_full_real_training_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
@@ -1084,6 +1269,12 @@ def run_full_real_training_v7(
         if training_dataset_path is not None
         else output_dir / "dataset" / "training_dataset.parquet"
     )
+    if training_dataset_path is None:
+        _assert_dataset_build_fits_in_memory(
+            labels_path=labels_path,
+            symbols=merge_symbols(symbols, symbols_file),
+            output_dir=output_dir,
+        )
 
     dataset_result = build_v7_training_dataset_artifact(
         V7TrainingDatasetConfig(
@@ -1161,7 +1352,26 @@ def run_full_real_training_v7(
             training_dataset = training_dataset.drop(columns=rejected)
             factor_evaluation["droppedBeforeTraining"] = rejected
             if not screening.selected_factors:
-                raise ValueError("no factor passed the frozen pre-training screening gate")
+                raise ResearchRejection(
+                    code="no_factor_passed_screening",
+                    title="没有因子通过冻结的预训练筛选闸门",
+                    reasons=(
+                        f"evaluated {len(screening.summary)} factors; 0 passed the "
+                        "frozen calibration gate, so there is nothing to train on",
+                    ),
+                    stage="factor_screening",
+                    remediation=(
+                        "放宽 factor 门槛（min-abs-rank-ic / icir / monotonicity）、"
+                        "更换 factorLibrary，或改用 factorScreeningMode=evaluate_only "
+                        "先观察证据再决定。"
+                    ),
+                    metrics={
+                        "evaluatedFactors": len(screening.summary),
+                        "selectedFactors": 0,
+                        "droppedBeforeTraining": len(rejected),
+                    },
+                    output_dir=output_dir,
+                )
         typer.echo(
             json_dump({
                 "progress": 0.26,
@@ -1173,29 +1383,36 @@ def run_full_real_training_v7(
             })
         )
 
-    training_result = run_v7_training_experiment(
-        training_dataset,
-        V7TrainingConfig(
-            model=model,
-            horizons=horizons_tuple,
-            min_train_rows=min_train_rows,
-            n_splits=n_splits,
-            split_mode=split_mode,
-            valid_size_days=valid_size_days,
-            min_train_days=min_train_days,
-            rolling_train_days=rolling_train_days,
-            embargo_days=embargo_days,
-            purge_days=purge_days,
-            output_dir=str(output_dir / "training"),
-            mark_production_ready=mark_production_ready,
-            paper_report_path=str(paper_report) if paper_report else None,
-            allow_model_downgrade=allow_model_downgrade,
-            ft_max_epochs=ft_max_epochs,
-            ft_batch_size=ft_batch_size,
-            ft_device=ft_device,
-            require_gpu=require_gpu,
-        ),
+    training_config = V7TrainingConfig(
+        model=model,
+        horizons=horizons_tuple,
+        min_train_rows=min_train_rows,
+        n_splits=n_splits,
+        split_mode=split_mode,
+        valid_size_days=valid_size_days,
+        min_train_days=min_train_days,
+        rolling_train_days=rolling_train_days,
+        embargo_days=embargo_days,
+        purge_days=purge_days,
+        output_dir=str(output_dir / "training"),
+        mark_production_ready=mark_production_ready,
+        paper_report_path=str(paper_report) if paper_report else None,
+        allow_model_downgrade=allow_model_downgrade,
+        ft_max_epochs=ft_max_epochs,
+        ft_batch_size=ft_batch_size,
+        ft_device=ft_device,
+        require_gpu=require_gpu,
     )
+    _assert_oos_budget_is_feasible(
+        training_dataset,
+        training_config,
+        primary_horizon=primary_horizon,
+        min_selection_days=selection_min_oos_days,
+        min_holdout_days=selection_min_holdout_days,
+        output_dir=output_dir,
+    )
+
+    training_result = run_v7_training_experiment(training_dataset, training_config)
     typer.echo(json_dump({"progress": 0.48, "stage": "training", "message": "walk-forward training completed"}))
 
     raw_predictions = read_frame(Path(training_result.artifact_paths["predictions"]))
@@ -1314,13 +1531,18 @@ def run_full_real_training_v7(
             position_state_path=candidate_state_path,
         )
 
-    portfolio_selection_predictions, portfolio_holdout_predictions, portfolio_split = (
-        _split_portfolio_selection_holdout(
-            predictions_frame,
-            minimum_selection_dates=selection_min_oos_days,
-            minimum_holdout_dates=selection_min_holdout_days,
+    try:
+        portfolio_selection_predictions, portfolio_holdout_predictions, portfolio_split = (
+            _split_portfolio_selection_holdout(
+                predictions_frame,
+                minimum_selection_dates=selection_min_oos_days,
+                minimum_holdout_dates=selection_min_holdout_days,
+            )
         )
-    )
+    except ResearchRejection as rejection:
+        # The helper cannot know where this run files its evidence.
+        rejection.output_dir = output_dir
+        raise
     candidates: list[dict[str, object]] = []
     candidate_errors: list[dict[str, object]] = []
     for stock_mode in selection_modes:
@@ -1426,7 +1648,27 @@ def run_full_real_training_v7(
                         "error": str(exc),
                     })
     if not candidates:
-        raise ValueError(f"every portfolio candidate failed: {candidate_errors}")
+        # Every candidate was refused by a portfolio-construction constraint
+        # (selection pressure, universe coverage, weight limits). The pipeline
+        # worked; the research conditions could not support a portfolio.
+        failure_path = output_dir / "portfolio_search" / "candidate_failures.json"
+        failure_path.parent.mkdir(parents=True, exist_ok=True)
+        failure_path.write_text(json_dump(candidate_errors), encoding="utf-8")
+        raise ResearchRejection(
+            code="no_viable_portfolio_candidate",
+            title="没有任何组合候选满足构建约束",
+            reasons=tuple(
+                f"{item.get('id')}: {item.get('error')}" for item in candidate_errors
+            )[:8],
+            stage="portfolio_construction",
+            remediation=(
+                "常见原因是可交易宇宙相对 Top-K 太小（选股压力不足或 Top-K 覆盖了整个宇宙）。"
+                "扩大研究范围、降低 Top-K，或放宽单票/行业上限后重试。"
+            ),
+            metrics={"candidateCount": len(candidate_errors)},
+            evidence_paths=(str(failure_path),),
+            output_dir=output_dir,
+        )
     champion, portfolio_frontier = _select_portfolio_frontier(
         candidates,
         objective_weights=objective_weights,
@@ -1463,9 +1705,31 @@ def run_full_real_training_v7(
         encoding="utf-8",
     )
     if not governance.accepted:
-        raise ValueError(
-            "portfolio candidate rejected by overfitting governance: "
-            + "; ".join(governance.rejection_reasons)
+        # The gate is unchanged; only its reporting is. The champion, the whole
+        # Pareto frontier and the governance evidence are persisted first so a
+        # rejection is auditable instead of vanishing with the exception.
+        frontier_path = output_dir / "portfolio_search" / "rejected_frontier.json"
+        frontier_path.write_text(
+            json_dump({
+                "champion": _public_portfolio_candidate(champion),
+                "paretoFrontier": portfolio_frontier,
+                "candidateFailures": candidate_errors,
+                "split": portfolio_split,
+            }),
+            encoding="utf-8",
+        )
+        raise ResearchRejection(
+            code="overfitting_governance_rejected",
+            title="候选组合被过拟合治理闸门否决",
+            reasons=tuple(governance.rejection_reasons),
+            stage="portfolio_selection",
+            remediation=(
+                "PBO/DSR/SPA 是预先声明的闸门，不允许事后放宽来通过。"
+                "减少候选数量、延长 OOS 观测窗口，或更换研究设计后重新预注册。"
+            ),
+            metrics=governance.to_dict(),
+            evidence_paths=(str(governance_path), str(frontier_path)),
+            output_dir=output_dir,
         )
     final_predictions, final_selection_evidence = _apply_stock_selection_mode(
         portfolio_holdout_predictions,
@@ -1687,17 +1951,25 @@ def _split_portfolio_selection_holdout(
         .sort_values()
         .tolist()
     )
-    required = minimum_selection_dates + minimum_holdout_dates
-    if len(dates) < required:
-        raise ValueError(
-            "insufficient OOS dates for nested portfolio selection and final holdout: "
-            f"dates={len(dates)}, required={required}"
+    if len(dates) < required_oos_days(minimum_selection_dates, minimum_holdout_dates):
+        # A protocol that cannot be executed is a research-condition failure,
+        # not a crash: the walk-forward simply did not produce enough OOS days
+        # for a nested selection plus a frozen holdout.
+        raise reject_insufficient_oos(
+            observed_days=len(dates),
+            min_selection_days=minimum_selection_dates,
+            min_holdout_days=minimum_holdout_dates,
         )
     holdout_count = max(
         minimum_holdout_dates,
         int(math.ceil(len(dates) * holdout_fraction)),
     )
-    holdout_count = min(holdout_count, len(dates) - minimum_selection_dates)
+    # The selection segment has to keep one extra day: governance measures the
+    # segment in daily returns, and differencing the NAV consumes the first day.
+    holdout_count = min(
+        holdout_count,
+        len(dates) - minimum_selection_dates - RETURN_DIFFERENCING_DAYS,
+    )
     split_at = len(dates) - holdout_count
     selection_end = pd.Timestamp(dates[split_at - 1])
     holdout_start = pd.Timestamp(dates[split_at])
@@ -1960,8 +2232,16 @@ def _build_full_pipeline_acceptance_metrics(
     else:
         metrics["eligible_symbol_count_min"] = 0
         metrics["effective_universe_min"] = 0
-    if "pit_violation_count" not in metrics:
-        metrics["pit_violation_count"] = 0
+    # `metrics["pit_violation_count"] = 0` used to be injected here whenever the
+    # training metrics carried none. That is the whole DEF-023 hardening undone in
+    # two lines: the acceptance gate stopped defaulting the measurement, and this
+    # supplied the default instead, so `no_pit_violations` reported a *measured*
+    # pass on a run where no PIT comparison had ever been made. A run that was not
+    # audited must reach the gate as unaudited.
+    #
+    # The dataset audits (`pit_violation_count`, `uses_mock_or_synthetic`,
+    # `label_alignment_status`) travel with `training_metrics`, forwarded by
+    # `_dataset_audit_metrics` from the gates that actually measured them.
     return metrics
 
 

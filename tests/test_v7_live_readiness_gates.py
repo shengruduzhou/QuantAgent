@@ -23,6 +23,20 @@ def _passing_metrics() -> dict[str, object]:
         "adverse_regime_passed": True,
         "uses_mock_or_synthetic": False,
         "pit_violation_count": 0,
+        # A live-readiness claim now requires survivorship evidence. Before the
+        # gate existed these fixtures passed with none, which meant a readiness
+        # report could assert production-readiness without anyone having checked
+        # whether the universe contained the names that died (M5-02 / DEF-024).
+        "survivorship_status": "pass",
+        "survivorship_delisted_symbols": 61,
+        "survivorship_unknown_sessions": 0,
+        # And it requires evidence that the labels do not start accruing before
+        # the features are available. The identical story to survivorship one
+        # round earlier: these fixtures asserted readiness with no such evidence,
+        # while the dataset builder was in fact stamping every row as unavailable
+        # until after its own label window had opened (M5-02 / DEF-026).
+        "label_alignment_status": "pass",
+        "label_alignment_violation_rows": 0,
         "benchmark_symbol": "000300.SH",
         "benchmark_return": 0.01,
         "excess_return_after_costs": 0.01,
@@ -106,3 +120,35 @@ def test_cli_live_readiness_report_writes_safety_defaults(tmp_path):
     assert payload["safety_defaults"]["live_trading_enabled"] is False
     assert payload["safety_defaults"]["dry_run"] is True
     assert payload["safety_defaults"]["virtual_broker_only"] is True
+
+
+def test_readiness_blocks_when_survivorship_was_never_checked(tmp_path):
+    """A readiness claim with no survivorship evidence must not pass.
+
+    This is what the fixture above had to be corrected for: before the gate
+    existed, `test_readiness_passes_when_all_gates_satisfied` passed while nothing
+    had checked whether the universe contained the names that stopped trading.
+    """
+    metrics = _passing_metrics()
+    del metrics["survivorship_status"]
+    paper = tmp_path / "paper.json"
+    paper.write_text("{}", encoding="utf-8")
+
+    report = evaluate_model_acceptance_gates(metrics, paper_report_path=paper)
+
+    assert not report.passed
+    assert "survivorship_unknown" in report.failures
+    assert report.has_unknowns
+
+
+def test_readiness_blocks_when_survivorship_cannot_be_determined(tmp_path):
+    metrics = _passing_metrics()
+    metrics["survivorship_status"] = "unknown"
+    metrics["survivorship_unknown_sessions"] = 903
+    paper = tmp_path / "paper.json"
+    paper.write_text("{}", encoding="utf-8")
+
+    report = evaluate_model_acceptance_gates(metrics, paper_report_path=paper)
+
+    assert not report.passed
+    assert "survivorship_unknown" in report.failures

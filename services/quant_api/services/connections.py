@@ -65,6 +65,12 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._lock = RLock()
         self._session_values: dict[str, str] = {}
+        # Providers an operator has explicitly disconnected. Ambient credentials
+        # (a repo `.env` is loaded process-wide by the LLM helper, so its keys
+        # appear in os.environ for every component) must not silently resurrect
+        # a connection the operator just took down — the UI would report the
+        # provider as connected and requests would keep being authorised.
+        self._disconnected: set[str] = set()
 
     def list(self) -> list[dict]:
         return [self._public(spec) for spec in CONNECTIONS]
@@ -85,6 +91,7 @@ class ConnectionManager:
             normalized[name] = value
         with self._lock:
             self._session_values.update(normalized)
+            self._disconnected.discard(spec.id)
         return self._public(spec)
 
     def disconnect(self, provider_id: str) -> dict:
@@ -92,9 +99,23 @@ class ConnectionManager:
         with self._lock:
             for name in spec.variables:
                 self._session_values.pop(name, None)
+            self._disconnected.add(spec.id)
         return self._public(spec)
 
+    def _suppressed_variables(self) -> set[str]:
+        """Variables an explicit disconnect has taken out of service."""
+        with self._lock:
+            disconnected = set(self._disconnected)
+        return {
+            variable
+            for spec in CONNECTIONS
+            if spec.id in disconnected
+            for variable in spec.variables
+        }
+
     def has_variable(self, name: str) -> bool:
+        if name in self._suppressed_variables():
+            return False
         with self._lock:
             return bool(self._session_values.get(name) or os.getenv(name))
 
@@ -104,7 +125,7 @@ class ConnectionManager:
             for spec in CONNECTIONS
             if spec.id in provider_ids
             for variable in spec.variables
-        }
+        } - self._suppressed_variables()
         with self._lock:
             session = {name: value for name, value in self._session_values.items() if name in allowed}
         resolved = {
@@ -121,10 +142,11 @@ class ConnectionManager:
                 for name in spec.variables
                 if self._session_values.get(name)
             }
+        suppressed = self._suppressed_variables()
         environment_values = {
             name: os.getenv(name)
             for name in spec.variables
-            if os.getenv(name)
+            if os.getenv(name) and name not in suppressed
         }
         connected = all(name in session_values or name in environment_values for name in spec.variables)
         source = "session" if connected and all(name in session_values for name in spec.variables) else "environment" if connected else "none"

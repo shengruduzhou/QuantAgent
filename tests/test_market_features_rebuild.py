@@ -220,15 +220,26 @@ def test_no_future_function_in_derived_flags():
         pd.testing.assert_series_equal(a_a[col].iloc[:-1], a_b[col].iloc[:-1], check_names=False)
 
 
-def test_available_at_preserves_existing_pit_contract():
-    """available_at at row i == trade_date at row i+1 (for same symbol),
-    falling back to trade_date + 1 calendar day at the last row.
+def test_available_at_never_falls_after_its_own_trade_date():
+    """available_at == trade_date, for every row.
+
+    This test used to assert the opposite — that `available_at` at row *i* equals
+    `trade_date` at row *i+1* — and called that "the existing PIT contract". It
+    was pinning the defect (DEF-026): every feature here is derived from bar
+    `trade_date` and nothing later, while `v7_label_builder` opens the label
+    window at `close(trade_date)`. Stamping the row as unusable until the next
+    session put the availability stamp *inside* its own label window, for 100% of
+    rows, and violated the `available_at <= trade_date` invariant this pipeline
+    asserts in its own manifest.
+
+    The stamp is also the as-of join key in `merge_pit_features`, so the extra
+    session it granted was an open door: a feature honestly published on `t+1`
+    joined onto the row scored on the `t -> t+1` return and scored rank IC
+    +1.0000 against it.
     """
     panel = _panel_with_three_symbols()
     feats = build_market_features(panel)
-    a = feats[feats["symbol"] == "A.SZ"].sort_values("trade_date").reset_index(drop=True)
-    for i in range(len(a) - 1):
-        assert pd.Timestamp(a.loc[i, "available_at"]) == pd.Timestamp(a.loc[i + 1, "trade_date"])
-    # Last row falls back to trade_date + 1 day
-    last_idx = len(a) - 1
-    assert pd.Timestamp(a.loc[last_idx, "available_at"]) == pd.Timestamp(a.loc[last_idx, "trade_date"]) + pd.Timedelta(days=1)
+    available = pd.to_datetime(feats["available_at"])
+    trade_date = pd.to_datetime(feats["trade_date"])
+    assert (available == trade_date).all()
+    assert not (available > trade_date).any()

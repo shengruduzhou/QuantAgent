@@ -10,6 +10,7 @@ import pandas as pd
 
 from quantagent.config.paths import quant_paths
 from quantagent.execution.fill_simulator import FillSimulator
+from quantagent.domain.lineage import Lineage
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.execution.virtual_broker import VirtualBroker
 
@@ -90,6 +91,10 @@ def simulate_ashare_target_weights(
     )
     manager = OrderManager(
         broker=broker,
+        # Economic submission requires canonical lineage; the simulator is a
+        # real order path and supplies a run identity per simulation.
+        lineage=Lineage(run_id=f"ashare_sim_{id(config):x}", strategy_version_id="v7_ashare_simulation"),
+        forensic_replay=not config.fix_cross_day_order_dedup,
         config=OrderManagerConfig(
             lot_size=config.lot_size,
             min_order_value_yuan=config.min_order_value_yuan,

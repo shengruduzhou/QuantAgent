@@ -189,11 +189,26 @@ git diff --check
 
 ## 任务控制 / Job control
 
-- 状态机：`queued → starting → running ⇄ paused → succeeded|failed|cancelled`。
-  `starting` 表示进程尚未注册，此时 pause/cancel 无信号可发；status 只有在
-  `Popen` 成功并登记进程后才变为 `running`。
-- `pause` 用 SIGSTOP、`resume` 用 SIGCONT：这是**调度**控制，不释放 RAM/GPU，
-  UI 必须如实说明暂停的进程仍占用显存。
+- 状态机：`queued → starting → running ⇄ paused →
+  succeeded|failed|cancelled|rejected`。`starting` 表示进程尚未注册，此时
+  pause/cancel 无信号可发；status 只有在 `Popen` 成功并登记进程后才变为 `running`。
+- **`rejected` 是终态但不是失败**：运行走完了，是预先声明的研究闸门否决了候选
+  （退出码 `3`，见 `quantagent.research.verdict`）。UI 必须把它呈现为**结论**，
+  与 `failed`（工程故障）分开；产物完整保留，`research_verdict.json` 记录闸门、
+  实测值与补救方向。闸门不得事后放宽来"通过"。
+- 每个任务由 `scripts/job_supervisor.py` 包一层：它把 worker PID 和**真实退出码**
+  写到 `<job>.status.json`。job 进程 `start_new_session=True` 且 stdout **直接写
+  日志文件**（不走管道）——用管道时 API 一重启，训练就会阻塞在写满的 64KB 缓冲区上
+  永远"运行中"。API 重启后按序恢复：状态文件里有退出码就据此结束；进程（supervisor
+  或 worker 任一）还活着就重新接管并继续跟踪；两者都没有则记
+  `exitStatusObserved=false` 并**如实说明退出状态未知**，不得直接断言 failed。
+- `pause` 用 SIGSTOP、`resume` 用 SIGCONT，作用于**整棵进程树**：这是**调度**控制，
+  不释放 RAM/GPU，UI 必须如实说明暂停的进程仍占用显存。
+- 失败必须命名：`services/quant_api/services/job_diagnostics.py` 从任务自己的日志
+  归类原因并给出补救动作；无法归类时记 `unclassified` 并附日志尾部，**不得猜测**。
+- `retry` 只对 `failed` / `cancelled` 开放，且以**原参数**重放到原 output_dir；
+  `succeeded` / `rejected` 重试会覆盖已有证据，应改为从策略发起新的运行。
+- JobRecord 持久化 `parameters`，否则任何已完成的任务都无法复现、重试或解释。
 
 ## Strategy Workbench / 策略实验室
 
@@ -206,3 +221,17 @@ git diff --check
   localStorage；只向命令声明的 provider 注入。
 - 不提供 arbitrary Bash；新执行能力必须登记 allowlisted command、路径边界、
   控制开关、credential provider 和测试。
+- **策略是有版本历史的实体，不是一堆文件**：同一 `id` 的多次保存是版本，
+  `GET /api/strategies` 每个策略只返回一行（附 `versionCount` / `runCount`）。
+  删除走归档（`runtime/archives/strategies/`），运行产物只有显式请求才一并删除。
+- 每次启动登记一条 run（`runtime/strategies/<id>/runs.jsonl`），把策略版本、job、
+  output_dir 串起来；缺了这条链，完成的运行就只是一个匿名目录。
+- 结论由 `services/quant_api/services/run_results.py` 从运行**自己的产物**推导：
+  验收闸门、PBO/DSR/SPA、训练证据、成本后净值都带 `sourcePath`。**产物缺失即
+  缺失**，不得渲染成 0 或 pass；短窗口年化必须带评估天数警告。
+- 发起前必须做**可算的**前置校验，避免训练跑完才失败：
+  基准标的是否真在所选面板内；`nSplits × 20` 是否 ≥
+  `selectionMinOosDays + selectionMinHoldoutDays`。二者曾是出厂默认值，
+  每次运行都在 ~62% 处中止。
+- 运行对比上限 4 项，逐指标标注更优方向；跨研究范围/宇宙/评估窗口的运行不可直接比较，
+  UI 必须写明这一点。

@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from services.quant_api.app import create_app
-from services.quant_api.services.jobs import JobManager, JobRecord, _progress_from_line
+from services.quant_api.services.jobs import JobManager, JobRecord, _parse_event_line
 
 
 def request(app, method: str, url: str, **kwargs):
@@ -196,7 +196,7 @@ def test_tickflow_recorder_accepts_server_symbol_file_and_requires_network_confi
     ],
 )
 def test_provider_progress_is_parsed_from_structured_and_legacy_output(line: str, expected: float) -> None:
-    assert _progress_from_line(line) == pytest.approx(expected)
+    assert _parse_event_line(line)["progress"] == pytest.approx(expected)
 
 
 def test_data_job_requires_allowlisted_command_and_explicit_universe(quant_ui_settings) -> None:

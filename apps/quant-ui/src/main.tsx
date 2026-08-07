@@ -24,6 +24,7 @@ import "./vnext/styles/factor-intelligence.css";
 import "./vnext/styles/governance.css";
 import "./vnext/styles/strategy.css";
 import "./vnext/styles/fusion.css";
+import "./vnext/styles/runs.css";
 import "./vnext/styles/council.css";
 
 const queryClient = new QueryClient({

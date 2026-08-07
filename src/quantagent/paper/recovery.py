@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from quantagent.paper import ledger as lg
 from quantagent.paper.orders import (
+    TERMINAL_STATES,
     CANCELLED,
     FILLED,
     PARTIALLY_FILLED,
@@ -237,3 +238,98 @@ def reconcile(live: Any, recovered: RecoveredState, *,
         "replayed_fills": len(recovered.fills),
         "chain_valid": recovered.chain_valid,
     }
+
+
+def recover_from_canonical(
+    canonical_ledger_path: str,
+    *,
+    portfolio_id: str,
+    initial_cash: float,
+) -> RecoveredState:
+    """Rebuild paper state from the canonical ledger — the only record of account.
+
+    `recover()` above reads paper's legacy `EventLedger`. That ledger no longer
+    receives economic events, so this is the path that reconstructs money.
+    Keeping both readers would recreate the divergence the migration removed:
+    two histories that agree until a crash lands between them.
+    """
+    from quantagent.domain.ledger import CanonicalLedger
+    from quantagent.domain.orders import OrderStatus as CanonicalStatus
+
+    ledger = CanonicalLedger(canonical_ledger_path)
+    verification = ledger.verify()
+    if not verification["valid"]:
+        raise RecoveryRefused(
+            f"canonical chain verification failed at record {verification.get('brokenAt')}. "
+            "Rebuilding from an edited or truncated history would produce "
+            "confident numbers with no provenance."
+        )
+
+    book, account = ledger.replay(initial_cash=initial_cash)
+    portfolio = Portfolio(
+        portfolio_id=portfolio_id, cash=account.cash, initial_cash=initial_cash
+    )
+    state = RecoveredState(portfolio=portfolio, chain_valid=True)
+    state.events_replayed = len(ledger)
+
+    # Inventory comes from the canonical lots. Sellability is a function of the
+    # session, so the latest session the ledger knows about is used as "today":
+    # anything acquired earlier has settled, anything acquired on it has not.
+    sessions = [r.trade_date for r in ledger.read() if r.trade_date]
+    latest_session = max(sessions) if sessions else ""
+    for symbol, lots in account.lots.items():
+        total = float(sum(lot.quantity for lot in lots))
+        if total <= 0:
+            continue
+        sellable = float(account.sellable(symbol, latest_session)) if latest_session else 0.0
+        cost = account.cost_basis.get(symbol, 0.0)
+        portfolio.positions[symbol] = Position(
+            symbol=symbol,
+            total=total,
+            sellable=sellable,
+            pending_settlement=total - sellable,
+            average_cost=float(cost),
+            realised_pnl=0.0,
+        )
+    portfolio.realised_pnl = float(account.realised_pnl)
+    portfolio.fees_paid = float(account.total_fees)
+
+    for canonical in book.orders():
+        order = Order(
+            symbol=canonical.symbol,
+            side=canonical.side.value,
+            quantity=float(canonical.quantity),
+            limit_price=canonical.limit_price or 1.0,
+            order_id=canonical.order_id,
+        )
+        order.state = _PAPER_STATE_OF[canonical.status]
+        order.filled_quantity = float(canonical.cumulative_quantity)
+        order.filled_notional = sum(f.quantity * f.price for f in canonical.fills)
+        order.fees_paid = canonical.total_fees
+        order.reject_reason = canonical.reason
+        state.orders[order.order_id] = order
+
+    state.fills = [
+        Fill(
+            order_id=fill.order_id, symbol=fill.symbol, side=fill.side.value,
+            quantity=float(fill.quantity), price=float(fill.price),
+            notional=float(fill.gross), commission=float(fill.commission),
+            stamp_duty=float(fill.stamp_duty), transfer_fee=float(fill.transfer_fee),
+            market_time=fill.filled_at, fill_id=fill.execution_id,
+        )
+        for fill in book.fills()
+    ]
+    return state
+
+
+#: Canonical status -> paper's vocabulary, the inverse of paper.orders._TO_CANONICAL.
+_PAPER_STATE_OF: dict[Any, str] = {}
+
+
+def _build_state_map() -> None:
+    from quantagent.paper.orders import _TO_CANONICAL
+
+    _PAPER_STATE_OF.update({status: name for name, status in _TO_CANONICAL.items()})
+
+
+_build_state_map()

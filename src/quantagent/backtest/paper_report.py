@@ -157,7 +157,15 @@ def _pnl_frame(
         bench["trade_date"] = pd.to_datetime(bench["trade_date"], errors="coerce")
         bench = bench[bench["symbol"].astype(str) == str(benchmark_symbol)].sort_values("trade_date")
         if not bench.empty and "close" in bench.columns:
-            bench["benchmark_return"] = pd.to_numeric(bench["close"], errors="coerce").pct_change().fillna(0.0)
+            # Only the *first* observation is legitimately a 0% day — there is no
+            # prior close to compare it to. Interior gaps stay NaN. Blanket
+            # `fillna(0.0)` turned every session the benchmark was missing into a
+            # flat day, which is how excess return gets overstated by exactly the
+            # benchmark's move across the gap (DEF-022).
+            returns = pd.to_numeric(bench["close"], errors="coerce").pct_change()
+            if len(returns):
+                returns.iloc[0] = 0.0 if pd.isna(returns.iloc[0]) else returns.iloc[0]
+            bench["benchmark_return"] = returns
             frame = frame.merge(bench[["trade_date", "benchmark_return"]], on="trade_date", how="left")
     return frame
 
@@ -251,14 +259,48 @@ def _summary(
     benchmark_return = None
     benchmark_max_drawdown = None
     information_ratio = None
+    benchmark_sessions = 0
+    benchmark_sessions_missing = 0
+    benchmark_status = "absent"
     if not pnl.empty and "benchmark_return" in pnl.columns:
-        bench_returns = pd.to_numeric(pnl["benchmark_return"], errors="coerce").fillna(0.0)
-        benchmark_curve = (1.0 + bench_returns).cumprod()
-        benchmark_return = float(benchmark_curve.iloc[-1] - 1.0) if not benchmark_curve.empty else None
-        benchmark_max_drawdown = float((benchmark_curve / benchmark_curve.cummax() - 1.0).min()) if not benchmark_curve.empty else None
-        excess_daily = daily_returns.reset_index(drop=True).reindex(bench_returns.reset_index(drop=True).index).fillna(0.0) - bench_returns.reset_index(drop=True)
-        tracking_error = float(excess_daily.std(ddof=0))
-        information_ratio = float(excess_daily.mean() / tracking_error * (252.0**0.5)) if tracking_error > 0 else None
+        bench_returns = pd.to_numeric(pnl["benchmark_return"], errors="coerce")
+        benchmark_sessions = int(bench_returns.notna().sum())
+        benchmark_sessions_missing = int(bench_returns.isna().sum())
+        if benchmark_sessions_missing:
+            # A gap is not a flat day. Filling it produced a confident number that
+            # was wrong by the benchmark's move across the gap — measured at 20
+            # percentage points on a 5-of-10-session gap — with nothing in the
+            # output to say anything was missing. Unknown is the only honest answer,
+            # and the coverage counts below say why.
+            benchmark_status = "incomplete"
+        else:
+            benchmark_status = "complete"
+            benchmark_curve = (1.0 + bench_returns).cumprod()
+            benchmark_return = (
+                float(benchmark_curve.iloc[-1] - 1.0) if not benchmark_curve.empty else None
+            )
+            benchmark_max_drawdown = (
+                float((benchmark_curve / benchmark_curve.cummax() - 1.0).min())
+                if not benchmark_curve.empty
+                else None
+            )
+            strategy_daily = daily_returns.reset_index(drop=True)
+            bench_daily = bench_returns.reset_index(drop=True)
+            aligned = strategy_daily.reindex(bench_daily.index)
+            if aligned.isna().any():
+                # The strategy's own return series is short. Filling it with zeros
+                # was the same defect on the other side of the subtraction.
+                benchmark_status = "incomplete"
+                benchmark_return = None
+                benchmark_max_drawdown = None
+            else:
+                excess_daily = aligned - bench_daily
+                tracking_error = float(excess_daily.std(ddof=0))
+                information_ratio = (
+                    float(excess_daily.mean() / tracking_error * (252.0**0.5))
+                    if tracking_error > 0
+                    else None
+                )
     excess_return = None if benchmark_return is None else float(net_return - benchmark_return)
     return {
         "initial_cash": float(initial_cash),
@@ -270,6 +312,12 @@ def _summary(
         "benchmark_return": benchmark_return,
         "excess_return": excess_return,
         "excess_return_after_costs": excess_return,
+        # Coverage, so a `None` excess return is distinguishable from "no benchmark
+        # was requested". A reader cannot otherwise tell an unmeasured number from
+        # an unrequested one.
+        "benchmark_status": benchmark_status,
+        "benchmark_sessions_covered": benchmark_sessions,
+        "benchmark_sessions_missing": benchmark_sessions_missing,
         "annualized_return": annualized_return,
         "annualized_volatility": annualized_volatility,
         "sharpe": sharpe,

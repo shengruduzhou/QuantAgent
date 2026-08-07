@@ -60,6 +60,12 @@ MASK_TRUE = "TRUE"
 MASK_FALSE = "FALSE"
 MASK_UNKNOWN = "UNKNOWN"
 
+#: Master `status` values that positively assert the security still trades. Only
+#: these turn a missing delisting date into a confident FALSE; anything else —
+#: "delisted", "suspended", a blank, an unrecognised value — leaves it UNKNOWN,
+#: because the alternative is asserting a security is alive on no evidence.
+LISTED_STATUSES: frozenset[str] = frozenset({"listed", "active", "trading", "normal"})
+
 #: Optional feature families. Each contributes a ``has_<family>`` indicator.
 OPTIONAL_FAMILIES: tuple[str, ...] = (
     "tick_events", "level2_snapshot", "level2_order_events", "minute_bars",
@@ -211,6 +217,75 @@ def _interval_mask(
     return mask
 
 
+#: Master `source` values that identify a security fetched from an exchange's
+#: *delisting* register rather than its listing register. Provenance is the only
+#: place U0's master records the distinction: `status_end` (the delisting date) is
+#: empty for all 5,888 rows, so the fact that a name is dead survives only in where
+#: it was found.
+DELISTING_REGISTER_SOURCES: frozenset[str] = frozenset(
+    {"sz_delist", "sz_delist_retry", "sh_delist", "sh_delist_retry", "bj_delist"}
+)
+
+#: What `resolve_listing_status` concluded, and from which column.
+LISTING_STATUS_LISTED = "listed"
+LISTING_STATUS_DELISTED = "delisted"
+LISTING_STATUS_UNKNOWN = "unknown"
+
+
+def resolve_listing_status(master: pd.DataFrame) -> tuple[pd.Series, str]:
+    """Decide, per security, whether the master says it is listed or dead.
+
+    DEF-024 taught `build_masks` to consult a `status` column so that a missing
+    delisting date would not be read as "confidently never delisted". The U0
+    master has no `status` column, so on the real master that fix could only ever
+    answer UNKNOWN — for all 5,888 names, including the 5,530 the master sources
+    from live listing registers. Honest, but inert: it cannot tell the 358 names it
+    exists to catch from the 5,530 it does not need to.
+
+    The master does carry the distinction, in two agreeing columns:
+    `status_end_blocked` (True for exactly the 358) and `source` (`sz_delist` /
+    `sh_delist_retry`). Reading them turns the mask from "nothing is knowable" into
+    "these 358 are dead and undated, the rest are alive" — which is the difference
+    between a gate that can never pass and a gate that names what is missing.
+
+    Returns the per-symbol status and the column it was derived from, so a caller
+    can record *how* it knows rather than asserting the conclusion.
+    """
+    index = master["symbol"].astype(str)
+    if "status" in master.columns:
+        status = master["status"].astype("object").str.lower()
+        resolved = pd.Series(LISTING_STATUS_UNKNOWN, index=index, dtype="object")
+        resolved[status.isin(LISTED_STATUSES).to_numpy()] = LISTING_STATUS_LISTED
+        resolved[status.astype(str).str.contains("delist", na=False).to_numpy()] = (
+            LISTING_STATUS_DELISTED
+        )
+        return resolved, "status"
+
+    from_delisting_register = (
+        master["source"].astype(str).isin(DELISTING_REGISTER_SOURCES)
+        if "source" in master.columns
+        else pd.Series(False, index=master.index)
+    )
+    blocked = (
+        master["status_end_blocked"].fillna(False).astype(bool)
+        if "status_end_blocked" in master.columns
+        else pd.Series(False, index=master.index)
+    )
+    if "source" not in master.columns and "status_end_blocked" not in master.columns:
+        return pd.Series(LISTING_STATUS_UNKNOWN, index=index, dtype="object"), "none"
+
+    dead = (from_delisting_register | blocked).to_numpy()
+    resolved = pd.Series(LISTING_STATUS_LISTED, index=index, dtype="object")
+    resolved[dead] = LISTING_STATUS_DELISTED
+    basis = "+".join(
+        name for name, present in
+        (("source", "source" in master.columns),
+         ("status_end_blocked", "status_end_blocked" in master.columns))
+        if present
+    )
+    return resolved, basis
+
+
 def build_masks(
     panel: pd.DataFrame,
     *,
@@ -248,10 +323,35 @@ def build_masks(
         listing.isna(), MASK_UNKNOWN,
         np.where(dates < listing, MASK_TRUE, MASK_FALSE),
     )
+    # A missing delisting date means two different things, and conflating them is
+    # survivorship bias by default. If the master says the security is still
+    # listed, no delisting date is a confident FALSE. If it says *delisted* and the
+    # date was never captured, we do not know when the name stopped trading, so the
+    # honest mask is UNKNOWN for its whole history — a FALSE there made a dead name
+    # contribute exactly as many eligible training sessions as a live one
+    # (DEF-024). Note the asymmetry this removes: `mask_pre_listing` already
+    # returned UNKNOWN for a missing listing date.
+    #
+    # The status is *resolved* from whatever the master actually carries rather
+    # than read from a column name assumed to exist — see `resolve_listing_status`.
+    # Measured on U0's master: reading only `status` left all 5,888 names UNKNOWN,
+    # because that column is not there; reading provenance identifies the 358 that
+    # came from delisting registers and clears the 5,530 that did not.
+    listing_status, status_basis = resolve_listing_status(master)
+    status = result["symbol"].astype(str).map(listing_status)
+    known_listed = (status == LISTING_STATUS_LISTED).to_numpy()
     result["mask_post_delisting"] = np.where(
-        delisting.isna(), MASK_FALSE,
+        delisting.notna(),
         np.where(dates > delisting, MASK_TRUE, MASK_FALSE),
+        np.where(known_listed, MASK_FALSE, MASK_UNKNOWN),
     )
+    result.attrs["listing_status_basis"] = status_basis
+    # Published as a column, not just consumed here. `mask_post_delisting` answers
+    # "is this row after the security died", which is FALSE both for a live name and
+    # for a dead name's rows *before* it died — so the mask alone cannot say whether
+    # the panel contains dead names at all. That ambiguity made the survivorship
+    # audit read a correctly-built panel as the most suspicious kind (DEF-028).
+    result["listing_status"] = status.fillna(LISTING_STATUS_UNKNOWN)
 
     # Seasoning counts *trading sessions observed in the panel*, not calendar
     # days, so holidays cannot shorten the window.
@@ -260,13 +360,40 @@ def build_masks(
     seasoning.loc[session_index.index[session_index < seasoning_days]] = MASK_TRUE
     result["mask_seasoning"] = seasoning
 
-    result["eligible_for_training"] = (
-        (result["mask_is_suspended"] != MASK_TRUE)
-        & (result["mask_is_st"] != MASK_TRUE)
-        & (result["mask_pre_listing"] != MASK_TRUE)
-        & (result["mask_post_delisting"] != MASK_TRUE)
-        & (result["mask_seasoning"] != MASK_TRUE)
+    mask_columns = [
+        "mask_is_suspended", "mask_is_st", "mask_pre_listing",
+        "mask_post_delisting", "mask_seasoning",
+    ]
+    # `eligible_for_training` keeps its permissive meaning — "not *known* to be
+    # ineligible" — because flipping UNKNOWN to ineligible would empty the universe
+    # wherever a register has partial coverage (U0's ST data is SZSE-only). But a
+    # single boolean that silently absorbs UNKNOWN either way is how a caller ends
+    # up unable to tell "verified eligible" from "we could not check". So the
+    # tri-state is published alongside it, and `unknown_masks` names which checks
+    # could not be made, so a gate can enforce a policy on the difference rather
+    # than inferring one.
+    result["eligible_for_training"] = np.logical_and.reduce(
+        [result[column] != MASK_TRUE for column in mask_columns]
     )
+    any_true = np.logical_or.reduce([result[column] == MASK_TRUE for column in mask_columns])
+    any_unknown = np.logical_or.reduce(
+        [result[column] == MASK_UNKNOWN for column in mask_columns]
+    )
+    result["eligibility_status"] = np.where(
+        any_true, MASK_FALSE, np.where(any_unknown, MASK_UNKNOWN, MASK_TRUE)
+    )
+    # Built column-wise. The row-wise `iterrows()` this replaces ran at ~30k
+    # rows/s, i.e. ~6 minutes on the 10.9M-row full-universe panel — and wiring
+    # survivorship into the training path (M5-02) makes that a cost paid on every
+    # run rather than once at build time. Same output, verified by test.
+    unknown_parts = pd.Series("", index=result.index, dtype="object")
+    for column in mask_columns:
+        name = column.removeprefix("mask_")
+        is_unknown = result[column].to_numpy() == MASK_UNKNOWN
+        unknown_parts = unknown_parts.where(
+            ~is_unknown, unknown_parts.str.cat(pd.Series(name, index=result.index), sep=",")
+        )
+    result["unknown_masks"] = unknown_parts.str.lstrip(",")
     return result
 
 

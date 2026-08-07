@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 import json
 import os
@@ -11,13 +11,62 @@ import signal
 import subprocess
 import sys
 from threading import RLock, Thread
+import time
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
+from quantagent.research.verdict import (
+    CONFIGURATION_BLOCKED_EXIT_CODE,
+    RESEARCH_REJECTED_EXIT_CODE,
+)
 from quantagent.safety.operating_mode import reject_live_intent
-from services.quant_api.config import ApiSettings, project_relative, safe_project_path
+from services.quant_api.config import (
+    PROJECT_ROOT,
+    ApiSettings,
+    project_relative,
+    safe_project_path,
+)
 from services.quant_api.events import EventBroker
 from services.quant_api.services.connections import CREDENTIAL_VARIABLES
+from services.quant_api.services.job_diagnostics import JobFailure, diagnose
+from services.quant_api.services.process_supervisor import (
+    process_is_alive,
+    process_start_ticks,
+    sample_process,
+    signal_tree,
+    terminate_tree,
+)
+
+
+# `rejected` is terminal but is not a failure: the run completed and a
+# pre-registered gate refused the candidate.
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "rejected", "blocked"})
+#: Verdicts a run can print on stdout to declare its own terminal conclusion.
+TERMINAL_VERDICTS = frozenset({"rejected", "blocked"})
+# Retry is for recovering from an interruption, not for repeating a finished
+# experiment: a completed run's evidence must not be silently overwritten.
+RETRYABLE_STATUSES = frozenset({"failed", "cancelled"})
+ACTIVE_STATUSES = frozenset({"queued", "starting", "running", "paused", "cancelling"})
+POLL_SECONDS = 1.0
+RESOURCE_SAMPLE_SECONDS = 5.0
+
+# The supervisor ships with this code, so its location follows the package
+# rather than whatever project root the settings point at.
+JOB_SUPERVISOR = PROJECT_ROOT / "scripts" / "job_supervisor.py"
+
+STAGE_LABELS: dict[str, str] = {
+    "contract": "研究契约校验",
+    "dataset": "PIT 数据集构建",
+    "factor_screening": "因子筛选",
+    "training": "滚动样本外训练",
+    "prediction": "样本外预测",
+    "portfolio": "组合与目标权重",
+    "portfolio_selection": "组合候选选择",
+    "backtest": "A 股回测",
+    "risk": "风控与验收闸门",
+    "evidence": "证据归档",
+    "verdict": "研究结论",
+}
 
 
 @dataclass
@@ -35,6 +84,30 @@ class JobRecord:
     error: str | None = None
     logPath: str | None = None
     ownedOutputPaths: list[str] = field(default_factory=list)
+    # --- reproducibility -----------------------------------------------------
+    # Without the parameters a finished job cannot be re-run, compared, or even
+    # explained; "what did this run actually do" required reading the log's
+    # first line.
+    parameters: dict[str, Any] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    retryOf: str | None = None
+    attempt: int = 1
+    # --- observability -------------------------------------------------------
+    stage: str | None = None
+    stages: list[dict[str, Any]] = field(default_factory=list)
+    lastOutputAt: str | None = None
+    resources: dict[str, Any] | None = None
+    exitCode: int | None = None
+    exitStatusObserved: bool = False
+    failure: dict[str, Any] | None = None
+    verdict: dict[str, Any] | None = None
+    # --- process identity (survives an API restart) --------------------------
+    pid: int | None = None
+    workerPid: int | None = None
+    processStartTicks: int | None = None
+    workerStartTicks: int | None = None
+    statusPath: str | None = None
+    adopted: bool = False
 
 
 COMMANDS: dict[str, dict[str, Any]] = {
@@ -253,6 +326,9 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "type": "strategy-pipeline",
         "required": {"market_panel_path", "labels_path", "output_dir"},
         "allowed": {
+            # A pilot scope makes the difference between an hours-long
+            # all-or-nothing run and a run an operator can validate first.
+            "symbols", "symbols_file",
             "market_panel_path", "labels_path", "output_dir", "sector_map_path",
             "fundamentals_root", "valuation_path", "disclosures_path",
             "training_dataset_path", "synthesized_factors_path", "factor_library",
@@ -276,7 +352,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "market_panel_path", "labels_path", "sector_map_path",
             "training_dataset_path", "synthesized_factors_path",
             "fundamentals_root", "valuation_path", "disclosures_path",
-            "minute_panel_path",
+            "minute_panel_path", "symbols_file",
         },
         "path_outputs": {"output_dir"},
         "option_aliases": {
@@ -690,7 +766,16 @@ class JobManager:
         self._purged: set[str] = set()
         self._load()
 
-    def submit(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    def submit(
+        self,
+        job_type: str,
+        command_id: str,
+        parameters: dict[str, Any],
+        *,
+        labels: dict[str, str] | None = None,
+        retry_of: str | None = None,
+        attempt: int = 1,
+    ) -> dict[str, Any]:
         spec, normalized = self._validate(job_type, command_id, parameters)
         job_id = f"job_{uuid4().hex[:16]}"
         log_path = self.settings.jobs_root / f"{job_id}.log"
@@ -715,6 +800,11 @@ class JobManager:
                 for path in declared_outputs
                 if not path.exists()
             ],
+            parameters=dict(normalized),
+            labels=dict(labels or {}),
+            retryOf=retry_of,
+            attempt=attempt,
+            statusPath=project_relative(self.settings, self.settings.jobs_root / f"{job_id}.status.json"),
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -722,6 +812,51 @@ class JobManager:
         self._emit(record)
         Thread(target=self._run, args=(job_id, command_id, normalized, spec, log_path), daemon=True).start()
         return self._public(record)
+
+    def retry(self, job_id: str) -> dict[str, Any]:
+        """Re-submit a finished job with exactly the parameters it ran with.
+
+        Re-running is the normal response to a transient failure, and doing it
+        by hand means re-typing a parameter set nobody kept. The new job records
+        which attempt it is and which job it descends from, so a chain of
+        retries stays legible instead of looking like unrelated runs.
+        """
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                raise KeyError(job_id)
+            if record.status not in TERMINAL_STATUSES:
+                raise ValueError(
+                    f"job {job_id} is {record.status}; only a finished job can be retried"
+                )
+            if record.status not in RETRYABLE_STATUSES:
+                # A retry replays the same parameters into the same output
+                # directory. For a run that already produced a conclusion that
+                # would overwrite its evidence and reproduce the same answer;
+                # a new experiment belongs in a new run directory.
+                raise ValueError(
+                    f"job {job_id} finished as {record.status}; retrying would overwrite its "
+                    "evidence with an identical run. Launch a new run from the strategy instead."
+                )
+            if not record.parameters:
+                raise ValueError(
+                    f"job {job_id} predates parameter capture and cannot be replayed; "
+                    "resubmit it from the page that created it"
+                )
+            source = record
+            root = source.retryOf or source.id
+            attempt = source.attempt + 1
+            parameters = dict(source.parameters)
+            labels = dict(source.labels)
+            job_type, command_id = source.type, source.commandId
+        return self.submit(
+            job_type,
+            command_id,
+            parameters,
+            labels=labels,
+            retry_of=root,
+            attempt=attempt,
+        )
 
     def validate(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         spec, _ = self._validate(job_type, command_id, parameters)
@@ -817,17 +952,16 @@ class JobManager:
 
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        terminal = {"succeeded", "failed", "cancelled"}
         with self._lock:
             record = self._jobs.get(job_id)
             if record is None:
                 raise KeyError(job_id)
-            if record.status in terminal:
+            if record.status in TERMINAL_STATUSES:
                 raise ValueError(f"job {job_id} already finished with status {record.status}")
             self._cancel_requested.add(job_id)
-            process = self._processes.get(job_id)
             was_paused = record.status == "paused"
-            if process is None:
+            target = record.workerPid or record.pid
+            if target is None:
                 record.status = "cancelled"
                 record.message = "cancelled before process start"
                 record.finishedAt = _now()
@@ -837,8 +971,8 @@ class JobManager:
             self._persist()
             public = self._public(record)
         self._emit(record)
-        if process is not None:
-            _terminate(process, was_paused=was_paused)
+        if target is not None:
+            terminate_tree(target, was_paused=was_paused)
         return public
 
     def pause(self, job_id: str) -> dict[str, Any]:
@@ -855,11 +989,11 @@ class JobManager:
                 raise KeyError(job_id)
             if record.status != "running":
                 raise ValueError(f"job {job_id} is {record.status}, only a running job can be paused")
-            process = self._processes.get(job_id)
-            if process is None:
+            target = record.workerPid or record.pid
+            if target is None:
                 raise ValueError(f"job {job_id} has no live process to pause")
             try:
-                process.send_signal(signal.SIGSTOP)
+                signal_tree(target, signal.SIGSTOP)
             except OSError as exc:
                 raise ValueError(f"could not pause job {job_id}: {exc}") from exc
             record.status = "paused"
@@ -877,11 +1011,11 @@ class JobManager:
                 raise KeyError(job_id)
             if record.status != "paused":
                 raise ValueError(f"job {job_id} is {record.status}, only a paused job can be resumed")
-            process = self._processes.get(job_id)
-            if process is None:
+            target = record.workerPid or record.pid
+            if target is None:
                 raise ValueError(f"job {job_id} has no live process to resume")
             try:
-                process.send_signal(signal.SIGCONT)
+                signal_tree(target, signal.SIGCONT)
             except OSError as exc:
                 raise ValueError(f"could not resume job {job_id}: {exc}") from exc
             record.status = "running"
@@ -900,15 +1034,17 @@ class JobManager:
                 raise KeyError(job_id)
             process = self._processes.pop(job_id, None)
             was_paused = record.status == "paused"
+            target = record.workerPid or record.pid
             owned_outputs = list(record.ownedOutputPaths)
             self._cancel_requested.add(job_id)
             self._purged.add(job_id)
             self._jobs.pop(job_id, None)
             self._persist()
-        if process is not None:
+        if target is not None:
             # Same trap as cancel: a suspended process ignores SIGTERM until it
-            # is continued, and purge would then block on wait().
-            _terminate(process, was_paused=was_paused)
+            # is continued, and purge would then block waiting for it.
+            terminate_tree(target, was_paused=was_paused)
+        if process is not None:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -916,6 +1052,7 @@ class JobManager:
                 process.wait(timeout=5)
         log_path = self.settings.jobs_root / f"{job_id}.log"
         log_path.unlink(missing_ok=True)
+        (self.settings.jobs_root / f"{job_id}.status.json").unlink(missing_ok=True)
         removed_outputs: list[str] = []
         output_errors: list[str] = []
         if delete_outputs:
@@ -976,7 +1113,7 @@ class JobManager:
                     pending = lines.pop()
                 for line in lines:
                     yield f"event: log\ndata: {json.dumps({'line': line.rstrip()}, ensure_ascii=False)}\n\n"
-            terminal = record["status"] in {"succeeded", "failed", "cancelled"}
+            terminal = record["status"] in TERMINAL_STATUSES
             if terminal and pending:
                 yield f"event: log\ndata: {json.dumps({'line': pending}, ensure_ascii=False)}\n\n"
                 pending = ""
@@ -1038,90 +1175,371 @@ class JobManager:
                 value = ",".join(str(item) for item in value)
             command.extend([option, str(value)])
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path = self.settings.jobs_root / f"{job_id}.status.json"
+        status_path.unlink(missing_ok=True)
+        # The command is wrapped by a supervisor that records the real exit code
+        # to disk. Its argv is fixed here; the job's own argv is passed through
+        # unchanged after `--`.
+        # Invoked by path, deliberately outside the `services.quant_api`
+        # namespace: an operator restarting the API with
+        # `pkill -f services.quant_api` would otherwise kill the supervisors of
+        # every running job along with it.
+        supervised = [
+            sys.executable,
+            str(JOB_SUPERVISOR),
+            "--status-file",
+            str(status_path),
+            "--job-id",
+            job_id,
+            "--",
+            *command,
+        ]
         try:
-            with log_path.open("w", encoding="utf-8") as handle:
+            # The child writes straight to the log file rather than through a
+            # pipe this process must keep draining. With a pipe, an API restart
+            # left the training process blocked on a full 64KB buffer forever —
+            # a job that looked "running" but could never progress again.
+            handle = log_path.open("w", encoding="utf-8")
+            with handle:
                 handle.write(f"$ {' '.join(command)}\n")
                 handle.flush()
                 with self._lock:
                     if job_id in self._purged or job_id not in self._jobs:
                         return
                     process = subprocess.Popen(
-                        command,
+                        supervised,
                         cwd=self.settings.project_root,
                         env=self._process_environment(spec),
-                        stdout=subprocess.PIPE,
+                        stdout=handle,
                         stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
+                        stdin=subprocess.DEVNULL,
+                        # Its own session, so restarting or interrupting the API
+                        # does not take a multi-hour training down with it.
+                        start_new_session=True,
                     )
                     self._processes[job_id] = process
                     cancel_requested = job_id in self._cancel_requested
-                # Only now is there something to pause, cancel or signal.
-                self._update(job_id, status="running", message="running")
-                if cancel_requested:
-                    process.terminate()
-                assert process.stdout is not None
-                for line in process.stdout:
-                    with self._lock:
-                        if job_id in self._purged:
-                            process.terminate()
-                            break
-                    handle.write(line)
-                    handle.flush()
-                    progress = _progress_from_line(line)
-                    if progress is not None:
-                        self._update(
-                            job_id,
-                            progress=progress,
-                            message=line.strip()[:240] or "running",
-                        )
-                code = process.wait()
-            with self._lock:
-                self._processes.pop(job_id, None)
-                cancelled = job_id in self._cancel_requested
-                purged = job_id in self._purged
-            if purged:
-                return
-            outputs = [
-                project_relative(self.settings, value)
-                for key, value in parameters.items()
-                if key in spec["path_outputs"] and value is not None
-            ]
-            outputs.extend(spec.get("fixed_outputs", ()))
-            if cancelled:
-                self._update(
-                    job_id, status="cancelled", finishedAt=_now(),
-                    message="cancelled", outputPaths=outputs,
-                )
-            elif code == 0:
-                if self.on_success is not None:
-                    try:
-                        self.on_success()
-                    except Exception:
-                        pass
-                self._update(
-                    job_id, status="succeeded", finishedAt=_now(), progress=1.0,
-                    message="completed; runtime catalog invalidated", outputPaths=outputs,
-                )
-            else:
-                self._update(
-                    job_id, status="failed", finishedAt=_now(), message=f"exit code {code}",
-                    error=f"command exited with code {code}",
-                )
         except OSError as exc:
             with self._lock:
-                self._processes.pop(job_id, None)
-                cancelled = job_id in self._cancel_requested
                 purged = job_id in self._purged
             if purged:
                 return
-            if cancelled:
-                self._update(job_id, status="cancelled", finishedAt=_now(), message="cancelled")
-            else:
-                self._update(
-                    job_id, status="failed", finishedAt=_now(), message="failed to start",
-                    error=str(exc),
+            self._update(
+                job_id, status="failed", finishedAt=_now(), message="failed to start",
+                error=str(exc),
+                failure={
+                    "code": "spawn_failed",
+                    "title": "无法启动任务进程",
+                    "detail": str(exc),
+                    "remediation": "确认 Python 环境与入口脚本存在，然后重试。",
+                    "retryable": True,
+                    "logTail": [],
+                    "exitCode": None,
+                    "signal": None,
+                },
+            )
+            return
+
+        self._update(
+            job_id,
+            status="running",
+            message="running",
+            pid=process.pid,
+            processStartTicks=process_start_ticks(process.pid),
+            statusPath=project_relative(self.settings, status_path),
+            lastOutputAt=_now(),
+        )
+        if cancel_requested:
+            terminate_tree(process.pid, was_paused=False)
+        self._supervise(
+            job_id,
+            process=process,
+            log_path=log_path,
+            status_path=status_path,
+            spec=spec,
+            parameters=parameters,
+        )
+
+    # ------------------------------------------------------------------
+    # supervision
+    # ------------------------------------------------------------------
+
+    def _supervise(
+        self,
+        job_id: str,
+        *,
+        process: subprocess.Popen | None,
+        log_path: Path,
+        status_path: Path,
+        spec: dict[str, Any],
+        parameters: dict[str, Any],
+        pid: int | None = None,
+        start_ticks: int | None = None,
+    ) -> None:
+        """Follow a job to completion, whether we spawned it or adopted it.
+
+        An adopted job passes ``process=None`` and is followed by PID instead;
+        the record's own ``adopted`` flag is what the UI reads.
+        """
+        position = 0
+        next_sample = 0.0
+        worker_pid: int | None = None
+        while True:
+            with self._lock:
+                if job_id in self._purged or job_id not in self._jobs:
+                    return
+            if worker_pid is None:
+                worker_pid = self._read_worker_pid(status_path)
+                if worker_pid is not None:
+                    self._update(
+                        job_id,
+                        workerPid=worker_pid,
+                        workerStartTicks=process_start_ticks(worker_pid),
+                    )
+            position = self._drain_log(job_id, log_path, position)
+            monotonic = time.monotonic()
+            if monotonic >= next_sample:
+                next_sample = monotonic + RESOURCE_SAMPLE_SECONDS
+                self._sample_resources(job_id, worker_pid or pid or (process.pid if process else None))
+            if process is not None:
+                if process.poll() is not None:
+                    break
+            elif not process_is_alive(pid, start_ticks):
+                break
+            time.sleep(POLL_SECONDS)
+
+        # A final drain: the last lines are usually the ones that explain the end.
+        position = self._drain_log(job_id, log_path, position)
+        with self._lock:
+            self._processes.pop(job_id, None)
+            cancelled = job_id in self._cancel_requested
+            purged = job_id in self._purged
+        if purged:
+            return
+        exit_code, observed = self._resolve_exit_code(process, status_path)
+        self._finalize(
+            job_id,
+            exit_code=exit_code,
+            exit_observed=observed,
+            cancelled=cancelled,
+            log_path=log_path,
+            spec=spec,
+            parameters=parameters,
+        )
+
+    def _resolve_exit_code(
+        self,
+        process: subprocess.Popen | None,
+        status_path: Path,
+    ) -> tuple[int | None, bool]:
+        """Prefer the supervisor's on-disk record; fall back to our own wait()."""
+        status = _read_json(status_path)
+        if isinstance(status, dict) and status.get("state") in {"exited", "start_failed"}:
+            code = status.get("exitCode")
+            if isinstance(code, int):
+                return code, True
+        if process is not None:
+            return process.returncode, process.returncode is not None
+        return None, False
+
+    def _read_worker_pid(self, status_path: Path) -> int | None:
+        status = _read_json(status_path)
+        if isinstance(status, dict):
+            worker = status.get("workerPid")
+            if isinstance(worker, int):
+                return worker
+        return None
+
+    def _drain_log(self, job_id: str, log_path: Path, position: int) -> int:
+        """Read new log bytes and turn structured lines into job state."""
+        if not log_path.exists():
+            return position
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(position)
+                chunk = handle.read()
+                position = handle.tell()
+        except OSError:
+            return position
+        if not chunk:
+            return position
+        changes: dict[str, Any] = {"lastOutputAt": _now()}
+        last_text = ""
+        for line in chunk.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            last_text = text
+            event = _parse_event_line(text)
+            if event is None:
+                continue
+            if event.get("verdict") in TERMINAL_VERDICTS:
+                changes["verdict"] = event["payload"]
+            if event.get("progress") is not None:
+                changes["progress"] = event["progress"]
+            if event.get("stage"):
+                changes["stage"] = event["stage"]
+                changes["stages"] = self._advance_stage(
+                    job_id,
+                    stage=str(event["stage"]),
+                    message=str(event.get("message") or ""),
+                    progress=event.get("progress"),
                 )
+            if event.get("message"):
+                changes["message"] = str(event["message"])[:240]
+        # Even unstructured output is evidence the job is alive; showing the last
+        # line beats showing "running" for an hour with no other signal.
+        changes.setdefault("message", last_text[:240] or "running")
+        self._update(job_id, **changes)
+        return position
+
+    def _advance_stage(
+        self,
+        job_id: str,
+        *,
+        stage: str,
+        message: str,
+        progress: float | None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            stages = list(record.stages) if record else []
+        now = _now()
+        if stages and stages[-1]["id"] == stage:
+            stages[-1].update({"message": message or stages[-1].get("message"), "progress": progress})
+            return stages
+        if stages:
+            stages[-1]["completedAt"] = now
+            stages[-1]["status"] = "completed"
+        stages.append({
+            "id": stage,
+            "label": STAGE_LABELS.get(stage, stage),
+            "startedAt": now,
+            "completedAt": None,
+            "status": "running",
+            "message": message,
+            "progress": progress,
+        })
+        return stages
+
+    def _sample_resources(self, job_id: str, pid: int | None) -> None:
+        if not pid:
+            return
+        sample = sample_process(pid, now=_now())
+        if sample is not None:
+            self._update(job_id, resources=sample.to_dict())
+
+    def _finalize(
+        self,
+        job_id: str,
+        *,
+        exit_code: int | None,
+        exit_observed: bool,
+        cancelled: bool,
+        log_path: Path,
+        spec: dict[str, Any],
+        parameters: dict[str, Any],
+    ) -> None:
+        outputs = [
+            project_relative(self.settings, value)
+            for key, value in parameters.items()
+            if key in spec["path_outputs"] and value is not None
+        ]
+        outputs.extend(spec.get("fixed_outputs", ()))
+        with self._lock:
+            record = self._jobs.get(job_id)
+            stages = list(record.stages) if record else []
+            verdict = dict(record.verdict) if record and record.verdict else None
+        for stage in stages:
+            if stage.get("completedAt") is None:
+                stage["completedAt"] = _now()
+                stage["status"] = "completed" if exit_code == 0 else "stopped"
+
+        if cancelled:
+            self._update(
+                job_id, status="cancelled", finishedAt=_now(), stages=stages,
+                message="cancelled by operator", outputPaths=outputs,
+                exitCode=exit_code, exitStatusObserved=exit_observed,
+            )
+            return
+        if exit_code == 0:
+            if self.on_success is not None:
+                try:
+                    self.on_success()
+                except Exception:
+                    pass
+            self._update(
+                job_id, status="succeeded", finishedAt=_now(), progress=1.0, stages=stages,
+                message="completed; runtime catalog invalidated", outputPaths=outputs,
+                exitCode=0, exitStatusObserved=exit_observed, failure=None,
+            )
+            return
+        if exit_code == CONFIGURATION_BLOCKED_EXIT_CODE:
+            # Nothing was measured: the configuration could not answer its own
+            # question. Filing this as "rejected" would imply a hypothesis was
+            # tested and refused, and filing it as "failed" would imply a bug.
+            self._update(
+                job_id, status="blocked", finishedAt=_now(), progress=1.0, stages=stages,
+                message=(verdict or {}).get("title") or "配置无法执行该研究协议",
+                outputPaths=outputs, exitCode=exit_code, exitStatusObserved=exit_observed,
+                verdict=verdict or {
+                    "verdict": "blocked",
+                    "title": "配置无法执行该研究协议",
+                    "reasons": (verdict or {}).get("reasons") or [],
+                },
+                failure=None,
+            )
+            return
+        if exit_code == RESEARCH_REJECTED_EXIT_CODE:
+            # A pre-registered gate refused the candidate. The run itself
+            # completed: its evidence is intact and worth reading.
+            if self.on_success is not None:
+                try:
+                    self.on_success()
+                except Exception:
+                    pass
+            reasons = (verdict or {}).get("reasons") or []
+            self._update(
+                job_id, status="rejected", finishedAt=_now(), progress=1.0, stages=stages,
+                message=(verdict or {}).get("title") or "研究闸门否决了该候选",
+                outputPaths=outputs, exitCode=exit_code, exitStatusObserved=exit_observed,
+                verdict=verdict or {
+                    "verdict": "rejected",
+                    "title": "研究闸门否决了该候选",
+                    "reasons": reasons,
+                },
+                failure=None,
+            )
+            return
+
+        lines = _read_tail(log_path, 400)
+        if not exit_observed:
+            failure = JobFailure(
+                code="exit_status_unknown",
+                title="任务在服务重启期间结束，退出状态未知",
+                detail=(
+                    "进程在本 API 进程之外结束，没有留下退出码。"
+                    "下方日志尾部是它最后写出的内容。"
+                ),
+                remediation="根据日志判断是否已完成；需要时用相同参数重试。",
+                retryable=True,
+                log_tail=lines[-40:],
+                exit_code=None,
+            )
+        else:
+            failure = diagnose(lines, exit_code=exit_code, cancelled=False)
+        self._update(
+            job_id,
+            status="failed",
+            finishedAt=_now(),
+            stages=stages,
+            message=failure.title,
+            error=failure.detail,
+            failure=failure.to_dict(),
+            exitCode=exit_code,
+            exitStatusObserved=exit_observed,
+            outputPaths=outputs,
+        )
 
     def _process_environment(self, spec: dict[str, Any]) -> dict[str, str]:
         environment = {
@@ -1183,63 +1601,276 @@ class JobManager:
             return
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            self._jobs = {item["id"]: JobRecord(**item) for item in payload}
-            for record in self._jobs.values():
-                if record.status in {"queued", "starting", "running", "paused", "cancelling"}:
-                    record.status = "failed"
-                    record.finishedAt = _now()
-                    record.error = "API process restarted before job completed"
         except (OSError, ValueError, TypeError):
             self._jobs = {}
+            return
+        known = {item.name for item in fields(JobRecord)}
+        self._jobs = {}
+        for item in payload:
+            if not isinstance(item, dict) or "id" not in item:
+                continue
+            # Records written by older builds lack the newer fields; drop unknown
+            # keys rather than refusing to load the entire history.
+            self._jobs[item["id"]] = JobRecord(**{k: v for k, v in item.items() if k in known})
+        for record in list(self._jobs.values()):
+            if record.status in ACTIVE_STATUSES:
+                self._recover(record)
+        self._persist()
+
+    def _recover(self, record: JobRecord) -> None:
+        """Reconcile one in-flight job against reality after an API restart.
+
+        Three outcomes, in order of how much we actually know:
+        the supervisor recorded an exit code (finalize from it); the process is
+        demonstrably still running (re-adopt and keep following it); or neither
+        (say the exit status is unknown instead of inventing "failed").
+        """
+        job_id = record.id
+        status_path = (
+            safe_project_path(self.settings, record.statusPath)
+            if record.statusPath
+            else self.settings.jobs_root / f"{job_id}.status.json"
+        )
+        log_path = (
+            safe_project_path(self.settings, record.logPath)
+            if record.logPath
+            else self.settings.jobs_root / f"{job_id}.log"
+        )
+        spec = COMMANDS.get(record.commandId) or {"path_outputs": set()}
+        status = _read_json(status_path)
+        exit_code = status.get("exitCode") if isinstance(status, dict) else None
+        state = status.get("state") if isinstance(status, dict) else None
+
+        if state in {"exited", "start_failed"} and isinstance(exit_code, int):
+            record.status = "running"  # so _finalize's transition is meaningful
+            Thread(
+                target=self._finalize,
+                args=(job_id,),
+                kwargs={
+                    "exit_code": exit_code,
+                    "exit_observed": True,
+                    "cancelled": False,
+                    "log_path": log_path,
+                    "spec": spec,
+                    "parameters": record.parameters,
+                },
+                daemon=True,
+            ).start()
+            return
+
+        worker_pid = status.get("workerPid") if isinstance(status, dict) else None
+        if isinstance(worker_pid, int):
+            record.workerPid = worker_pid
+        # Follow whichever half of the pair is still alive. The supervisor can
+        # die while the training it started keeps running for hours, and a
+        # workstation that declared that training dead would be lying about the
+        # most expensive thing on the machine.
+        follow_pid, follow_ticks = None, None
+        if process_is_alive(record.pid, record.processStartTicks):
+            follow_pid, follow_ticks = record.pid, record.processStartTicks
+        elif process_is_alive(record.workerPid, record.workerStartTicks):
+            follow_pid, follow_ticks = record.workerPid, record.workerStartTicks
+        if follow_pid is not None:
+            record.adopted = True
+            record.message = (
+                "已在服务重启后重新接管该进程"
+                if follow_pid == record.pid
+                else "监督进程已消失，但训练进程仍在运行，已直接接管"
+            )
+            Thread(
+                target=self._supervise,
+                args=(job_id,),
+                kwargs={
+                    "process": None,
+                    "log_path": log_path,
+                    "status_path": status_path,
+                    "spec": spec,
+                    "parameters": record.parameters,
+                    "pid": follow_pid,
+                    "start_ticks": follow_ticks,
+                },
+                daemon=True,
+            ).start()
+            return
+
+        lines = _read_tail(log_path, 400)
+        verdict_line = next(
+            (
+                line
+                for line in reversed(lines)
+                if '"verdict"' in line
+                and any(f'"{name}"' in line for name in TERMINAL_VERDICTS)
+            ),
+            None,
+        )
+        if verdict_line is not None:
+            event = _parse_event_line(verdict_line)
+            verdict = (event or {}).get("payload") or {}
+            # A run that recorded its own conclusion keeps it across an API
+            # restart; recovering it as a generic failure would discard both the
+            # verdict and the evidence behind it.
+            record.status = "blocked" if verdict.get("verdict") == "blocked" else "rejected"
+            record.verdict = verdict or None
+            record.progress = 1.0
+            record.message = verdict.get("title") or (
+                "配置无法执行该研究协议" if record.status == "blocked" else "研究闸门否决了该候选"
+            )
+            record.finishedAt = record.finishedAt or _now()
+            return
+
+        record.status = "failed"
+        record.finishedAt = _now()
+        failure = JobFailure(
+            code="lost_after_restart",
+            title="服务重启后该任务的进程已不存在",
+            detail=(
+                "API 重启时该任务仍在运行，重启后进程已消失且没有留下退出码，"
+                "因此无法断定它是完成还是中断。"
+            ),
+            remediation="查看日志尾部与输出目录判断进度；需要时用相同参数重试。",
+            retryable=True,
+            log_tail=lines[-40:],
+            exit_code=None,
+        )
+        record.failure = failure.to_dict()
+        record.error = failure.detail
+        record.message = failure.title
+        record.exitStatusObserved = False
 
     def _persist(self) -> None:
+        # A per-write temp name: supervision threads and recovery threads persist
+        # concurrently, and a shared "jobs.tmp" meant one thread's rename could
+        # delete the file another was about to rename.
+        with self._lock:
+            snapshot = [asdict(record) for record in self._jobs.values()]
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.state_path.with_suffix(".tmp")
-        temp.write_text(
-            json.dumps([asdict(record) for record in self._jobs.values()], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temp.replace(self.state_path)
+        temp = self.state_path.with_name(f"jobs.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            temp.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp.replace(self.state_path)
+        except OSError:
+            temp.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _public(record: JobRecord) -> dict[str, Any]:
         data = asdict(record)
         data.pop("logPath", None)
         data.pop("ownedOutputPaths", None)
+        data.pop("processStartTicks", None)
+        data.pop("statusPath", None)
+        data["terminal"] = record.status in TERMINAL_STATUSES
+        data["elapsedSeconds"] = _elapsed_seconds(record)
+        data["canRetry"] = bool(record.status in RETRYABLE_STATUSES and record.parameters)
         return data
 
 
-def _terminate(process: subprocess.Popen, *, was_paused: bool) -> None:
-    """Terminate a job process, resuming it first if it was suspended.
+def _elapsed_seconds(record: JobRecord) -> float | None:
+    if not record.startedAt:
+        return None
+    started = _parse_time(record.startedAt)
+    if started is None:
+        return None
+    end = _parse_time(record.finishedAt) if record.finishedAt else datetime.now(timezone.utc)
+    if end is None:
+        return None
+    return round((end - started).total_seconds(), 1)
 
-    A SIGSTOP'd process does not act on SIGTERM until it runs again, so
-    terminating a paused job without SIGCONT leaves it stopped forever while the
-    log reader blocks on its stdout pipe. Continue first, then terminate.
-    """
-    if was_paused:
-        try:
-            process.send_signal(signal.SIGCONT)
-        except OSError:
-            pass
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
     try:
-        process.terminate()
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _read_tail(path: Path, limit: int) -> list[str]:
+    """Last `limit` lines without loading a multi-gigabyte log into memory."""
+    if not path.exists():
+        return []
+    try:
+        size = path.stat().st_size
+        window = min(size, 512 * 1024)
+        with path.open("rb") as handle:
+            handle.seek(size - window)
+            data = handle.read(window)
     except OSError:
-        pass
+        return []
+    text = data.decode("utf-8", errors="replace")
+    if window < size:
+        text = text.split("\n", 1)[-1]
+    return text.splitlines()[-limit:]
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _progress_from_line(line: str) -> float | None:
-    """Parse provider progress without requiring a provider-specific protocol."""
-    match = re.search(r"\[(\d+)\s*/\s*(\d+)\]", line)
-    if match and int(match.group(2)) > 0:
-        return min(0.99, int(match.group(1)) / int(match.group(2)))
+def _parse_event_line(line: str) -> dict[str, Any] | None:
+    """Extract progress, stage, message and verdict from one output line.
+
+    Commands publish structured JSON lines; anything else is treated as plain
+    output. The previous implementation read only `progress` and then used the
+    entire raw JSON blob as the human-facing message, which is why the UI could
+    never say which stage a run was in.
+    """
+    text = line.strip()
+    bracket = re.search(r"\[(\d+)\s*/\s*(\d+)\]", text)
+    if bracket and int(bracket.group(2)) > 0:
+        return {
+            "progress": min(0.99, int(bracket.group(1)) / int(bracket.group(2))),
+            "stage": None,
+            "message": text[:240],
+        }
+    if not text.startswith("{"):
+        return None
     try:
-        payload = json.loads(line)
+        payload = json.loads(text)
     except (TypeError, ValueError):
         return None
+    if not isinstance(payload, dict):
+        return None
+
+    event: dict[str, Any] = {"progress": None, "stage": None, "message": None}
+    if payload.get("verdict") in TERMINAL_VERDICTS:
+        event["verdict"] = payload["verdict"]
+        event["payload"] = payload
+    value = payload.get("progress")
+    if isinstance(value, (int, float)):
+        event["progress"] = min(1.0, max(0.0, float(value)))
+    else:
+        for current_key, total_key in (
+            ("batch", "total_batches"),
+            ("iteration", "total_iterations"),
+            ("rows_written", "total_rows"),
+            ("fold", "total_folds"),
+        ):
+            current, total = payload.get(current_key), payload.get(total_key)
+            if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                event["progress"] = min(0.99, max(0.0, float(current) / float(total)))
+                break
+    if isinstance(payload.get("stage"), str):
+        event["stage"] = payload["stage"]
+    if isinstance(payload.get("message"), str):
+        event["message"] = payload["message"]
+    if event["progress"] is None and event["stage"] is None and event["message"] is None:
+        return None
+    return event
+
+
     value = payload.get("progress")
     if isinstance(value, (int, float)):
         return min(0.99, max(0.0, float(value)))

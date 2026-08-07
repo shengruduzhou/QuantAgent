@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Any, Iterable, Mapping
 
+from quantagent.domain.accounting import UnpriceablePosition
 from quantagent.paper.orders import BUY, SELL, Fill
 
 
@@ -67,25 +68,50 @@ class Portfolio:
     def sellable(self, symbol: str) -> float:
         return self.positions[symbol].sellable if symbol in self.positions else 0.0
 
+    def unpriceable(self, prices: Mapping[str, float]) -> tuple[str, ...]:
+        """Held symbols with no mark. The delisted-and-still-held case."""
+        return tuple(
+            sorted(
+                symbol for symbol, position in self.positions.items()
+                if not position.is_flat and symbol not in prices
+            )
+        )
+
     def market_value(self, prices: Mapping[str, float]) -> float:
+        """Raises when a held position has no mark.
+
+        The `if s in prices` filter this replaces silently *excluded* unpriced
+        positions, which claims the holding does not exist — the same class of
+        defect as marking it at zero, and equally invisible because the resulting
+        equity figure looks perfectly ordinary (DEF-021).
+        """
+        missing = self.unpriceable(prices)
+        if missing:
+            raise UnpriceablePosition(missing)
         return sum(
             p.market_value(prices[s]) for s, p in self.positions.items()
-            if s in prices and not p.is_flat
+            if not p.is_flat
         )
 
     def equity(self, prices: Mapping[str, float]) -> float:
         return self.cash + self.market_value(prices)
 
     def unrealised_pnl(self, prices: Mapping[str, float]) -> float:
+        missing = self.unpriceable(prices)
+        if missing:
+            raise UnpriceablePosition(missing)
         return sum(
             p.unrealised_pnl(prices[s]) for s, p in self.positions.items()
-            if s in prices and not p.is_flat
+            if not p.is_flat
         )
 
     def gross_exposure(self, prices: Mapping[str, float]) -> float:
+        missing = self.unpriceable(prices)
+        if missing:
+            raise UnpriceablePosition(missing)
         return sum(
             abs(p.market_value(prices[s])) for s, p in self.positions.items()
-            if s in prices
+            if not p.is_flat
         )
 
     # -- mutation (only ever driven by a Fill) ----------------------------
@@ -162,6 +188,13 @@ class Portfolio:
         if share_ratio != 1.0:
             position.average_cost /= share_ratio
         self.cash += cash_received
+        # Dividend income is realised return, not a free cash increase. On the ex
+        # date the mark drops by the dividend, so cash rises and market value falls
+        # by the same amount; booking the cash without the income left realised PnL
+        # understated by exactly the dividend, and disagreeing with the canonical
+        # replay that does book it (DEF-020).
+        position.realised_pnl += cash_received
+        self.realised_pnl += cash_received
         return {
             "symbol": symbol, "applied": True, "share_ratio": share_ratio,
             "shares_before": before, "shares_after": position.total,
@@ -169,7 +202,18 @@ class Portfolio:
         }
 
     def to_dict(self, prices: Mapping[str, float] | None = None) -> dict[str, Any]:
+        """Snapshot. Valuation fields are None when a holding cannot be marked."""
         prices = prices or {}
+        unpriceable = self.unpriceable(prices)
+        valuation: dict[str, Any] = (
+            {"market_value": None, "equity": None, "unrealised_pnl": None}
+            if unpriceable
+            else {
+                "market_value": self.market_value(prices),
+                "equity": self.equity(prices),
+                "unrealised_pnl": self.unrealised_pnl(prices),
+            }
+        )
         return {
             "portfolio_id": self.portfolio_id,
             "cash": self.cash,
@@ -178,7 +222,5 @@ class Portfolio:
             "fees_paid": self.fees_paid,
             "positions": {s: p.to_dict() for s, p in self.positions.items()
                           if not p.is_flat},
-            "market_value": self.market_value(prices),
-            "equity": self.equity(prices),
-            "unrealised_pnl": self.unrealised_pnl(prices),
-        }
+            "unpriceable_symbols": list(unpriceable),
+        } | valuation

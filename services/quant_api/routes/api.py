@@ -13,7 +13,11 @@ from services.quant_api.adapters.utils import page_slice
 from services.quant_api.config import safe_project_path
 from services.quant_api.runtime_indexer.parsers import parser_for
 from services.quant_api.schemas.models import CleanupRequest, CouncilOverrideRequest, FactorReviewRequest, GlobalSearchResult, JobRequest, SearchEntity, SearchGroup
+from services.quant_api.schemas.paper import PaperOrderCancellation, PaperOrderSubmission
 from services.quant_api.schemas.strategy import ConnectionRequest, StrategyDraft
+from services.quant_api.services.paper_orders import SubmissionRejected, WriterLockUnavailable
+from quantagent.execution.order_manager import IdempotencyConflict
+from quantagent.safety.operating_mode import LiveTradingRejected
 
 
 router = APIRouter(prefix="/api")
@@ -32,7 +36,7 @@ def response(data: Any, *, issues: list[dict] | None = None, status: str | None 
 
 
 @router.get("/search")
-async def global_search(request: Request, q: str = Query(min_length=2, max_length=120), limit: int = Query(8, ge=1, le=20)) -> dict:
+def global_search(request: Request, q: str = Query(min_length=2, max_length=120), limit: int = Query(8, ge=1, le=20)) -> dict:
     svc = services(request)
     needle = q.strip().lower()
     groups: list[SearchGroup] = []
@@ -133,19 +137,19 @@ async def global_search(request: Request, q: str = Query(min_length=2, max_lengt
 
 
 @router.get("/data/providers")
-async def data_providers(request: Request) -> dict:
+def data_providers(request: Request) -> dict:
     data = services(request).data_manager.overview()
     return response(data, status="ready")
 
 
 @router.get("/data/quarantine")
-async def data_quarantine(request: Request) -> dict:
+def data_quarantine(request: Request) -> dict:
     data = services(request).data_manager.quarantine_files()
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/data/coverage")
-async def data_coverage(
+def data_coverage(
     request: Request,
     path: str,
     date_column: str = Query("trade_date", alias="dateColumn"),
@@ -166,7 +170,7 @@ async def data_coverage(
 
 
 @router.get("/governance/status")
-async def governance_status(request: Request) -> dict:
+def governance_status(request: Request) -> dict:
     """Read-only operational governance surface (H-031): shadow/S4/U0/lineage.
 
     Returns existence- and gate-level fields only; never candidate performance.
@@ -177,7 +181,7 @@ async def governance_status(request: Request) -> dict:
 
 
 @router.get("/system/overview")
-async def system_overview(request: Request) -> dict:
+def system_overview(request: Request) -> dict:
     svc = services(request)
     backtests = svc.backtests.list()
     models = svc.models.list()
@@ -226,7 +230,7 @@ async def system_overview(request: Request) -> dict:
 
 
 @router.get("/system/resources")
-async def system_resources() -> dict:
+def system_resources() -> dict:
     """Return bounded host telemetry; never expose arbitrary shell execution."""
 
     payload: dict[str, Any] = {
@@ -283,7 +287,7 @@ async def system_resources() -> dict:
 
 
 @router.get("/system/runtime-index")
-async def runtime_index(
+def runtime_index(
     request: Request,
     kind: str | None = None,
     query: str | None = None,
@@ -330,7 +334,7 @@ async def runtime_index(
 
 
 @router.get("/system/runtime-catalog")
-async def runtime_catalog(request: Request, refresh: bool = False) -> dict:
+def runtime_catalog(request: Request, refresh: bool = False) -> dict:
     svc = services(request)
     if refresh:
         svc.indexer.scan(force=True)
@@ -339,7 +343,7 @@ async def runtime_catalog(request: Request, refresh: bool = False) -> dict:
 
 
 @router.get("/system/runtime-index/{artifact_id}/lineage")
-async def runtime_lineage(request: Request, artifact_id: str) -> dict:
+def runtime_lineage(request: Request, artifact_id: str) -> dict:
     data = services(request).indexer.lineage(artifact_id)
     if data is None:
         raise HTTPException(404, "artifact not found")
@@ -348,7 +352,7 @@ async def runtime_lineage(request: Request, artifact_id: str) -> dict:
 
 
 @router.get("/system/runtime-index/{artifact_id}/preview")
-async def runtime_preview(request: Request, artifact_id: str, limit: int = Query(100, le=1_000)) -> dict:
+def runtime_preview(request: Request, artifact_id: str, limit: int = Query(100, le=1_000)) -> dict:
     svc = services(request)
     artifact = svc.indexer.get(artifact_id)
     if artifact is None:
@@ -371,7 +375,7 @@ async def runtime_preview(request: Request, artifact_id: str, limit: int = Query
 
 
 @router.get("/system/logs")
-async def system_logs(
+def system_logs(
     request: Request,
     artifact_id: str | None = Query(None, alias="artifactId"),
     query: str | None = None,
@@ -395,13 +399,13 @@ async def system_logs(
 
 
 @router.get("/system/runtime-cleanup")
-async def runtime_cleanup_analysis(request: Request) -> dict:
+def runtime_cleanup_analysis(request: Request) -> dict:
     data = services(request).cleanup.analyze()
     return response(data, status="ready" if data["candidates"] else "empty")
 
 
 @router.post("/system/runtime-cleanup")
-async def runtime_cleanup_execute(request: Request, body: CleanupRequest) -> dict:
+def runtime_cleanup_execute(request: Request, body: CleanupRequest) -> dict:
     try:
         data = services(request).cleanup.execute(body.candidate_ids, body.confirmation)
         services(request).indexer.invalidate()
@@ -411,13 +415,13 @@ async def runtime_cleanup_execute(request: Request, body: CleanupRequest) -> dic
 
 
 @router.get("/backtests")
-async def list_backtests(request: Request) -> dict:
+def list_backtests(request: Request) -> dict:
     items = services(request).backtests.list()
     return response(items, status="ready" if items else "empty")
 
 
 @router.get("/backtests/{backtest_id}")
-async def get_backtest(request: Request, backtest_id: str) -> dict:
+def get_backtest(request: Request, backtest_id: str) -> dict:
     item = services(request).backtests.get(backtest_id)
     if item is None:
         raise HTTPException(404, "backtest not found")
@@ -425,12 +429,12 @@ async def get_backtest(request: Request, backtest_id: str) -> dict:
 
 
 @router.get("/backtests/{backtest_id}/equity")
-async def backtest_equity(request: Request, backtest_id: str) -> dict:
+def backtest_equity(request: Request, backtest_id: str) -> dict:
     return _backtest_call(request, backtest_id, "equity")
 
 
 @router.get("/backtests/{backtest_id}/drawdown")
-async def backtest_drawdown(request: Request, backtest_id: str) -> dict:
+def backtest_drawdown(request: Request, backtest_id: str) -> dict:
     payload = _backtest_call(request, backtest_id, "equity")
     if payload["status"] == "error":
         return payload
@@ -441,7 +445,7 @@ async def backtest_drawdown(request: Request, backtest_id: str) -> dict:
 
 
 @router.get("/backtests/{backtest_id}/trades")
-async def backtest_trades(
+def backtest_trades(
     request: Request,
     backtest_id: str,
     symbol: str | None = None,
@@ -460,7 +464,7 @@ async def backtest_trades(
 
 
 @router.get("/backtests/{backtest_id}/positions")
-async def backtest_positions(request: Request, backtest_id: str, symbol: str | None = None) -> dict:
+def backtest_positions(request: Request, backtest_id: str, symbol: str | None = None) -> dict:
     try:
         data = services(request).backtests.positions(backtest_id, symbol=symbol)
         return response(data, status="ready" if data else "empty")
@@ -469,7 +473,7 @@ async def backtest_positions(request: Request, backtest_id: str, symbol: str | N
 
 
 @router.get("/backtests/{backtest_id}/risk")
-async def backtest_risk(request: Request, backtest_id: str, page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
+def backtest_risk(request: Request, backtest_id: str, page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
     try:
         data = services(request).backtests.risk_events(backtest_id, page=page, page_size=page_size)
         return response(data, status="ready" if data["items"] else "empty")
@@ -478,7 +482,7 @@ async def backtest_risk(request: Request, backtest_id: str, page: int = 1, page_
 
 
 @router.get("/backtests/{backtest_id}/stocks/{symbol}")
-async def stock_replay(request: Request, backtest_id: str, symbol: str) -> dict:
+def stock_replay(request: Request, backtest_id: str, symbol: str) -> dict:
     try:
         data = services(request).backtests.stock_replay(backtest_id, symbol)
         return response(data, status="ready" if data["availability"]["bars"] else "partial")
@@ -487,7 +491,7 @@ async def stock_replay(request: Request, backtest_id: str, symbol: str) -> dict:
 
 
 @router.get("/backtests/{backtest_id}/stocks/{symbol}/kline")
-async def stock_kline(
+def stock_kline(
     request: Request,
     backtest_id: str,
     symbol: str,
@@ -502,7 +506,7 @@ async def stock_kline(
 
 
 @router.get("/backtests/{backtest_id}/stocks/{symbol}/signals")
-async def stock_signals(request: Request, backtest_id: str, symbol: str) -> dict:
+def stock_signals(request: Request, backtest_id: str, symbol: str) -> dict:
     try:
         data = services(request).backtests.signals(backtest_id, symbol)
         return response(data, status="ready" if data else "empty")
@@ -511,12 +515,12 @@ async def stock_signals(request: Request, backtest_id: str, symbol: str) -> dict
 
 
 @router.get("/backtests/{backtest_id}/stocks/{symbol}/trades")
-async def stock_trades(request: Request, backtest_id: str, symbol: str, page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
-    return await backtest_trades(request, backtest_id, symbol, page, page_size)
+def stock_trades(request: Request, backtest_id: str, symbol: str, page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
+    return backtest_trades(request, backtest_id, symbol, page, page_size)
 
 
 @router.get("/backtests/{backtest_id}/stocks/{symbol}/t-analysis")
-async def stock_t_analysis(request: Request, backtest_id: str, symbol: str, source_id: str | None = Query(None, alias="sourceId")) -> dict:
+def stock_t_analysis(request: Request, backtest_id: str, symbol: str, source_id: str | None = Query(None, alias="sourceId")) -> dict:
     if services(request).backtests.get(backtest_id) is None:
         raise HTTPException(404, "backtest not found")
     data = services(request).do_t.analyze(source_id=source_id, symbol=symbol)
@@ -532,7 +536,7 @@ async def stock_t_analysis(request: Request, backtest_id: str, symbol: str, sour
 
 
 @router.get("/fusion/runs")
-async def list_fusion_runs(request: Request) -> dict:
+def list_fusion_runs(request: Request) -> dict:
     data = services(request).fusion.list()
     return response(
         data,
@@ -546,7 +550,7 @@ async def list_fusion_runs(request: Request) -> dict:
 
 
 @router.get("/fusion/runs/{run_id}")
-async def get_fusion_run(request: Request, run_id: str) -> dict:
+def get_fusion_run(request: Request, run_id: str) -> dict:
     try:
         data = services(request).fusion.detail(run_id)
     except KeyError:
@@ -555,7 +559,7 @@ async def get_fusion_run(request: Request, run_id: str) -> dict:
 
 
 @router.get("/fusion/runs/{run_id}/nav")
-async def get_fusion_nav(
+def get_fusion_nav(
     request: Request,
     run_id: str,
     limit: int = Query(4_000, le=20_000),
@@ -568,7 +572,7 @@ async def get_fusion_nav(
 
 
 @router.get("/fusion/runs/{run_id}/compare")
-async def compare_fusion_candidates(
+def compare_fusion_candidates(
     request: Request,
     run_id: str,
     candidates: str = Query("", max_length=500),
@@ -584,12 +588,12 @@ async def compare_fusion_candidates(
 
 
 @router.get("/council/roster")
-async def council_roster(request: Request) -> dict:
+def council_roster(request: Request) -> dict:
     return response(services(request).council.roster())
 
 
 @router.get("/council/review/fusion/{run_id}")
-async def council_review_fusion(
+def council_review_fusion(
     request: Request,
     run_id: str,
     candidate: str | None = None,
@@ -601,8 +605,21 @@ async def council_review_fusion(
     return response(data)
 
 
+@router.get("/council/review/run/{run_id}")
+def council_review_strategy_run(request: Request, run_id: str) -> dict:
+    """Role-scoped council review of a completed strategy-pipeline run."""
+    svc = services(request)
+    try:
+        data = svc.council.review_strategy_run(
+            run_id, svc.strategies.results, svc.strategies
+        )
+    except KeyError as exc:
+        raise HTTPException(404, f"run not found: {exc}")
+    return response(data)
+
+
 @router.get("/council/overrides")
-async def council_overrides(
+def council_overrides(
     request: Request,
     subjectType: str | None = None,
     subjectId: str | None = None,
@@ -614,7 +631,7 @@ async def council_overrides(
 
 
 @router.post("/council/overrides")
-async def create_council_override(request: Request, body: CouncilOverrideRequest) -> dict:
+def create_council_override(request: Request, body: CouncilOverrideRequest) -> dict:
     try:
         data = services(request).council.record_override(
             subject_type=body.subject_type,
@@ -630,13 +647,13 @@ async def create_council_override(request: Request, body: CouncilOverrideRequest
 
 
 @router.get("/factors")
-async def list_factors(request: Request, query: str | None = None) -> dict:
+def list_factors(request: Request, query: str | None = None) -> dict:
     data = services(request).factors.list(query)
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/factors/correlation")
-async def factor_correlation(
+def factor_correlation(
     request: Request,
     names: str = Query("", max_length=500),
 ) -> dict:
@@ -647,7 +664,7 @@ async def factor_correlation(
 
 
 @router.get("/factors/{factor_name}")
-async def get_factor(request: Request, factor_name: str) -> dict:
+def get_factor(request: Request, factor_name: str) -> dict:
     data = services(request).factors.get(factor_name)
     if data is None:
         raise HTTPException(404, "factor not found")
@@ -655,7 +672,7 @@ async def get_factor(request: Request, factor_name: str) -> dict:
 
 
 @router.get("/factors/{factor_name}/explanation")
-async def factor_explanation(request: Request, factor_name: str) -> dict:
+def factor_explanation(request: Request, factor_name: str) -> dict:
     data = services(request).factors.explanation(factor_name)
     if data is None:
         raise HTTPException(404, "factor not found")
@@ -663,7 +680,7 @@ async def factor_explanation(request: Request, factor_name: str) -> dict:
 
 
 @router.get("/factors/{factor_name}/reviews")
-async def factor_reviews(request: Request, factor_name: str) -> dict:
+def factor_reviews(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     data = services(request).factors.reviews(factor_name)
@@ -671,7 +688,7 @@ async def factor_reviews(request: Request, factor_name: str) -> dict:
 
 
 @router.post("/factors/{factor_name}/reviews")
-async def create_factor_review(request: Request, factor_name: str, body: FactorReviewRequest) -> dict:
+def create_factor_review(request: Request, factor_name: str, body: FactorReviewRequest) -> dict:
     try:
         return response(services(request).factors.record_review(factor_name, body.action, body.note))
     except KeyError:
@@ -679,7 +696,7 @@ async def create_factor_review(request: Request, factor_name: str, body: FactorR
 
 
 @router.get("/factors/{factor_name}/backtest")
-async def factor_backtest(request: Request, factor_name: str) -> dict:
+def factor_backtest(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     data = services(request).factors.backtest(factor_name)
@@ -687,7 +704,7 @@ async def factor_backtest(request: Request, factor_name: str) -> dict:
 
 
 @router.get("/factors/{factor_name}/stocks/{symbol}/signals")
-async def factor_stock_signals(request: Request, factor_name: str, symbol: str) -> dict:
+def factor_stock_signals(request: Request, factor_name: str, symbol: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     return response([], status="empty", issues=[{
@@ -698,7 +715,7 @@ async def factor_stock_signals(request: Request, factor_name: str, symbol: str) 
 
 
 @router.get("/factors/{factor_name}/stocks/{symbol}/trades")
-async def factor_stock_trades(request: Request, factor_name: str, symbol: str) -> dict:
+def factor_stock_trades(request: Request, factor_name: str, symbol: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     return response([], status="empty", issues=[{
@@ -709,14 +726,14 @@ async def factor_stock_trades(request: Request, factor_name: str, symbol: str) -
 
 
 @router.get("/factors/{factor_name}/ic")
-async def factor_ic(request: Request, factor_name: str) -> dict:
+def factor_ic(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     return response(services(request).factors.ic(factor_name))
 
 
 @router.get("/factors/{factor_name}/quantile-returns")
-async def factor_quantiles(request: Request, factor_name: str) -> dict:
+def factor_quantiles(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
     data = services(request).factors.quantile_returns(factor_name)
@@ -724,13 +741,13 @@ async def factor_quantiles(request: Request, factor_name: str) -> dict:
 
 
 @router.get("/selection/runs")
-async def selection_runs(request: Request) -> dict:
+def selection_runs(request: Request) -> dict:
     data = services(request).selections.list()
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/selection/runs/{run_id}")
-async def selection_run(request: Request, run_id: str) -> dict:
+def selection_run(request: Request, run_id: str) -> dict:
     data = services(request).selections.get(run_id)
     if data is None:
         raise HTTPException(404, "selection run not found")
@@ -738,7 +755,7 @@ async def selection_run(request: Request, run_id: str) -> dict:
 
 
 @router.get("/selection/runs/{run_id}/funnel")
-async def selection_funnel(request: Request, run_id: str) -> dict:
+def selection_funnel(request: Request, run_id: str) -> dict:
     try:
         return response(services(request).selections.funnel(run_id))
     except KeyError:
@@ -746,7 +763,7 @@ async def selection_funnel(request: Request, run_id: str) -> dict:
 
 
 @router.get("/selection/runs/{run_id}/ranking")
-async def selection_ranking(request: Request, run_id: str, limit: int = Query(500, le=1_000)) -> dict:
+def selection_ranking(request: Request, run_id: str, limit: int = Query(500, le=1_000)) -> dict:
     try:
         data = services(request).selections.ranking(run_id, limit)
         return response(data, status="ready" if data else "empty")
@@ -755,7 +772,7 @@ async def selection_ranking(request: Request, run_id: str, limit: int = Query(50
 
 
 @router.get("/selection/runs/{run_id}/stocks/{symbol}/decision-chain")
-async def selection_decision_chain(request: Request, run_id: str, symbol: str) -> dict:
+def selection_decision_chain(request: Request, run_id: str, symbol: str) -> dict:
     data = services(request).selections.decision_chain(run_id, symbol)
     if data is None:
         return response(
@@ -775,13 +792,13 @@ async def selection_decision_chain(request: Request, run_id: str, symbol: str) -
 
 
 @router.get("/models")
-async def list_models(request: Request) -> dict:
+def list_models(request: Request) -> dict:
     data = services(request).models.list()
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/models/compare")
-async def compare_models(request: Request, ids: str = Query("")) -> dict:
+def compare_models(request: Request, ids: str = Query("")) -> dict:
     model_ids = [value for value in ids.split(",") if value]
     if not model_ids:
         return response({"models": [], "metricKeys": []}, status="empty")
@@ -792,7 +809,7 @@ async def compare_models(request: Request, ids: str = Query("")) -> dict:
 
 
 @router.get("/models/{model_id}")
-async def get_model(request: Request, model_id: str) -> dict:
+def get_model(request: Request, model_id: str) -> dict:
     data = services(request).models.get(model_id)
     if data is None:
         raise HTTPException(404, "model not found")
@@ -800,7 +817,7 @@ async def get_model(request: Request, model_id: str) -> dict:
 
 
 @router.get("/models/{model_id}/observability")
-async def model_observability(request: Request, model_id: str) -> dict:
+def model_observability(request: Request, model_id: str) -> dict:
     try:
         return response(services(request).models.observability(model_id))
     except KeyError:
@@ -808,7 +825,7 @@ async def model_observability(request: Request, model_id: str) -> dict:
 
 
 @router.get("/models/{model_id}/training-metrics")
-async def model_training_metrics(request: Request, model_id: str) -> dict:
+def model_training_metrics(request: Request, model_id: str) -> dict:
     try:
         data = services(request).models.training_metrics(model_id)
         return response(data, status="ready" if data else "empty")
@@ -817,7 +834,7 @@ async def model_training_metrics(request: Request, model_id: str) -> dict:
 
 
 @router.get("/models/{model_id}/feature-importance")
-async def model_feature_importance(request: Request, model_id: str) -> dict:
+def model_feature_importance(request: Request, model_id: str) -> dict:
     try:
         data = services(request).models.feature_importance(model_id)
         return response(data, status="ready" if data else "empty")
@@ -826,7 +843,7 @@ async def model_feature_importance(request: Request, model_id: str) -> dict:
 
 
 @router.get("/models/{model_id}/predictions")
-async def model_predictions(request: Request, model_id: str, symbol: str | None = None, limit: int = Query(2_000, le=10_000)) -> dict:
+def model_predictions(request: Request, model_id: str, symbol: str | None = None, limit: int = Query(2_000, le=10_000)) -> dict:
     try:
         data = services(request).models.predictions(model_id, symbol=symbol, limit=limit)
         return response(data, status="ready" if data else "empty")
@@ -835,39 +852,39 @@ async def model_predictions(request: Request, model_id: str, symbol: str | None 
 
 
 @router.get("/models/{model_id}/stocks/{symbol}/prediction-history")
-async def model_stock_predictions(request: Request, model_id: str, symbol: str, limit: int = Query(2_000, le=10_000)) -> dict:
-    return await model_predictions(request, model_id, symbol, limit)
+def model_stock_predictions(request: Request, model_id: str, symbol: str, limit: int = Query(2_000, le=10_000)) -> dict:
+    return model_predictions(request, model_id, symbol, limit)
 
 
 @router.get("/risk/overview")
-async def risk_overview(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
+def risk_overview(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
     return response(services(request).risk.overview(backtest_id))
 
 
 @router.get("/risk/events")
-async def risk_events(request: Request, backtest_id: str | None = Query(None, alias="backtestId"), page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
+def risk_events(request: Request, backtest_id: str | None = Query(None, alias="backtestId"), page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
     data = services(request).risk.events(backtest_id, page, page_size)
     return response(data, status="ready" if data["items"] else "empty")
 
 
 @router.get("/risk/stocks")
-async def risk_stocks(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
+def risk_stocks(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
     data = services(request).risk.stocks(backtest_id)
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/risk/rules")
-async def risk_rules(request: Request) -> dict:
+def risk_rules(request: Request) -> dict:
     return response(services(request).risk.rules())
 
 
 @router.get("/connections")
-async def list_connections(request: Request) -> dict:
+def list_connections(request: Request) -> dict:
     return response(services(request).connections.list())
 
 
 @router.post("/connections/{provider_id}")
-async def connect_provider(request: Request, provider_id: str, body: ConnectionRequest) -> dict:
+def connect_provider(request: Request, provider_id: str, body: ConnectionRequest) -> dict:
     try:
         return response(services(request).connections.connect(provider_id, body.credentials))
     except KeyError:
@@ -877,7 +894,7 @@ async def connect_provider(request: Request, provider_id: str, body: ConnectionR
 
 
 @router.delete("/connections/{provider_id}")
-async def disconnect_provider(request: Request, provider_id: str) -> dict:
+def disconnect_provider(request: Request, provider_id: str) -> dict:
     try:
         return response(services(request).connections.disconnect(provider_id))
     except KeyError:
@@ -885,28 +902,108 @@ async def disconnect_provider(request: Request, provider_id: str) -> dict:
 
 
 @router.get("/strategies")
-async def list_strategies(request: Request) -> dict:
-    data = services(request).strategies.list()
+def list_strategies(request: Request, include_versions: bool = Query(False, alias="includeVersions")) -> dict:
+    data = services(request).strategies.list(include_versions=include_versions)
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/strategies/defaults")
-async def strategy_defaults(request: Request) -> dict:
+def strategy_defaults(request: Request) -> dict:
     return response(services(request).strategies.defaults())
 
 
+@router.get("/strategies/runs")
+def list_strategy_runs(
+    request: Request,
+    strategy_id: str | None = Query(None, alias="strategyId"),
+) -> dict:
+    """Every launched run, with its live job state resolved alongside it."""
+    svc = services(request)
+    runs = svc.strategies.runs(strategy_id)
+    enriched = [{**run, "job": svc.jobs.get(run.get("jobId"))} for run in runs]
+    return response(enriched, status="ready" if enriched else "empty")
+
+
+@router.get("/strategies/runs/compare")
+def compare_strategy_runs(
+    request: Request,
+    runs: str = Query("", max_length=400),
+) -> dict:
+    """Align up to four runs on the same fields, read from their own artifacts."""
+    ids = [item.strip() for item in runs.split(",") if item.strip()]
+    if not ids:
+        return response({"runs": [], "metrics": [], "gates": []}, status="empty")
+    try:
+        data = services(request).strategies.compare_runs(ids)
+    except KeyError as exc:
+        raise HTTPException(404, f"run not found: {exc.args[0]}")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return response(data)
+
+
+@router.get("/strategies/runs/{run_id}")
+def get_strategy_run(request: Request, run_id: str) -> dict:
+    svc = services(request)
+    data = svc.strategies.run_result(run_id)
+    if data is None:
+        raise HTTPException(404, "strategy run not found")
+    data["job"] = svc.jobs.get(data.get("jobId"))
+    result_status = data["result"]["status"]
+    return response(
+        data,
+        status="ready" if result_status in {"complete", "rejected"} else "partial",
+    )
+
+
+@router.get("/strategies/{strategy_id}")
+def get_strategy(
+    request: Request,
+    strategy_id: str,
+    version: str | None = None,
+) -> dict:
+    svc = services(request)
+    data = svc.strategies.get(strategy_id, version)
+    if data is None:
+        raise HTTPException(404, "strategy not found")
+    data["runs"] = [
+        {**run, "job": svc.jobs.get(run.get("jobId"))}
+        for run in data.get("runs", [])
+    ]
+    return response(data)
+
+
+@router.delete("/strategies/{strategy_id}")
+def delete_strategy(
+    request: Request,
+    strategy_id: str,
+    version: str | None = None,
+    delete_outputs: bool = Query(False, alias="deleteOutputs"),
+) -> dict:
+    """Archive a strategy or one of its versions; outputs only on request."""
+    try:
+        data = services(request).strategies.delete(
+            strategy_id, version=version, delete_outputs=delete_outputs
+        )
+    except KeyError:
+        raise HTTPException(404, "strategy not found")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, str(exc))
+    return response(data, status="partial" if data["errors"] else "ready")
+
+
 @router.post("/strategies/validate")
-async def validate_strategy(request: Request, body: StrategyDraft) -> dict:
+def validate_strategy(request: Request, body: StrategyDraft) -> dict:
     return response(services(request).strategies.validate(body))
 
 
 @router.post("/strategies")
-async def save_strategy(request: Request, body: StrategyDraft) -> dict:
+def save_strategy(request: Request, body: StrategyDraft) -> dict:
     return response(services(request).strategies.save(body))
 
 
 @router.post("/strategies/launch")
-async def launch_strategy(request: Request, body: StrategyDraft) -> dict:
+def launch_strategy(request: Request, body: StrategyDraft) -> dict:
     service_container = services(request)
     run_output = f"{body.output_dir.rstrip('/')}/runs/run_{uuid4().hex[:12]}"
     body = body.model_copy(update={"output_dir": run_output})
@@ -931,12 +1028,26 @@ async def launch_strategy(request: Request, body: StrategyDraft) -> dict:
         launch["jobType"],
         launch["commandId"],
         launch["parameters"],
+        # Labels travel with the job so a run found in the task centre can be
+        # traced back to the strategy version that produced it.
+        labels={
+            "strategyId": manifest["id"],
+            "strategyVersion": manifest["version"],
+            "strategyName": manifest["name"],
+        },
     )
-    return response({"job": job, "strategy": manifest})
+    run = service_container.strategies.register_run(
+        strategy_id=manifest["id"],
+        version=manifest["version"],
+        job_id=job["id"],
+        output_dir=run_output,
+        name=manifest["name"],
+    )
+    return response({"job": job, "strategy": manifest, "run": run})
 
 
 @router.get("/risk/backtests/{backtest_id}")
-async def risk_backtest(request: Request, backtest_id: str) -> dict:
+def risk_backtest(request: Request, backtest_id: str) -> dict:
     if services(request).backtests.get(backtest_id) is None:
         raise HTTPException(404, "backtest not found")
     return response({
@@ -947,13 +1058,13 @@ async def risk_backtest(request: Request, backtest_id: str) -> dict:
 
 
 @router.get("/do-t/sources")
-async def do_t_sources(request: Request) -> dict:
+def do_t_sources(request: Request) -> dict:
     data = services(request).do_t.list_sources()
     return response(data, status="ready" if data else "empty")
 
 
 @router.get("/do-t/analysis")
-async def do_t_analysis(request: Request, source_id: str | None = Query(None, alias="sourceId"), symbol: str | None = None, limit: int = Query(500, le=1_000)) -> dict:
+def do_t_analysis(request: Request, source_id: str | None = Query(None, alias="sourceId"), symbol: str | None = None, limit: int = Query(500, le=1_000)) -> dict:
     try:
         data = services(request).do_t.analyze(source_id, symbol, limit)
         return response(data, status="ready" if data["pairs"] else "empty")
@@ -963,52 +1074,52 @@ async def do_t_analysis(request: Request, source_id: str | None = Query(None, al
 
 
 @router.post("/jobs/data")
-async def create_data_job(request: Request, body: JobRequest) -> dict:
+def create_data_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "data", body)
 
 
 @router.post("/jobs/backtest")
-async def create_backtest_job(request: Request, body: JobRequest) -> dict:
+def create_backtest_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "backtest", body)
 
 
 @router.post("/jobs/train")
-async def create_train_job(request: Request, body: JobRequest) -> dict:
+def create_train_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "train", body)
 
 
 @router.post("/jobs/factor-discovery")
-async def create_factor_discovery_job(request: Request, body: JobRequest) -> dict:
+def create_factor_discovery_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "factor-discovery", body)
 
 
 @router.post("/jobs/factor-evaluation")
-async def create_factor_evaluation_job(request: Request, body: JobRequest) -> dict:
+def create_factor_evaluation_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "factor-evaluation", body)
 
 
 @router.post("/jobs/infer")
-async def create_infer_job(request: Request, body: JobRequest) -> dict:
+def create_infer_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "infer", body)
 
 
 @router.post("/jobs/governance")
-async def create_governance_job(request: Request, body: JobRequest) -> dict:
+def create_governance_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "governance", body)
 
 
 @router.post("/jobs/fusion-search")
-async def create_fusion_search_job(request: Request, body: JobRequest) -> dict:
+def create_fusion_search_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "fusion-search", body)
 
 
 @router.post("/jobs/t-plus-one-research")
-async def create_t_plus_one_research_job(request: Request, body: JobRequest) -> dict:
+def create_t_plus_one_research_job(request: Request, body: JobRequest) -> dict:
     return _create_job(request, "t-plus-one-research", body)
 
 
 @router.post("/jobs/{job_type}/validate")
-async def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
+def validate_job(request: Request, job_type: str, body: JobRequest) -> dict:
     if job_type not in {"data", "backtest", "train", "infer", "factor-discovery", "factor-evaluation", "fusion-search", "t-plus-one-research", "governance", "strategy-pipeline"}:
         raise HTTPException(404, "job type not found")
     try:
@@ -1018,14 +1129,44 @@ async def validate_job(request: Request, job_type: str, body: JobRequest) -> dic
 
 
 @router.get("/jobs")
-async def list_jobs(request: Request) -> dict:
+def list_jobs(request: Request) -> dict:
     data = services(request).jobs.list()
     return response(data, status="ready" if data else "empty")
 
 
 
+@router.post("/jobs/{job_id}/retry")
+def retry_job(request: Request, job_id: str) -> dict:
+    """Re-run a finished job with the parameters it actually ran with.
+
+    This replays a job that already passed its gate — it cannot introduce new
+    parameters — which is why there is still no route for submitting a
+    strategy pipeline directly. A retry of a strategy run is registered against
+    the same strategy, so its results stay attached to the research record
+    rather than appearing as an orphan output directory.
+    """
+    svc = services(request)
+    try:
+        job = svc.jobs.retry(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    labels = job.get("labels") or {}
+    run = None
+    if labels.get("strategyId") and job.get("parameters", {}).get("output_dir"):
+        run = svc.strategies.register_run(
+            strategy_id=labels["strategyId"],
+            version=labels.get("strategyVersion", ""),
+            job_id=job["id"],
+            output_dir=job["parameters"]["output_dir"],
+            name=labels.get("strategyName", labels["strategyId"]),
+        )
+    return response({**job, "run": run})
+
+
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job(request: Request, job_id: str) -> dict:
+def cancel_job(request: Request, job_id: str) -> dict:
     try:
         return response(services(request).jobs.cancel(job_id))
     except KeyError:
@@ -1035,7 +1176,7 @@ async def cancel_job(request: Request, job_id: str) -> dict:
 
 
 @router.post("/jobs/{job_id}/pause")
-async def pause_job(request: Request, job_id: str) -> dict:
+def pause_job(request: Request, job_id: str) -> dict:
     try:
         return response(services(request).jobs.pause(job_id))
     except KeyError:
@@ -1045,7 +1186,7 @@ async def pause_job(request: Request, job_id: str) -> dict:
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_job(request: Request, job_id: str) -> dict:
+def resume_job(request: Request, job_id: str) -> dict:
     try:
         return response(services(request).jobs.resume(job_id))
     except KeyError:
@@ -1055,7 +1196,7 @@ async def resume_job(request: Request, job_id: str) -> dict:
 
 
 @router.delete("/jobs/{job_id}")
-async def purge_job(
+def purge_job(
     request: Request,
     job_id: str,
     delete_outputs: bool = Query(False, alias="deleteOutputs"),
@@ -1071,7 +1212,7 @@ async def purge_job(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(request: Request, job_id: str) -> dict:
+def get_job(request: Request, job_id: str) -> dict:
     data = services(request).jobs.get(job_id)
     if data is None:
         raise HTTPException(404, "job not found")
@@ -1079,7 +1220,7 @@ async def get_job(request: Request, job_id: str) -> dict:
 
 
 @router.get("/jobs/{job_id}/logs")
-async def job_logs(request: Request, job_id: str, limit: int = Query(500, le=10_000)) -> dict:
+def job_logs(request: Request, job_id: str, limit: int = Query(500, le=10_000)) -> dict:
     if services(request).jobs.get(job_id) is None:
         raise HTTPException(404, "job not found")
     data = services(request).jobs.logs(job_id, limit)
@@ -1087,7 +1228,7 @@ async def job_logs(request: Request, job_id: str, limit: int = Query(500, le=10_
 
 
 @router.get("/jobs/{job_id}/stream")
-async def job_stream(request: Request, job_id: str):
+def job_stream(request: Request, job_id: str):
     if services(request).jobs.get(job_id) is None:
         raise HTTPException(404, "job not found")
     return StreamingResponse(services(request).jobs.stream(job_id), media_type="text/event-stream")
@@ -1107,3 +1248,98 @@ def _create_job(request: Request, job_type: str, body: JobRequest) -> dict:
         return response(data)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Paper orders — the only economic submission path in this API
+# ---------------------------------------------------------------------------
+# Every route here refuses live intent before it does anything else, and the
+# broker it reaches has no connector, no credential and no network call. The
+# submission is *queued*, not executed inline: making the HTTP response the
+# execution would collapse "crash after responding" and "crash before executing"
+# into one indistinguishable window, and those are the two that produce duplicates.
+@router.get("/paper/policy")
+def paper_policy(request: Request) -> dict:
+    """The safety boundary, stated rather than implied."""
+    service = services(request).paper_orders
+    state = service.mode.to_dict()
+    # `OperatingModeState.to_dict` is snake_case (it is `asdict`); this API is
+    # camelCase. Translating at the boundary rather than changing the domain type,
+    # which other surfaces already read.
+    return response(
+        {
+            "mode": state["mode"],
+            "declaredAt": state["declared_at"],
+            "liveTradingAvailable": state["live_trading_available"],
+            "banner": state["banner"],
+            "executable": state["executable"],
+            "simulatesOrders": state["simulatesOrders"],
+            "paperBannerLines": state["paperBannerLines"],
+            "writable": service.writable,
+            "writerLockError": service.writer_lock_error,
+        }
+    )
+
+
+@router.post("/paper/orders")
+def submit_paper_order(request: Request, body: PaperOrderSubmission) -> dict:
+    try:
+        data = services(request).paper_orders.submit(
+            body.model_dump(by_alias=True)
+        )
+    except LiveTradingRejected as exc:
+        # 451: the request is refused on policy grounds, not because it was
+        # malformed. A 422 would invite the client to "fix" it and retry.
+        raise HTTPException(451, str(exc))
+    except IdempotencyConflict as exc:
+        raise HTTPException(409, str(exc))
+    except WriterLockUnavailable as exc:
+        # 409: the request is well-formed and permitted; this instance is simply
+        # not the writer. Retrying against the writer will succeed.
+        raise HTTPException(409, str(exc))
+    except SubmissionRejected as exc:
+        raise HTTPException(422, f"{exc.reason}: {exc}")
+    return response(data, status="ready")
+
+
+@router.post("/paper/orders/drain")
+def drain_paper_orders(request: Request, limit: int = Query(50, ge=1, le=500)) -> dict:
+    """Run the worker once. Exposed so an operator can drive it without a terminal."""
+    return response(services(request).paper_orders.drain(limit=limit))
+
+
+@router.post("/paper/orders/recover")
+def recover_paper_orders(request: Request) -> dict:
+    """Settle every queued submission against the ledger after a restart."""
+    return response(services(request).paper_orders.recover())
+
+
+@router.get("/paper/orders")
+def list_paper_orders(request: Request) -> dict:
+    data = services(request).paper_orders.orders()
+    return response(data, status="ready" if data else "empty")
+
+
+@router.get("/paper/orders/{idempotency_key}")
+def get_paper_order(request: Request, idempotency_key: str, run_id: str = Query(alias="runId")) -> dict:
+    data = services(request).paper_orders.status(idempotency_key, run_id)
+    if data is None:
+        raise HTTPException(404, "no submission is recorded for that key and run")
+    return response(data)
+
+
+@router.post("/paper/orders/{idempotency_key}/cancel")
+def cancel_paper_order(
+    request: Request, idempotency_key: str, body: PaperOrderCancellation
+) -> dict:
+    try:
+        data = services(request).paper_orders.cancel(idempotency_key, body.run_id)
+    except SubmissionRejected as exc:
+        raise HTTPException(422, f"{exc.reason}: {exc}")
+    return response(data)
+
+
+@router.get("/paper/account")
+def paper_account(request: Request) -> dict:
+    """Cash, positions, PnL and NAV — replayed from the ledger, never from memory."""
+    return response(services(request).paper_orders.account())

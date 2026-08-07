@@ -13,12 +13,24 @@ from tests.quant_ui.test_api import request
 from quantagent.cli.v7_train import run_full_real_training_v7
 
 
-def _write_labels(path, horizons: tuple[int, ...] = (1, 5, 20)) -> None:
+def _write_labels(
+    path,
+    horizons: tuple[int, ...] = (1, 5, 20),
+    trading_days: int = 400,
+) -> None:
+    """A labels panel long enough to actually seat the fixture's fold budget.
+
+    Pre-flight blocks a run whose panel cannot produce the OOS days its
+    selection protocol requires, so a one-date fixture is not a valid stand-in
+    for a panel a strategy could really be launched against.
+    """
+    symbols = ["000001.SZ", "000002.SZ"]
+    dates = pd.bdate_range("2023-01-02", periods=trading_days)
     frame = pd.DataFrame({
-        "symbol": ["000001.SZ", "000002.SZ"],
-        "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
+        "symbol": [symbol for _ in dates for symbol in symbols],
+        "trade_date": [date for date in dates for _ in symbols],
         **{
-            f"forward_return_{horizon}d": [0.01, -0.01]
+            f"forward_return_{horizon}d": [0.01, -0.01] * len(dates)
             for horizon in horizons
         },
     })
@@ -41,7 +53,7 @@ def _strategy_payload() -> dict:
         "primaryHorizon": 5,
         "horizonBlendMethod": "adaptive_oos",
         "splitMode": "rolling",
-        "nSplits": 4,
+        "nSplits": 6,
         "requireGpu": True,
         "topK": 30,
         "topKCandidates": [10, 20, 30, 50],
@@ -65,6 +77,7 @@ def _strategy_payload() -> dict:
         "objective": "max_expected_alpha",
         "weighting": "rank",
         "initialCash": 1_000_000,
+        "benchmarkSymbol": "000001.SZ",
         "objectiveWeights": {
             "excessReturn": 0.45,
             "annualReturn": 0.30,
@@ -130,8 +143,9 @@ def test_strategy_launch_is_atomic_and_direct_job_route_is_not_exposed(quant_ui_
         observed["validated"] = (job_type, command_id, parameters)
         return {"valid": True}
 
-    def fake_submit(job_type, command_id, parameters):
+    def fake_submit(job_type, command_id, parameters, **kwargs):
         observed["submitted"] = (job_type, command_id, parameters)
+        observed["labels"] = kwargs.get("labels")
         return {
             "id": "job_strategy",
             "type": job_type,
@@ -337,7 +351,7 @@ def test_excess_return_objective_requires_a_benchmark(quant_ui_settings) -> None
         item for item in data["issues"] if item["code"] == "benchmark_missing"
     )
     assert issue["severity"] == "blocking"
-    assert issue["action"]["kind"] == "set_benchmark"
+    assert issue["action"]["kind"] == "clear_excess_objective"
 
 
 def test_strategy_launch_fails_closed_without_human_gate_or_real_inputs(quant_ui_settings) -> None:
@@ -399,12 +413,20 @@ def test_strategy_pipeline_uses_cli_aliases_and_omits_false_single_flag(
 
     class Process:
         stdout = []
+        pid = 424242
+        returncode = 0
 
         def __init__(self, command, **kwargs) -> None:
-            observed["command"] = command
+            # The job is wrapped by the exit-status supervisor; the command the
+            # contract cares about is everything after the `--` separator.
+            observed["supervised"] = command
+            observed["command"] = command[command.index("--") + 1:]
             observed["env"] = kwargs["env"]
 
-        def wait(self) -> int:
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout=None) -> int:
             return 0
 
         def terminate(self) -> None:
@@ -439,6 +461,7 @@ def test_strategy_pipeline_uses_cli_aliases_and_omits_false_single_flag(
         quant_ui_settings.jobs_root / "job_alias.log",
     )
 
+    assert observed["supervised"][1].endswith("scripts/job_supervisor.py")
     assert "--market-panel" in observed["command"]
     assert "--labels" in observed["command"]
     assert "--max-weight" in observed["command"]
@@ -472,3 +495,57 @@ def test_declared_sharpe_and_drawdown_acceptance_limits_are_enforced() -> None:
     assert report.passed is False
     assert "max_drawdown_exceeded" in report.failures
     assert "sharpe_below_minimum" in report.failures
+
+
+def test_launch_is_blocked_when_the_benchmark_is_absent_from_the_panel(quant_ui_settings) -> None:
+    """The run would otherwise abort at the portfolio stage, after training.
+
+    A full-universe stock panel holds no index symbol, so the previously
+    suggested "use CSI 300" remedy produced a guaranteed late failure.
+    """
+    app = create_app(quant_ui_settings)
+
+    response = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={**_strategy_payload(), "benchmarkSymbol": "000300.SH"},
+    )
+
+    data = response.json()["data"]
+    issue = next(
+        item for item in data["issues"] if item["code"] == "benchmark_absent_from_panel"
+    )
+    assert data["valid"] is False
+    assert issue["severity"] == "blocking"
+    assert issue["evidence"]["benchmarkSymbol"] == "000300.SH"
+
+
+def test_launch_is_blocked_when_folds_cannot_produce_the_required_oos_days(
+    quant_ui_settings,
+) -> None:
+    """4 folds x 20 days = 80 OOS days cannot satisfy an 80+20 protocol.
+
+    This was the shipped default: every run reached the portfolio stage and
+    aborted there, having already paid for the whole walk-forward training.
+    """
+    app = create_app(quant_ui_settings)
+
+    response = request(
+        app,
+        "POST",
+        "/api/strategies/validate",
+        json={**_strategy_payload(), "nSplits": 4},
+    )
+
+    data = response.json()["data"]
+    issue = next(
+        item for item in data["issues"]
+        if item["code"] == "insufficient_projected_oos_days"
+    )
+    assert data["valid"] is False
+    assert issue["severity"] == "blocking"
+    assert issue["evidence"]["projectedOosDays"] == 80
+    # 80 selection + 20 holdout + 1 day consumed by NAV differencing.
+    assert issue["evidence"]["requiredOosDays"] == 101
+    assert issue["evidence"]["minimumSplits"] == 6

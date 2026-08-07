@@ -47,9 +47,12 @@ def test_dataset_builder_shifts_close_features_and_builds_labels():
     assert not result.dataset.empty
     assert "momentum_5d" in result.feature_schema["feature_columns"]
     assert "forward_return_5d" in result.label_schema["label_columns"]
+    # `available_at` must never fall after the row's own trade_date: the label
+    # window opens at close(trade_date), so a later stamp credits the model with a
+    # move it could not have traded (DEF-026). This assertion used to be `>`.
     features = build_market_features(market)
-    first = features.sort_values(["symbol", "trade_date"]).iloc[0]
-    assert pd.Timestamp(first["available_at"]) > pd.Timestamp(first["trade_date"])
+    available = pd.to_datetime(features["available_at"])
+    assert (available == pd.to_datetime(features["trade_date"])).all()
 
 
 def test_label_builder_keeps_multi_horizon_schema():
@@ -60,8 +63,13 @@ def test_label_builder_keeps_multi_horizon_schema():
 
 
 def test_v7_training_experiment_writes_validation_artifacts(tmp_path):
+    # 50 days used to be enough only because the first fold's training window
+    # was silently cut down to whatever survived the embargo+purge gap. With the
+    # gap reserved on top of min_train_days, a fold needs
+    # min_train_days + embargo + purge + valid_size_days usable dates — and
+    # feature warm-up plus the label tail eat roughly 20 of the raw dates.
     dataset = build_v7_training_dataset(
-        _market_panel(days=50),
+        _market_panel(days=120),
         config=V7DatasetBuildConfig(horizons=(1, 5), min_rows=40, min_symbols=2, min_dates=20),
     ).dataset
     result = run_v7_training_experiment(

@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import {
+  ArrowRight,
   ArrowsClockwise,
   Brain,
   CheckCircle,
@@ -22,6 +23,7 @@ import type { EChartsOption } from "echarts";
 import { apiPost } from "../../api/client";
 import type {
   DecisionCouncilMember,
+  StrategyRun,
   JobSummary,
   StrategyDefaults,
   StrategyDraft,
@@ -43,7 +45,7 @@ import {
 } from "../workbench/InstitutionalWorkbench";
 import { useVNextChartPalette, useVNextTheme } from "../theme";
 
-const DEFAULT_DRAFT: StrategyDraft = {
+export const DEFAULT_DRAFT: StrategyDraft = {
   name: "A股多因子 · 滚动 OOS 策略",
   hypothesis: "经人工审核的价量与质量因子在滚动样本外窗口中提供稳定横截面超额，且在A股交易约束和成本后仍然成立。",
   invalidationCriteria: "任一 OOS Gate 失败、最大回撤超过 15%、Sharpe 低于 1.0，或因子相关性/漂移证据失效时，停止晋级并重新研究。",
@@ -63,7 +65,10 @@ const DEFAULT_DRAFT: StrategyDraft = {
   primaryHorizon: 5,
   horizonBlendMethod: "adaptive_oos",
   splitMode: "rolling",
-  nSplits: 4,
+  // 80 selection + 20 holdout days, plus the day NAV differencing consumes,
+  // needs 101 OOS days. At 20 days per fold that is 6 folds; 5 produced exactly
+  // 100 and aborted in governance after the whole portfolio search had run.
+  nSplits: 6,
   requireGpu: true,
   topK: 30,
   topKCandidates: [20, 30, 50],
@@ -88,8 +93,11 @@ const DEFAULT_DRAFT: StrategyDraft = {
   objective: "max_expected_alpha",
   weighting: "rank",
   initialCash: 1_000_000,
-  benchmarkSymbol: "000300.SH",
-  objectiveWeights: { excessReturn: 0.5, annualReturn: 0.2, drawdownControl: 0.3 },
+  benchmarkSymbol: "",
+  objectiveWeights: { excessReturn: 0, annualReturn: 0.45, drawdownControl: 0.55 },
+  universeScope: "full",
+  universeSymbols: "",
+  universeSymbolsFile: "",
   riskLimits: { maxDrawdown: 0.15, maxTurnover: 0.45, minSharpe: 1.0 },
   humanApproved: false,
 };
@@ -183,6 +191,33 @@ function normalizeDraft(draft: StrategyDraft): StrategyDraft {
   };
 }
 
+
+/** Objectives that cannot be measured must not carry preference weight.
+ *
+ * Excess return is defined against a benchmark. With no benchmark selected the
+ * pipeline refuses to optimise for it, so a preset that asks for it produces a
+ * blocked launch rather than a preference. Redistribute it instead of shipping
+ * a configuration the operator has to repair by hand.
+ */
+function withMeasurableObjectives(
+  weights: StrategyDraft["objectiveWeights"],
+  benchmarkSymbol: string | null | undefined,
+): StrategyDraft["objectiveWeights"] {
+  if (benchmarkSymbol) return weights;
+  const spare = weights.excessReturn;
+  if (spare <= 0) return weights;
+  const remainder = weights.annualReturn + weights.drawdownControl;
+  if (remainder <= 0) {
+    return { excessReturn: 0, annualReturn: 0.5, drawdownControl: 0.5 };
+  }
+  const annual = Number((weights.annualReturn + spare * (weights.annualReturn / remainder)).toFixed(3));
+  return {
+    excessReturn: 0,
+    annualReturn: annual,
+    drawdownControl: Number((1 - annual).toFixed(3)),
+  };
+}
+
 function withPreset(
   current: StrategyDraft,
   preset: StrategyDraft["researchPreset"],
@@ -200,6 +235,8 @@ function withPreset(
     fundamentalThresholdCandidates: [0.35, 0.5],
     fundamentalBlendCandidates: [0.25, 0.5],
   };
+  const measurable = (weights: StrategyDraft["objectiveWeights"]) =>
+    withMeasurableObjectives(weights, current.benchmarkSymbol);
   if (preset === "drawdown_first") {
     return {
       ...shared,
@@ -207,7 +244,7 @@ function withPreset(
       weighting: "rank",
       maxWeightPerName: 0.05,
       maxTurnover: 0.35,
-      objectiveWeights: { excessReturn: 0.25, annualReturn: 0.15, drawdownControl: 0.6 },
+      objectiveWeights: measurable({ excessReturn: 0.25, annualReturn: 0.15, drawdownControl: 0.6 }),
       riskLimits: { ...current.riskLimits, maxDrawdown: 0.1, maxTurnover: 0.35, minSharpe: 0.8 },
     };
   }
@@ -218,7 +255,7 @@ function withPreset(
       weighting: "softmax",
       maxWeightPerName: 0.08,
       maxTurnover: 0.65,
-      objectiveWeights: { excessReturn: 0.35, annualReturn: 0.5, drawdownControl: 0.15 },
+      objectiveWeights: measurable({ excessReturn: 0.35, annualReturn: 0.5, drawdownControl: 0.15 }),
       riskLimits: { ...current.riskLimits, maxDrawdown: 0.2, maxTurnover: 0.65 },
     };
   }
@@ -237,7 +274,7 @@ function withPreset(
       weighting: "rank",
       maxWeightPerName: 0.06,
       maxTurnover: 0.4,
-      objectiveWeights: { excessReturn: 0.4, annualReturn: 0.25, drawdownControl: 0.35 },
+      objectiveWeights: measurable({ excessReturn: 0.4, annualReturn: 0.25, drawdownControl: 0.35 }),
       riskLimits: { ...current.riskLimits, maxDrawdown: 0.15, maxTurnover: 0.4 },
     };
   }
@@ -247,7 +284,7 @@ function withPreset(
     weighting: "rank",
     maxWeightPerName: 0.06,
     maxTurnover: 0.45,
-    objectiveWeights: { excessReturn: 0.5, annualReturn: 0.2, drawdownControl: 0.3 },
+    objectiveWeights: measurable({ excessReturn: 0.5, annualReturn: 0.2, drawdownControl: 0.3 }),
     riskLimits: { ...current.riskLimits, maxDrawdown: 0.15, maxTurnover: 0.45, minSharpe: 1.0 },
   };
 }
@@ -259,6 +296,7 @@ export function StrategyStudioPage(): JSX.Element {
   const [validation, setValidation] = useState<StrategyValidation | null>(null);
   const [saved, setSaved] = useState<StrategyManifestSummary | null>(null);
   const [activeJob, setActiveJob] = useState<JobSummary | null>(null);
+  const [activeRun, setActiveRun] = useState<StrategyRun | null>(null);
   const [selectedCouncilId, setSelectedCouncilId] = useState("data_quality");
   const [busy, setBusy] = useState<"validate" | "save" | "launch" | "cancel" | "repair" | "">("");
   const [error, setError] = useState("");
@@ -397,6 +435,7 @@ export function StrategyStudioPage(): JSX.Element {
       const result = await apiPost<StrategyLaunchResult>("/strategies/launch", draft);
       setSaved(result.data.strategy);
       setActiveJob(result.data.job);
+      setActiveRun(result.data.run ?? null);
       const checked = await apiPost<StrategyValidation>("/strategies/validate", draft);
       setValidation(checked.data);
       await manifests.refetch();
@@ -464,6 +503,22 @@ export function StrategyStudioPage(): JSX.Element {
     const path = defaults.data?.data.selected?.fundamentalsRoot
       ?? defaults.data?.data.options?.fundamentalsRoot?.find((item) => item.exists)?.path;
     if (path) update("fundamentalsRoot", path);
+  };
+
+  const resolveBenchmark = (): void => {
+    // The old remedy set 000300.SH, which is absent from a full-universe stock
+    // panel and made the run abort at the portfolio stage. Clearing the
+    // benchmark and its excess-return weight is the configuration that runs.
+    updateMany({
+      benchmarkSymbol: "",
+      researchPreset: "custom",
+      objectiveWeights: { excessReturn: 0, annualReturn: 0.5, drawdownControl: 0.5 },
+    });
+  };
+
+  const resolveOosDays = (issue: StrategyValidationIssue): void => {
+    const minimum = Number(issue.evidence?.minimumSplits ?? 0);
+    if (minimum > 0) update("nSplits", Math.min(20, minimum));
   };
 
   const disableFundamentalCandidate = (): void => {
@@ -585,7 +640,31 @@ export function StrategyStudioPage(): JSX.Element {
                   <option value="off">关闭（以纯策略基线为主）</option>
                 </select>
               </Field>
-              <Field label="基准指数"><input value={draft.benchmarkSymbol ?? ""} onChange={(event) => update("benchmarkSymbol", event.target.value)} /></Field>
+              <Field label="研究范围" hint={draft.universeScope === "pilot" ? "试点结论不可外推到全宇宙" : "全部可用标的，耗时最长"}>
+                <select value={draft.universeScope} onChange={(event) => {
+                  const scope = event.target.value as StrategyDraft["universeScope"];
+                  updateMany({ universeScope: scope, researchPreset: "custom" });
+                }}>
+                  <option value="full">全宇宙（以完整结论为主）</option>
+                  <option value="pilot">试点宇宙（先验证配置与链路）</option>
+                </select>
+              </Field>
+              {draft.universeScope === "pilot"
+                ? <Field label="试点标的清单" wide hint="项目内一行一个 symbol 的文件路径，或在下方直接填写逗号分隔的 symbol">
+                    <input className="mono" value={draft.universeSymbolsFile ?? ""} onChange={(event) => update("universeSymbolsFile", event.target.value)} placeholder="runtime/data/u0/pilot_symbols.txt" />
+                  </Field>
+                : null}
+              {draft.universeScope === "pilot"
+                ? <Field label="或直接指定 symbol" wide>
+                    <input className="mono" value={draft.universeSymbols ?? ""} onChange={(event) => update("universeSymbols", event.target.value)} placeholder="000001.SZ,600519.SH" />
+                  </Field>
+                : null}
+              <Field label="基准指数" hint="留空表示不做超额比较；个股全宇宙面板通常不含指数标的">
+                <input value={draft.benchmarkSymbol ?? ""} onChange={(event) => updateMany({
+                  benchmarkSymbol: event.target.value,
+                  objectiveWeights: withMeasurableObjectives(draft.objectiveWeights, event.target.value),
+                })} />
+              </Field>
               <Field label="Horizon 集合"><input aria-describedby="strategy-horizon-help" value={draft.horizons} onChange={(event) => updateHorizons(event.target.value)} /></Field>
               <Field label="主周期">
                 <select value={draft.primaryHorizon} onChange={(event) => update("primaryHorizon", Number(event.target.value))} disabled={!horizonOptions.length}>
@@ -770,7 +849,8 @@ export function StrategyStudioPage(): JSX.Element {
                   onRepairLabels={repairLabels}
                   onApplyFundamentals={applyFundamentalDefault}
                   onDisableFundamentals={disableFundamentalCandidate}
-                  onSetBenchmark={() => update("benchmarkSymbol", "000300.SH")}
+                  onResolveBenchmark={resolveBenchmark}
+                  onResolveOosDays={() => resolveOosDays(issue)}
                 />
               ))}
               {warningIssues.map((issue) => (
@@ -786,13 +866,23 @@ export function StrategyStudioPage(): JSX.Element {
                   onRepairLabels={repairLabels}
                   onApplyFundamentals={applyFundamentalDefault}
                   onDisableFundamentals={disableFundamentalCandidate}
-                  onSetBenchmark={() => update("benchmarkSymbol", "000300.SH")}
+                  onResolveBenchmark={resolveBenchmark}
+                  onResolveOosDays={() => resolveOosDays(issue)}
                 />
               ))}
               {infoIssues.length ? <details className="strategy-protocols">
                 <summary><Info size={14} />查看 {infoIssues.length} 项研究协议</summary>
                 {infoIssues.map((issue) => <div key={issue.code}><strong>{issue.title}</strong><span>{issue.detail}</span></div>)}
               </details> : null}
+            </div> : null}
+            {activeRun ? <div className="strategy-run-handoff">
+              <span>
+                <strong>{running ? "运行进行中" : job?.status === "succeeded" ? "运行完成，结论已就绪" : job?.status === "rejected" ? "运行完成并被研究闸门否决" : job?.status === "blocked" ? "配置无法执行该协议，运行未开始训练" : job?.status === "failed" ? "运行中止，已生成诊断" : "运行已登记"}</strong>
+                <small>{activeRun.runId} · {activeRun.outputDir}</small>
+              </span>
+              <a href={`/runs?run=${encodeURIComponent(activeRun.runId)}`}>
+                查看阶段、诊断与结论<ArrowRight size={14} />
+              </a>
             </div> : null}
             {saved ? <div className="strategy-saved"><CheckCircle weight="fill" /><span><strong>{saved.version}</strong><small>{saved.path} · {saved.contentHash?.slice(0, 12)}</small></span></div> : null}
             {error ? <div className="strategy-error" role="alert"><WarningCircle /><span><strong>无法提交当前策略</strong>{error.split("；").map((item) => <small key={item}>{item}</small>)}</span></div> : null}
@@ -868,7 +958,8 @@ function IssueCard({
   onRepairLabels,
   onApplyFundamentals,
   onDisableFundamentals,
-  onSetBenchmark,
+  onResolveBenchmark,
+  onResolveOosDays,
 }: {
   issue: StrategyValidationIssue;
   canApplyDefaults: boolean;
@@ -880,7 +971,8 @@ function IssueCard({
   onRepairLabels: () => void;
   onApplyFundamentals: () => void;
   onDisableFundamentals: () => void;
-  onSetBenchmark: () => void;
+  onResolveBenchmark: () => void;
+  onResolveOosDays: () => void;
 }): JSX.Element {
   const missingHorizons = issue.evidence?.missingHorizons ?? [];
   const availableHorizons = issue.evidence?.availableHorizons ?? [];
@@ -903,8 +995,13 @@ function IssueCard({
       {issue.code === "fundamentals_missing"
         ? <button type="button" onClick={onDisableFundamentals}>关闭基本面候选</button>
         : null}
-      {issue.code === "benchmark_missing"
-        ? <button type="button" onClick={onSetBenchmark}>使用沪深 300</button>
+      {["benchmark_missing", "benchmark_absent_from_panel"].includes(issue.code)
+        ? <button type="button" className="primary" onClick={onResolveBenchmark}>清空基准并把超额权重设为 0</button>
+        : null}
+      {issue.code === "insufficient_projected_oos_days"
+        ? <button type="button" className="primary" onClick={onResolveOosDays}>
+            提高到 {issue.evidence?.minimumSplits ?? "所需"} 折
+          </button>
         : null}
       {issue.code.endsWith("_missing") && !["fundamentals_missing", "missing_horizon_columns"].includes(issue.code) && canApplyDefaults
         ? <button type="button" onClick={onApplyDefaults}>载入可用输入</button>

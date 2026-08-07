@@ -24,6 +24,18 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from quantagent.backtest import ashare_rules as rules
+from quantagent.domain.ledger import CanonicalLedger, mirror_event, mirror_open
+from quantagent.domain.lineage import Lineage
+from quantagent.domain.orders import (
+    CorporateAction as CanonicalCorporateAction,
+    Fill as CanonicalFill,
+    OrderBook,
+    OrderEventType as CanonicalEventType,
+    OrderIntent as CanonicalIntent,
+    RiskDecision as CanonicalRiskDecision,
+    Side as CanonicalSide,
+    Signal,
+)
 from quantagent.data.microstructure import contracts as mc
 from quantagent.paper import ledger as lg
 from quantagent.paper.orders import (
@@ -111,6 +123,10 @@ class PaperBroker:
         *,
         run_id: str,
         config: BrokerConfig | None = None,
+        canonical_ledger_path: str | None = None,
+        lineage: Lineage | None = None,
+        canonical_ledger: CanonicalLedger | None = None,
+        book: OrderBook | None = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = event_ledger
@@ -118,6 +134,45 @@ class PaperBroker:
         self.config = config or BrokerConfig()
         self.orders: dict[str, Order] = {}
         self.fills: list[Fill] = []
+        #: Execution ids already booked. A set rather than a scan over `fills`
+        #: so the idempotency check stays O(1) as a session accumulates.
+        self._fill_ids: set[str] = set()
+        # Economic record of account. `self.ledger` remains for operational
+        # events (kill switch, mark-to-market, session close); every order,
+        # fill, rejection and cancellation is mirrored here so a paper run
+        # can be reconstructed without reading paper's own structures.
+        #
+        # An upstream OMS that already opened the canonical order injects its
+        # ledger and book here. Constructing our own instead would give one
+        # economic order two records of account — the duplication Module One
+        # exists to remove — so the venue appends to the OMS's chain rather than
+        # starting a parallel one.
+        if canonical_ledger is not None and canonical_ledger_path is not None:
+            raise ValueError(
+                "pass either canonical_ledger or canonical_ledger_path, not both: "
+                "two ledgers for one broker is exactly the duplicate record of "
+                "account this argument exists to prevent"
+            )
+        # `is not None`, not `or`: CanonicalLedger defines __len__, so an empty
+        # injected ledger is falsy and `or` would silently swap it for a fresh
+        # in-memory one — the venue would then write to a chain nobody reads.
+        self.canonical = (
+            canonical_ledger
+            if canonical_ledger is not None
+            else CanonicalLedger(canonical_ledger_path)
+        )
+        # Attaching to a chain that already holds events means starting from the
+        # state it records, not from empty. An empty book cannot see that an order
+        # id already exists, so it would happily append a second CREATED and
+        # RISK_APPROVED for an order the file says is FILLED — writing a chain
+        # that no longer replays, and only discovering it at read time when the
+        # damage is durable (DEF-014).
+        self.book = (
+            book if book is not None
+            else (self.canonical.replay_book() if len(self.canonical) else OrderBook())
+        )
+        self.lineage = lineage or Lineage(run_id=run_id)
+        self._canonical_ids: dict[str, str] = {}
         self.killed: bool = False
         self.kill_reason: str | None = None
 
@@ -128,6 +183,78 @@ class PaperBroker:
             event_type, run_id=self.run_id,
             portfolio_id=self.portfolio.portfolio_id,
             payload=payload, symbol=symbol, market_time=market_time,
+        )
+
+    # -- canonical mirror --------------------------------------------------
+    def _canonical_open(self, order: Order, trade_date: str | None = None) -> None:
+        """Signal -> Intent -> Order on the canonical ledger, before any fill."""
+        session = (trade_date or datetime.now(timezone.utc).isoformat())[:10]
+        signal = Signal.create(
+            symbol=order.symbol, trade_date=f"{session}-{order.order_id}",
+            score=0.0, lineage=self.lineage,
+        )
+        intent = CanonicalIntent.create(
+            symbol=order.symbol, side=CanonicalSide(order.side),
+            quantity=int(order.quantity), trade_date=session,
+            lineage=signal.lineage, limit_price=order.limit_price,
+            reference_price=order.limit_price,
+        )
+        canonical = mirror_open(self.book, self.canonical, intent, trade_date=session)
+        self._canonical_ids[order.order_id] = canonical.order_id
+        decision = CanonicalRiskDecision.create(
+            approved=True, rule="paper_pretrade", threshold="board+cash+t+1",
+            measured="passed", reason="passed paper validation", lineage=canonical.lineage,
+        )
+        for event in (CanonicalEventType.RISK_APPROVED, CanonicalEventType.SUBMITTED):
+            self.book.apply(
+                canonical.order_id, event,
+                risk_decision=decision if event is CanonicalEventType.RISK_APPROVED else None,
+            )
+            self.canonical.append(self.book.history_of(canonical.order_id)[-1], trade_date=session)
+
+    def _canonical_event(
+        self, order: Order, event_type: "CanonicalEventType", *,
+        fill: "CanonicalFill | None" = None, reason: str | None = None,
+        trade_date: str | None = None,
+    ) -> None:
+        canonical_id = self._canonical_ids.get(order.order_id)
+        if canonical_id is None:
+            return
+        # `trade_date` stays None when the caller does not know the session. It
+        # used to fall back to the wall clock, which silently wrote *today* into a
+        # settlement-relevant field: a cancel issued without a market snapshot
+        # stamped the current date, and replay then re-dated the order's earlier
+        # fill to it, moving the T+1 lot a day forward (DEF-016). The bug was
+        # invisible whenever the wall clock happened to match the session being
+        # simulated. An absent date is recoverable — replay falls back to the
+        # fill's own session — a wrong one is not.
+        mirror_event(
+            self.book, self.canonical, canonical_id, event_type,
+            trade_date=(trade_date[:10] if trade_date else None),
+            fill=fill, reason=reason,
+        )
+
+    def _canonical_fill(self, order: Order, fill: Fill, trade_date: str | None = None) -> None:
+        canonical_id = self._canonical_ids.get(order.order_id)
+        if canonical_id is None:
+            return
+        session = (trade_date or datetime.now(timezone.utc).isoformat())[:10]
+        canonical = self.book.state_of(canonical_id)
+        economic = CanonicalFill(
+            execution_id=fill.fill_id, order_id=canonical_id, symbol=fill.symbol,
+            side=CanonicalSide(fill.side), quantity=int(fill.quantity), price=float(fill.price),
+            reference_price=float(order.limit_price or fill.price),
+            commission=float(fill.commission), stamp_duty=float(fill.stamp_duty),
+            transfer_fee=float(fill.transfer_fee), filled_at=session,
+            lineage=canonical.lineage.derive(execution_id=fill.fill_id),
+        )
+        total = canonical.filled_quantity + economic.quantity
+        event = (
+            CanonicalEventType.FILL if total >= canonical.quantity
+            else CanonicalEventType.PARTIAL_FILL
+        )
+        mirror_event(
+            self.book, self.canonical, canonical_id, event, trade_date=session, fill=economic,
         )
 
     # -- kill switch -------------------------------------------------------
@@ -143,10 +270,8 @@ class PaperBroker:
     def _reject(self, order: Order, reason: str, market: MarketSnapshot | None) -> Order:
         order.reject_reason = reason
         order.transition(REJECTED)
-        self._emit(lg.ORDER_REJECTED,
-                   {"order": order.to_dict(), "reason": reason},
-                   symbol=order.symbol,
-                   market_time=market.clock if market else None)
+        self._canonical_event(order, CanonicalEventType.REJECTED, reason=reason,
+                              trade_date=getattr(market, 'trade_date', None))
         return order
 
     def _validate(self, order: Order, market: MarketSnapshot) -> str | None:
@@ -203,42 +328,49 @@ class PaperBroker:
     # -- pricing -----------------------------------------------------------
     def _execution_price(self, order: Order, market: MarketSnapshot,
                          quantity: float) -> float:
-        """Fill price including slippage and square-root market impact."""
-        base = market.last_price
-        slippage = base * (self.config.slippage_bps / 10_000.0)
-        participation = (
-            quantity / market.session_volume if market.session_volume > 0 else 0.0
-        )
-        impact = base * self.config.impact_coefficient * (participation ** 0.5)
-        adjustment = slippage + impact
-        price = base + adjustment if order.side == BUY else base - adjustment
+        """Fill price including slippage and square-root market impact.
 
-        limits = market.limits()
-        if not limits.unlimited:
-            if limits.limit_up is not None:
-                price = min(price, limits.limit_up)
-            if limits.limit_down is not None:
-                price = max(price, limits.limit_down)
-        if order.limit_price is not None:
-            price = min(price, order.limit_price) if order.side == BUY \
-                else max(price, order.limit_price)
-        return round(price, 2)
+        Delegates to `ashare_rules.execution_price`. The formula used to live here
+        and was copied into the streaming matcher; two copies of a pricing formula
+        agree only until one is edited, and the disagreement then arrives as a
+        reconciliation difference with no way to say which side is right.
+        """
+        return rules.execution_price(
+            last_price=market.last_price,
+            side=order.side,
+            quantity=quantity,
+            session_volume=market.session_volume,
+            slippage_bps=self.config.slippage_bps,
+            impact_coefficient=self.config.impact_coefficient,
+            limits=market.limits(),
+            limit_price=order.limit_price,
+        )
+
+    def attach_canonical(self, order_id: str, canonical_order_id: str) -> None:
+        """Adopt an order the upstream OMS already opened canonically.
+
+        The venue does not re-open an order that already exists in the record of
+        account; it appends its own lifecycle events (ACCEPTED, FILL, REJECTED,
+        CANCELLED) to the order the OMS created. Without this the same economic
+        order appears twice — once as the OMS's and once as paper's — and every
+        aggregate built from the ledger double-counts it.
+        """
+        self._canonical_ids[order_id] = canonical_order_id
 
     # -- submission --------------------------------------------------------
     def submit(self, order: Order, market: MarketSnapshot) -> Order:
         """Validate, accept and attempt to fill a single order."""
         self.orders[order.order_id] = order
-        self._emit(lg.ORDER_CREATED, {"order": order.to_dict()},
-                   symbol=order.symbol, market_time=market.clock)
+        if order.order_id not in self._canonical_ids:
+            self._canonical_open(order, trade_date=getattr(market, 'trade_date', None))
 
         reason = self._validate(order, market)
         if reason:
             return self._reject(order, reason, market)
 
         order.transition(ACCEPTED)
-        self._emit(lg.ORDER_ACCEPTED, {"order_id": order.order_id,
-                                       "quantity": order.quantity},
-                   symbol=order.symbol, market_time=market.clock)
+        self._canonical_event(order, CanonicalEventType.ACCEPTED,
+                              trade_date=getattr(market, 'trade_date', None))
         return self._attempt_fill(order, market)
 
     def _attempt_fill(self, order: Order, market: MarketSnapshot) -> Order:
@@ -274,31 +406,39 @@ class PaperBroker:
         )
 
         try:
-            self.portfolio.apply_fill(fill)
+            self.apply_execution_report(order, fill, trade_date=market.trade_date)
         except (InsufficientCash, InsufficientSellable) as exc:
             return self._reject(order, str(exc), market)
+        return order
 
+    def apply_execution_report(
+        self, order: Order, fill: Fill, *, trade_date: str | None = None
+    ) -> bool:
+        """Book one execution. Idempotent on `fill_id`; returns False on a repeat.
+
+        A venue re-delivers execution reports — a retried callback, a session
+        reconnect, a gateway that timed out after the venue had already answered.
+        Every one of those must move money exactly once, so the identity check
+        lives here rather than in each caller: this is the only path by which a
+        fill reaches the portfolio, the canonical ledger and the order.
+        """
+        if fill.fill_id in self._fill_ids:
+            return False
+        self.portfolio.apply_fill(fill)
+        self._fill_ids.add(fill.fill_id)
         self.fills.append(fill)
+        self._canonical_fill(order, fill, trade_date=trade_date)
         order.filled_quantity += fill.quantity
         order.filled_notional += fill.notional
         order.fees_paid += fill.fees
 
+        # The canonical fill above already recorded this economically; the
+        # paper transition below only advances paper's own view of the order.
         if order.remaining <= 1e-9:
             order.transition(FILLED)
-            event = lg.ORDER_FILLED
         else:
             order.transition(PARTIALLY_FILLED)
-            event = lg.ORDER_PARTIALLY_FILLED
-
-        self._emit(event, {"fill": fill.to_dict(), "order_id": order.order_id},
-                   symbol=order.symbol, market_time=market.clock)
-        self._emit(lg.CASH_CHANGED,
-                   {"delta": fill.cash_delta, "cash": self.portfolio.cash},
-                   symbol=order.symbol, market_time=market.clock)
-        self._emit(lg.POSITION_CHANGED,
-                   {"position": self.portfolio.position(order.symbol).to_dict()},
-                   symbol=order.symbol, market_time=market.clock)
-        return order
+        return True
 
     def submit_parent(
         self, parent: ParentOrder, markets: Sequence[MarketSnapshot]
@@ -316,13 +456,15 @@ class PaperBroker:
         order = self.orders[order_id]
         if not order.is_open:
             return order
+        session = getattr(market, "trade_date", None)
         order.transition(CANCEL_REQUESTED)
-        self._emit(lg.ORDER_CANCEL_REQUESTED, {"order_id": order_id},
-                   symbol=order.symbol)
+        self._canonical_event(
+            order, CanonicalEventType.CANCEL_REQUESTED, trade_date=session
+        )
         order.transition(CANCELLED)
-        self._emit(lg.ORDER_CANCELLED,
-                   {"order_id": order_id, "unfilled": order.remaining},
-                   symbol=order.symbol)
+        self._canonical_event(
+            order, CanonicalEventType.CANCELLED, reason='operator_cancel', trade_date=session
+        )
         return order
 
     # -- session -----------------------------------------------------------
@@ -332,12 +474,34 @@ class PaperBroker:
         return snapshot
 
     def apply_corporate_action(self, symbol: str, *, share_ratio: float = 1.0,
-                               cash_per_share: float = 0.0) -> dict[str, Any]:
+                               cash_per_share: float = 0.0,
+                               ex_date: str | None = None) -> dict[str, Any]:
+        """Apply a split, bonus issue or cash dividend, canonically.
+
+        This used to mutate the portfolio and emit to the legacy operational log
+        only, which classified a cash dividend and a share adjustment as telemetry.
+        Measured cost of that classification (DEF-020): a 0.50/share dividend plus a
+        2:1 split left the portfolio holding 2,000 shares and 990,494.90 in cash
+        while the canonical replay still said 1,000 shares and 989,994.90 — a 500.00
+        cash divergence and 1,000 shares, on a record of account that is supposed to
+        be the only one.
+
+        The canonical append comes first. If it fails the portfolio is untouched, so
+        the two cannot end up disagreeing in the direction that matters: the ledger
+        may know about an action the in-memory portfolio has not applied yet, and a
+        restart replays it. The reverse — portfolio adjusted, ledger silent — is the
+        divergence that cannot be recovered from.
+        """
+        session = (ex_date or datetime.now(timezone.utc).isoformat())[:10]
+        action = CanonicalCorporateAction.create(
+            symbol=symbol, ex_date=session, lineage=self.lineage,
+            share_ratio=share_ratio, cash_per_share=cash_per_share,
+        )
+        self.canonical.append_corporate_action(action, trade_date=session)
         result = self.portfolio.apply_corporate_action(
             symbol, share_ratio=share_ratio, cash_per_share=cash_per_share
         )
-        self._emit(lg.CORPORATE_ACTION_APPLIED, result, symbol=symbol)
-        return result
+        return result | {"corporateActionId": action.corporate_action_id}
 
     def close_session(self, trade_date: str) -> dict[str, Any]:
         """Settle T+1 purchases and close the session."""

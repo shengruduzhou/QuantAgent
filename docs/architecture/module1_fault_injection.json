@@ -1,0 +1,363 @@
+{
+  "clean": true,
+  "experimentCount": 13,
+  "experiments": [
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "control",
+      "experimentId": "sigkill.none",
+      "fault": "control run, no fault",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": 9,
+      "delivery": "real signal.SIGKILL",
+      "experimentId": "sigkill.after_claim",
+      "fault": "SIGKILL to a live worker process at after_claim",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 0,
+        "fills": 0,
+        "fillsAfterRecovery": 0,
+        "identityResidual": 0.0,
+        "ledgerRecords": 0,
+        "maxOrdersPerIntent": 0,
+        "notes": [
+          "no ledger file: nothing economic was ever recorded"
+        ],
+        "orders": 0,
+        "ordersAfterRecovery": 0,
+        "recoveryRan": false,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": 9,
+      "delivery": "real signal.SIGKILL",
+      "experimentId": "sigkill.after_first_ledger_append",
+      "fault": "SIGKILL to a live worker process at after_first_ledger_append",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 0,
+        "fills": 0,
+        "fillsAfterRecovery": 0,
+        "identityResidual": 0.0,
+        "ledgerRecords": 1,
+        "maxOrdersPerIntent": 1,
+        "notes": [],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": 9,
+      "delivery": "real signal.SIGKILL",
+      "experimentId": "sigkill.mid_ledger_append",
+      "fault": "SIGKILL to a live worker process at mid_ledger_append",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 0,
+        "fills": 0,
+        "fillsAfterRecovery": 0,
+        "identityResidual": 0.0,
+        "ledgerRecords": 0,
+        "maxOrdersPerIntent": 0,
+        "notes": [],
+        "orders": 0,
+        "ordersAfterRecovery": 0,
+        "recoveryRan": true,
+        "tornTail": true
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": 9,
+      "delivery": "real signal.SIGKILL",
+      "experimentId": "sigkill.after_venue_fill",
+      "fault": "SIGKILL to a live worker process at after_venue_fill",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": 9,
+      "delivery": "real signal.SIGKILL",
+      "experimentId": "sigkill.after_execution_before_resolve",
+      "fault": "SIGKILL to a live worker process at after_execution_before_resolve",
+      "hypothesis": "the ledger stays replayable, at most one economic order exists, no confirmed fill is lost, and recovery adds nothing",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "injected at the os.fsync syscall, scoped to the ledger's fd",
+      "experimentId": "storage.fsync_failure",
+      "fault": "os.fsync raises EIO during a canonical append",
+      "hypothesis": "the failure surfaces to the caller, no further append is accepted, and a restart replays the file that is actually there",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 6,
+        "maxOrdersPerIntent": 1,
+        "notes": [
+          "seeded one completed order before injecting the fault",
+          "append surfaced the failure: [Errno 5] simulated EIO writing canonical.jsonl",
+          "further appends refused (fail-closed latch held)",
+          "records before the fault 5, on disk now 6"
+        ],
+        "orders": 2,
+        "ordersAfterRecovery": 2,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "injected at the file write (not a genuinely full filesystem)",
+      "experimentId": "storage.disk_full",
+      "fault": "the ledger write fails with ENOSPC",
+      "hypothesis": "the failure surfaces and the chain remains replayable",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [
+          "seeded one completed order before injecting the fault",
+          "append surfaced the failure: [Errno 28] No space left on device",
+          "records before the fault 5, on disk now 5"
+        ],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "injected at the file flush (the shape a full volume usually takes)",
+      "experimentId": "storage.disk_full_at_flush",
+      "fault": "the ledger write succeeds but the flush fails with ENOSPC",
+      "hypothesis": "the failure still surfaces, the ledger latches closed, and everything already committed remains replayable",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [
+          "seeded one completed order before injecting the fault",
+          "append surfaced the failure: [Errno 28] No space left on device (at flush)",
+          "further appends refused (fail-closed latch held)",
+          "records before the fault 5, on disk now 5"
+        ],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "real chmod on the real file",
+      "experimentId": "storage.read_only_path",
+      "fault": "the ledger file is made read-only under a running writer",
+      "hypothesis": "the append fails loudly rather than silently dropping an economic event",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [
+          "seeded one completed order before injecting the fault",
+          "append surfaced the failure: PermissionError",
+          "records before the fault 5, on disk now 5"
+        ],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "real edit to the file",
+      "experimentId": "integrity.missing_record",
+      "fault": "a record is removed from the middle of the chain",
+      "hypothesis": "verification fails and no projection is exposed",
+      "measurement": {
+        "chainValid": false,
+        "distinctExecutionIds": 0,
+        "fills": 0,
+        "fillsAfterRecovery": 0,
+        "identityResidual": 0.0,
+        "ledgerRecords": 4,
+        "maxOrdersPerIntent": 0,
+        "notes": [
+          "chain broken at record 2",
+          "removed one middle record (675 bytes) from the chain",
+          "verification correctly refused the chain; this is the pass condition"
+        ],
+        "orders": 0,
+        "ordersAfterRecovery": 0,
+        "recoveryRan": false,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "real edit to the file",
+      "experimentId": "integrity.corrupted_record",
+      "fault": "a filled quantity is edited in place",
+      "hypothesis": "verification fails and no projection is exposed",
+      "measurement": {
+        "chainValid": false,
+        "distinctExecutionIds": 0,
+        "fills": 0,
+        "fillsAfterRecovery": 0,
+        "identityResidual": 0.0,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 0,
+        "notes": [
+          "chain broken at record 4",
+          "edited a filled quantity in place",
+          "verification correctly refused the chain; this is the pass condition"
+        ],
+        "orders": 0,
+        "ordersAfterRecovery": 0,
+        "recoveryRan": false,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    },
+    {
+      "blastRadius": "one paper account in a temporary directory",
+      "childSignal": null,
+      "delivery": "real concurrent processes",
+      "experimentId": "lock.contention.four_processes",
+      "fault": "four worker processes contend for one writer lock and one queue entry",
+      "hypothesis": "exactly one economic order exists, every process terminates, and no lock cycle forms",
+      "measurement": {
+        "chainValid": true,
+        "distinctExecutionIds": 1,
+        "fills": 1,
+        "fillsAfterRecovery": 1,
+        "identityResidual": 3.994671260443283e-11,
+        "ledgerRecords": 5,
+        "maxOrdersPerIntent": 1,
+        "notes": [
+          "child exit codes: [0, 0, 0, 0]",
+          "2 of 4 children held the writer lock"
+        ],
+        "orders": 1,
+        "ordersAfterRecovery": 1,
+        "recoveryRan": true,
+        "tornTail": false
+      },
+      "passed": true,
+      "violations": []
+    }
+  ],
+  "failed": [],
+  "schemaVersion": "quantagent.module1_fault_injection.v1",
+  "steadyState": {
+    "description": "one paper account, one queued buy of 1,000 shares at a bounded price",
+    "invariants": [
+      "one intent creates at most one economic order (measured per lineage, not as a cap on the absolute count)",
+      "one execution id creates one economic effect",
+      "no confirmed fill is lost",
+      "the chain verifies or reports a torn tail and stays replayable",
+      "realised + unrealised == NAV - initial cash",
+      "recovery introduces no new order"
+    ],
+    "stopCondition": "any invariant violated by any experiment"
+  }
+}

@@ -43,6 +43,9 @@ web = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
   "httpx>=0.27",
+  # Per-job CPU/RSS accounting. Without it a long training reports no resource
+  # usage at all, which is the difference between "still working" and "stuck".
+  "psutil>=5.9",
 ]
 test = [
   "pytest>=8.2",

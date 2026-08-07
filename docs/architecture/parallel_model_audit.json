@@ -1,0 +1,273 @@
+{
+  "byClassification": {
+    "canonical_projection": 10,
+    "stateless_adapter": 9
+  },
+  "canonicalModule": "quantagent/domain/orders.py",
+  "clean": true,
+  "findings": [
+    {
+      "classification": "canonical_projection",
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_status_enum",
+      "line": 38,
+      "reason": "the canonical side enum",
+      "symbol": "Side"
+    },
+    {
+      "classification": "canonical_projection",
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_status_enum",
+      "line": 47,
+      "reason": "the canonical status enum",
+      "symbol": "OrderStatus"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_entity",
+      "line": 205,
+      "reason": "the canonical entity itself",
+      "symbol": "OrderIntent"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_entity",
+      "line": 290,
+      "reason": "the canonical entity itself",
+      "symbol": "Fill"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_entity",
+      "line": 329,
+      "reason": "the canonical entity itself",
+      "symbol": "OrderEvent"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_entity",
+      "line": 357,
+      "reason": "the canonical entity itself",
+      "symbol": "Order"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/domain/orders.py",
+      "kind": "duplicate_entity",
+      "line": 506,
+      "reason": "the canonical entity itself",
+      "symbol": "PositionLot"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": "tests/domain/test_model_isolation.py",
+      "file": "src/quantagent/paper/orders.py",
+      "kind": "duplicate_entity",
+      "line": 90,
+      "reason": "matching/simulation fields only. Its state machine is no longer independent: ALLOWED_TRANSITIONS and TERMINAL_STATES are derived by comprehension from domain.orders.ALLOWED_TRANSITIONS via _TO_CANONICAL, and every paper state maps onto a canonical status. Evidence: tests/domain/test_model_isolation.py",
+      "symbol": "Order"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": "tests/domain/test_model_isolation.py",
+      "file": "src/quantagent/paper/orders.py",
+      "kind": "duplicate_entity",
+      "line": 231,
+      "reason": "paper execution report carrying the same fee decomposition as domain.orders.Fill; holds no transition rules. Evidence: tests/domain/test_model_isolation.py",
+      "symbol": "Fill"
+    },
+    {
+      "classification": "canonical_projection",
+      "evidence": null,
+      "file": "src/quantagent/reconciliation/snapshot.py",
+      "kind": "duplicate_entity",
+      "line": 66,
+      "reason": "read-only comparison projection of a replayed OrderBook",
+      "symbol": "OrderFacts"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": "tests/domain/test_model_isolation.py",
+      "file": "src/quantagent/backtest/microstructure_simulator.py",
+      "kind": "duplicate_entity",
+      "line": 54,
+      "reason": "isolated microstructure research model with no production consumer and no import path to broker/ledger; isolation is enforced, not asserted. Evidence: tests/domain/test_model_isolation.py",
+      "symbol": "OrderIntent"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": "tests/domain/test_model_isolation.py",
+      "file": "src/quantagent/backtest/microstructure_simulator.py",
+      "kind": "duplicate_entity",
+      "line": 70,
+      "reason": "isolated microstructure research model; see the OrderIntent disposition. Evidence: tests/domain/test_model_isolation.py",
+      "symbol": "Fill"
+    },
+    {
+      "classification": "stateless_adapter",
+      "file": "src/quantagent/execution/broker_base.py",
+      "kind": "duplicate_status_enum",
+      "line": 8,
+      "reason": "wire enum, mapped to domain.orders.Side at the boundary",
+      "symbol": "OrderSide"
+    },
+    {
+      "classification": "stateless_adapter",
+      "file": "src/quantagent/execution/broker_base.py",
+      "kind": "duplicate_status_enum",
+      "line": 18,
+      "reason": "wire enum, mapped to canonical OrderEventType at the boundary",
+      "symbol": "OrderStatus"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": null,
+      "file": "src/quantagent/execution/broker_base.py",
+      "kind": "duplicate_entity",
+      "line": 28,
+      "reason": "broker wire request; economic truth is on the canonical ledger",
+      "symbol": "Order"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": null,
+      "file": "src/quantagent/execution/broker_base.py",
+      "kind": "duplicate_entity",
+      "line": 45,
+      "reason": "broker wire intent; converted by OrderManager._open_canonical",
+      "symbol": "OrderIntent"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": null,
+      "file": "src/quantagent/execution/broker_base.py",
+      "kind": "duplicate_entity",
+      "line": 61,
+      "reason": "broker wire reply; folded in by _record_canonical_state",
+      "symbol": "OrderState"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": null,
+      "file": "src/quantagent/execution/fill_simulator.py",
+      "kind": "duplicate_entity",
+      "line": 9,
+      "reason": "pure fill-probability decision; carries no quantity ledger",
+      "symbol": "FillDecision"
+    },
+    {
+      "classification": "stateless_adapter",
+      "evidence": "tests/domain/test_integrated_idempotency.py::test_history_is_a_projection_not_independent_state",
+      "file": "src/quantagent/execution/order_manager.py",
+      "kind": "duplicate_entity",
+      "line": 100,
+      "reason": "broker request/reply cache. `OrderManager.history` is now a read-only property projected from the canonical OrderBook, and `rebuild_history()` reconstructs it from the durable ledger. Evidence: tests/domain/test_integrated_idempotency.py::test_history_is_a_projection_not_independent_state and ::test_history_rebuilds_from_the_durable_ledger",
+      "symbol": "OrderRecord"
+    }
+  ],
+  "outOfScopeStatusMutations": [
+    {
+      "file": "src/quantagent/data/providers/qmt_gateway.py",
+      "kind": "non_order_status_mutation",
+      "line": 326,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "src/quantagent/data/providers/qmt_gateway.py",
+      "kind": "non_order_status_mutation",
+      "line": 345,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "src/quantagent/data/providers/qmt_gateway.py",
+      "kind": "non_order_status_mutation",
+      "line": 351,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "src/quantagent/data/providers/qmt_gateway.py",
+      "kind": "non_order_status_mutation",
+      "line": 373,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "src/quantagent/data/providers/qmt_gateway.py",
+      "kind": "non_order_status_mutation",
+      "line": 381,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "src/quantagent/training/orchestration.py",
+      "kind": "non_order_status_mutation",
+      "line": 267,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 965,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 969,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 999,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 1021,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 1645,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 1712,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    },
+    {
+      "file": "services/quant_api/services/jobs.py",
+      "kind": "non_order_status_mutation",
+      "line": 1721,
+      "reason": "job/probe/run status, outside the order domain",
+      "symbol": ".status"
+    }
+  ],
+  "schemaVersion": "quantagent.parallel_model_audit.v1",
+  "totalFindings": 19,
+  "unresolvedBlockers": 0
+}

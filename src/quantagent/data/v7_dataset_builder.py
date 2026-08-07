@@ -80,7 +80,13 @@ def build_v7_training_dataset(
         dataset=dataset,
         feature_schema={
             "feature_columns": feature_columns,
-            "available_at_policy": "close-derived technical features are available from the next trading row",
+            "available_at_policy": (
+                "close-derived technical features are available at the close of their own "
+                "trade_date (available_at == trade_date); labels are entered at that same "
+                "close (v7_label_builder: close(t+h)/close(t)-1), so available_at never "
+                "falls inside a label window. Execution latency is modelled by the "
+                "executable backtest, not by back-dating the availability stamp."
+            ),
             "source_name": config.source_name,
         },
         label_schema=label_schema,
@@ -130,8 +136,26 @@ def build_market_features(
     data["amount_mean_20d"] = group["amount"].transform(lambda s: s.rolling(20, min_periods=5).mean())
     data["volume_mean_20d"] = group["volume"].transform(lambda s: s.rolling(20, min_periods=5).mean())
     data["intraday_return"] = data["close"] / data["open"].replace(0, np.nan) - 1.0
-    data["available_at"] = group["trade_date"].shift(-1)
-    data["available_at"] = data["available_at"].fillna(data["trade_date"] + pd.Timedelta(days=1))
+    # `available_at` is defined by `ashare.contracts` as "the earliest wall-clock
+    # time a decision maker could have used the row". Every feature above is
+    # derived from bar `trade_date` and nothing later, so that instant is the close
+    # of `trade_date` itself.
+    #
+    # This used to be `shift(-1)` — the *next* trading row. Intended as
+    # conservatism about acting, it had two measured consequences (DEF-026), both
+    # because `available_at` is not merely documentation: it is the as-of join key
+    # in `merge_pit_features`.
+    #   * The stamp landed inside the row's own label window. `v7_label_builder`
+    #     measures `close(t+h)/close(t) - 1`, so the window opened at `close(t)`
+    #     while the row claimed to be unusable until `t+1` — 100% of rows, and it
+    #     also violated this pipeline's own declared invariant
+    #     `available_at <= trade_date`.
+    #   * Because the join key was `t+1`, any *extra* PIT feature published on
+    #     `t+1` was joined onto the row scored on the `t -> t+1` return. Measured
+    #     with an honestly-stamped feature carrying that day's return: rank IC
+    #     **+1.0000**. The conservative stamp was admitting exactly the information
+    #     it was meant to exclude.
+    data["available_at"] = data["trade_date"]
 
     # ST flag FIRST — needed so the board-aware limit derivation can apply the
     # ST 5% override. Take from caller-provided table; else keep an existing

@@ -5,6 +5,7 @@ import {
   CaretDown,
   CaretUp,
   ChartBar,
+  ArrowClockwise,
   ListMagnifyingGlass,
   Pause,
   Play,
@@ -57,7 +58,13 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
   const alertCount = failedJobs.length + riskEventCount;
 
   const alerts = useMemo(() => [
-    ...failedJobs.map((job) => ({ id: job.id, severity: "error", title: job.commandId, detail: job.error ?? job.message ?? "Job failed", path: `/training?job=${job.id}` })),
+    ...failedJobs.map((job) => ({
+      id: job.id,
+      severity: "error",
+      title: job.failure?.title ?? job.commandId,
+      detail: job.failure?.remediation ?? job.error ?? job.message ?? "Job failed",
+      path: job.labels?.strategyId ? "/runs" : `/training?job=${job.id}`,
+    })),
     ...(riskEventCount ? [{ id: "risk-events", severity: "warning", title: `${riskEventCount} active risk events`, detail: "Open the Risk Manager for exact rules and thresholds.", path: "/risk" }] : []),
   ], [failedJobs, riskEventCount]);
 
@@ -78,6 +85,16 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
       await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
     } catch (error) {
       setCancelError(error instanceof Error ? error.message : `${action} failed`);
+    }
+  };
+
+  const retryJob = async (job: JobSummary): Promise<void> => {
+    setCancelError("");
+    try {
+      await apiPost(`/jobs/${job.id}/retry`, {});
+      await queryClient.invalidateQueries({ queryKey: ["global-activity-jobs"] });
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : "Retry failed");
     }
   };
 
@@ -140,13 +157,14 @@ export function OperationsDock({ open, tab, size, jobs, overview, realtime, setT
                   <button type="button" className="vnext-task-main" onClick={() => setSelectedJobId(job.id)} onDoubleClick={() => openPath(`/training?job=${job.id}`)}>
                     <span className={`vnext-job-state state-${job.status}`} />
                     <span><strong>{commandLabel(job.commandId)}</strong><small>{job.commandId} · {job.id} · {formatDate(job.createdAt)}</small></span>
-                    <em>{job.progress === null || job.progress === undefined ? "—" : `${Math.round(job.progress * 100)}%`}</em>
+                    <em>{job.progress === null || job.progress === undefined ? "—" : `${Math.round(job.progress * 100)}%`}{job.stage ? ` · ${job.stage}` : ""}</em>
                     <b>{job.status}</b>
                   </button>
                   <div className="vnext-task-actions">
                     {job.status === "running" ? <button type="button" className="vnext-pause-job" onClick={() => void setJobRunState(job, "pause")}><Pause size={14} />暂停</button> : null}
                     {job.status === "paused" ? <button type="button" className="vnext-resume-job" onClick={() => void setJobRunState(job, "resume")}><Play size={14} />继续</button> : null}
                     {ACTIVE_STATUSES.includes(job.status) ? <button type="button" className="vnext-cancel-job" onClick={() => void cancelJob(job)}><XCircle size={14} />停止</button> : null}
+                    {job.canRetry ? <button type="button" className="vnext-retry-job" onClick={() => void retryJob(job)}><ArrowClockwise size={14} />重试</button> : null}
                     <button type="button" className="vnext-purge-job" onClick={() => void purgeJob(job)}><XCircle size={14} />{ACTIVE_STATUSES.includes(job.status) ? "停止并清除" : "清除"}</button>
                   </div>
                 </div>

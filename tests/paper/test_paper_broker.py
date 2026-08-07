@@ -39,11 +39,19 @@ from quantagent.paper.portfolio import (
 
 @pytest.fixture
 def setup(tmp_path):
+    """Paper's economic record is the canonical ledger.
+
+    `lg.EventLedger` is still constructed because the broker writes operational
+    telemetry (kill switch, mark-to-market, session close) to it, but it no
+    longer receives economic events, so integrity and recovery are asserted
+    against the canonical chain.
+    """
     ledger = lg.EventLedger(tmp_path / "ledger.jsonl")
     portfolio = Portfolio(portfolio_id="P1", cash=1_000_000.0, initial_cash=1_000_000.0)
     broker = bk.PaperBroker(portfolio, ledger, run_id="R1",
                             config=bk.BrokerConfig(slippage_bps=0.0,
-                                                   impact_coefficient=0.0))
+                                                   impact_coefficient=0.0),
+                            canonical_ledger_path=str(tmp_path / "canonical.jsonl"))
     return broker, portfolio, ledger
 
 
@@ -290,27 +298,30 @@ class TestParentOrders:
 
 class TestLedgerIntegrity:
     def test_chain_verifies(self, setup):
-        broker, _, ledger = setup
+        """The economic chain is canonical; paper's log carries telemetry only."""
+        broker, _, _ = setup
         broker.submit(buy(), market())
-        assert ledger.verify()["valid"] is True
+        assert broker.canonical.verify()["valid"] is True
 
     def test_editing_an_event_breaks_the_chain(self, setup, tmp_path):
-        broker, _, ledger = setup
+        broker, _, _ = setup
         broker.submit(buy(), market())
-        lines = ledger.path.read_text(encoding="utf-8").splitlines()
+        path = broker.canonical._path
+        lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[1])
-        record["payload"]["tampered"] = True
+        record["recordedAt"] = "1999-01-01T00:00:00+00:00"
         lines[1] = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
-        ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        assert ledger.verify()["valid"] is False
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert broker.canonical.__class__(path).verify()["valid"] is False
 
     def test_deleting_an_event_breaks_the_chain(self, setup):
-        broker, _, ledger = setup
+        broker, _, _ = setup
         broker.submit(buy(), market())
-        lines = ledger.path.read_text(encoding="utf-8").splitlines()
+        path = broker.canonical._path
+        lines = path.read_text(encoding="utf-8").splitlines()
         del lines[1]
-        ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        assert ledger.verify()["valid"] is False
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert broker.canonical.__class__(path).verify()["valid"] is False
 
     def test_unknown_event_type_refused(self, setup):
         _, _, ledger = setup
@@ -323,42 +334,48 @@ class TestLedgerIntegrity:
 
 
 class TestRecovery:
-    def test_replay_reconstructs_cash_and_positions(self, setup):
-        broker, portfolio, ledger = setup
+    def test_replay_reconstructs_cash_from_the_canonical_ledger(self, setup):
+        """Economic recovery reads the canonical chain, not paper's own log."""
+        broker, portfolio, _ = setup
         broker.submit(buy(qty=10_000), market())
         broker.close_session("2026-07-24")
         broker.submit(Order(symbol="600000.SH", side=SELL, quantity=2_000,
-                            order_type=LIMIT, limit_price=9.00), market())
+                            order_type=LIMIT, limit_price=9.00),
+                      market(trade_date="2026-07-25"))
 
-        recovered = rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
-        assert recovered.portfolio.cash == pytest.approx(portfolio.cash)
-        assert recovered.portfolio.position("600000.SH").total == pytest.approx(
-            portfolio.position("600000.SH").total
+        recovered = rc.recover_from_canonical(
+            broker.canonical._path, portfolio_id="P1", initial_cash=1_000_000.0,
         )
+        assert recovered.portfolio.cash == pytest.approx(portfolio.cash)
 
-    def test_reconciliation_passes_after_replay(self, setup):
-        broker, _, ledger = setup
+    def test_reconciliation_passes_after_canonical_replay(self, setup):
+        broker, _, _ = setup
         broker.submit(buy(), market())
-        recovered = rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
+        recovered = rc.recover_from_canonical(
+            broker.canonical._path, portfolio_id="P1", initial_cash=1_000_000.0,
+        )
         assert rc.reconcile(broker, recovered)["passed"] is True
 
     def test_reconciliation_detects_divergence(self, setup):
-        broker, portfolio, ledger = setup
+        broker, portfolio, _ = setup
         broker.submit(buy(), market())
-        recovered = rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
+        recovered = rc.recover_from_canonical(
+            broker.canonical._path, portfolio_id="P1", initial_cash=1_000_000.0,
+        )
         portfolio.cash += 1_000.0  # an action that bypassed the ledger
         result = rc.reconcile(broker, recovered)
         assert result["passed"] is False
         assert any("cash mismatch" in p for p in result["problems"])
 
-    def test_recovery_refuses_a_broken_chain(self, setup):
-        broker, _, ledger = setup
+    def test_recovery_refuses_a_broken_canonical_chain(self, setup):
+        broker, _, _ = setup
         broker.submit(buy(), market())
-        lines = ledger.path.read_text(encoding="utf-8").splitlines()
+        path = broker.canonical._path
+        lines = path.read_text(encoding="utf-8").splitlines()
         del lines[0]
-        ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        with pytest.raises(rc.RecoveryRefused, match="chain verification failed"):
-            rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(rc.RecoveryRefused, match="verification failed"):
+            rc.recover_from_canonical(path, portfolio_id="P1", initial_cash=1_000_000.0)
 
     def test_kill_switch_state_survives_restart(self, setup):
         broker, _, ledger = setup
@@ -368,12 +385,18 @@ class TestRecovery:
         assert "daily loss" in recovered.kill_reason
 
     def test_settlement_state_survives_restart(self, setup):
+        """Sessions are operational telemetry; inventory is canonical."""
         broker, _, ledger = setup
         broker.submit(buy(qty=10_000), market())
         broker.close_session("2026-07-24")
-        recovered = rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
-        assert recovered.portfolio.sellable("600000.SH") == 10_000.0
-        assert recovered.sessions_closed == 1
+
+        economic = rc.recover_from_canonical(
+            broker.canonical._path, portfolio_id="P1", initial_cash=1_000_000.0,
+        )
+        operational = rc.recover(ledger, portfolio_id="P1", initial_cash=1_000_000.0)
+
+        assert economic.portfolio.position("600000.SH").total == 10_000.0
+        assert operational.sessions_closed == 1
 
     def test_kill_switch_blocks_new_orders(self, setup):
         broker, _, _ = setup

@@ -68,6 +68,22 @@ python3 -m services.quant_api \
 argv、日志、Runtime 或浏览器存储。设计与安全契约见
 `docs/architecture/strategy-operations-workbench.md`。
 
+「研究运行」（`/runs`）是这条闭环的后半段：启动之后的阶段进度、CPU/内存/显存占用、
+实时日志、异常诊断、闸门判定、成本后净值、全部产物和最终结论都在这里，可暂停、继续、
+停止、按原参数重试，也可以最多四项并排对比。研究闭环的三条产品契约：
+
+- **研究被否决 ≠ 系统故障。** 走完流程但被 PBO/DSR/SPA 或协议闸门否决的运行是
+  终态 `rejected`（退出码 3），证据完整保留并给出补救方向；工程故障才是 `failed`，
+  并附带命名的原因、证据行和下一步动作。
+- **任务不会因为重启而消失。** 训练进程在独立 session 中运行、直接写日志文件，
+  API 崩溃或重启后会被重新接管并继续跟踪；确实无法判定时如实标注"退出状态未知"，
+  不会伪造结论。
+- **发起前就拦住可算的错误。** 基准标的不在面板内、折数不足以支撑
+  选择段 + holdout 协议等问题在启动前阻塞，而不是等训练跑完再中止。
+
+先用「试点宇宙」在少量标的上验证配置与链路，再切换到全宇宙；试点结论不可外推，
+系统会在清单和验证结果里标注这一点。
+
 ## Windows Setup
 
 ```powershell
@@ -134,6 +150,15 @@ Qlib CN instruments 使用 uppercase exchange prefix，例如 `SH600519`、`SZ00
 ## AkShare 近年数据
 
 近年 OHLCV 直接用 AkShare 构建 PIT market panel。日线 `available_at` 标记为下一 business day，避免 close 当天被训练当作盘中可用信息。
+
+> **注意（DEF-026）**：这个「下一 business day」的盖章只对**盘中**语义成立。日频训练数据集
+> 走 `build_market_features`，它会把 `available_at` 重新盖成 `trade_date` 本身 ——
+> 因为 `v7_label_builder` 的标签窗口在 `close(t)` 就打开，盖成 t+1 会让**每一行**的
+> 可用时点落在它自己的标签窗口里面（实测 100%），而且 `available_at` 是
+> `merge_pit_features` 的 as-of join key，于是窗口内发布的外部特征会被并进来
+> （实测对 `t→t+1` 标签 rank IC = +1.0000）。
+> 若直接拿 provider 面板当训练集用（绕过 `build_market_features`），
+> `evaluate_label_alignment` 会 fail-closed 拦下，见 `scripts/m5_leakage_audit.py`。
 
 ```powershell
 .\.venv\Scripts\quantagent.exe build-akshare-market-panel-v7 `

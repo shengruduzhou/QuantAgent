@@ -206,7 +206,11 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         "timestamp_columns": ["trade_date", "available_at"],
         "forbidden_columns": list(FORBIDDEN_INFERENCE_COLUMNS) + label_column_names + [f"label_end_{h}d" for h in desired_horizons],
         "horizons": list(desired_horizons),
-        "available_at_policy": "close-derived features are available from the next trading row; financial joins use available_at <= trade_date",
+        # These two clauses used to contradict each other: "available from the next
+        # trading row" makes `available_at = trade_date + 1`, which violates the
+        # `available_at <= trade_date` invariant asserted in the same sentence — for
+        # every row, and nothing checked it (DEF-026).
+        "available_at_policy": "close-derived features are available at the close of their own trade_date; all joins use available_at <= trade_date",
         "source_name": config.source_name,
         "schema_drift": schema_drift,
     }
@@ -243,7 +247,9 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         end_date=config.end_date,
         symbols=config.symbols or tuple(sorted(dataset["symbol"].astype(str).dropna().unique())),
         required_columns=("symbol", "trade_date", "available_at", *label_column_names),
-        pit_violation_count=int(quality_report.get("metrics", {}).get("pit_violation_count", 0)),
+        # `None` when no PIT audit could run — passed straight through rather than
+        # coerced to 0, which would record "never checked" as "checked and clean".
+        pit_violation_count=quality_report.get("metrics", {}).get("pit_violation_count"),
         warnings=tuple(quality_report.get("failures", ())),
         extra={
             "feature_schema_path": str(schema_path),

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import pytest
 
@@ -140,23 +141,67 @@ def test_queued_job_cancels_before_process_start(quant_ui_settings) -> None:
     assert result["status"] == "cancelled"
 
 
-def test_restart_marks_incomplete_jobs_failed_for_safe_resume(quant_ui_settings) -> None:
+def test_restart_reports_a_vanished_job_as_unknown_not_as_a_diagnosis(quant_ui_settings) -> None:
+    """A job whose process is gone gets an honest 'exit status unknown'.
+
+    The old behaviour flatly declared every in-flight job failed. That is a
+    claim the API cannot support: the process may well have finished its work.
+    """
     from services.quant_api.services.jobs import JobRecord, _now
     jm = JobManager(quant_ui_settings)
     jm._jobs["job_live"] = JobRecord(id="job_live", type="data", status="running",
-                                     commandId="backfill-u0-market-panel", createdAt=_now())
+                                     commandId="backfill-u0-market-panel", createdAt=_now(),
+                                     pid=None)
     jm._persist()
     reloaded = JobManager(quant_ui_settings)   # simulates an API restart
-    assert reloaded._jobs["job_live"].status == "failed"
-    assert "restarted" in (reloaded._jobs["job_live"].error or "")
+    record = reloaded._jobs["job_live"]
+    assert record.status == "failed"
+    assert record.failure["code"] == "lost_after_restart"
+    assert record.failure["retryable"] is True
+    assert record.exitStatusObserved is False
 
 
-# --- progress / pagination parsing ------------------------------------------
+def test_restart_finalises_from_the_supervisor_exit_code(quant_ui_settings) -> None:
+    """When the supervisor recorded an exit code, the restart uses it."""
+    from services.quant_api.services.jobs import JobRecord, _now
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_done"] = JobRecord(
+        id="job_done", type="data", status="running",
+        commandId="audit-u0-full-universe", createdAt=_now(),
+        statusPath=None,
+    )
+    status_path = quant_ui_settings.jobs_root / "job_done.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_done"].status == "running":
+        time.sleep(0.05)
+    assert reloaded._jobs["job_done"].status == "succeeded"
+    assert reloaded._jobs["job_done"].exitStatusObserved is True
+
+
+# --- progress / stage parsing ------------------------------------------------
 def test_progress_parses_paginated_counter() -> None:
-    from services.quant_api.services.jobs import _progress_from_line
-    assert _progress_from_line("[25 / 100] fetching") == pytest.approx(0.25)
-    assert _progress_from_line(json.dumps({"rows_written": 3, "total_rows": 6})) == pytest.approx(0.5)
-    assert _progress_from_line("no progress here") is None
+    from services.quant_api.services.jobs import _parse_event_line
+    assert _parse_event_line("[25 / 100] fetching")["progress"] == pytest.approx(0.25)
+    assert _parse_event_line(
+        json.dumps({"rows_written": 3, "total_rows": 6})
+    )["progress"] == pytest.approx(0.5)
+    assert _parse_event_line("no progress here") is None
+
+
+def test_stage_and_message_survive_parsing(quant_ui_settings) -> None:
+    """The stage a run is in must reach the UI, not just a percentage."""
+    from services.quant_api.services.jobs import _parse_event_line
+    event = _parse_event_line(json.dumps({
+        "progress": 0.48, "stage": "training", "message": "walk-forward training completed",
+    }))
+    assert event["stage"] == "training"
+    assert event["message"] == "walk-forward training completed"
+    assert event["progress"] == pytest.approx(0.48)
 
 
 # --- governance surface: unavailable states ----------------------------------

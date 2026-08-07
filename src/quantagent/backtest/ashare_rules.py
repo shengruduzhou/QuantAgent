@@ -258,6 +258,50 @@ def round_to_lot(shares: float, *, board: str, side: str,
     return int(minimum + ((shares - minimum) // increment) * increment)
 
 
+def execution_price(
+    *,
+    last_price: float,
+    side: str,
+    quantity: float,
+    session_volume: float,
+    slippage_bps: float,
+    impact_coefficient: float,
+    limits: "PriceLimits | None" = None,
+    limit_price: float | None = None,
+) -> float:
+    """Fill price: slippage plus square-root impact, bounded by band and limit.
+
+    One implementation, called by every engine that fills against a bar. It lived
+    in `paper/broker.py` and was copied into the streaming matcher, which is the
+    duplication this codebase keeps paying for: two copies of a pricing formula
+    agree until one is edited, and the disagreement then shows up as a
+    reconciliation difference with no way to say which side is right.
+
+    Both bounds are applied, and the order matters less than the fact that neither
+    is optional: the band is the exchange's limit on what could trade at all, and
+    the order's own limit is the worst price its owner accepted. Filling through
+    either books a price the market never offered.
+    """
+    base = float(last_price)
+    slippage = base * (float(slippage_bps) / 10_000.0)
+    participation = (
+        float(quantity) / float(session_volume) if session_volume > 0 else 0.0
+    )
+    impact = base * float(impact_coefficient) * (participation ** 0.5)
+    adjustment = slippage + impact
+    buying = side.upper() == "BUY"
+    price = base + adjustment if buying else base - adjustment
+
+    if limits is not None and not limits.unlimited:
+        if limits.limit_up is not None:
+            price = min(price, limits.limit_up)
+        if limits.limit_down is not None:
+            price = max(price, limits.limit_down)
+    if limit_price is not None:
+        price = min(price, limit_price) if buying else max(price, limit_price)
+    return round(price, 2)
+
+
 @dataclass(frozen=True)
 class TradabilityVerdict:
     can_buy: bool

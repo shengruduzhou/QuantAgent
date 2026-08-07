@@ -41,7 +41,9 @@ class DataManifest:
     missing_columns: tuple[str, ...] = ()
     duplicate_row_count: int = 0
     duplicate_rate: float = 0.0
-    pit_violation_count: int = 0
+    #: `None` means no PIT audit could run against this dataset — distinct from
+    #: `0`, which means one ran and found nothing.
+    pit_violation_count: int | None = 0
     warnings: tuple[str, ...] = ()
     quality_status: str = "unknown"
     extra: dict[str, Any] = field(default_factory=dict)
@@ -106,7 +108,7 @@ def build_manifest_for_frame(
     symbols: Iterable[str] = (),
     universe: str | None = None,
     required_columns: Iterable[str] = (),
-    pit_violation_count: int = 0,
+    pit_violation_count: int | None = 0,
     warnings: Iterable[str] = (),
     extra: dict[str, Any] | None = None,
 ) -> DataManifest:
@@ -127,8 +129,13 @@ def build_manifest_for_frame(
         output_path_strings.append(str(path))
         content_hashes[str(path)] = hash_file(path)
     warnings_tuple = tuple(warnings)
+    if pit_violation_count is None:
+        # An un-runnable audit must not read as a clean one. It is not a failure —
+        # nothing failed — but a manifest that says `passed` on a dataset whose
+        # look-ahead was never checked is the claim this programme keeps paying for.
+        warnings_tuple = warnings_tuple + ("pit_audit_not_auditable",)
     status = "passed"
-    if missing or pit_violation_count or row_count == 0:
+    if missing or (pit_violation_count or 0) or row_count == 0:
         status = "failed"
     if warnings_tuple and status == "passed":
         status = "warning"
@@ -148,7 +155,7 @@ def build_manifest_for_frame(
         missing_columns=missing,
         duplicate_row_count=duplicate_row_count,
         duplicate_rate=duplicate_rate,
-        pit_violation_count=int(pit_violation_count),
+        pit_violation_count=None if pit_violation_count is None else int(pit_violation_count),
         warnings=warnings_tuple,
         quality_status=status,
         extra=dict(extra or {}),

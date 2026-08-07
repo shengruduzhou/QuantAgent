@@ -5,10 +5,15 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import shutil
+from threading import RLock
 from typing import Any
+from uuid import uuid4
 
+from quantagent.research.verdict import required_oos_days as _required_oos_days
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
 from services.quant_api.schemas.strategy import StrategyDraft
+from services.quant_api.services.run_results import RunResultResolver
 
 
 DECISION_COUNCIL = (
@@ -24,6 +29,44 @@ DECISION_COUNCIL = (
 
 HORIZON_COLUMN = re.compile(r"^forward_return_(\d+)d$")
 
+# `run-full-real-training-v7` fixes the per-fold validation window at 20 trading
+# days and the web layer does not expose it, so the OOS days a run will produce
+# are determined entirely by the fold count chosen here.
+OOS_DAYS_PER_FOLD = 20
+
+# Mirrors the CLI defaults for `run-full-real-training-v7`; the web layer does
+# not expose either, so the pre-flight projection has to assume them.
+_MIN_TRAIN_DAYS = 120
+_EMBARGO_DAYS = 5
+
+_SYMBOL_CACHE: dict[tuple[str, float, str], bool] = {}
+_PANEL_DAYS_CACHE: dict[tuple[str, float], int | None] = {}
+
+
+def _panel_trading_days(path: Path) -> int | None:
+    """Distinct trading days in a panel. None when it cannot be determined."""
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return None
+    if key in _PANEL_DAYS_CACHE:
+        return _PANEL_DAYS_CACHE[key]
+    try:
+        import pyarrow.compute as compute
+        import pyarrow.dataset as parquet_dataset
+
+        dataset = parquet_dataset.dataset(path, format="parquet")
+        if "trade_date" not in dataset.schema.names:
+            return None
+        column = dataset.to_table(columns=["trade_date"]).column("trade_date")
+        days = int(compute.count_distinct(column).as_py())
+    except Exception:
+        return None
+    if len(_PANEL_DAYS_CACHE) > 32:
+        _PANEL_DAYS_CACHE.clear()
+    _PANEL_DAYS_CACHE[key] = days
+    return days
+
 
 def _parquet_horizons(path: Path) -> list[int]:
     import pyarrow.dataset as parquet_dataset
@@ -38,21 +81,401 @@ def _parquet_horizons(path: Path) -> list[int]:
     )
 
 
+def _panel_contains_symbol(path: Path, symbol: str) -> bool | None:
+    """Is this symbol present in the panel? None when it cannot be determined.
+
+    A benchmark that is not in the panel aborts the run late, after the whole
+    training has been paid for, so it is worth one scan of a single column to
+    find out before launching.
+    """
+    try:
+        key = (str(path), path.stat().st_mtime, symbol)
+    except OSError:
+        return None
+    if key in _SYMBOL_CACHE:
+        return _SYMBOL_CACHE[key]
+    try:
+        import pyarrow.compute as compute
+        import pyarrow.dataset as parquet_dataset
+
+        dataset = parquet_dataset.dataset(path, format="parquet")
+        if "symbol" not in dataset.schema.names:
+            return None
+        table = dataset.to_table(
+            columns=["symbol"],
+            filter=compute.field("symbol") == symbol,
+        )
+        found = table.num_rows > 0
+    except Exception:
+        return None
+    if len(_SYMBOL_CACHE) > 64:
+        _SYMBOL_CACHE.clear()
+    _SYMBOL_CACHE[key] = found
+    return found
+
+
 class StrategyService:
-    def __init__(self, settings: ApiSettings) -> None:
+    """Strategies as durable entities: versions, runs, results and deletion.
+
+    Every save used to create a standalone file and the list endpoint returned
+    each file as if it were a separate strategy, so three edits of one idea
+    looked like three strategies and there was no way to remove any of them.
+    A strategy is now one identity with an ordered version history and the runs
+    launched from it, and it can be archived or deleted like any other record.
+    """
+
+    RUNS_FILENAME = "runs.jsonl"
+
+    def __init__(self, settings: ApiSettings, runs: "RunResultResolver | None" = None) -> None:
         self.settings = settings
         self.root = settings.runtime_root / "strategies"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.archive_root = settings.runtime_root / "archives" / "strategies"
+        self.results = runs or RunResultResolver(settings)
+        self._lock = RLock()
 
-    def list(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for path in sorted(self.root.glob("*/*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+    # ------------------------------------------------------------------
+    # identity + versions
+    # ------------------------------------------------------------------
+
+    def list(self, *, include_versions: bool = False) -> list[dict[str, Any]]:
+        """One entry per strategy, newest first, with its version history."""
+        strategies: list[dict[str, Any]] = []
+        for directory in sorted(self.root.iterdir() if self.root.exists() else []):
+            if not directory.is_dir():
+                continue
+            versions = self._versions(directory)
+            if not versions:
+                continue
+            latest = versions[0]
+            runs = self.runs(directory.name)
+            entry = {
+                **latest,
+                "versionCount": len(versions),
+                "firstCreatedAt": versions[-1]["createdAt"],
+                "updatedAt": latest["createdAt"],
+                "runCount": len(runs),
+                "lastRun": runs[0] if runs else None,
+            }
+            if include_versions:
+                entry["versions"] = versions
+            strategies.append(entry)
+        strategies.sort(key=lambda item: item.get("updatedAt") or "", reverse=True)
+        return strategies
+
+    def get(self, strategy_id: str, version: str | None = None) -> dict[str, Any] | None:
+        directory = self._strategy_dir(strategy_id)
+        if directory is None:
+            return None
+        versions = self._versions(directory)
+        if not versions:
+            return None
+        selected = (
+            next((item for item in versions if item["version"] == version), None)
+            if version
+            else versions[0]
+        )
+        if selected is None:
+            return None
+        return {
+            **selected,
+            "versions": versions,
+            "versionCount": len(versions),
+            "runs": self.runs(strategy_id),
+        }
+
+    def _strategy_dir(self, strategy_id: str) -> Path | None:
+        slug = self._slug(strategy_id)
+        if slug != strategy_id.strip().lower():
+            return None
+        directory = self.root / slug
+        return directory if directory.is_dir() else None
+
+    def _versions(self, directory: Path) -> list[dict[str, Any]]:
+        versions: list[dict[str, Any]] = []
+        for path in directory.glob("*.json"):
+            if path.name == self.RUNS_FILENAME:
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            items.append(self._public(payload, path))
-        return items
+            if "draft" not in payload or "id" not in payload:
+                continue
+            versions.append(self._public(payload, path))
+        versions.sort(key=lambda item: item["version"], reverse=True)
+        return versions
+
+    # ------------------------------------------------------------------
+    # runs
+    # ------------------------------------------------------------------
+
+    def register_run(
+        self,
+        *,
+        strategy_id: str,
+        version: str,
+        job_id: str,
+        output_dir: str,
+        name: str,
+    ) -> dict[str, Any]:
+        """Record that a job was launched from a specific strategy version.
+
+        Without this link a finished job is an anonymous output directory: the
+        parameters that produced it, the hypothesis behind it and the artifacts
+        it wrote could not be connected to each other.
+        """
+        record = {
+            "runId": f"run_{uuid4().hex[:12]}",
+            "strategyId": strategy_id,
+            "strategyVersion": version,
+            "strategyName": name,
+            "jobId": job_id,
+            "outputDir": output_dir,
+            "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        path = self.root / strategy_id / self.RUNS_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return record
+
+    def runs(self, strategy_id: str | None = None) -> list[dict[str, Any]]:
+        paths = (
+            [self.root / strategy_id / self.RUNS_FILENAME]
+            if strategy_id
+            else sorted(self.root.glob(f"*/{self.RUNS_FILENAME}"))
+        )
+        runs: list[dict[str, Any]] = []
+        for path in paths:
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    runs.append(json.loads(line))
+                except ValueError:
+                    continue
+        runs.sort(key=lambda item: item.get("createdAt") or "", reverse=True)
+        return runs
+
+    def run(self, run_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.runs() if item.get("runId") == run_id), None)
+
+    def run_result(self, run_id: str) -> dict[str, Any] | None:
+        record = self.run(run_id)
+        if record is None:
+            return None
+        return {**record, "result": self.results.resolve(record["outputDir"])}
+
+    # Comparable fields, with the direction that counts as better. `None` means
+    # there is no universally better direction and the UI must not imply one.
+    COMPARISON_METRICS: tuple[tuple[str, str, str, str | None], ...] = (
+        ("training.rankIcMean", "Rank IC", "训练", "higher"),
+        ("training.icir", "ICIR", "训练", "higher"),
+        ("training.hitRate", "命中率", "训练", "higher"),
+        ("training.evaluatedDays", "评估交易日", "训练", "higher"),
+        ("governance.pbo", "PBO", "过拟合治理", "lower"),
+        ("governance.dsrProbability", "DSR 概率", "过拟合治理", "higher"),
+        ("governance.spaPValue", "SPA p-value", "过拟合治理", "lower"),
+        ("governance.cumulativeTrials", "累计试验", "过拟合治理", "lower"),
+        ("backtest.totalReturn", "区间收益", "成本后回测", "higher"),
+        ("backtest.maxDrawdown", "最大回撤", "成本后回测", "higher"),
+        ("backtest.orderCount", "成交笔数", "成本后回测", None),
+        ("backtest.skippedOrderCount", "被约束跳过", "成本后回测", "lower"),
+        ("acceptance.passedCount", "通过闸门数", "验收", "higher"),
+    )
+    COMPARISON_LIMIT = 4
+
+    def compare_runs(self, run_ids: list[str]) -> dict[str, Any]:
+        """Align several runs on the same fields so they can be judged together.
+
+        Bounded to four: beyond that the table stops being readable and starts
+        inviting the selection of a winner from noise. Every cell is copied from
+        a run's own artifacts — a run that never produced a field shows a gap,
+        not a zero.
+        """
+        if not run_ids:
+            raise ValueError("compare requires at least one run")
+        if len(run_ids) > self.COMPARISON_LIMIT:
+            raise ValueError(
+                f"compare is bounded to {self.COMPARISON_LIMIT} runs; received {len(run_ids)}"
+            )
+        known = {item["runId"]: item for item in self.runs()}
+        missing = [run_id for run_id in run_ids if run_id not in known]
+        if missing:
+            raise KeyError(", ".join(missing))
+
+        resolved = [
+            {**known[run_id], "result": self.results.resolve(known[run_id]["outputDir"])}
+            for run_id in run_ids
+        ]
+
+        def read(payload: dict[str, Any], path: str) -> Any:
+            node: Any = payload["result"]
+            for part in path.split("."):
+                if not isinstance(node, dict):
+                    return None
+                node = node.get(part)
+            return node
+
+        metrics = []
+        for path, label, group, direction in self.COMPARISON_METRICS:
+            values = [read(item, path) for item in resolved]
+            if all(value is None for value in values):
+                continue
+            numeric = [value for value in values if isinstance(value, (int, float))]
+            best_index = None
+            if direction and len(numeric) > 1 and len(set(numeric)) > 1:
+                target = max(numeric) if direction == "higher" else min(numeric)
+                best_index = next(
+                    (index for index, value in enumerate(values) if value == target),
+                    None,
+                )
+            metrics.append({
+                "key": path,
+                "label": label,
+                "group": group,
+                "direction": direction,
+                "values": values,
+                "bestIndex": best_index,
+            })
+
+        gate_names: list[str] = []
+        for item in resolved:
+            for gate in ((item["result"].get("acceptance") or {}).get("gates") or []):
+                if gate["name"] not in gate_names:
+                    gate_names.append(gate["name"])
+        gates = [
+            {
+                "name": name,
+                "values": [
+                    next(
+                        (
+                            {"passed": gate["passed"], "actual": gate["actual"], "threshold": gate["threshold"]}
+                            for gate in ((item["result"].get("acceptance") or {}).get("gates") or [])
+                            if gate["name"] == name
+                        ),
+                        None,
+                    )
+                    for item in resolved
+                ],
+            }
+            for name in gate_names
+        ]
+
+        return {
+            "runs": [
+                {
+                    "runId": item["runId"],
+                    "strategyId": item["strategyId"],
+                    "strategyName": item["strategyName"],
+                    "strategyVersion": item["strategyVersion"],
+                    "createdAt": item["createdAt"],
+                    "outputDir": item["outputDir"],
+                    "outcome": (item["result"].get("conclusion") or {}).get("outcome"),
+                    "headline": (item["result"].get("conclusion") or {}).get("headline"),
+                    "promotable": bool((item["result"].get("conclusion") or {}).get("promotable")),
+                }
+                for item in resolved
+            ],
+            "metrics": metrics,
+            "gates": gates,
+            "note": (
+                "同列数字来自各自运行的产物；空缺表示该运行没有产出该字段，"
+                "不代表 0。研究范围、宇宙和评估窗口不同的运行不可直接比较。"
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # deletion
+    # ------------------------------------------------------------------
+
+    def delete(
+        self,
+        strategy_id: str,
+        *,
+        version: str | None = None,
+        delete_outputs: bool = False,
+    ) -> dict[str, Any]:
+        """Archive a strategy (or one version) and optionally its run outputs.
+
+        Deleting moves the manifest into ``runtime/archives`` rather than
+        unlinking it: a research record that can be silently destroyed is not an
+        auditable one. Run outputs are only removed on an explicit request, and
+        only from inside the runtime subtree.
+        """
+        directory = self._strategy_dir(strategy_id)
+        if directory is None:
+            raise KeyError(strategy_id)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = self.archive_root / f"{strategy_id}_{stamp}"
+        destination.mkdir(parents=True, exist_ok=True)
+
+        moved: list[str] = []
+        removed_outputs: list[str] = []
+        errors: list[str] = []
+
+        if version:
+            source = directory / f"{version}.json"
+            if not source.exists():
+                raise KeyError(f"{strategy_id}@{version}")
+            shutil.move(str(source), str(destination / source.name))
+            moved.append(project_relative(self.settings, destination / source.name))
+            remaining = self._versions(directory)
+            if not remaining:
+                # The last version is gone; retire the identity too.
+                self._archive_runs(directory, destination, moved)
+                shutil.rmtree(directory, ignore_errors=True)
+        else:
+            if delete_outputs:
+                for run in self.runs(strategy_id):
+                    error = self._remove_output(run.get("outputDir"))
+                    if error:
+                        errors.append(error)
+                    elif run.get("outputDir"):
+                        removed_outputs.append(str(run["outputDir"]))
+            for item in sorted(directory.iterdir()):
+                shutil.move(str(item), str(destination / item.name))
+                moved.append(project_relative(self.settings, destination / item.name))
+            directory.rmdir()
+
+        return {
+            "id": strategy_id,
+            "version": version,
+            "archivedTo": project_relative(self.settings, destination),
+            "archivedFiles": moved,
+            "outputsRemoved": removed_outputs,
+            "errors": errors,
+        }
+
+    def _archive_runs(self, directory: Path, destination: Path, moved: list[str]) -> None:
+        runs_path = directory / self.RUNS_FILENAME
+        if runs_path.exists():
+            shutil.move(str(runs_path), str(destination / runs_path.name))
+            moved.append(project_relative(self.settings, destination / runs_path.name))
+
+    def _remove_output(self, output_dir: str | None) -> str | None:
+        if not output_dir:
+            return None
+        try:
+            path = safe_project_path(self.settings, output_dir)
+        except ValueError as exc:
+            return f"{output_dir}: {exc}"
+        runtime = self.settings.runtime_root.resolve()
+        resolved = path.resolve()
+        if resolved == runtime or runtime not in resolved.parents:
+            return f"{output_dir}: refused, outside the bounded runtime subtree"
+        if not path.exists():
+            return None
+        try:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+        except OSError as exc:
+            return f"{output_dir}: {exc}"
+        return None
 
     def defaults(self) -> dict[str, Any]:
         groups = {
@@ -185,6 +608,7 @@ class StrategyService:
             "valuationPath": draft.valuation_path,
             "disclosuresPath": draft.disclosures_path,
             "minutePanelPath": draft.minute_panel_path,
+            "universeSymbolsFile": draft.universe_symbols_file,
         }
         resolved_inputs: dict[str, str] = {}
         resolved_paths: dict[str, Path] = {}
@@ -414,7 +838,74 @@ class StrategyService:
                 "缺少超额收益基准",
                 "未指定 benchmarkSymbol；无法验证最大超额目标。",
                 field="benchmarkSymbol",
-                action={"kind": "set_benchmark", "label": "使用沪深 300"},
+                action={"kind": "clear_excess_objective", "label": "把超额权重改为 0"},
+            )
+        else:
+            # Measured against the actual panel, not assumed. A full-universe
+            # stock panel normally holds no index symbol, and the run aborts on
+            # this at ~60% progress — after the entire training has been paid for.
+            panel = resolved_paths.get("marketPanelPath")
+            present = (
+                _panel_contains_symbol(panel, draft.benchmark_symbol)
+                if panel is not None and panel.is_file()
+                else None
+            )
+            if present is False:
+                add_issue(
+                    "benchmark_absent_from_panel",
+                    "blocking",
+                    "基准标的不在行情面板内",
+                    (
+                        f"benchmarkSymbol={draft.benchmark_symbol} 在所选行情面板中不存在。"
+                        "运行会在组合阶段中止，而训练成本已经付出。"
+                        "个股全宇宙面板通常不含指数标的。"
+                    ),
+                    field="benchmarkSymbol",
+                    action={"kind": "resolve_benchmark", "label": "改用面板内标的或清空基准"},
+                    evidence={
+                        "benchmarkSymbol": draft.benchmark_symbol,
+                        "marketPanelPath": resolved_inputs.get("marketPanelPath"),
+                    },
+                )
+
+        # The nested selection protocol needs more OOS days than a short
+        # walk-forward produces. This is pure arithmetic and knowable now; left
+        # unchecked it aborts the run after training completes.
+        projected_oos_days = draft.n_splits * OOS_DAYS_PER_FOLD
+        # Uses the run's own definition, which reserves the day that NAV
+        # differencing consumes before governance ever sees the segment.
+        required_oos_days = _required_oos_days(
+            draft.selection_min_oos_days, draft.selection_min_holdout_days
+        )
+        if projected_oos_days < required_oos_days:
+            minimum_splits = -(-required_oos_days // OOS_DAYS_PER_FOLD)  # ceil
+            add_issue(
+                "insufficient_projected_oos_days",
+                "blocking",
+                "样本外交易日不足以执行选择与 holdout 协议",
+                (
+                    f"{draft.n_splits} 折 × {OOS_DAYS_PER_FOLD} 天 = {projected_oos_days} 个"
+                    f"样本外交易日，少于协议所需的 {required_oos_days} 天"
+                    f"（选择 {draft.selection_min_oos_days} + holdout "
+                    f"{draft.selection_min_holdout_days}）。"
+                    f"至少需要 {minimum_splits} 折。"
+                ),
+                field="nSplits",
+                action={"kind": "resolve_oos_days", "label": f"提高到 {minimum_splits} 折"},
+                evidence={
+                    "nSplits": draft.n_splits,
+                    "oosDaysPerFold": OOS_DAYS_PER_FOLD,
+                    "projectedOosDays": projected_oos_days,
+                    "requiredOosDays": required_oos_days,
+                    "minimumSplits": minimum_splits,
+                },
+            )
+        else:
+            # The fold count above is what the request asks for; whether the
+            # panel's date span can seat that many folds is a separate question,
+            # and answering it needs the data.
+            self._check_panel_supports_fold_budget(
+                draft, resolved_paths.get("labelsPath"), required_oos_days, add_issue
             )
         if draft.do_t_mode in {"daily_swing", "both"}:
             add_issue(
@@ -422,6 +913,24 @@ class StrategyService:
                 "info",
                 "T+1 日线能力边界",
                 "日线波段使用 ATR timing gate 与持有期软锁，不冒充盘中成交能力。",
+            )
+        if draft.universe_scope == "pilot":
+            add_issue(
+                "pilot_universe_scope",
+                "warning",
+                "试点宇宙：结论不可外推到全宇宙",
+                (
+                    "本次只在指定的试点股票集合上运行。它用于在投入数小时算力前"
+                    "验证配置与链路；任何 IC、回撤或超额结论都只对该子集成立，"
+                    "不得当作全宇宙结果引用。"
+                ),
+                field="universeScope",
+                evidence={
+                    "universeSymbolsFile": draft.universe_symbols_file,
+                    "inlineSymbolCount": len(
+                        [item for item in (draft.universe_symbols or "").split(",") if item.strip()]
+                    ),
+                },
             )
         add_issue(
             "research_only",
@@ -465,16 +974,20 @@ class StrategyService:
                 "missing_horizon_columns",
                 "gpu_not_enforced",
                 "overfit_gates",
+                "insufficient_projected_oos_days",
             },
             "portfolio": {
                 "pareto_top_k_protocol",
                 "bounded_early_oos_search",
                 "benchmark_missing",
+                "benchmark_absent_from_panel",
+                "insufficient_projected_oos_days",
             },
             "backtest": {
                 "minutePanelPath_missing",
                 "daily_swing_contract",
                 "benchmark_missing",
+                "benchmark_absent_from_panel",
             },
             "risk": {
                 "overfit_gates",
@@ -566,6 +1079,71 @@ class StrategyService:
             "decisionCouncil": decision_council,
         }
 
+    def _check_panel_supports_fold_budget(
+        self,
+        draft: StrategyDraft,
+        labels_path: Path | None,
+        required_oos_days: int,
+        add_issue,
+    ) -> None:
+        """Can this panel's date span actually seat the requested folds?
+
+        ``n_splits x 20`` is what the operator asked for. Whether the data can
+        deliver it depends on the panel's trading-day count minus the training
+        window, the embargo and the label purge. The run itself re-checks this
+        exactly once the dataset is built; this is the cheap early warning so an
+        operator is not told to raise ``nSplits`` to a number the panel cannot
+        support either.
+        """
+        if labels_path is None or not labels_path.is_file():
+            return
+        try:
+            from quantagent.training.splitters import WalkForwardSplitConfig, plan_walk_forward
+        except Exception:
+            return
+        panel_days = _panel_trading_days(labels_path)
+        if panel_days is None:
+            return
+
+        horizons = [int(value) for value in str(draft.horizons).split(",") if value.strip().isdigit()]
+        max_horizon = max(horizons) if horizons else int(draft.primary_horizon)
+        # Feature warm-up consumes leading dates before any row is complete. The
+        # exact cost depends on which factors survive screening, so this is a
+        # deliberate under-estimate: it only fires when the shortfall is certain.
+        optimistic_usable_days = panel_days - max_horizon
+        cfg = WalkForwardSplitConfig(
+            n_splits=draft.n_splits,
+            valid_size_days=OOS_DAYS_PER_FOLD,
+            min_train_days=_MIN_TRAIN_DAYS,
+            embargo_days=_EMBARGO_DAYS,
+            purge_days=max_horizon,
+            mode=draft.split_mode,
+        )
+        plan = plan_walk_forward(optimistic_usable_days, cfg)
+        if plan.oos_days >= required_oos_days:
+            return
+        add_issue(
+            "panel_span_cannot_seat_folds",
+            "blocking",
+            "面板日期跨度不足以支撑所需折数",
+            (
+                f"标签面板有 {panel_days} 个交易日；扣除 {_MIN_TRAIN_DAYS} 天训练窗口、"
+                f"{_EMBARGO_DAYS} 天 embargo 与 {max_horizon} 天标签 purge 后，"
+                f"最多只能容纳 {plan.achievable_splits} 折 = {plan.oos_days} 个样本外交易日，"
+                f"少于协议所需的 {required_oos_days} 天。"
+                "提高 nSplits 无法解决，需要更长的数据跨度或更短的标签期限。"
+            ),
+            field="labelsPath",
+            evidence={
+                "panelTradingDays": panel_days,
+                "maxHorizon": max_horizon,
+                "achievableSplits": plan.achievable_splits,
+                "achievableOosDays": plan.oos_days,
+                "requiredOosDays": required_oos_days,
+                "note": "warm-up 未计入，实际可用交易日只会更少",
+            },
+        )
+
     def save(self, draft: StrategyDraft) -> dict[str, Any]:
         validation = self.validate(draft)
         strategy_id = draft.id or self._slug(draft.name)
@@ -630,6 +1208,11 @@ class StrategyService:
             "acceptance_max_drawdown": draft.risk_limits.max_drawdown,
             "acceptance_min_sharpe": draft.risk_limits.min_sharpe,
         }
+        if draft.universe_scope == "pilot":
+            if draft.universe_symbols:
+                parameters["symbols"] = draft.universe_symbols
+            if draft.universe_symbols_file:
+                parameters["symbols_file"] = draft.universe_symbols_file
         optional = {
             "sector_map_path": draft.sector_map_path,
             "training_dataset_path": draft.training_dataset_path,

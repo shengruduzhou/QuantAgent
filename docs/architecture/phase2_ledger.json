@@ -1,0 +1,998 @@
+{
+  "byState": {
+    "blocked": 2,
+    "in_progress": 10,
+    "not_started": 15,
+    "verified": 36
+  },
+  "maximumPermittedStage": "backtest_only",
+  "phaseComplete": false,
+  "requirements": [
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/lineage.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-01",
+      "missing": [],
+      "module": "orders",
+      "note": "",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_lineage.py"
+      ],
+      "title": "Canonical lineage identifiers across all engines"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/idempotency.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-02",
+      "missing": [],
+      "module": "orders",
+      "note": "Covers all 7 duplicate-delivery paths plus the INC-E1 over-suppression direction.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_order_idempotency.py"
+      ],
+      "title": "Durable claim-once idempotency for economic actions"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/orders.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-03a",
+      "missing": [],
+      "module": "orders",
+      "note": "Signal, TargetPosition, OrderIntent, RiskDecision, Order, OrderEvent, Fill, PositionLot, CashMovement, OrderBook. Immutable snapshots, enforced transitions, T+1 lots, slippage derived from price rather than charged as a fee.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_order_entities.py"
+      ],
+      "title": "Canonical immutable order/execution entity set defined"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/backtest/engine.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-03b",
+      "missing": [],
+      "module": "orders",
+      "note": "backtest/engine.py now opens a Signal -> OrderIntent -> Order for every order, records RiskDecision + lifecycle events, and its `trades` DataFrame is derived from canonical Fills via _trade_row (one-way projection, no independent state).",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_ledger_reconstruction.py"
+      ],
+      "title": "The fast backtest engine emits canonical entities"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-03c",
+      "missing": [],
+      "module": "orders",
+      "note": "_open_canonical writes Signal -> Intent -> Order + RiskDecision to the CanonicalLedger before broker.submit(); _record_canonical_state folds the broker reply. broker_base types are now dispositioned as stateless wire adapters.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_integrated_idempotency.py"
+      ],
+      "title": "execution/order_manager.py adopts the canonical set"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-03d",
+      "missing": [],
+      "module": "orders",
+      "note": "`history` is a read-only property projected from the canonical OrderBook; `rebuild_history()` reconstructs it from the ledger. The wire cache `_wire` holds broker request/reply pairs only and is never read for economics. DEF-010: rebuild_history built `CanonicalLedger(self.ledger_path)`, which returned an *empty* ledger whenever the chain was in-memory or injected — so the audit compared `history` against nothing and passed. It now reads the chain the manager actually writes to, re-opened from disk when durable, via the new replay_book() that needs no fabricated initial_cash.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_integrated_idempotency.py"
+      ],
+      "title": "OrderManager.history is a derived projection"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/backtest/microstructure_simulator.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-03e",
+      "missing": [],
+      "module": "orders",
+      "note": "Isolation is enforced rather than asserted: microstructure_simulator has no production importer and no import path to broker/ledger, and no module outside domain/ keeps its own durable order log.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_model_isolation.py"
+      ],
+      "title": "Non-canonical models proven unable to reach execution"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/paper/orders.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/parallel_model_audit.json"
+      ],
+      "id": "M1-03f",
+      "missing": [],
+      "module": "orders",
+      "note": "ALLOWED_TRANSITIONS and TERMINAL_STATES are now derived by comprehension from domain.orders.ALLOWED_TRANSITIONS via _TO_CANONICAL; paper restates no rules. The migration exposed a genuine gap in the canonical table (ACCEPTED -> REJECTED is real: a venue can acknowledge then refuse at fill time) which was fixed in domain/orders.py rather than worked around in paper.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_model_isolation.py"
+      ],
+      "title": "paper/orders.py has no independent state machine"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "scripts/parallel_model_audit.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/parallel_model_audit.json"
+      ],
+      "id": "M1-15",
+      "missing": [],
+      "module": "orders",
+      "note": "unresolved_blocker = 0 across 19 findings (10 canonical projections, 9 stateless adapters). Reached by migration and enforced dispositions, not by narrowing the scanner — the scanner was *widened* this round: ORDER_DOMAIN_PREFIXES gained src/quantagent/reconciliation/ and ENTITY_NAMES gained OrderFacts, which added a blocker that was then closed by disposition. Every disposition names a test that fails if it stops holding.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_model_isolation.py"
+      ],
+      "title": "Residual parallel-model blockers reduced to zero"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/paper/broker.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-16",
+      "missing": [],
+      "module": "orders",
+      "note": "PaperBroker mirrors every order, acceptance, rejection, cancellation and fill to CanonicalLedger. Measured: paper cash 989984.8999 == replayed cash 989984.8999; position, order status, cumulative/leaves/last quantity and lineage all reconstruct; replay is hash-stable; a tampered chain raises LedgerCorruption before any projection is exposed.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_paper_canonical_replay.py"
+      ],
+      "title": "Paper economic state replays from the canonical ledger"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/orders.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-17",
+      "missing": [],
+      "module": "orders",
+      "note": "A rejection requires cumulative_quantity == 0, no fills and an explicit reason; PARTIALLY_FILLED -> REJECTED stays absent from the table. leaves_quantity, last_quantity and cumulative_quantity are exposed separately from status.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_rejection_semantics.py"
+      ],
+      "title": "ACCEPTED->REJECTED is constrained to untraded orders"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/paper/broker.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-18",
+      "missing": [],
+      "module": "orders",
+      "note": "All 8 economic _emit calls removed from paper/broker.py; the legacy EventLedger now carries only kill switch, mark-to-market and session close. Corporate actions were on that list until DEF-020 measured what classifying them as telemetry cost: a 500.00 cash and 1,000-share divergence from one dividend and one split, on the record of account that is supposed to be the only one. They are canonical now, and the audit's ECONOMIC_EVENT_NAMES gained CORPORATE_ACTION_APPLIED so the omission cannot recur — the list not containing it is exactly why no audit objected. A repository audit fails if any economic event name reappears, and a per-method AST check fails if one method writes economically to both ledgers — that audit caught two dead ORDER_FILLED assignments the regex removal missed.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_model_isolation.py"
+      ],
+      "title": "No dual economic writes: CanonicalLedger is Paper's only ledger"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/paper/recovery.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-19",
+      "missing": [],
+      "module": "orders",
+      "note": "recover_from_canonical() refuses a chain that fails verification, then rebuilds cash, positions, lots, sellable inventory, realised PnL and fees from canonical events. Sellability is resolved against the latest session in the ledger. recover() survives for operational telemetry (kill switch, sessions) only.",
+      "state": "verified",
+      "testPaths": [
+        "tests/paper/test_paper_broker.py"
+      ],
+      "title": "Paper economic recovery reads only the canonical ledger"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-14",
+      "missing": [],
+      "module": "orders",
+      "note": "Submission without lineage.run_id raises MissingIdempotencyLineage before the broker is touched; a reused key with a different request fingerprint raises IdempotencyConflict rather than returning the original. Forensic replay is an explicit isolated harness refused by any economically reachable broker.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_integrated_idempotency.py"
+      ],
+      "title": "Economic idempotency is mandatory and fails closed"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "scripts/parallel_model_audit.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/parallel_model_audit.json"
+      ],
+      "id": "M1-12",
+      "missing": [],
+      "module": "orders",
+      "note": "AST scan classifies every order entity/status enum/direct status mutation as removed | canonical_projection | stateless_adapter | unresolved_blocker. Undispositioned findings default to blocker, so a new duplicate cannot pass silently — demonstrated this round: adding reconciliation/ to the scanned domain immediately flagged its OrderFacts projection until it was dispositioned. Currently 19 findings: 10 canonical projections, 9 stateless adapters, 0 blockers.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_integrated_idempotency.py"
+      ],
+      "title": "Machine-readable residual parallel-model report"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/ledger.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-04",
+      "missing": [],
+      "module": "orders",
+      "note": "Hash-chained JSONL, fsynced. verify() locates the first broken record; a tampered record and a torn trailing write are both covered.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_ledger_reconstruction.py"
+      ],
+      "title": "Append-only hash-chained ledger, no silent state overwrite"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/accounting.py",
+        "src/quantagent/domain/ledger.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-07",
+      "missing": [],
+      "module": "orders",
+      "note": "Real engine run, in-memory state discarded, rebuilt from disk: order status, filled/remaining quantity, lots, cash, fees, slippage and NAV all match, and replay is hash-stable across repetitions. Replay refuses a corrupt chain.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_ledger_reconstruction.py"
+      ],
+      "title": "Ledger replay reconstructs exact economic state (req D)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/accounting.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-08",
+      "missing": [],
+      "module": "orders",
+      "note": "12 seeded fuzz sequences assert identities after every economic event; 8 more assert a refused transition records no event and mutates nothing. DEF-007 closed by *deleting* AccountState.frozen_cash rather than documenting it: no event fed it, so it read 0.0 forever and every 'reserved cash matches' comparison passed without measuring anything. Cash committed to working buy orders is now derived from the order book by reconciliation.snapshot (reserved_cash), which also means the commitment is released exactly once because it is recomputed rather than decremented. Order gained `reference_price` in the process — an order priced only by reference previously reserved nothing, reporting a working order as committing no capital.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_accounting_invariants.py"
+      ],
+      "title": "Accounting invariants + state-machine fuzzing (req E)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/accounting.py",
+        "src/quantagent/backtest/engine.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-09",
+      "missing": [],
+      "module": "orders",
+      "note": "Same-day buy unsellable, prior-day sellable, intraday T uses only settled base, partial fills form separate lots, cancels do not touch settled inventory. Found and fixed a real T+1 violation in the fast engine (see defect DEF-004).",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_accounting_invariants.py"
+      ],
+      "title": "T+1 position lots (req F)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/idempotency.py",
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-10",
+      "missing": [],
+      "module": "orders",
+      "note": "Drives the real OrderManager against a recording broker: repeated reconcile, restart, 8 threads, 32-thread claim race, two OS processes, two recovery workers -> exactly one economic submission each time. Later-session rebuy and revised quantity still pass through. Found and fixed a real concurrency defect: the store loaded once at construction, so two workers each held an empty view and both won (see defect DEF-006).",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_integrated_idempotency.py",
+        "tests/domain/test_order_idempotency.py"
+      ],
+      "title": "Integrated idempotency: order manager, threads, processes (req B)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/reconciliation/composite.py",
+        "src/quantagent/reconciliation/snapshot.py",
+        "src/quantagent/reconciliation/differences.py",
+        "scripts/module1_composite_replay.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_composite_replay.json"
+      ],
+      "id": "M1-20",
+      "missing": [],
+      "module": "orders",
+      "note": "MEASURED unexplained_economic_differences = 0. One scenario (full fill, ACCEPTED->REJECTED with zero fills, T+1 refusal, next-session sale with stamp duty, partial fill, cancelled remainder, re-delivered execution, out-of-order event, settlement, restart) driven through all three paths, each rebuilt from its ledger file alone. paper vs oms_to_paper: 0 differences of any kind. fast vs venue: 45 differences, every one named by an ExplanationRule for fill-price or cost model; no rule excuses a quantity, status or inventory difference. Reserved cash and reserved inventory are derived from the order book rather than read from the unfed AccountState.frozen_cash field (DEF-007). Found DEF-008 (P0), DEF-009 (P0), DEF-010, DEF-011 and DEF-014 — the last two in this round's own new code, both caught by the comparison before anything was claimed as working.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "Composite Fast/Paper/OMS replay with zero unexplained differences"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/orders.py",
+        "src/quantagent/domain/accounting.py",
+        "src/quantagent/domain/ledger.py",
+        "src/quantagent/paper/broker.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-21",
+      "missing": [],
+      "module": "orders",
+      "note": "DEF-008 was measured before the fix: re-delivering one 500-share execution left the book holding 1,000 shares and charged cash twice. Now enforced on three layers — Order.apply returns the same snapshot for an identical re-report (and raises DuplicateExecution on conflicting economics), OrderBook.apply records no event when nothing changed, and replay_account refuses to apply an execution id twice even if an older writer put it in the file. mirror_event and mirror_open keep book and ledger from disagreeing about whether an event happened — DEF-014 proved that obligation cannot be left to each call site: every caller appended history_of(...)[-1] unconditionally, so an already-known order id wrote a stale FILL into the chain as a CREATED and left it unreplayable.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "One execution id produces exactly one economic effect"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/execution/paper_adapter.py",
+        "src/quantagent/execution/order_manager.py",
+        "src/quantagent/paper/broker.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_composite_replay.json"
+      ],
+      "id": "M1-22",
+      "missing": [],
+      "module": "orders",
+      "note": "Before this the OMS could only reach VirtualBroker, so intent -> risk -> OMS -> venue had no paper leg to reconcile. PaperBrokerAdapter translates only; the OMS opens the canonical order and hands it to the venue via attach_canonical, so one economic order keeps one record. Passing both a ledger and a ledger path now raises on both sides. Measured: the OMS chain and the venue driven directly produce zero differences.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "OMS-to-paper is a real path sharing one record of account"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/accounting.py",
+        "src/quantagent/domain/orders.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_composite_replay.json"
+      ],
+      "id": "M1-23",
+      "missing": [],
+      "module": "orders",
+      "note": "DEF-009: entry fees were expensed instead of capitalised into cost basis, so `realised + unrealised` exceeded `NAV - initial cash` by 10.3521 on the composite scenario — profit no cash or inventory backed. Cash was always right, which is why a NAV-level review could not see it. AccountState.identity_residual is now the check; it is 0 to float precision on all three paths, and unrealised PnL is marked against the same weighted-average basis a sale realises against.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_accounting_invariants.py",
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "PnL split reconciles with cash on every path"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "services/quant_api/services/paper_orders.py",
+        "services/quant_api/schemas/paper.py",
+        "services/quant_api/routes/api.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-13",
+      "missing": [],
+      "module": "orders",
+      "note": "Round 7 found the premise wrong: there was no HTTP endpoint and no worker that submitted an economic order, so the requirement was unbuilt rather than untested. Round 8 built it — POST /api/paper/orders queues, /paper/orders/drain runs the worker, and the chain is HTTP -> claim -> worker -> OrderManager -> PaperBrokerAdapter -> PaperBroker -> one CanonicalLedger. 46 tests drive the route itself, measuring orders and fills on the ledger rather than trusting the reply: double click, repeated POST, timeout-after-success, gateway retry, duplicate queue delivery, 16 concurrent posts, 8 concurrent worker threads, two OS processes, simultaneous recovery, crash before claim / after claim / after canonical append / after paper acceptance, duplicate execution report, reordered lifecycle event, changed fingerprint (409), later-session order, cancel of a partially filled order, and both lineage fields failing closed. Live intent is refused with 451 before anything is recorded; missing market data is an explicit rejection, never a fabricated fill. Found DEF-015 and DEF-016.",
+      "state": "verified",
+      "testPaths": [
+        "tests/quant_ui/test_paper_order_api.py"
+      ],
+      "title": "API and worker submission paths use the durable guard"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "services/quant_api/services/paper_orders.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-24",
+      "missing": [],
+      "module": "orders",
+      "note": "The mandate's *single-host contract* option, chosen because this build has no shared transactional store to give the alternative. Enforced in two layers because one is not enough: an exclusive fcntl.flock stops a second process on this host, and a host-identity occupancy record with a heartbeat stops a second *host* — flock is advisory and per-host, so on a shared filesystem it would grant both and prove nothing. Writes are refused rather than the process being killed, so a second instance still serves read-only pages and says why. Covered in both directions: a stale heartbeat and an unreadable record both read as free, so a dead host cannot hold the account hostage. LIMIT, stated rather than papered over: multi-host deployment is *refused*, not supported — the shared transactional uniqueness that would support it does not exist here, and the cross-host guard is best effort.",
+      "state": "verified",
+      "testPaths": [
+        "tests/quant_ui/test_paper_order_api.py"
+      ],
+      "title": "Deployment uniqueness: single-host single-writer enforced"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "scripts/module1_fault_injection.py",
+        "src/quantagent/domain/ledger.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_fault_injection.json"
+      ],
+      "id": "M1-11",
+      "missing": [],
+      "module": "orders",
+      "note": "12 experiments in scripts/module1_fault_injection.py, each recording steady state, hypothesis, blast radius, delivery mechanism and measurement; run in the suite by tests/quant_ui/test_module1_fault_injection.py so a regression fails there rather than in a script someone remembers to invoke. Process faults are delivered by a **real signal.SIGKILL** to a child process at five economic boundaries (after the claim, after the first ledger append, mid-append leaving a genuine torn tail, after the venue books the fill, after execution before the request resolves) — the earlier rounds' injected exceptions still unwound the stack and flushed buffers, which is precisely the difference that tears a log. Storage faults: fsync EIO scoped to the ledger's own fd, ENOSPC, a real chmod to read-only, a removed middle record, an edited filled quantity. Plus four contending worker processes, where the timeout is the deadlock check. Every storage experiment runs against a chain that already holds a filled order, so it proves committed data survives rather than only that an error surfaces. Invariants checked after each: at most one order per intent (measured per lineage, not as a cap on the count), one execution id one effect, no confirmed fill lost, chain verifies or reports a recoverable torn tail, realised + unrealised == NAV - initial cash, recovery adds no order. Found DEF-017. STILL NOT covered, stated rather than implied: a machine-level restart, and a genuinely full filesystem (ENOSPC is injected at the write, not produced by filling a volume). There is no DBMS in this build, so 'database lock/disconnect' maps to the filesystem and lock faults above rather than to a test that does not exist.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_ledger_reconstruction.py",
+        "tests/domain/test_order_idempotency.py",
+        "tests/domain/test_composite_replay.py",
+        "tests/domain/test_ledger_write_failures.py",
+        "tests/quant_ui/test_module1_fault_injection.py"
+      ],
+      "title": "Module One controlled fault tests (req G)"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M1-05",
+      "missing": [],
+      "module": "orders",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "UI drill-down strategy->signal->order->fill->position->cash->NAV"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M1-06",
+      "missing": [],
+      "module": "orders",
+      "note": "Skip reasons are now accurate and drillable; cancel/expire paths are not modelled in the fast engine.",
+      "state": "in_progress",
+      "testPaths": [
+        "tests/test_skipped_order_audit_is_explainable.py"
+      ],
+      "title": "Skipped/blocked/rejected/cancelled/expired orders all queryable"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/streaming/bus.py"
+      ],
+      "evidencePaths": [],
+      "id": "M2-01",
+      "missing": [],
+      "module": "streaming",
+      "note": "Events are buffered in a heap and emitted in the total order from M2-03, so the same events shuffled eight ways produce one digest and one emission sequence — arrival order cannot reach the results. Three refusals rather than conventions: an event sorting before the last emitted one raises LateArrival (never silently reordered, which would make the emitted sequence a lie, and never dropped, which would lose a fill); a re-published identical event raises DuplicateEvent; and a consumer publishing MARKET_KINDS mid-drain raises, because reacting to the tape is allowed and extending it is how a backtest invents the market it wanted. Reactions at the same instant *are* accepted — a bar producing a signal then an order is the normal case and the causal priority orders it. The frontier advances with the bus and is handed to the consumer rather than the consumer being trusted to track time. Checkpoints carry a running digest of emitted event ids, not a position: a resumed run is proven to be the same run, and resuming a bus that has already emitted is refused rather than splicing two runs. Two defects fixed in this round's own code: `replay()` sorted before publishing, which neutralised the shuffle its callers were testing; and the draining flag spanned the whole loop, so a caller that broke out early left the bus refusing market data forever.",
+      "state": "verified",
+      "testPaths": [
+        "tests/streaming/test_event_bus.py"
+      ],
+      "title": "Strict timestamp-ordered event bus"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/streaming/events.py",
+        "src/quantagent/domain/timeline.py"
+      ],
+      "evidencePaths": [],
+      "id": "M2-02",
+      "missing": [],
+      "module": "streaming",
+      "note": "All 21 kinds the programme names, asserted by name rather than by count. Every event carries the full nine-stamp EventTime — there is no constructor taking a bare instant, because an event that cannot say when it became knowable cannot be checked for look-ahead. Every kind has a distinct declared causal priority, and `_assert_priorities_cover_every_kind` runs at import so adding a kind without placing it in the causal chain is a startup error rather than a subtly wrong backtest (it would otherwise sort last via UNKNOWN_PRIORITY, after the orders that should have reacted to it). MARKET_KINDS and REACTION_KINDS partition the taxonomy, which is what lets the bus tell observing the tape from extending it. Event ids are content-addressed so a replay produces the same ids as the run it replays.",
+      "state": "verified",
+      "testPaths": [
+        "tests/streaming/test_event_bus.py"
+      ],
+      "title": "Full event taxonomy (calendar/session/bar/corp-action/...)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/domain/timeline.py"
+      ],
+      "evidencePaths": [],
+      "id": "M2-03",
+      "missing": [],
+      "module": "streaming",
+      "note": "EventTime carries all nine stamps (source, event, available, ingestion, processing, decision, submission, venue receive, fill) and refuses two things at construction: a naive timestamp, and an available_time earlier than its event_time. DecisionFrontier.admit *raises* rather than returning a boolean — a guard whose result can be ignored by forgetting to read it is not a guard — and the frontier cannot move backwards. Deterministic tie-breaking is (event_time, causal priority, source sequence, stable identity); an unknown event kind sorts after every known one rather than sharing the calendar bucket, and the stable final term is what keeps a replay reproducible instead of ordering by set iteration. Made concrete to this repository rather than left abstract: bar_field_availability states when each *column* of a daily A-share bar becomes knowable, because the panel is one row per (symbol, session) and `close` is as easy to reach from a 09:30 decision as `pre_close` — pre_close and open are admitted at the open (the auction prints 09:25), close/high/low/volume/amount are refused with the 5h30m gap named, and an unknown column raises rather than defaulting. NOT YET WIRED into the engines: that is M2-01/M2-04's work, and this requirement claims the model and its guard, not their adoption.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_timeline.py"
+      ],
+      "title": "Explicit time model (event/available/decision/submit/fill)"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/streaming/lifecycle.py"
+      ],
+      "evidencePaths": [],
+      "id": "M2-04",
+      "missing": [],
+      "module": "streaming",
+      "note": "OrderLifecycle keeps *no* order state: it folds ORDER/VENUE_CALLBACK/FILL/CANCEL/EXPIRY through OrderBook via mirror_open/mirror_event, and every economic figure it reports is a replay of the chain. Tested by what changes rather than by attribute names — the only field that moves while events are handled is the events-seen counter (a name-based check would flag `initial_cash`, an immutable replay input, and prove nothing). Because the lifecycle is Module One's, its refusals are inherited rather than restated, and each is exercised here: a re-delivered execution id moves no money, reusing one with different economics raises, a fill after a cancel raises, a rejection after a fill raises, and a cancel that lost a race to a fill is absorbed (which is not the same as absorbing a duplicate fill). DEF-016 is inherited too: a cancel in the next session does not re-date the earlier fill's settlement. Three things fail closed rather than defaulting: an event for an order this run never opened, a missing required field, and an unknown venue reply — treating 'unknown' as 'accepted' is how a refused order starts trading. Whether a fill is final is decided by the order's remaining quantity, not asserted by the venue. Cross-engine evidence: given the same economic events, the streaming lifecycle and the paper broker produce identical cash, positions, fees, realised PnL, lots and event sequences, compared through EconomicSnapshot so it is records of account being compared rather than two engines' opinions of themselves.",
+      "state": "verified",
+      "testPaths": [
+        "tests/streaming/test_lifecycle_and_ambiguity.py"
+      ],
+      "title": "Order lifecycle shared with paper and live"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/streaming/ambiguity.py"
+      ],
+      "evidencePaths": [],
+      "id": "M2-05",
+      "missing": [],
+      "module": "streaming",
+      "note": "A bar that touches both the stop and the target is consistent with a loss and with a gain, and the default failure is silent: whichever branch the code checks first wins, and code tends to check the profitable one. Every resolution now names the rule that produced it, and the three ambiguous outcomes are distinguished — RESOLVED_BY_INTRABAR (a measurement, finer data settled it), RESOLVED_CONSERVATIVELY (an assumption, the adverse level is taken to have triggered first, and `is_assumption` says so) and UNRESOLVED (the caller asked to be told rather than assumed for). There is deliberately no policy that resolves ambiguity in the position's favour: AmbiguityPolicy has exactly two members, so it cannot be selected from a configuration file, and a test fails if such a member is ever added. Adverse is defined relative to the *position*, not to price direction, so a short bracket resolves against the short. A gap through a level fills at the bar's open rather than at the level, because filling at the level credits a price the market never offered. Inverted brackets and internally inconsistent bars are refused, since an inconsistent bar can be made to resolve either way. `ambiguity_report` separates assumptions from measurements: '3% ambiguous' and '3% priced by assumption' are the same number describing very different confidence.",
+      "state": "verified",
+      "testPaths": [
+        "tests/streaming/test_lifecycle_and_ambiguity.py"
+      ],
+      "title": "Documented rule for same-bar stop-loss/take-profit ambiguity"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/streaming/matching.py",
+        "src/quantagent/reconciliation/composite.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_composite_replay.json"
+      ],
+      "id": "M3-01",
+      "missing": [],
+      "module": "reconciliation",
+      "note": "The composite now runs FOUR engines, streaming included, and streaming derives its own fills: MatchingVenue reads a BAR, decides acceptance, quantity and price over the shared A-share rulebook, and publishes VENUE_CALLBACK/FILL events. That independence is the requirement — a streaming engine handed the venue's answers agrees with it automatically and the comparison would be a recording against itself. Proven independent rather than asserted: the two legs' execution id sets are disjoint (`strm-*` versus the venue's uuids), checked by a test. MEASURED: streaming vs paper = **0 differences of any kind**, not merely 0 unexplained, across all 45+ dimensions with no rule permitting any. Streaming vs fast = 45 differences, every one named. Streaming expresses all 10 scenario steps (the fast engine expresses 4), so nothing is out of its scope. Found DEF-019, and removed a duplicated pricing formula: `ashare_rules.execution_price` is now the single implementation both engines delegate to, so their agreement on price is a property rather than a coincidence maintained by hand — a test breaks the shared function and requires *both* engines to break.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "Event-level fast-vs-streaming reconciliation table"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/reconciliation/differences.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/module1_composite_replay.json"
+      ],
+      "id": "M3-02",
+      "missing": [],
+      "module": "reconciliation",
+      "note": "Enforced at construction, not by review: ExplanationRule rejects a tolerance on any status, quantity, count, lot or event-sequence dimension, so `0.5 orders` cannot be configured. A tolerance also stops applying beyond its own bound rather than stretching to fit. The two pairs that must match exactly — paper vs OMS and streaming vs paper — are granted an *empty* rule tuple, so no tolerance can apply to them at all, and tests assert both tuples stay empty. For the pairs that may legitimately differ, a test scans every cross-path rule and fails if any grants a tolerance on a discrete dimension. A dimension one side never reported is compared against an ABSENT sentinel and counts as a difference, so an engine cannot reconcile perfectly by modelling nothing.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/test_composite_replay.py"
+      ],
+      "title": "Exact equality for discrete state, tolerances only for documented float math"
+    },
+    {
+      "claimedState": "blocked",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M3-03",
+      "missing": [],
+      "module": "reconciliation",
+      "note": "Blocked on Module Five, not on reconciliation. The machine-readable table exists and is regenerated by scripts/module1_composite_replay.py into docs/architecture/module1_composite_replay.json; what is missing is a route and a page to serve it, which is the web loop's work (M7-01). Recorded as blocked rather than in_progress because no amount of reconciliation work advances it.",
+      "state": "blocked",
+      "testPaths": [],
+      "title": "Reconciliation visible in UI and downloadable"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/backtest/engine.py",
+        "src/quantagent/domain/orders.py"
+      ],
+      "evidencePaths": [],
+      "id": "M4-01",
+      "missing": [],
+      "module": "golden",
+      "note": "28 scenarios across two files, each with its arithmetic derived in the docstring and asserted exactly. The fast-engine file (12) covers costs, T+1, price limits, lots, the NAV identity and determinism. The venue file (16) covers what the fast engine structurally cannot, having no venue and no working orders: partial fill with costs charged only on what traded, cancel of a remainder, cancel before any fill, late fill after a cancel, cash dividend, 2:1 split, corporate action reaching the chain, ex-date total-return equivalence, corporate-action interleaving, fractional entitlement refusal, an action on an unheld position, two strategies competing for cash, two competing for inventory, same-bar stop/target both ways, and the streaming engine reproducing the partial-fill arithmetic to the cent, four delisting cases, four missing-benchmark cases and two expiration cases. Found DEF-020, DEF-021 and DEF-022. Also corrected a wrong premise of my own: a test asserted that holding through an ex date earned 500.00 more than selling first. It does not — the engine said so — because the mark drops by the dividend, so total return is unchanged and only the 0.255 fee difference on a smaller notional remains. The test now pins that, which is the stronger check: an engine crediting a dividend *without* dropping the mark would show free money on the ex date. STILL MISSING, and why this stays in_progress: three cases, each blocked on something other than scenario-writing effort, stated so the gap is not mistaken for laziness: (a) *spread* cannot be modelled — there is no bid/ask in this build and no Level-2 vendor serves this market, so a spread scenario would be asserting an invented number; (b) *base-position intraday T* is a strategy feature that does not exist yet; (c) *same-bar stop/target through an engine* needs bracket orders in the order model — the rule itself is implemented and tested in M2-05, but no engine places a bracket, so there is nothing to drive it through. Delisting and the missing benchmark are now covered, and writing it forced DEF-021: a held position with no mark was valued at *zero*, understating NAV by 10,000.00 on a 1,000-share holding and fabricating a 10,005.10 loss — while the accounting identity still held, because cash and the mark were consistently wrong together. Valuation now refuses rather than defaulting, and `valuation()` reports nav=None with the unpriceable symbols named. Paper's Portfolio had the same defect in the opposite shape: `if s in prices` silently *excluded* unpriced holdings, claiming they did not exist. Writing the missing-benchmark case then found DEF-022, the same shape one level up: a benchmark gap was filled with 0%-return days, so with the benchmark absent for 5 of 10 sessions it reported benchmark_return +0.00% and excess_return +0.00% when the truth was +20% and -20% — excess return overstated by 20 percentage points and presented as a confident number. Now: interior gaps stay NaN (only the first observation is legitimately 0%), an incomplete benchmark yields None with benchmark_status and session-coverage counts, and the acceptance gate distinguishes an *absent* benchmark from an *incomplete* one because the two need different fixes. The gate's machine-readable reason code was deliberately left unchanged and the cause put in structured fields instead — mutating an identifier to carry a new distinction breaks every consumer matching on it.",
+      "state": "in_progress",
+      "testPaths": [
+        "tests/test_golden_backtest_scenarios.py",
+        "tests/test_golden_venue_scenarios.py"
+      ],
+      "title": "Hand-calculated golden backtest scenarios"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "src/quantagent/data/v7_quality_gates.py",
+        "src/quantagent/backtest/paper_report.py"
+      ],
+      "evidencePaths": [],
+      "id": "M5-01",
+      "missing": [],
+      "module": "risk",
+      "note": "All 12 measurement-dependent gates emit unknown when their metric is absent, not just excess_return_after_costs. DEF-023, measured before the fix by evaluating an *empty* metrics dict: four gates **passed on no evidence at all** — max_drawdown (abs(0.0) <= any limit), single_factor_dominance (0.0 <= any limit), no_mock_or_synthetic (absent -> False -> 'no synthetic data') and no_pit_violations (absent -> 0 -> 'no look-ahead'). The last two are the worst: a run never audited for leakage or synthetic data was recorded as clean on both, which is the claim this programme most needs earned rather than defaulted. The gates that did fail reported a fabricated 0.0 as the *measured* value, so an operator read 'rank_ic_mean_not_positive' and concluded the model had no edge when no IC had been computed. Now: 12 unknowns on an empty dict, zero measured passes, asserted by test. Three-way distinction pinned per gate — never audited / audited clean / audited dirty are three statuses, not two. A config-waived requirement is also distinguished from a measured pass (reason=waived_by_configuration, required=False), because 'passed' implies a threshold was cleared and a switched-off check cleared nothing. Verified the strictness does not make a genuinely complete run unpassable. Excess return additionally distinguishes an absent benchmark from an incomplete one (DEF-022) via structured fields, with the machine-readable reason code left stable.",
+      "state": "verified",
+      "testPaths": [
+        "tests/test_gate_unknown_vs_failed.py",
+        "tests/test_golden_venue_scenarios.py"
+      ],
+      "title": "Gates emit pass/fail/unknown and never fabricate a measurement"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/data/v7_quality_gates.py",
+        "src/quantagent/data/ashare/gold_bridge.py",
+        "src/quantagent/research/selection_governance.py"
+      ],
+      "evidencePaths": [
+        "docs/architecture/m5_leakage_audit.json"
+      ],
+      "id": "M5-02",
+      "missing": [],
+      "module": "risk",
+      "note": "PIT, purge/embargo, OOS budget, PBO/DSR/SPA, survivorship and now label alignment are all enforced as gates. Stays in_progress because the readiness pipeline still does not *compute* survivorship, and because DEF-026 leaves an open convention decision recorded below. DEF-025, measured: the DEF-023 hardening was defeated one layer down. Making a gate report `unknown` on a missing measurement achieves nothing while the producer supplies a fabricated one, and four did: `_pit_violations` returned 0 for a frame it could not read, `_uses_mock_or_synthetic` returned False for a frame with no provenance column, `_aggregate_metrics` wrote `uses_mock_or_synthetic: False` as a constant, and the CLI injected `pit_violation_count = 0`. So on the real training path `no_pit_violations` and `no_mock_or_synthetic` — the two claims this programme most needs earned — were recorded as *measured passes*, on nothing. Both audits now return tri-state reports and producers forward what was measured or nothing at all. DEF-026, measured: nothing had ever compared a row's availability stamp against its own label window. `build_market_features` stamped `available_at = next trading row` while `v7_label_builder` opens the label window at `close(trade_date)`, so 100% of rows declared themselves unusable until after they were already being scored — and that also violates the `available_at <= trade_date` invariant the gold builder asserts in the same sentence that describes the shift. The stamp is not documentation: it is the as-of join key in `merge_pit_features`, so a third-party feature published during the label window joined onto the row scored on that window's return, at rank IC +1.0000 (0.0 after the fix). A conservative stamp intended to withhold information was admitting it. Execution latency belongs to the executable layer, which models it explicitly; encoding it in the availability stamp bought nothing and cost a leak. `evaluate_label_alignment` returns pass / fail / unknown, reads `label_entry_at` when a delayed-entry builder publishes one, and records which basis it used rather than assuming. OPEN DECISION, not a defect: this repository runs two label conventions — `v7_label_builder`'s close(t+h)/close(t)-1 and `gold_bridge.LABEL_CONVENTION`'s delay-1 close(t+1+h)/close(t+1)-1. Measured on 800 liquid names over 2024-08..2026-08, delaying entry by one session costs 4.0% of momentum_5d's IC and 8.8% of momentum_20d's, but 73.5% of return_1d's: the cost is concentrated exactly in the fastest-decaying signals, which is where this programme's short-horizon candidates live. Three tests that asserted 'all gates satisfied' were again found passing with no evidence for the new gate — the same discovery as DEF-024 one round earlier. DEF-024, measured: gold_bridge masked a missing delisting date as a confident FALSE, so a symbol the master recorded as `status=delisted` with no date contributed exactly as many eligible training sessions as a still-listed name — survivorship bias by default, and asymmetric with mask_pre_listing, which already returned UNKNOWN for a missing listing date. The mask now consults `status`: only an explicitly listed status turns a missing date into FALSE, anything else is UNKNOWN. `eligible_for_training` deliberately keeps its permissive meaning (flipping UNKNOWN to ineligible would empty the universe wherever a register has partial coverage — U0's ST data is SZSE-only), so the tri-state `eligibility_status` and a `unknown_masks` column are published alongside it and a gate enforces the policy on the difference. `evaluate_survivorship` returns pass / fail / unknown, where unknown covers both 'a name's delisting status cannot be determined' and 'the panel contains no delisted names at all', the latter being the signature of the bias in a full-universe panel. Wiring it caught something worth recording: two live-readiness tests asserting 'all gates satisfied' had been passing with no survivorship evidence whatsoever, so a readiness report could assert production-readiness without anyone having checked whether the universe contained the names that died. DEF-027, measured: U0 keeps two masters, and the fix could not fire against one of them. `historical_security_master.parquet` (H-032C) has no `status` column and not a single delisting date, so against it the mask answered UNKNOWN for all 5,888 names — unable to separate the 358 it existed to catch from the 5,530 it did not need to. Honest but inert, and the DEF-025 lesson in a new place: hardening one side of an interface is worth nothing until you check what the other side speaks. That master does record the distinction, in two columns that agree exactly — `status_end_blocked` (True for those 358) and `source` (`sz_delist` / `sh_delist_retry`) — so `resolve_listing_status` reads whichever vocabulary is present and publishes which one it used. DEF-028, and it corrects a wrong verdict this ledger carried for one round: the audit counted a delisted name as present only if it had a `mask_post_delisting == TRUE` row — a bar *after* the security stopped existing. A panel that includes dead names and correctly stops each at its delisting date has none of those, by construction, so the audit read the healthiest possible shape as the most suspicious one and the only way to construct a passing fixture was to build a broken panel. Presence is now read from the security's status and the mask is used for what it does answer — whether any row outlived its own delisting, which is a real failure when it happens. Re-measured against the shipped FULL_UNIVERSE_GOLD_READY artifact using the master the build actually reads (`security_master.parquet`: `status` present, 5,533 listed / 361 delisted, all 361 delisting dates populated): 261 delisted names are present, contributing 424,662 sessions — 3.89% of the panel — and **zero** of them have a bar past their delisting date. Survivorship verdict: **pass**. The previous round's reading — that those names had been recorded as never having died — was wrong, and wrong because the artifact was judged against a master it was not built from. `build_masks` was also 18x slower than it needed to be (row-wise `iterrows()`, ~30k rows/s, ~6 min on the full panel); vectorised to 22s with output pinned identical to the row-wise construction, which matters now that survivorship is computed per training run rather than once at build time. STILL OPEN: the label-entry convention (see DEF-026 above), and nothing computes survivorship at *gold build* time, so a future rebuild pointed at the H-032C master would silently lose the evidence that makes today's verdict a pass.",
+      "state": "in_progress",
+      "testPaths": [
+        "tests/test_gate_unknown_vs_failed.py",
+        "tests/test_v7_live_readiness_gates.py",
+        "tests/test_pit_label_alignment_gates.py",
+        "tests/test_survivorship_producer.py"
+      ],
+      "title": "Research risk layer (PIT/leakage/survivorship/multiple-testing)"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M5-03",
+      "missing": [],
+      "module": "risk",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Model risk layer (versioning/sensitivity/drift/disable)"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/portfolio/v7_target_weights.py"
+      ],
+      "evidencePaths": [],
+      "id": "M5-04",
+      "missing": [],
+      "module": "risk",
+      "note": "Name/sector/turnover limits enforced; style and factor exposure, capacity and stress tests are not.",
+      "state": "in_progress",
+      "testPaths": [],
+      "title": "Portfolio risk layer (limits/exposure/capacity/stress)"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/paper/risk.py",
+        "src/quantagent/execution/order_manager.py"
+      ],
+      "evidencePaths": [],
+      "id": "M5-05",
+      "missing": [],
+      "module": "risk",
+      "note": "Cash, inventory, T+1, price band and lot size enforced in paper; stale-data and abnormal-price checks absent.",
+      "state": "in_progress",
+      "testPaths": [],
+      "title": "Pre-trade risk layer"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M5-06",
+      "missing": [],
+      "module": "risk",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Intraday/post-trade risk layer"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/paper/risk.py",
+        "src/quantagent/execution/risk_kill_switch.py"
+      ],
+      "evidencePaths": [],
+      "id": "M5-07",
+      "missing": [],
+      "module": "risk",
+      "note": "Kill switch and cancel-all exist for paper; flatten, per-symbol disable and manual approval are not wired to the UI.",
+      "state": "in_progress",
+      "testPaths": [],
+      "title": "Operational controls (kill switch/cancel all/flatten/approval)"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "src/quantagent/paper/risk.py"
+      ],
+      "evidencePaths": [],
+      "id": "M5-08",
+      "missing": [],
+      "module": "risk",
+      "note": "RiskDecision exists in paper; the fast backtest records rejects without rule/threshold/measured-value.",
+      "state": "in_progress",
+      "testPaths": [],
+      "title": "Risk decisions stored as first-class evidence"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "services/quant_api/services/strategies.py"
+      ],
+      "evidencePaths": [],
+      "id": "M6-01",
+      "missing": [],
+      "module": "lifecycle",
+      "note": "Save/version/compare/soft-delete/archive exist; clone, branch, rollback, restore and controlled permanent delete do not.",
+      "state": "in_progress",
+      "testPaths": [
+        "tests/quant_ui/test_strategy_lifecycle.py"
+      ],
+      "title": "Full entity lifecycle (create/version/clone/branch/rollback/delete/restore)"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M6-02",
+      "missing": [],
+      "module": "lifecycle",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "A version never silently mutates after producing a result"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "apps/quant-ui/src/vnext/strategy/StrategyStudioPage.tsx"
+      ],
+      "evidencePaths": [],
+      "id": "M7-01",
+      "missing": [],
+      "module": "web",
+      "note": "Create/validate/launch/monitor/cancel exist. Streaming backtest, reconciliation, order drill-down, promotion and rollback have no UI.",
+      "state": "in_progress",
+      "testPaths": [],
+      "title": "Complete terminal-free operation loop"
+    },
+    {
+      "claimedState": "in_progress",
+      "codePaths": [
+        "services/quant_api/services/strategies.py"
+      ],
+      "evidencePaths": [],
+      "id": "M7-02",
+      "missing": [],
+      "module": "web",
+      "note": "Pre-flight issues carry a remediation and an action; promotion-stage guidance does not exist.",
+      "state": "in_progress",
+      "testPaths": [
+        "tests/quant_ui/test_blocked_configuration.py"
+      ],
+      "title": "UI shows blocking reason and next valid action"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M8-01",
+      "missing": [],
+      "module": "promotion",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Explicit promotion stages with no skipping"
+    },
+    {
+      "claimedState": "blocked",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M8-02",
+      "missing": [],
+      "module": "promotion",
+      "note": "Blocked on M2: there is no streaming backtest to share contracts with.",
+      "state": "blocked",
+      "testPaths": [],
+      "title": "Paper uses the same contracts as the streaming backtest"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M8-03",
+      "missing": [],
+      "module": "promotion",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Shadow mode against live data, no economic orders"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M8-04",
+      "missing": [],
+      "module": "promotion",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Canary admission mechanism, disabled by default"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M9-01",
+      "missing": [],
+      "module": "determinism",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Hash-level determinism across the full pipeline"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M9-02",
+      "missing": [],
+      "module": "determinism",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Repeated unattended cycles with no resource drift"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M10-01",
+      "missing": [],
+      "module": "chaos",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Documented steady state and invariants"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M10-02",
+      "missing": [],
+      "module": "chaos",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Fault injection at every major stage"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M10-03",
+      "missing": [],
+      "module": "chaos",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Recovery verified with no duplicate order and no fabricated completion"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M11-01",
+      "missing": [],
+      "module": "usability",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "No-AI, no-terminal first-time-user acceptance test"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M12-01",
+      "missing": [],
+      "module": "acceptance",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "11 independent role reports with own tests and evidence"
+    },
+    {
+      "claimedState": "not_started",
+      "codePaths": [],
+      "evidencePaths": [],
+      "id": "M13-01",
+      "missing": [],
+      "module": "matrix",
+      "note": "",
+      "state": "not_started",
+      "testPaths": [],
+      "title": "Full supported-configuration test matrix"
+    },
+    {
+      "claimedState": "verified",
+      "codePaths": [
+        "tests/conftest.py"
+      ],
+      "evidencePaths": [],
+      "id": "M13-02",
+      "missing": [],
+      "module": "matrix",
+      "note": "Ambient .env network flags are disarmed before collection; full suite 2152 passed / 0 failed in 3:21.",
+      "state": "verified",
+      "testPaths": [
+        "tests/domain/"
+      ],
+      "title": "Regression suite passes with no external network dependency"
+    }
+  ],
+  "schemaVersion": "quantagent.phase2_ledger.v1",
+  "总数": 63
+}

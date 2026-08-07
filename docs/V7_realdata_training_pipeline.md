@@ -144,6 +144,34 @@ E:\Project\QuantAgent\runtime\
   --paper-report-output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
 ```
 
+## Walk-forward 折数预算 / OOS Budget
+
+`--n-splits` 是**请求**，实际折数由数据跨度决定。两者由同一段算术产生
+（`quantagent.training.splitters.plan_walk_forward`），前端预检、CLI 预检和
+运行期使用的是同一个函数，因此不会互相矛盾。
+
+一折需要的交易日：
+
+```
+lead = min_train_days + embargo_days + purge_days      # purge 默认取 max(horizons)
+可用折数 = (可用交易日 - lead) // valid_size_days       # valid_size_days 默认 20
+```
+
+其中「可用交易日」是**特征全部非空且标签非空**之后剩下的日期数，不是面板原始日期数。
+
+三条已修正的行为，操作时需要知道：
+
+1. **折窗锚定在样本末端。** 请求 5 折就是最近 5 个窗口，不是十年前的 5 个窗口。
+   需要旧的学习曲线语义时用 `WalkForwardSplitConfig(anchor="start")`。
+2. **每折都拿满 `min_train_days` 个训练日。** embargo 与 purge 的间隔是在训练窗口
+   *之外*额外预留的，不会从训练窗口里扣。
+3. **多期限共用同一个 OOS 窗口。** 120 天标签比 1 天标签早 120 个交易日耗尽，
+   若各自锚定末端会得到互不相交的验证窗口，跨期限融合将无日期可融合。
+   所有期限统一锚定到最短寿命标签的最后可用日期。
+
+若配置产生的 OOS 天数少于 `selection_min_oos_days + selection_min_holdout_days`，
+运行在**训练开始前**中止，退出码 4，状态 `blocked`（不是 `rejected`：没有任何假设被检验过）。
+
 ## Paper Report Outputs / 报告输出
 
 `run-full-real-training-v7`、`run-paper-backtest-v7`、`generate-paper-report-v7` 写出：

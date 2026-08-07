@@ -45,24 +45,31 @@ def test_qlib_schema_lists_required_and_optional_columns():
     assert set(report["optional_columns_missing"]) == set(QLIB_MARKET_OPTIONAL_COLUMNS)
 
 
-def test_close_derived_features_available_next_trading_day():
-    """``build_market_features`` shifts ``available_at`` to the next trading row.
+def test_close_derived_features_are_available_at_their_own_close():
+    """``build_market_features`` stamps ``available_at == trade_date``.
 
-    This contract is critical: close-derived technicals must not be
-    visible on the same trade_date they were computed from.
+    The previous version of this test asserted the shift to the *next* trading row,
+    on the reasoning that "close-derived technicals must not be visible on the same
+    trade_date they were computed from". That reasoning was applied to one side of
+    the pair only: `v7_label_builder` scores the very same row on
+    ``close(t+h)/close(t) - 1``, a window that opens at ``close(t)``. So the row
+    was declared unusable until ``t+1`` while being credited with a return starting
+    at ``t`` — a look-ahead in 100% of rows (DEF-026), and a violation of the
+    ``available_at <= trade_date`` invariant the gold builder asserts.
+
+    `available_at` is not a comment: `merge_pit_features` uses it as the as-of join
+    key. The extra session it granted let a feature published on ``t+1`` join onto
+    the row scored on the ``t -> t+1`` return, measured at rank IC +1.0000.
+
+    Latency between knowing a signal and filling an order is real, but it belongs
+    to the execution layer, which models it explicitly. Encoding it in the
+    availability stamp bought no conservatism and cost a leak.
     """
     frame = _synthetic_panel()
     features = build_market_features(frame)
-    grouped = features.sort_values(["symbol", "trade_date"]).groupby("symbol", sort=False)
-    for _, sub in grouped:
-        # ``available_at`` for row i should equal trade_date for row i+1 (until the last row).
-        rows = sub.reset_index(drop=True)
-        for i in range(len(rows) - 1):
-            current_available = pd.Timestamp(rows.loc[i, "available_at"])
-            next_trade = pd.Timestamp(rows.loc[i + 1, "trade_date"])
-            assert current_available == next_trade, (
-                "available_at must equal next trading row's trade_date"
-            )
+    available = pd.to_datetime(features["available_at"])
+    trade_date = pd.to_datetime(features["trade_date"])
+    assert (available == trade_date).all()
 
 
 def test_validate_qlib_market_schema_flags_future_available_at():

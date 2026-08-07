@@ -61,7 +61,10 @@ class StrategyDraft(StrategyModel):
         "primary_only",
     ] = Field("adaptive_oos", alias="horizonBlendMethod")
     split_mode: Literal["rolling", "expanding"] = Field("rolling", alias="splitMode")
-    n_splits: int = Field(4, ge=2, le=20, alias="nSplits")
+    # 6 folds x 20 OOS days = 120 days, the smallest budget that clears the
+    # default 80 selection + 20 holdout protocol once NAV differencing has taken
+    # its day. Pre-flight blocks anything short of it against the real panel.
+    n_splits: int = Field(6, ge=2, le=20, alias="nSplits")
     require_gpu: bool = Field(False, alias="requireGpu")
     top_k: int = Field(30, ge=5, le=500, alias="topK")
     top_k_candidates: list[int] = Field(
@@ -118,6 +121,13 @@ class StrategyDraft(StrategyModel):
     objective: Literal["max_expected_alpha", "mean_variance", "min_variance"] = "max_expected_alpha"
     weighting: Literal["equal", "rank", "softmax"] = "rank"
     initial_cash: float = Field(1_000_000, ge=100_000, le=10_000_000_000, alias="initialCash")
+    # Research scope. A full-universe run costs hours; a pilot cohort lets an
+    # operator prove the configuration before committing the machine to it. The
+    # scope is recorded on the manifest, so a pilot result can never be mistaken
+    # for a full-universe one.
+    universe_scope: Literal["full", "pilot"] = Field("full", alias="universeScope")
+    universe_symbols: str | None = Field(None, max_length=8_000, alias="universeSymbols")
+    universe_symbols_file: str | None = Field(None, max_length=512, alias="universeSymbolsFile")
     benchmark_symbol: str | None = Field("000300.SH", max_length=32, alias="benchmarkSymbol")
     objective_weights: ObjectiveWeights = Field(default_factory=ObjectiveWeights, alias="objectiveWeights")
     risk_limits: RiskLimits = Field(default_factory=RiskLimits, alias="riskLimits")
@@ -150,6 +160,12 @@ class StrategyDraft(StrategyModel):
 
     @model_validator(mode="after")
     def validate_cross_fields(self) -> "StrategyDraft":
+        if self.universe_scope == "pilot" and not (
+            self.universe_symbols or self.universe_symbols_file
+        ):
+            raise ValueError(
+                "pilot universeScope requires universeSymbols or universeSymbolsFile"
+            )
         horizons = {int(value) for value in self.horizons.split(",")}
         if self.primary_horizon not in horizons:
             raise ValueError("primaryHorizon must be included in horizons")

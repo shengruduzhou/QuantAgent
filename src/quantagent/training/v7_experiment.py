@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -21,7 +22,11 @@ from quantagent.data.v7_quality_gates import (
     evaluate_model_acceptance_gates,
 )
 from quantagent.training.model_registry import ModelRegistry
-from quantagent.training.splitters import WalkForwardSplitConfig, split_walk_forward
+from quantagent.training.splitters import (
+    WalkForwardSplitConfig,
+    plan_walk_forward,
+    split_walk_forward,
+)
 from quantagent.cuda_runtime import configure_cuda_environment
 
 
@@ -243,6 +248,8 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     boosters: dict[str, object] = {}
     all_predictions: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, object]] = []
+    dropped_folds: list[dict[str, object]] = []
+    anchor_end = shared_oos_anchor(data, feature_columns, config)
     for horizon in config.horizons:
         label_column = f"forward_return_{horizon}d"
         if label_column not in data.columns:
@@ -250,12 +257,27 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         horizon_data = data.dropna(subset=[label_column, *feature_columns]).reset_index(drop=True)
         if len(horizon_data) < config.min_train_rows:
             continue
-        folds = _make_walk_forward_folds(horizon_data, config)
+        folds = _make_walk_forward_folds(horizon_data, config, anchor_end=anchor_end)
         last_artifact = None
         for fold in folds:
             train_idx = fold.train_idx
             test_idx = fold.valid_idx
             if len(train_idx) < max(config.min_train_rows, 10, len(feature_columns)):
+                # A fold the splitter promised but that cannot be fit is a
+                # shortfall in the OOS span the caller asked for, so it is
+                # recorded rather than skipped in silence: downstream protocols
+                # size their selection/holdout windows off that span.
+                dropped_folds.append(
+                    {
+                        "horizon": int(horizon),
+                        "fold_id": int(fold.fold_id),
+                        "train_rows": int(len(train_idx)),
+                        "required_rows": int(max(config.min_train_rows, 10, len(feature_columns))),
+                        "valid_start": str(pd.Timestamp(fold.valid_dates[0]).date()),
+                        "valid_end": str(pd.Timestamp(fold.valid_dates[1]).date()),
+                        "reason": "insufficient_train_rows",
+                    }
+                )
                 continue
             train = horizon_data.iloc[train_idx]
             test = horizon_data.iloc[test_idx]
@@ -301,6 +323,7 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
         feature_importance=_feature_importance(boosters, feature_columns) if boosters else None,
     )
     metrics |= _training_manifest_metrics(prediction_frame, feature_columns, config.model)
+    metrics |= _dataset_audit_metrics(data, quality)
     adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{config.horizons[0]}d"
     adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
     metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
@@ -308,6 +331,9 @@ def run_v7_training_experiment(dataset: pd.DataFrame, config: V7TrainingConfig |
     metrics["backend"] = backend
     metrics["model_requested"] = config.model
     metrics["model_downgraded"] = backend != config.model
+    metrics["dropped_folds"] = dropped_folds
+    metrics["requested_splits"] = int(config.n_splits)
+    metrics["oos_trading_days"] = int(prediction_frame["trade_date"].nunique())
     try:
         exec_summary = _compute_executable_backtest(prediction_frame, config, Path(config.output_dir))
         metrics["executable_backtest"] = exec_summary
@@ -447,12 +473,53 @@ def _write_incremental_fold_monitor(
         fold_frame.to_csv(predictions_path.with_suffix(".csv"), index=False)
 
 
-def _make_walk_forward_folds(frame: pd.DataFrame, config: V7TrainingConfig):
+def shared_oos_anchor(
+    data: pd.DataFrame,
+    feature_columns: Sequence[str],
+    config: V7TrainingConfig,
+) -> pd.Timestamp | None:
+    """The last date every horizon can still be validated on.
+
+    Each horizon runs out of labels at a different point — a 120-day forward
+    return stops 120 trading days before a 1-day one. Left to anchor
+    individually, the horizons validate disjoint windows and a cross-horizon
+    blend has no dates in common to blend. Pinning them all to the shortest
+    horizon's last usable date keeps the OOS panel dense.
+    """
+    last_usable: list[pd.Timestamp] = []
+    for horizon in config.horizons:
+        label_column = f"forward_return_{horizon}d"
+        if label_column not in data.columns:
+            continue
+        usable = data.dropna(subset=[label_column, *feature_columns])
+        if usable.empty:
+            continue
+        dates = pd.to_datetime(usable["trade_date"], errors="coerce").dropna()
+        if not dates.empty:
+            last_usable.append(pd.Timestamp(dates.max()))
+    return min(last_usable) if last_usable else None
+
+
+def walk_forward_split_config(
+    frame: pd.DataFrame,
+    config: V7TrainingConfig,
+    anchor_end: pd.Timestamp | None = None,
+) -> WalkForwardSplitConfig:
+    """The split geometry a V7 run will use for ``frame``.
+
+    Exposed so the pre-flight layer can plan the identical geometry from a
+    panel's date span without building the training frame.
+    """
     available_horizons = tuple(h for h in config.horizons if f"forward_return_{h}d" in frame.columns)
     purge_days = max(available_horizons or config.horizons) if config.purge_days is None else int(config.purge_days)
     symbol_count = max(1, int(frame["symbol"].nunique()) if "symbol" in frame.columns else 1)
-    row_based_min_train_days = int(np.ceil(config.min_train_rows / symbol_count)) + config.embargo_days + max(0, purge_days)
-    cfg = WalkForwardSplitConfig(
+    # Days needed just to reach ``min_train_rows``. The embargo and purge gap is
+    # reserved by the splitter on top of the training window, so adding it here
+    # too would shrink the first fold's training set by exactly that much —
+    # which used to leave the earliest folds with a couple of days of data and
+    # get them silently discarded downstream.
+    row_based_min_train_days = int(np.ceil(config.min_train_rows / symbol_count))
+    return WalkForwardSplitConfig(
         n_splits=config.n_splits,
         valid_size_days=config.valid_size_days,
         min_train_days=max(config.min_train_days, row_based_min_train_days),
@@ -460,7 +527,16 @@ def _make_walk_forward_folds(frame: pd.DataFrame, config: V7TrainingConfig):
         embargo_days=config.embargo_days,
         purge_days=max(0, purge_days),
         mode=config.split_mode,
+        anchor_end=anchor_end,
     )
+
+
+def _make_walk_forward_folds(
+    frame: pd.DataFrame,
+    config: V7TrainingConfig,
+    anchor_end: pd.Timestamp | None = None,
+):
+    cfg = walk_forward_split_config(frame, config, anchor_end=anchor_end)
     folds = split_walk_forward(frame, config=cfg)
     if not folds:
         unique_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna().nunique()
@@ -468,20 +544,22 @@ def _make_walk_forward_folds(frame: pd.DataFrame, config: V7TrainingConfig):
         if relaxed_valid_size < config.valid_size_days:
             folds = split_walk_forward(
                 frame,
-                config=WalkForwardSplitConfig(
+                config=replace(
+                    cfg,
                     n_splits=max(1, min(config.n_splits, 2)),
                     valid_size_days=relaxed_valid_size,
-                    min_train_days=cfg.min_train_days,
-                    rolling_train_days=config.rolling_train_days,
-                    embargo_days=config.embargo_days,
-                    purge_days=max(0, purge_days),
-                    mode=config.split_mode,
                 ),
             )
     if not folds:
+        usable_days = int(pd.to_datetime(frame["trade_date"], errors="coerce").dropna().nunique())
+        plan = plan_walk_forward(usable_days, cfg)
         raise ValueError(
-            "V7 training produced no walk-forward folds; increase date coverage or lower "
-            "min_train_days/valid_size_days/purge_days."
+            "V7 training produced no walk-forward folds: "
+            f"{usable_days} usable trading days, but one fold needs "
+            f"{plan.days_needed_for(1)} "
+            f"(min_train_days={cfg.min_train_days} + embargo={cfg.embargo_days} "
+            f"+ purge={cfg.purge_days} + valid_size_days={cfg.valid_size_days}). "
+            "Increase date coverage or lower min_train_days/valid_size_days/purge_days."
         )
     return folds
 
@@ -609,6 +687,7 @@ def _run_ft_transformer_experiment(
     prediction_frame = pd.concat(all_predictions, ignore_index=True)
     metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients={})
     metrics |= _training_manifest_metrics(prediction_frame, feature_columns, config.model)
+    metrics |= _dataset_audit_metrics(data, quality)
     adverse_label_column = "forward_return_1d" if "forward_return_1d" in prediction_frame.columns else f"forward_return_{used_horizons[0]}d"
     adverse_report = evaluate_adverse_regime(prediction_frame, label_column=adverse_label_column)
     metrics["adverse_regime_passed"] = bool(adverse_report.get("passed", False))
@@ -1978,11 +2057,57 @@ def _aggregate_metrics(
         "max_drawdown": float(min(drawdowns)) if drawdowns else 0.0,
         "evaluated_days": n_days_total,
         "single_factor_dominance": dominance,
-        "uses_mock_or_synthetic": False,
+        # `uses_mock_or_synthetic: False` used to be written here as a constant.
+        # Nothing in this function looks at where the data came from, so the
+        # constant was an unearned claim — and it defeated the DEF-023 hardening
+        # exactly where that hardening was supposed to bite: the acceptance gate
+        # read it as a *measured* clean provenance audit. The real audit result is
+        # merged in by the caller from `evaluate_data_quality_gates`.
         "prediction_rows": int(len(predictions)),
         "fold_count": int(len(fold_metrics)),
         "hit_rate": _prediction_hit_rate(predictions),
     }
+
+
+def _dataset_audit_metrics(dataset: pd.DataFrame, quality: object) -> dict[str, object]:
+    """Carry the dataset's *measured* audits into the model metrics.
+
+    The acceptance gate judges provenance, look-ahead and label alignment, but
+    those are properties of the dataset, not of the fit — so they have to be
+    forwarded from where they were measured. They used to be supplied as
+    constants instead (`uses_mock_or_synthetic: False` here,
+    `pit_violation_count: 0` in the CLI), which turned three of the gate's
+    strictest checks into rubber stamps.
+
+    Anything the audits could not determine arrives as `None` and the gate reports
+    `unknown` — which is the intended behaviour, not a regression.
+    """
+    from quantagent.data.v7_quality_gates import evaluate_label_alignment, evaluate_survivorship
+
+    source = quality.metrics if hasattr(quality, "metrics") else (quality or {}).get("metrics", {})
+    forwarded = {
+        key: source.get(key)
+        for key in (
+            "pit_violation_count",
+            "uses_mock_or_synthetic",
+            "pit_audit_status",
+            "pit_audit_detail",
+            "provenance_audit_status",
+            "provenance_audit_detail",
+        )
+        if key in source
+    }
+    alignment = evaluate_label_alignment(dataset)
+    forwarded |= alignment.as_metrics()
+    forwarded["label_alignment_report"] = alignment.to_dict()
+    # The producer side the ledger named as missing: the survivorship gate has been
+    # fail-closed since DEF-024, but nothing computed the evidence it refuses runs
+    # for. A dataset carrying no `mask_post_delisting` reports `unknown` — correct,
+    # and now visible in the metrics rather than inferred from an absent key.
+    survivorship = evaluate_survivorship(dataset)
+    forwarded |= survivorship.as_metrics()
+    forwarded["survivorship_report"] = survivorship.to_dict()
+    return forwarded
 
 
 def _training_manifest_metrics(
@@ -2095,7 +2220,11 @@ def _write_artifacts(
             "purge_days": config.purge_days,
             "embargo_days": config.embargo_days,
             "seed": 1729,
-            "uses_mock_or_synthetic": False,
+            # From the provenance audit, not from optimism. `None` records that no
+            # column in the dataset says where the rows came from.
+            "uses_mock_or_synthetic": metrics.get("uses_mock_or_synthetic"),
+            "provenance_audit_status": metrics.get("provenance_audit_status"),
+            "label_alignment_status": metrics.get("label_alignment_status"),
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "git_commit": commit,
         },
