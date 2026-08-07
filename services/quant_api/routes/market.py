@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from quantagent.data.providers.base import ProviderUnavailable
+from services.quant_api.services.fuyao_best_practices import best_practice_payload
 
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -31,6 +32,17 @@ def _unavailable(exc: ProviderUnavailable, *, empty: Any) -> dict[str, Any]:
             }
         ],
     )
+
+
+@router.get("/best-practices")
+def market_best_practices() -> dict[str, Any]:
+    """Return the machine-readable Fuyao/Financial-API product contract.
+
+    This endpoint contains no market observations and needs no API key.  It lets
+    the UI expose the exact analytical/output boundary of every upstream best
+    practice while live data continues to come from the dedicated endpoints.
+    """
+    return _response(best_practice_payload())
 
 
 @router.get("/search")
