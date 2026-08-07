@@ -267,11 +267,11 @@ export function MarketIntelligencePage(): JSX.Element {
     const cashRow = samePeriod(cashflow);
     return {
       year: String(year),
-      revenue: readNumber(row, ["operating_revenue", "total_operating_revenue", "total_revenue", "revenue"]),
-      profit: readNumber(row, ["net_profit_parent_company", "net_profit_attributable_to_parent", "net_profit"]),
+      revenue: readNumber(row, ["operating_income", "operating_revenue", "total_operating_revenue", "total_revenue", "revenue"]),
+      profit: readNumber(row, ["parent_holder_net_profit", "net_profit_parent_company", "net_profit_attributable_to_parent", "net_profit"]),
       operatingCash: readNumber(cashRow, ["act_cash_flow_net", "net_cash_flow_operating"]),
-      assets: readNumber(balanceRow, ["total_assets"]),
-      liabilities: readNumber(balanceRow, ["total_liabilities"]),
+      assets: readNumber(balanceRow, ["assets_total", "total_assets"]),
+      liabilities: readNumber(balanceRow, ["total_debt", "total_liabilities"]),
       reportDate: dateFromMs(row.report_date_ms),
     };
   }), [balance, cashflow, income]);
