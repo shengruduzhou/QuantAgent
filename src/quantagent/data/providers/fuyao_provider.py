@@ -291,9 +291,7 @@ class FuyaoProvider(
         if frame.empty:
             return frame
         frame["symbol"] = symbol
-        frame["ex_date"] = pd.to_datetime(
-            frame.get("ex_date_ms"), unit="ms", errors="coerce"
-        ).dt.normalize()
+        frame["ex_date"] = _ms_series_to_shanghai_date(frame["ex_date_ms"])
         # The event is applied no earlier than the ex-date. This is conservative
         # for historical adjustment even if the company announced it earlier.
         frame["available_at"] = frame["ex_date"]
@@ -309,9 +307,7 @@ class FuyaoProvider(
         data = self._request(endpoint)
         frame = pd.DataFrame(_items(data))
         if not frame.empty and "date_ms" in frame.columns:
-            frame["trade_date"] = pd.to_datetime(
-                frame["date_ms"], unit="ms", errors="coerce"
-            ).dt.normalize()
+            frame["trade_date"] = _ms_series_to_shanghai_date(frame["date_ms"])
             start = pd.Timestamp(request.start_date)
             end = pd.Timestamp(request.end_date)
             frame = frame[frame["trade_date"].between(start, end)].reset_index(drop=True)
@@ -486,6 +482,19 @@ def _ms_to_timestamp(value: Any) -> pd.Timestamp | None:
         return None
 
 
+def _ms_series_to_shanghai_date(values: pd.Series) -> pd.Series:
+    """Decode epoch milliseconds to the upstream Shanghai calendar date.
+
+    Fuyao date fields are epoch milliseconds for a local market timestamp. If
+    they are converted as naive UTC and normalized first, every Shanghai
+    midnight becomes the prior UTC calendar day. Convert to Asia/Shanghai first,
+    then drop timezone/normalize so trade dates and disclosure dates keep their
+    documented local-market meaning.
+    """
+    parsed = pd.to_datetime(values, unit="ms", errors="coerce", utc=True)
+    return parsed.dt.tz_convert(SHANGHAI).dt.tz_localize(None).dt.normalize()
+
+
 def _normalise_price_rows(
     rows: list[dict[str, Any]],
     *,
@@ -506,9 +515,7 @@ def _normalise_price_rows(
         }
     )
     frame["symbol"] = symbol
-    frame["trade_date"] = pd.to_datetime(
-        frame["date_ms"], unit="ms", errors="coerce"
-    ).dt.normalize()
+    frame["trade_date"] = _ms_series_to_shanghai_date(frame["date_ms"])
     # Conservative daily-bar contract: no same-session use in daily research.
     frame["available_at"] = frame["trade_date"] + pd.Timedelta(days=1)
     frame["source"] = source
@@ -562,12 +569,8 @@ def _normalise_financial_rows(
     frame["symbol"] = frame.get(
         "thscode", frame.get("ticker", pd.Series(index=frame.index, dtype="object"))
     )
-    frame["report_period"] = pd.to_datetime(
-        frame["period_end_ms"], unit="ms", errors="coerce"
-    ).dt.normalize()
-    frame["ann_date"] = pd.to_datetime(
-        frame["report_date_ms"], unit="ms", errors="coerce"
-    ).dt.normalize()
+    frame["report_period"] = _ms_series_to_shanghai_date(frame["period_end_ms"])
+    frame["ann_date"] = _ms_series_to_shanghai_date(frame["report_date_ms"])
     frame["available_at"] = frame["ann_date"]
     if frame["available_at"].isna().any():
         raise ProviderUnavailable(
