@@ -247,7 +247,7 @@ class MarketDataService:
         }
 
     def market_intelligence(self) -> dict[str, Any]:
-        """Aggregate the current market-observation capabilities used by Fuyao inspirations.
+        """Aggregate current market-observation capabilities used by Fuyao inspirations.
 
         Each capability is isolated: one unavailable entitlement or empty upstream
         dataset must not erase the rest of the workstation. Failures are returned
@@ -262,7 +262,12 @@ class MarketDataService:
             "dragonAll": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "all"}),
             "dragonOrg": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "org"}),
             "dragonHotMoney": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "hot_money"}),
+            "limitPool": (
+                "/api/a-share/special-data/limit-up-pool",
+                {"page": 1, "size": 200, "sort_field": "continue_day_cnt", "sort_dir": "desc"},
+            ),
             "limitLadder": ("/api/a-share/special-data/limit-up-ladder", None),
+            "anomalyList": ("/api/a-share/special-data/anomaly-analysis-list", None),
         }
         panels: dict[str, Any] = {}
         issues: list[dict[str, str]] = []
