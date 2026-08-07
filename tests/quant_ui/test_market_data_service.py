@@ -99,9 +99,9 @@ class _FakeProvider:
                 "currency": "CNY",
             }
             if "income" in path:
-                base.update({"operating_revenue": 180_000_000_000, "net_profit": 90_000_000_000})
+                base.update({"operating_income": 180_000_000_000, "net_profit": 90_000_000_000, "parent_holder_net_profit": 86_000_000_000})
             if "balance" in path:
-                base.update({"total_assets": 300_000_000_000, "total_liabilities": 60_000_000_000})
+                base.update({"assets_total": 300_000_000_000, "total_debt": 60_000_000_000})
             if "cash-flow" in path:
                 base.update({"act_cash_flow_net": 100_000_000_000})
             return {"timestamp": 1, "item": [base]}
@@ -162,6 +162,8 @@ def test_financial_health_preserves_disclosure_fields(monkeypatch):
     assert result["pitKey"] == "report_date_ms"
     assert result["periodKey"] == "period_end_ms"
     assert result["statements"]["income"][0]["report_date_ms"] == 1767110400000
+    assert result["statements"]["income"][0]["operating_income"] == 180_000_000_000
+    assert result["statements"]["balance"][0]["assets_total"] == 300_000_000_000
     assert result["statements"]["cashflow"][0]["act_cash_flow_net"] == 100_000_000_000
 
 
