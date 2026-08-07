@@ -25,7 +25,7 @@ export function MarketWorkbenchPage(): JSX.Element {
         context="行情源 · 数据时间 · 复权口径必须显式"
       />
       <TruthNotice tone="info">
-        行情阅读基线：最新价 / 涨跌 → K 线 + MA20 / MA60 / MA120 → 联动成交量 → 区间收益 / 60 日回撤 / 20 日平均成交额 → 交易与决策证据。若 artifact 缺字段，保持 unavailable，不推断或伪造。
+        行情阅读基线：最新价 / 涨跌 → K 线 + 可验证均线层 → 联动成交量 → 区间收益 / 最大回撤 / 平均成交额 → 交易与决策证据。若 artifact 缺字段，保持 unavailable，不推断或伪造。
       </TruthNotice>
       <StockReplayPage />
     </div>
