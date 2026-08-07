@@ -111,8 +111,13 @@ class _FakeProvider:
             return {"timestamp": 1, "item": [{"thscode": "000858.SZ", "name": "五粮液", "rank": 1, "heat": "900", "rank_change": 5}]}
         if path.endswith("dragon-tiger-list"):
             return {"timestamp": 1, "trade_date": "2026-08-07", "stock_count": 1, "stock_items": [{"thscode": "600519.SH", "name": "贵州茅台", "net_value": 100_000_000}]}
+        if path.endswith("limit-up-pool"):
+            assert params == {"page": 1, "size": 200, "sort_field": "continue_day_cnt", "sort_dir": "desc"}
+            return {"timestamp": 1, "pagination": {"total": 1, "page": 1, "size": 200, "pages": 1}, "item": [{"thscode": "603986.SH", "name": "兆易创新", "continue_day_cnt": 2, "continue_day_text": "2连板", "seal_money": 123_000_000, "limit_up_time": "09:34", "limit_up_reason": "存储芯片"}]}
         if path.endswith("limit-up-ladder"):
             return {"timestamp": 1, "window": {"length": 30}, "item": [{"date": "20260807", "boards": {"two_board": [{"thscode": "600519.SH", "name": "贵州茅台", "board_num": 2}]}}]}
+        if path.endswith("anomaly-analysis-list"):
+            return {"timestamp": 1, "item": [{"stock_name": "贵州茅台", "analysis_content": "测试异动解读", "keyword_list": ["白酒"], "thscode": "600519.SH", "tag_name": "大涨"}]}
         raise AssertionError(path)
 
 
@@ -175,5 +180,8 @@ def test_market_intelligence_is_composed_from_real_capabilities(monkeypatch):
     assert result["issues"] == []
     assert result["panels"]["hotDay"]["item"][0]["rank"] == 1
     assert result["panels"]["dragonAll"]["stock_count"] == 1
+    assert result["panels"]["limitPool"]["pagination"]["total"] == 1
+    assert result["panels"]["limitPool"]["item"][0]["continue_day_cnt"] == 2
     assert result["panels"]["limitLadder"]["window"]["length"] == 30
+    assert result["panels"]["anomalyList"]["item"][0]["tag_name"] == "大涨"
     assert "test-key-not-secret" not in str(result)
