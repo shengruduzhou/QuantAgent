@@ -83,6 +83,17 @@ def test_adjusted_prices_request_forward_adjustment(monkeypatch: pytest.MonkeyPa
     assert fake.calls[0][1]["adjust"] == "forward"
 
 
+def test_backward_adjustment_is_explicitly_supported(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "test-key-not-secret")
+    fake = _FakeHttp({"/api/a-share/prices/historical": _ok([])})
+    provider = FuyaoProvider(allow_network=True, _http=fake)
+    provider.historical_prices(
+        ProviderRequest("2024-01-01", "2024-01-10", ("600519.SH",)),
+        adjust="backward",
+    )
+    assert fake.calls[0][1]["adjust"] == "backward"
+
+
 def test_financial_available_at_uses_disclosure_date_not_period_end(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "test-key-not-secret")
     period_ms = int(pd.Timestamp("2024-03-31", tz="Asia/Shanghai").timestamp() * 1000)
@@ -95,8 +106,8 @@ def test_financial_available_at_uses_disclosure_date_not_period_end(monkeypatch:
     }
     fake = _FakeHttp({
         "/api/a-share/financials/income-statements": _ok([row]),
-        "/api/a-share/financials/balance-sheets": _ok([{**row, "total_assets": 1000.0}]),
-        "/api/a-share/financials/cash-flow-statements": _ok([{**row, "net_cash_flow": 50.0}]),
+        "/api/a-share/financials/balance-sheets": _ok([{**row, "assets_total": 1000.0}]),
+        "/api/a-share/financials/cash-flow-statements": _ok([{**row, "act_cash_flow_net": 50.0}]),
     })
     provider = FuyaoProvider(allow_network=True, _http=fake)
     result = provider.fundamentals(ProviderRequest("2024-01-01", "2024-06-30", ("600519.SH",)))
@@ -120,6 +131,45 @@ def test_financials_fail_if_upstream_drops_pit_fields(monkeypatch: pytest.Monkey
     provider = FuyaoProvider(allow_network=True, _http=fake)
     with pytest.raises(ProviderUnavailable, match="report_date_ms"):
         provider.fundamentals(ProviderRequest("2024-01-01", "2024-06-30", ("600519.SH",)))
+
+
+def test_financial_indicators_follow_official_abilities_array_and_are_not_pit_eligible(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "test-key-not-secret")
+    payload = {
+        "code": 0,
+        "message": "ok",
+        "request_id": "req-indicator",
+        "data": {
+            "thscode": "600519.SH",
+            "report": "2024-4",
+            "abilities": [
+                {
+                    "ability": "growth",
+                    "indicators": [
+                        {"index_id": "revenue_yoy", "value": 0.15},
+                        {"index_id": "profit_yoy", "value": 0.12},
+                    ],
+                },
+                {
+                    "ability": "profitability",
+                    "indicators": [{"index_id": "roe", "value": 0.31}],
+                },
+            ],
+        },
+    }
+    fake = _FakeHttp({"/api/a-share/financials/indicators": payload})
+    provider = FuyaoProvider(allow_network=True, _http=fake)
+
+    frame = provider.financial_indicators("600519.SH", "2024-4")
+
+    assert frame[["ability", "index_id"]].to_records(index=False).tolist() == [
+        ("growth", "revenue_yoy"),
+        ("growth", "profit_yoy"),
+        ("profitability", "roe"),
+    ]
+    assert (~frame["pit_eligible"]).all()
+    assert (~frame["point_in_time_valid"]).all()
+    assert frame["available_at"].notna().all()
 
 
 def test_tradability_is_not_fabricated():
