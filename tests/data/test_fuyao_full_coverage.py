@@ -10,6 +10,7 @@ from quantagent.data.fuyao_catalog import (
     coverage_summary,
     validate_catalog,
 )
+from quantagent.data.fuyao_docs_audit import compare_live_contract, parse_llms_full_contract
 from quantagent.data.fuyao_dump import DUMP_ENDPOINTS
 from quantagent.data.fuyao_full_sync import (
     DUMP_STRATEGIES,
@@ -82,3 +83,37 @@ def test_natural_date_parameters_use_shanghai_midnight():
     value = _date_ms(date(2026, 7, 1))
     utc = datetime.fromtimestamp(value / 1000, timezone.utc)
     assert utc.isoformat() == "2026-06-30T16:00:00+00:00"
+
+
+def test_live_docs_parser_extracts_rest_dump_and_mcp_sets():
+    text = """
+GET /api/meta/tickers/list
+GET /api/a-share/prices/snapshot
+GET /dump/market-dumps/daily-k/download-url
+## 工具一览
+| fuyao-meta-mcp | /mcp/meta | get_meta_tickers_list | 标的列表 | GET /api/meta/tickers/list |
+| fuyao-a-share-mcp | /mcp/a-share | get_a_share_prices_snapshot | 快照 | GET /api/a-share/prices/snapshot |
+## AI Agent 跨服务调用场景
+get_fake_tool_outside_overview
+"""
+    parsed = parse_llms_full_contract(text)
+    assert parsed["rest_paths"] == {
+        "/api/meta/tickers/list",
+        "/api/a-share/prices/snapshot",
+    }
+    assert parsed["dump_paths"] == {"/dump/market-dumps/daily-k/download-url"}
+    assert parsed["mcp_tools"] == {
+        "get_meta_tickers_list",
+        "get_a_share_prices_snapshot",
+    }
+
+
+def test_live_contract_comparator_accepts_exact_registry_sets():
+    parsed = {
+        "rest_paths": {cap.rest_path for cap in REST_CAPABILITIES if cap.rest_path},
+        "dump_paths": {cap.rest_path for cap in DUMP_CAPABILITIES if cap.rest_path},
+        "mcp_tools": {cap.mcp_tool for cap in REST_CAPABILITIES if cap.mcp_tool},
+    }
+    result = compare_live_contract(parsed)
+    assert result["ok"] is True
+    assert all(not value for value in result["diffs"].values())
