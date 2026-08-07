@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 import typer
 
 from quantagent.cli._utils import app
@@ -44,50 +43,7 @@ def fetch_fuyao_daily(
     names = _parse_symbols(symbols)
     provider = FuyaoProvider(allow_network=True)
     request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=names)
-    if adjust == "none":
-        result = provider.daily_ohlcv(request)
-    else:
-        # Public provider method uses forward adjustment by contract. Backward is
-        # requested explicitly through the documented endpoint below.
-        if adjust == "forward":
-            result = provider.adjusted_prices(request)
-        else:
-            frames = []
-            for symbol in names:
-                data = provider.get_capability(
-                    "/api/a-share/prices/historical",
-                    params={
-                        "thscode": symbol,
-                        "interval": "1d",
-                        "start": int(pd.Timestamp(start_date, tz="Asia/Shanghai").timestamp() * 1000),
-                        "end": int(pd.Timestamp(end_date, tz="Asia/Shanghai").timestamp() * 1000),
-                        "adjust": "backward",
-                    },
-                )
-                rows = data.get("item", [])
-                if not rows:
-                    continue
-                frame = pd.DataFrame(rows).rename(
-                    columns={
-                        "open_price": "open",
-                        "high_price": "high",
-                        "low_price": "low",
-                        "close_price": "close",
-                        "turnover": "amount",
-                    }
-                )
-                frame["symbol"] = symbol
-                frame["trade_date"] = pd.to_datetime(frame["date_ms"], unit="ms", errors="coerce").dt.normalize()
-                frame["available_at"] = frame["trade_date"] + pd.Timedelta(days=1)
-                frame["source"] = "hithink_fuyao"
-                frame["source_endpoint"] = "/api/a-share/prices/historical"
-                frame["quality_status"] = "official_api"
-                frame["adjustment"] = "backward"
-                frames.append(frame)
-            out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-            from quantagent.data.providers.base import ProviderResult
-
-            result = ProviderResult(out, "hithink_fuyao", True, 0.98)
+    result = provider.historical_prices(request, adjust=adjust)
 
     frame = result.frame.copy()
     if frame.empty:
@@ -115,6 +71,7 @@ def fetch_fuyao_daily(
             "amount",
             "available_at",
             "source",
+            "source_endpoint",
             "quality_status",
         ),
         pit_violation_count=0,
