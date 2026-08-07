@@ -147,8 +147,44 @@ class TestQualityChecks:
         return frame
 
     def test_clean_dataset_passes(self):
-        report = _builder().run_quality_checks(self._dataset(), _master())
-        assert report["structurally_valid"], report["failed_checks"]
+        """A full-universe PASS must actually prove dead names are included.
+
+        The old fixture contained only a live security and therefore correctly
+        became survivorship=UNKNOWN after the quality gate was hardened. Build a
+        tiny but semantically complete universe here: one live name plus one
+        name that later delists, with no rows after its delisting date.
+        """
+        live = self._dataset()
+        dead = self._dataset()
+        dead["symbol"] = "DEAD.SZ"
+        frame = pd.concat([live, dead], ignore_index=True)
+        frame["mask_post_delisting"] = "FALSE"
+        master = pd.DataFrame(
+            [
+                {
+                    "symbol": "AAA.SZ",
+                    "board": "SZ_Main",
+                    "listing_date": pd.Timestamp("2020-01-02"),
+                    "delisting_date": pd.NaT,
+                    "status": "listed",
+                },
+                {
+                    "symbol": "DEAD.SZ",
+                    "board": "SZ_Main",
+                    "listing_date": pd.Timestamp("2020-01-02"),
+                    "delisting_date": pd.Timestamp("2025-12-31"),
+                    "status": "delisted",
+                },
+            ]
+        )
+
+        report = _builder().run_quality_checks(frame, master)
+
+        assert report["structurally_valid"], {
+            "failed": report["failed_checks"],
+            "unknown": report["unknown_checks"],
+        }
+        assert report["unknown_checks"] == []
 
     def test_duplicate_security_dates_detected(self):
         frame = pd.concat([self._dataset(), self._dataset()], ignore_index=True)
