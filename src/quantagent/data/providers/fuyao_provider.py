@@ -1,21 +1,17 @@
-"""Fuyao / HiThink official A-share data provider.
+"""Official Fuyao / HiThink A-share provider.
 
-The public contract is documented at https://fuyao.aicubes.cn/llms-full.txt and
-mirrored by https://github.com/HiThink-Tech/Financial-API.  This adapter keeps
-Fuyao behind QuantAgent's provider boundary instead of letting research scripts
-issue ad-hoc HTTP requests.
+Contract sources:
+- https://fuyao.aicubes.cn/llms-full.txt
+- https://github.com/HiThink-Tech/Financial-API/tree/main/docs/api
 
-Safety / PIT rules
-------------------
-* credentials are read only from ``HITHINK_FINANCE_API_KEY`` (or an explicitly
-  supplied env-var name); no secret is logged or returned;
-* raw daily bars are the canonical market-panel input; adjusted prices are a
-  separate capability;
-* financial rows become usable at ``report_date_ms`` (disclosure date), never
-  at ``period_end_ms``; this is the critical point-in-time boundary;
-* every normalized row carries source/retrieval/availability provenance;
-* unsupported capabilities fail loud.  Fuyao currently does not publicly
-  expose minute/tick/news/macro data, so those remain on other providers.
+PIT invariants:
+- raw daily bars are the canonical market-panel input; adjusted views are kept
+  separate;
+- financial statements become usable at ``report_date_ms`` (disclosure date),
+  never at ``period_end_ms``;
+- every normalised row carries provenance;
+- capabilities that cannot satisfy a historical PIT contract fail closed or are
+  explicitly marked non-PIT instead of being silently backfilled.
 """
 
 from __future__ import annotations
@@ -52,7 +48,7 @@ class FuyaoProvider(
     TradingCalendarProvider,
     IndexDataProvider,
 ):
-    """Adapter for the official HiThink/Fuyao REST API."""
+    """REST adapter for the official HiThink/Fuyao public data contract."""
 
     base_url: str = DEFAULT_BASE_URL
     token_env: str = DEFAULT_TOKEN_ENV
@@ -63,34 +59,84 @@ class FuyaoProvider(
     max_attempts: int = 3
     _http: HttpClient | None = field(default=None, repr=False, compare=False)
 
+    # ------------------------------------------------------------------
+    # A-share market data
+    # ------------------------------------------------------------------
     def daily_ohlcv(self, request: ProviderRequest) -> ProviderResult:
-        return self._historical_prices(request, adjust="none")
+        return self.historical_prices(request, adjust="none")
 
     def adjusted_prices(self, request: ProviderRequest) -> ProviderResult:
-        return self._historical_prices(request, adjust="forward")
+        return self.historical_prices(request, adjust="forward")
 
-    def tradability(self, request: ProviderRequest) -> ProviderResult:
-        raise ProviderUnavailable(
-            "Fuyao public contract does not expose a complete PIT tradability/ST "
-            "history. Keep QuantAgent's canonical tradability provider for this capability."
+    def historical_prices(
+        self,
+        request: ProviderRequest,
+        *,
+        adjust: str = "none",
+    ) -> ProviderResult:
+        if adjust not in {"none", "forward", "backward"}:
+            raise ValueError("adjust must be one of none/forward/backward")
+        endpoint = "/api/a-share/prices/historical"
+        frames: list[pd.DataFrame] = []
+        for symbol in request.symbols:
+            data = self._request(
+                endpoint,
+                params={
+                    "thscode": symbol,
+                    "interval": "1d",
+                    "start": _date_to_ms(request.start_date),
+                    "end": _date_to_ms(request.end_date),
+                    "adjust": adjust,
+                },
+            )
+            frame = _normalise_price_rows(
+                _items(data),
+                symbol=symbol,
+                source=self.source,
+                endpoint=endpoint,
+                reliability=self.source_reliability,
+            )
+            if not frame.empty:
+                frame["adjustment"] = adjust
+                frames.append(frame)
+        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return ProviderResult(
+            frame=out,
+            source=self.source,
+            point_in_time=True,
+            quality_score=self.source_reliability if not out.empty else 0.0,
+            warnings=() if not out.empty else ("fuyao_empty_historical",),
+            metadata={"adjust": adjust, "endpoint": endpoint},
         )
 
     def snapshot(self, symbols: tuple[str, ...] = ()) -> pd.DataFrame:
         params: dict[str, Any] = {}
         if symbols:
             params["thscodes"] = ",".join(symbols)
+        else:
+            # Never accidentally pull the whole market as an auth probe.
+            params.update({"limit": 100, "offset": 0})
         data = self._request("/api/a-share/prices/snapshot", params=params)
-        rows = _items(data)
-        frame = pd.DataFrame(rows)
-        if frame.empty:
-            return frame
-        frame = frame.rename(columns={"thscode": "symbol", "turnover": "amount"})
+        frame = pd.DataFrame(_items(data)).rename(
+            columns={"thscode": "symbol", "turnover": "amount"}
+        )
         return self._with_provenance(
             frame,
             endpoint="/api/a-share/prices/snapshot",
             available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
         )
 
+    def tradability(self, request: ProviderRequest) -> ProviderResult:
+        raise ProviderUnavailable(
+            "Fuyao public contract does not expose a complete historical PIT "
+            "tradability/ST/suspension panel. Keep QuantAgent's canonical "
+            "tradability provider for this capability."
+        )
+
+    # ------------------------------------------------------------------
+    # Symbol metadata
+    # ------------------------------------------------------------------
     def ticker_search(
         self,
         query: str,
@@ -109,6 +155,7 @@ class FuyaoProvider(
             pd.DataFrame(_items(data)),
             endpoint="/api/meta/tickers/search",
             available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
         )
 
     def ticker_list(
@@ -126,14 +173,18 @@ class FuyaoProvider(
             pd.DataFrame(_items(data)),
             endpoint="/api/meta/tickers/list",
             available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
         )
 
+    # ------------------------------------------------------------------
+    # Financials / valuation
+    # ------------------------------------------------------------------
     def fundamentals(self, request: ProviderRequest) -> ProviderResult:
-        """Return PIT-safe long-form income/balance/cash-flow rows.
+        """Return long-form PIT-safe income/balance/cash-flow rows.
 
-        ``available_at`` is disclosure time (``report_date_ms``).  The report
-        period is preserved separately as ``report_period`` and must never be
-        used as the availability timestamp by downstream joins.
+        The upstream contract returns both ``period_end_ms`` and
+        ``report_date_ms``. The former identifies the accounting period; the
+        latter controls model availability.
         """
         frames: list[pd.DataFrame] = []
         for symbol in request.symbols:
@@ -151,7 +202,9 @@ class FuyaoProvider(
                         "end": _date_to_ms(request.end_date),
                     },
                 )
-                frame = _normalise_financial_rows(_items(data), statement, self.source, path)
+                frame = _normalise_financial_rows(
+                    _items(data), statement_type=statement, source=self.source, endpoint=path
+                )
                 if not frame.empty:
                     frames.append(frame)
         out = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
@@ -161,115 +214,123 @@ class FuyaoProvider(
             point_in_time=True,
             quality_score=self.source_reliability if not out.empty else 0.0,
             warnings=() if not out.empty else ("fuyao_empty_fundamentals",),
-            metadata={"pit_key": "report_date_ms", "report_period_key": "period_end_ms"},
+            metadata={
+                "pit_key": "report_date_ms",
+                "report_period_key": "period_end_ms",
+                "period": "quarterly",
+            },
         )
 
     def financial_indicators(self, symbol: str, report: str) -> pd.DataFrame:
-        data = self._request(
-            "/api/a-share/financials/indicators",
-            params={"thscode": symbol, "report": report},
-        )
-        frame = pd.DataFrame(_items(data))
-        if frame.empty:
-            return frame
-        # The endpoint is report-specific. Preserve upstream timing fields if
-        # present; callers must not synthesize a disclosure date from period end.
+        """Flatten the five official indicator blocks for UI/research inspection.
+
+        The indicator endpoint returns ``abilities`` rather than ``item`` and
+        does *not* publish ``report_date_ms`` in the documented schema. Therefore
+        these rows are marked ``pit_eligible=False`` and use retrieval time as a
+        conservative ``available_at``. They must not enter historical training
+        until a disclosure timestamp is joined from a PIT statement source.
+        """
+        endpoint = "/api/a-share/financials/indicators"
+        data = self._request(endpoint, params={"thscode": symbol, "report": report})
+        rows: list[dict[str, Any]] = []
+        abilities = data.get("abilities", [])
+        if isinstance(abilities, list):
+            for block in abilities:
+                if not isinstance(block, Mapping):
+                    continue
+                ability = str(block.get("ability") or "")
+                indicators = block.get("indicators", [])
+                if not isinstance(indicators, list):
+                    continue
+                for indicator in indicators:
+                    if not isinstance(indicator, Mapping):
+                        continue
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "report": report,
+                            "ability": ability,
+                            "index_id": indicator.get("index_id"),
+                            "value": indicator.get("value"),
+                        }
+                    )
         return self._with_provenance(
-            frame,
-            endpoint="/api/a-share/financials/indicators",
-            available_at=_ms_to_timestamp(data.get("timestamp")),
+            pd.DataFrame(rows),
+            endpoint=endpoint,
+            available_at=pd.Timestamp(datetime.now(timezone.utc)),
+            pit_eligible=False,
         )
 
     def valuations_snapshot(self, symbols: tuple[str, ...]) -> pd.DataFrame:
-        data = self._request(
-            "/api/a-share/valuations/snapshot",
-            params={"thscodes": ",".join(symbols)},
-        )
+        endpoint = "/api/a-share/valuations/snapshot"
+        data = self._request(endpoint, params={"thscodes": ",".join(symbols)})
         return self._with_provenance(
             pd.DataFrame(_items(data)),
-            endpoint="/api/a-share/valuations/snapshot",
+            endpoint=endpoint,
             available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
         )
 
-    def corporate_actions(self, symbol: str, start: str | None = None, end: str | None = None) -> pd.DataFrame:
+    # ------------------------------------------------------------------
+    # Corporate actions / calendar / index
+    # ------------------------------------------------------------------
+    def corporate_actions(
+        self,
+        symbol: str,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
+        endpoint = "/api/a-share/corporate-actions/adjustment-factors"
         params: dict[str, Any] = {"thscode": symbol}
         if start:
             params["from"] = start
         if end:
             params["to"] = end
-        data = self._request("/api/a-share/corporate-actions/adjustment-factors", params=params)
+        data = self._request(endpoint, params=params)
         frame = pd.DataFrame(_items(data))
         if frame.empty:
             return frame
-        if "ex_date_ms" in frame.columns:
-            frame["ex_date"] = pd.to_datetime(frame["ex_date_ms"], unit="ms", errors="coerce")
-            frame["available_at"] = frame["ex_date"]
         frame["symbol"] = symbol
+        frame["ex_date"] = pd.to_datetime(
+            frame.get("ex_date_ms"), unit="ms", errors="coerce"
+        ).dt.normalize()
+        # The event is applied no earlier than the ex-date. This is conservative
+        # for historical adjustment even if the company announced it earlier.
+        frame["available_at"] = frame["ex_date"]
         return self._with_provenance(
             frame,
-            endpoint="/api/a-share/corporate-actions/adjustment-factors",
+            endpoint=endpoint,
             preserve_available_at=True,
+            pit_eligible=True,
         )
 
     def trading_days(self, request: ProviderRequest) -> ProviderResult:
-        data = self._request("/api/a-share/calendar/trading-days")
+        endpoint = "/api/a-share/calendar/trading-days"
+        data = self._request(endpoint)
         frame = pd.DataFrame(_items(data))
         if not frame.empty and "date_ms" in frame.columns:
-            frame["trade_date"] = pd.to_datetime(frame["date_ms"], unit="ms", errors="coerce").dt.normalize()
+            frame["trade_date"] = pd.to_datetime(
+                frame["date_ms"], unit="ms", errors="coerce"
+            ).dt.normalize()
             start = pd.Timestamp(request.start_date)
             end = pd.Timestamp(request.end_date)
             frame = frame[frame["trade_date"].between(start, end)].reset_index(drop=True)
         frame = self._with_provenance(
             frame,
-            endpoint="/api/a-share/calendar/trading-days",
+            endpoint=endpoint,
             available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
         )
-        return ProviderResult(frame, self.source, True, self.source_reliability if not frame.empty else 0.0)
+        return ProviderResult(
+            frame=frame,
+            source=self.source,
+            point_in_time=True,
+            quality_score=self.source_reliability if not frame.empty else 0.0,
+        )
 
     def index_daily(self, request: ProviderRequest) -> ProviderResult:
+        endpoint = "/api/a-share-index/prices/historical"
         frames: list[pd.DataFrame] = []
-        for symbol in request.symbols:
-            data = self._request(
-                "/api/a-share-index/prices/historical",
-                params={
-                    "thscode": symbol,
-                    "interval": "1d",
-                    "start": _date_to_ms(request.start_date),
-                    "end": _date_to_ms(request.end_date),
-                },
-            )
-            frame = _normalise_price_rows(_items(data), symbol, self.source, self.source_reliability)
-            if not frame.empty:
-                frames.append(frame)
-        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        return ProviderResult(out, self.source, True, self.source_reliability if not out.empty else 0.0)
-
-    def index_constituents(self, thscode: str) -> pd.DataFrame:
-        data = self._request(
-            "/api/a-share-index/constituents/ths-stock-list",
-            params={"thscode": thscode},
-        )
-        return self._with_provenance(
-            pd.DataFrame(_items(data)),
-            endpoint="/api/a-share-index/constituents/ths-stock-list",
-            available_at=_ms_to_timestamp(data.get("timestamp")),
-        )
-
-    def get_capability(self, path: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Low-level escape hatch for documented Fuyao REST capabilities.
-
-        It is deliberately restricted to ``/api/``.  Market-dump download URLs
-        are not exposed here because the public documentation describes those
-        short-lived links as login-cookie flows; QuantAgent must not pretend an
-        API key is sufficient until the upstream contract says so.
-        """
-        if not path.startswith("/api/"):
-            raise ValueError("Fuyao capability path must start with /api/")
-        return self._request(path, params=params)
-
-    def _historical_prices(self, request: ProviderRequest, *, adjust: str) -> ProviderResult:
-        frames: list[pd.DataFrame] = []
-        endpoint = "/api/a-share/prices/historical"
         for symbol in request.symbols:
             data = self._request(
                 endpoint,
@@ -278,30 +339,71 @@ class FuyaoProvider(
                     "interval": "1d",
                     "start": _date_to_ms(request.start_date),
                     "end": _date_to_ms(request.end_date),
-                    "adjust": adjust,
                 },
             )
-            frame = _normalise_price_rows(_items(data), symbol, self.source, self.source_reliability)
+            frame = _normalise_price_rows(
+                _items(data),
+                symbol=symbol,
+                source=self.source,
+                endpoint=endpoint,
+                reliability=self.source_reliability,
+            )
             if not frame.empty:
-                frame["adjustment"] = adjust
-                frame["source_endpoint"] = endpoint
                 frames.append(frame)
         out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         return ProviderResult(
-            frame=out,
-            source=self.source,
-            point_in_time=True,
-            quality_score=self.source_reliability if not out.empty else 0.0,
-            warnings=() if not out.empty else ("fuyao_empty_historical",),
-            metadata={"adjust": adjust, "endpoint": endpoint},
+            out,
+            self.source,
+            True,
+            self.source_reliability if not out.empty else 0.0,
         )
 
-    def _request(self, path: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def index_constituents(self, thscode: str) -> pd.DataFrame:
+        endpoint = "/api/a-share-index/constituents/ths-stock-list"
+        data = self._request(endpoint, params={"thscode": thscode})
+        return self._with_provenance(
+            pd.DataFrame(_items(data)),
+            endpoint=endpoint,
+            available_at=_ms_to_timestamp(data.get("timestamp")),
+            pit_eligible=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Generic documented capability boundary
+    # ------------------------------------------------------------------
+    def get_capability(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call a documented Fuyao REST capability under ``/api/``.
+
+        This is used by the market-dump downloader and lets higher layers access
+        newly documented read-only capabilities without bypassing auth/retry and
+        business-error handling. It intentionally does not accept arbitrary
+        hosts or non-API paths.
+        """
+        if not path.startswith("/api/"):
+            raise ValueError("Fuyao capability path must start with /api/")
+        return self._request(path, params=params)
+
+    # ------------------------------------------------------------------
+    # Transport / provenance
+    # ------------------------------------------------------------------
+    def _request(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.allow_network:
-            raise ProviderUnavailable("FuyaoProvider network access blocked: set allow_network=True explicitly.")
+            raise ProviderUnavailable(
+                "FuyaoProvider network access blocked: set allow_network=True explicitly."
+            )
         token = os.environ.get(self.token_env, "").strip()
         if not token:
-            raise ProviderUnavailable(f"FuyaoProvider requires {self.token_env} in the backend environment.")
+            raise ProviderUnavailable(
+                f"FuyaoProvider requires {self.token_env} in the backend environment."
+            )
         client = self._http or HttpClient(timeout=self.timeout, max_attempts=self.max_attempts)
         outcome = client.get_json(
             f"{self.base_url.rstrip('/')}{path}",
@@ -309,8 +411,15 @@ class FuyaoProvider(
             headers={"X-api-key": token, "Accept": "application/json"},
         )
         if not outcome.ok:
-            hint = "check API key/capability permission" if outcome.retry_class == RETRY_ENTITLEMENT else "retry upstream request"
-            raise ProviderUnavailable(f"Fuyao request failed ({outcome.retry_class}): {hint}; {outcome.error or ''}".strip())
+            hint = (
+                "check API key/capability permission"
+                if outcome.retry_class == RETRY_ENTITLEMENT
+                else "retry upstream request"
+            )
+            raise ProviderUnavailable(
+                f"Fuyao request failed ({outcome.retry_class}): {hint}; "
+                f"{outcome.error or ''}".strip()
+            )
         envelope = outcome.payload
         if not isinstance(envelope, dict):
             raise ProviderUnavailable("Fuyao response is not an object")
@@ -318,7 +427,8 @@ class FuyaoProvider(
         if code != 0:
             request_id = envelope.get("request_id")
             raise ProviderUnavailable(
-                f"Fuyao business error code={code}: {envelope.get('message', 'unknown error')}"
+                f"Fuyao business error code={code}: "
+                f"{envelope.get('message', 'unknown error')}"
                 + (f" request_id={request_id}" if request_id else "")
             )
         data = envelope.get("data")
@@ -333,6 +443,7 @@ class FuyaoProvider(
         endpoint: str,
         available_at: pd.Timestamp | None = None,
         preserve_available_at: bool = False,
+        pit_eligible: bool,
     ) -> pd.DataFrame:
         if frame.empty:
             return frame
@@ -344,13 +455,16 @@ class FuyaoProvider(
         out["source_endpoint"] = endpoint
         out["retrieved_at"] = retrieved_at
         out["quality_status"] = "official_api"
-        out["point_in_time_valid"] = True
+        out["point_in_time_valid"] = bool(pit_eligible)
+        out["pit_eligible"] = bool(pit_eligible)
         return out
 
 
 def _items(data: Mapping[str, Any]) -> list[dict[str, Any]]:
     value = data.get("item", [])
-    return [dict(row) for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return []
+    return [dict(row) for row in value if isinstance(row, Mapping)]
 
 
 def _date_to_ms(value: str) -> int:
@@ -366,15 +480,18 @@ def _ms_to_timestamp(value: Any) -> pd.Timestamp | None:
     if value is None:
         return None
     try:
-        return pd.to_datetime(int(value), unit="ms", utc=True).tz_convert(SHANGHAI).tz_localize(None)
+        ts = pd.to_datetime(int(value), unit="ms", utc=True)
+        return ts.tz_convert(SHANGHAI).tz_localize(None)
     except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _normalise_price_rows(
     rows: list[dict[str, Any]],
+    *,
     symbol: str,
     source: str,
+    endpoint: str,
     reliability: float,
 ) -> pd.DataFrame:
     if not rows:
@@ -389,20 +506,37 @@ def _normalise_price_rows(
         }
     )
     frame["symbol"] = symbol
-    frame["trade_date"] = pd.to_datetime(frame["date_ms"], unit="ms", errors="coerce").dt.normalize()
-    # Conservative daily-bar availability: next calendar day.  This matches the
-    # existing QuantAgent daily provider contract and prevents same-session use.
+    frame["trade_date"] = pd.to_datetime(
+        frame["date_ms"], unit="ms", errors="coerce"
+    ).dt.normalize()
+    # Conservative daily-bar contract: no same-session use in daily research.
     frame["available_at"] = frame["trade_date"] + pd.Timedelta(days=1)
     frame["source"] = source
+    frame["source_endpoint"] = endpoint
     frame["source_type"] = "official_api"
     frame["source_reliability"] = reliability
     frame["retrieved_at"] = pd.Timestamp(datetime.now(timezone.utc))
     frame["quality_status"] = "official_api"
     frame["point_in_time_valid"] = True
+    frame["pit_eligible"] = True
     columns = [
-        "symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
-        "available_at", "source", "source_type", "source_reliability", "retrieved_at",
-        "quality_status", "point_in_time_valid",
+        "symbol",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "available_at",
+        "source",
+        "source_endpoint",
+        "source_type",
+        "source_reliability",
+        "retrieved_at",
+        "quality_status",
+        "point_in_time_valid",
+        "pit_eligible",
     ]
     for column in columns:
         if column not in frame.columns:
@@ -412,6 +546,7 @@ def _normalise_price_rows(
 
 def _normalise_financial_rows(
     rows: list[dict[str, Any]],
+    *,
     statement_type: str,
     source: str,
     endpoint: str,
@@ -421,20 +556,30 @@ def _normalise_financial_rows(
     frame = pd.DataFrame(rows)
     if "report_date_ms" not in frame.columns or "period_end_ms" not in frame.columns:
         raise ProviderUnavailable(
-            f"Fuyao {statement_type} response lacks report_date_ms/period_end_ms; cannot satisfy PIT contract"
+            f"Fuyao {statement_type} response lacks report_date_ms/period_end_ms; "
+            "cannot satisfy PIT contract"
         )
-    frame["symbol"] = frame.get("thscode", frame.get("ticker", pd.Series(index=frame.index, dtype="object")))
-    frame["report_period"] = pd.to_datetime(frame["period_end_ms"], unit="ms", errors="coerce").dt.normalize()
-    frame["ann_date"] = pd.to_datetime(frame["report_date_ms"], unit="ms", errors="coerce").dt.normalize()
+    frame["symbol"] = frame.get(
+        "thscode", frame.get("ticker", pd.Series(index=frame.index, dtype="object"))
+    )
+    frame["report_period"] = pd.to_datetime(
+        frame["period_end_ms"], unit="ms", errors="coerce"
+    ).dt.normalize()
+    frame["ann_date"] = pd.to_datetime(
+        frame["report_date_ms"], unit="ms", errors="coerce"
+    ).dt.normalize()
     frame["available_at"] = frame["ann_date"]
     if frame["available_at"].isna().any():
-        raise ProviderUnavailable(f"Fuyao {statement_type} contains null disclosure dates; PIT merge blocked")
+        raise ProviderUnavailable(
+            f"Fuyao {statement_type} contains null disclosure dates; PIT merge blocked"
+        )
     frame["statement_type"] = statement_type
     frame["source"] = source
     frame["source_endpoint"] = endpoint
     frame["retrieved_at"] = pd.Timestamp(datetime.now(timezone.utc))
     frame["quality_status"] = "official_api"
     frame["point_in_time_valid"] = True
+    frame["pit_eligible"] = True
     return frame
 
 
