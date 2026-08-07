@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,9 +26,6 @@ class MarketDataService:
         self.connections = connections
 
     def _provider(self) -> FuyaoProvider:
-        # QuantAgent loads the repository .env into the backend process. Keep the
-        # key inside that process; this service only verifies connection state and
-        # never serializes credentials to the browser.
         if not self.connections.has_variable("HITHINK_FINANCE_API_KEY"):
             raise ProviderUnavailable(
                 "同花顺 Fuyao 未连接；请在服务端 .env 配置 HITHINK_FINANCE_API_KEY。"
@@ -108,8 +105,6 @@ class MarketDataService:
             "lastPrice": snapshot.get("last_price"),
             "priceChange": snapshot.get("price_change"),
             "changePercent": snapshot.get("price_change_ratio_pct"),
-            # Fuyao currently documents open/high/low/prev; keep the *_price
-            # aliases for compatibility with older cached/exported snapshots.
             "open": snapshot.get("open") if snapshot.get("open") is not None else snapshot.get("open_price"),
             "high": snapshot.get("high") if snapshot.get("high") is not None else snapshot.get("high_price"),
             "low": snapshot.get("low") if snapshot.get("low") is not None else snapshot.get("low_price"),
@@ -143,12 +138,158 @@ class MarketDataService:
             },
         }
 
+    def financial_health(self, symbol: str, *, limit: int = 5) -> dict[str, Any]:
+        """Return annual statement series for the Financial-API health view.
+
+        The UI deliberately receives the upstream statement field names so it can
+        inspect exact accounting semantics. report_date_ms remains attached to
+        every row and is the only historical availability timestamp.
+        """
+        symbol = symbol.strip().upper()
+        provider = self._provider()
+        count = max(1, min(10, limit))
+        statements: dict[str, list[dict[str, Any]]] = {}
+        endpoints = {
+            "income": "/api/a-share/financials/income-statements",
+            "balance": "/api/a-share/financials/balance-sheets",
+            "cashflow": "/api/a-share/financials/cash-flow-statements",
+        }
+        for name, path in endpoints.items():
+            data = provider.get_capability(
+                path,
+                {"thscode": symbol, "period": "annual", "limit": count},
+            )
+            statements[name] = _mapping_items(data)
+        return {
+            "symbol": symbol,
+            "source": "hithink_fuyao",
+            "period": "annual",
+            "statements": statements,
+            "provenance": endpoints,
+            "pitKey": "report_date_ms",
+            "periodKey": "period_end_ms",
+        }
+
+    def index_catalog(self, tag: str = "industry") -> dict[str, Any]:
+        normalized = tag.strip().lower()
+        if normalized not in {"industry", "cn_concept", "region", "tszs"}:
+            raise ValueError("index tag must be industry/cn_concept/region/tszs")
+        provider = self._provider()
+        data = provider.get_capability(
+            "/api/a-share-index/catalog/ths-index-list",
+            {"tag": normalized},
+        )
+        return {
+            "tag": normalized,
+            "timestamp": data.get("timestamp"),
+            "items": _mapping_items(data),
+            "source": "hithink_fuyao",
+            "endpoint": "/api/a-share-index/catalog/ths-index-list",
+        }
+
+    def index_overview(self, symbol: str, *, calendar_days: int = 180) -> dict[str, Any]:
+        symbol = symbol.strip().upper()
+        provider = self._provider()
+        now = datetime.now(SHANGHAI)
+        end = now.date()
+        start = end - timedelta(days=max(90, min(730, calendar_days)))
+        request = ProviderRequest(start.isoformat(), end.isoformat(), (symbol,))
+        history = provider.index_daily(request)
+        bars = []
+        for row in _records(history.frame.tail(180)):
+            bars.append(
+                {
+                    "datetime": row.get("trade_date"),
+                    "symbol": symbol,
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": row.get("close"),
+                    "volume": row.get("volume"),
+                    "amount": row.get("amount"),
+                }
+            )
+        constituents = _records(provider.index_constituents(symbol))
+        constituent_symbols = tuple(
+            str(row.get("thscode") or row.get("symbol"))
+            for row in constituents[:80]
+            if row.get("thscode") or row.get("symbol")
+        )
+        snapshot_rows = _records(provider.snapshot(constituent_symbols)) if constituent_symbols else []
+        names = {
+            str(row.get("thscode") or row.get("symbol")): row.get("name")
+            for row in constituents
+        }
+        snapshots = []
+        for row in snapshot_rows:
+            code = str(row.get("symbol") or row.get("thscode") or "")
+            snapshots.append(
+                {
+                    "symbol": code,
+                    "name": names.get(code),
+                    "lastPrice": row.get("last_price"),
+                    "changePercent": row.get("price_change_ratio_pct"),
+                    "amount": row.get("amount") if row.get("amount") is not None else row.get("turnover"),
+                }
+            )
+        return {
+            "symbol": symbol,
+            "source": "hithink_fuyao",
+            "bars": bars,
+            "constituentCount": len(constituents),
+            "constituents": constituents[:200],
+            "snapshots": snapshots,
+            "provenance": {
+                "history": "/api/a-share-index/prices/historical",
+                "constituents": "/api/a-share-index/constituents/ths-stock-list",
+                "stockSnapshot": "/api/a-share/prices/snapshot",
+            },
+        }
+
+    def market_intelligence(self) -> dict[str, Any]:
+        """Aggregate the current market-observation capabilities used by Fuyao inspirations.
+
+        Each capability is isolated: one unavailable entitlement or empty upstream
+        dataset must not erase the rest of the workstation. Failures are returned
+        as explicit per-panel issues and are never replaced with synthetic rows.
+        """
+        provider = self._provider()
+        specs: dict[str, tuple[str, Mapping[str, Any] | None]] = {
+            "hotDay": ("/api/a-share/special-data/hot-stock-list", {"period": "day"}),
+            "hotHour": ("/api/a-share/special-data/hot-stock-list", {"period": "hour"}),
+            "skyrocketDay": ("/api/a-share/special-data/skyrocket-list", {"period": "day"}),
+            "skyrocketHour": ("/api/a-share/special-data/skyrocket-list", {"period": "hour"}),
+            "dragonAll": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "all"}),
+            "dragonOrg": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "org"}),
+            "dragonHotMoney": ("/api/a-share/special-data/dragon-tiger-list", {"board_type": "hot_money"}),
+            "limitLadder": ("/api/a-share/special-data/limit-up-ladder", None),
+        }
+        panels: dict[str, Any] = {}
+        issues: list[dict[str, str]] = []
+        for name, (path, params) in specs.items():
+            try:
+                panels[name] = provider.get_capability(path, params)
+            except ProviderUnavailable as exc:
+                panels[name] = None
+                issues.append({"panel": name, "endpoint": path, "message": str(exc)})
+        return {
+            "source": "hithink_fuyao",
+            "panels": panels,
+            "issues": issues,
+            "provenance": {name: path for name, (path, _) in specs.items()},
+        }
+
+
+def _mapping_items(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    value = data.get("item", [])
+    if not isinstance(value, list):
+        return []
+    return [dict(row) for row in value if isinstance(row, Mapping)]
+
 
 def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     if frame.empty:
         return []
-    # pandas/numpy scalars and timestamps are not FastAPI JSON-safe by default.
-    # A JSON round-trip keeps nulls as null and emits ISO timestamps consistently.
     return json.loads(frame.to_json(orient="records", date_format="iso"))
 
 
