@@ -24,10 +24,9 @@ class _FakeProvider:
         }])
 
     def snapshot(self, symbols: tuple[str, ...]) -> pd.DataFrame:
-        assert symbols == ("600519.SH",)
         return pd.DataFrame([{
-            "symbol": "600519.SH",
-            "ticker": "600519",
+            "symbol": symbol,
+            "ticker": symbol.split(".")[0],
             "last_price": 1500.0,
             "price_change": 15.0,
             "price_change_ratio_pct": 1.01,
@@ -38,7 +37,7 @@ class _FakeProvider:
             "volume": 1_000_000,
             "amount": 1_500_000_000.0,
             "available_at": pd.Timestamp("2026-08-07 15:00:00"),
-        }])
+        } for symbol in symbols])
 
     def historical_prices(self, request, *, adjust: str):
         assert request.symbols == ("600519.SH",)
@@ -67,13 +66,64 @@ class _FakeProvider:
             "pcf_ttm": 18.4,
         }])
 
+    def index_daily(self, request):
+        dates = pd.date_range("2026-01-01", periods=120, freq="B")
+        return _FakeResult(pd.DataFrame({
+            "symbol": request.symbols[0],
+            "trade_date": dates,
+            "open": 100.0,
+            "high": 102.0,
+            "low": 99.0,
+            "close": [100 + index * 0.1 for index in range(len(dates))],
+            "volume": 2_000_000,
+            "amount": 300_000_000.0,
+        }))
 
-def test_market_data_service_builds_frontend_safe_overview(monkeypatch):
+    def index_constituents(self, thscode: str) -> pd.DataFrame:
+        assert thscode == "881101.TI"
+        return pd.DataFrame([
+            {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台"},
+            {"thscode": "000858.SZ", "ticker": "000858", "name": "五粮液"},
+        ])
+
+    def get_capability(self, path: str, params=None):
+        if path.endswith("ths-index-list"):
+            return {"timestamp": 1, "item": [{"thscode": "881101.TI", "name": "食品饮料"}]}
+        if "financials" in path:
+            base = {
+                "thscode": "600519.SH",
+                "period": "annual",
+                "fiscal_year": 2025,
+                "report_date_ms": 1767110400000,
+                "period_end_ms": 1767110400000,
+                "currency": "CNY",
+            }
+            if "income" in path:
+                base.update({"operating_revenue": 180_000_000_000, "net_profit": 90_000_000_000})
+            if "balance" in path:
+                base.update({"total_assets": 300_000_000_000, "total_liabilities": 60_000_000_000})
+            if "cash-flow" in path:
+                base.update({"act_cash_flow_net": 100_000_000_000})
+            return {"timestamp": 1, "item": [base]}
+        if path.endswith("hot-stock-list"):
+            return {"timestamp": 1, "item": [{"thscode": "600519.SH", "name": "贵州茅台", "rank": 1, "heat": "1000", "rank_change": 2}]}
+        if path.endswith("skyrocket-list"):
+            return {"timestamp": 1, "item": [{"thscode": "000858.SZ", "name": "五粮液", "rank": 1, "heat": "900", "rank_change": 5}]}
+        if path.endswith("dragon-tiger-list"):
+            return {"timestamp": 1, "trade_date": "2026-08-07", "stock_count": 1, "stock_items": [{"thscode": "600519.SH", "name": "贵州茅台", "net_value": 100_000_000}]}
+        if path.endswith("limit-up-ladder"):
+            return {"timestamp": 1, "window": {"length": 30}, "item": [{"date": "20260807", "boards": {"two_board": [{"thscode": "600519.SH", "name": "贵州茅台", "board_num": 2}]}}]}
+        raise AssertionError(path)
+
+
+def _service(monkeypatch) -> MarketDataService:
     monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "test-key-not-secret")
     monkeypatch.setattr(market_module, "FuyaoProvider", lambda allow_network: _FakeProvider())
-    service = MarketDataService(ConnectionManager())
+    return MarketDataService(ConnectionManager())
 
-    result = service.stock_overview("600519.SH")
+
+def test_market_data_service_builds_frontend_safe_overview(monkeypatch):
+    result = _service(monkeypatch).stock_overview("600519.SH")
 
     assert result["source"] == "hithink_fuyao"
     assert result["adjustment"] == "forward"
@@ -91,12 +141,7 @@ def test_market_data_service_builds_frontend_safe_overview(monkeypatch):
 
 
 def test_market_search_returns_normalized_a_share_identity(monkeypatch):
-    monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "test-key-not-secret")
-    monkeypatch.setattr(market_module, "FuyaoProvider", lambda allow_network: _FakeProvider())
-    service = MarketDataService(ConnectionManager())
-
-    rows = service.search("茅台")
-
+    rows = _service(monkeypatch).search("茅台")
     assert rows == [{
         "symbol": "600519.SH",
         "ticker": "600519",
@@ -105,3 +150,30 @@ def test_market_search_returns_normalized_a_share_identity(monkeypatch):
         "assetType": "a-share",
         "currency": "CNY",
     }]
+
+
+def test_financial_health_preserves_disclosure_fields(monkeypatch):
+    result = _service(monkeypatch).financial_health("600519.SH")
+    assert result["pitKey"] == "report_date_ms"
+    assert result["periodKey"] == "period_end_ms"
+    assert result["statements"]["income"][0]["report_date_ms"] == 1767110400000
+    assert result["statements"]["cashflow"][0]["act_cash_flow_net"] == 100_000_000_000
+
+
+def test_index_views_and_constituent_snapshot(monkeypatch):
+    service = _service(monkeypatch)
+    catalog = service.index_catalog("industry")
+    overview = service.index_overview("881101.TI")
+    assert catalog["items"][0]["thscode"] == "881101.TI"
+    assert overview["constituentCount"] == 2
+    assert len(overview["snapshots"]) == 2
+    assert len(overview["bars"]) == 120
+
+
+def test_market_intelligence_is_composed_from_real_capabilities(monkeypatch):
+    result = _service(monkeypatch).market_intelligence()
+    assert result["issues"] == []
+    assert result["panels"]["hotDay"]["item"][0]["rank"] == 1
+    assert result["panels"]["dragonAll"]["stock_count"] == 1
+    assert result["panels"]["limitLadder"]["window"]["length"] == 30
+    assert "test-key-not-secret" not in str(result)
