@@ -18,6 +18,7 @@ from services.quant_api.services.council import CouncilService
 from services.quant_api.services.data_manager import DataManagerService
 from services.quant_api.services.governance import GovernanceService
 from services.quant_api.services.jobs import JobManager
+from services.quant_api.services.market_data import MarketDataService
 from services.quant_api.services.paper_orders import PaperOrderService
 from services.quant_api.services.runtime_cleanup import RuntimeCleanupService
 from services.quant_api.services.strategies import StrategyService
@@ -46,6 +47,7 @@ class ServiceContainer:
     events: EventBroker
     connections: ConnectionManager
     data_manager: DataManagerService
+    market: MarketDataService
     strategies: StrategyService
     jobs: JobManager
     cleanup: RuntimeCleanupService
@@ -93,6 +95,7 @@ class ServiceContainer:
             events=events,
             connections=connections,
             data_manager=DataManagerService(resolved, connections),
+            market=MarketDataService(connections),
             strategies=StrategyService(resolved),
             jobs=JobManager(
                 resolved,
