@@ -31,10 +31,10 @@ class _FakeProvider:
             "last_price": 1500.0,
             "price_change": 15.0,
             "price_change_ratio_pct": 1.01,
-            "open_price": 1488.0,
-            "high_price": 1510.0,
-            "low_price": 1480.0,
-            "prev_price": 1485.0,
+            "open": 1488.0,
+            "high": 1510.0,
+            "low": 1480.0,
+            "prev": 1485.0,
             "volume": 1_000_000,
             "amount": 1_500_000_000.0,
             "available_at": pd.Timestamp("2026-08-07 15:00:00"),
@@ -79,6 +79,10 @@ def test_market_data_service_builds_frontend_safe_overview(monkeypatch):
     assert result["adjustment"] == "forward"
     assert result["name"] == "贵州茅台"
     assert result["snapshot"]["lastPrice"] == 1500.0
+    assert result["snapshot"]["open"] == 1488.0
+    assert result["snapshot"]["high"] == 1510.0
+    assert result["snapshot"]["low"] == 1480.0
+    assert result["snapshot"]["prevClose"] == 1485.0
     assert result["valuation"]["peTtm"] == 20.5
     assert len(result["bars"]) == 260
     assert result["bars"][-1]["datetime"].startswith("2026")
