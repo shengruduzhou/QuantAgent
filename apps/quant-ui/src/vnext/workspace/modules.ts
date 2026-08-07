@@ -6,6 +6,7 @@ import {
   ChartLineUp,
   Database,
   FileText,
+  Fire,
   Flask,
   Gauge,
   Gavel,
@@ -44,6 +45,7 @@ export const vnextModuleGroups: Array<{ id: VNextModuleGroup; label: string }> =
 export const vnextModules: VNextModule[] = [
   { id: "dashboard", path: "/", label: "决策总览", caption: "Decision Dashboard", group: "research", icon: ChartLineUp, keywords: "dashboard overview portfolio model risk operations 总览" },
   { id: "data", path: "/runtime?view=data", label: "数据实验室", caption: "Data Lab", group: "research", icon: Database, keywords: "data dataset provider tickflow coverage quarantine 数据" },
+  { id: "market-intelligence", path: "/market-intelligence", label: "市场情报台", caption: "Market Intelligence", group: "research", icon: Fire, keywords: "fuyao financial api market intelligence hot stock dragon tiger industry concept financial 行情 热榜 龙虎榜 行业 概念 财务" },
   { id: "factor", path: "/factors", label: "因子实验室", caption: "Factor Lab", group: "research", icon: Atom, keywords: "factor alpha ic 因子" },
   { id: "fusion", path: "/fusion", label: "因子融合工场", caption: "Alpha Foundry", group: "research", icon: Sparkle, keywords: "fusion blend pareto frontier robustness pbo dsr 融合 前沿 稳健" },
   { id: "strategy-studio", path: "/strategy", label: "策略实验室", caption: "Strategy Studio", group: "research", icon: Strategy, keywords: "strategy authoring factor model portfolio backtest risk 策略 编写 回测 风控" },
