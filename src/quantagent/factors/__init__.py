@@ -5,11 +5,6 @@ from quantagent.factors.governance_metrics import (
     correlation_clusters,
     evaluate_factor_candidate,
 )
-from quantagent.factors.expression_safety import (
-    expression_leakage_reasons,
-    validate_feature_expression,
-    validate_feature_expressions,
-)
 
 try:
     from quantagent.factors import alpha101 as alpha101
@@ -25,8 +20,17 @@ except Exception:
     technical_indicators = None
 
 __all__ = [
-    "FactorGateConfig", "FactorGovernanceReport", "FactorMeta", "FactorOutput", "FactorRegistry",
-    "alpha101", "alpha181", "cicc_ashare80", "cicc_high_freq", "correlation_clusters", "default_registry",
-    "evaluate_factor_candidate", "expression_leakage_reasons", "technical_indicators", "validate_feature_expression",
-    "validate_feature_expressions",
+    "FactorGateConfig",
+    "FactorGovernanceReport",
+    "FactorMeta",
+    "FactorOutput",
+    "FactorRegistry",
+    "alpha101",
+    "alpha181",
+    "cicc_ashare80",
+    "cicc_high_freq",
+    "correlation_clusters",
+    "default_registry",
+    "evaluate_factor_candidate",
+    "technical_indicators",
 ]

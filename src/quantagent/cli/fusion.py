@@ -21,6 +21,11 @@ import typer
 
 from quantagent.cli._utils import app, default_reports_root
 
+
+# Factor panels often carry labels beside features for convenience. A typo in
+# --factor-names must not silently promote those future values into predictors.
+# Keep this deliberately narrow: reject semantic label/target names, not every
+# feature containing words such as "return" (momentum/lagged return is valid).
 _LEAKAGE_FACTOR_NAME = re.compile(
     r"^(?:forward[_-]?return(?:s)?(?:_|$)|future[_-]?return(?:s)?(?:_|$)|label(?:_|$)|target(?:_|$)|y(?:_|$))",
     re.IGNORECASE,
@@ -39,7 +44,8 @@ def _resolve_forward_column(frame: pd.DataFrame, requested: str) -> str:
     candidates = [column for column in frame.columns if column.startswith("forward_return")]
     if not candidates:
         raise typer.BadParameter(
-            f"forward panel has no '{requested}' column and no forward_return* fallback; available columns: {sorted(frame.columns)[:20]}"
+            f"forward panel has no '{requested}' column and no forward_return* fallback; "
+            f"available columns: {sorted(frame.columns)[:20]}"
         )
     chosen = sorted(candidates)[0]
     typer.echo(f"forward column '{requested}' not found; using '{chosen}'")
@@ -56,7 +62,6 @@ def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
 
 
 def _validate_benchmark_contract(benchmark_path: Optional[Path], benchmark_symbol: str) -> None:
-    """Production research requires an explicit benchmark series and identity."""
     missing: list[str] = []
     if benchmark_path is None:
         missing.append("--benchmark-path")
@@ -66,7 +71,7 @@ def _validate_benchmark_contract(benchmark_path: Optional[Path], benchmark_symbo
         raise typer.BadParameter(
             "governed factor-fusion search requires an explicit benchmark; missing "
             + ", ".join(missing)
-            + ". The universe-equal-weight fallback remains available only to internal exploratory APIs, not this promotion-capable CLI."
+            + ". Equal-weight fallback remains exploratory only."
         )
 
 
@@ -96,7 +101,12 @@ def search_factor_fusion(
     preference_robustness: float = typer.Option(0.15, min=0.0, max=1.0),
 ):
     """Search factor blends and rank the out-of-sample Pareto frontier."""
-    from quantagent.fusion import FusionSearchConfig, ObjectivePreference, run_fusion_search, save_fusion_artifacts
+    from quantagent.fusion import (
+        FusionSearchConfig,
+        ObjectivePreference,
+        run_fusion_search,
+        save_fusion_artifacts,
+    )
 
     names = tuple(name.strip() for name in factor_names.split(",") if name.strip())
     if not names:
@@ -108,16 +118,28 @@ def search_factor_fusion(
     forward_panel = _read_panel(forward_returns_path)
     resolved_column = _resolve_forward_column(forward_panel, forward_column)
     forward_panel = forward_panel.rename(columns={resolved_column: "forward_return"})
+
     missing = [name for name in names if name not in factor_panel.columns]
     if missing:
-        raise typer.BadParameter(f"factor columns missing from the panel: {missing}")
+        raise typer.BadParameter(
+            f"factor columns missing from the panel: {missing}"
+        )
 
     benchmark_frame = _read_panel(benchmark_path)  # type: ignore[arg-type]
     if "trade_date" not in benchmark_frame.columns:
         raise typer.BadParameter("benchmark file must contain a trade_date column")
-    value_column = next((column for column in ("benchmark_return", "forward_return", "return") if column in benchmark_frame.columns), None)
+    value_column = next(
+        (
+            column
+            for column in ("benchmark_return", "forward_return", "return")
+            if column in benchmark_frame.columns
+        ),
+        None,
+    )
     if value_column is None:
-        raise typer.BadParameter("benchmark file must contain benchmark_return, forward_return or return")
+        raise typer.BadParameter(
+            "benchmark file must contain benchmark_return, forward_return or return"
+        )
     benchmark_returns = (
         benchmark_frame.assign(trade_date=pd.to_datetime(benchmark_frame["trade_date"]))
         .set_index("trade_date")[value_column]
@@ -126,32 +148,53 @@ def search_factor_fusion(
     )
 
     config = FusionSearchConfig(
-        factor_names=names, horizon_days=horizon_days, top_k=top_k, n_folds=n_folds,
-        embargo_days=embargo_days, min_train_days=min_train_days, min_test_days=min_test_days,
-        transaction_cost_bps=transaction_cost_bps, include_genetic=include_genetic,
-        random_controls=random_controls, single_factor_baselines=single_factor_baselines, seed=seed,
+        factor_names=names,
+        horizon_days=horizon_days,
+        top_k=top_k,
+        n_folds=n_folds,
+        embargo_days=embargo_days,
+        min_train_days=min_train_days,
+        min_test_days=min_test_days,
+        transaction_cost_bps=transaction_cost_bps,
+        include_genetic=include_genetic,
+        random_controls=random_controls,
+        single_factor_baselines=single_factor_baselines,
+        seed=seed,
         benchmark_symbol=benchmark_symbol.strip().upper(),
         preference=ObjectivePreference(
-            excess_return=preference_excess_return, annual_return=preference_annual_return,
-            drawdown_control=preference_drawdown_control, robustness=preference_robustness,
+            excess_return=preference_excess_return,
+            annual_return=preference_annual_return,
+            drawdown_control=preference_drawdown_control,
+            robustness=preference_robustness,
         ),
     )
 
     def _progress(stage: str, completed: int, total: int) -> None:
+        # Bracket form is what the web JobRunner's progress parser understands.
         typer.echo(f"[{completed} / {total}] {stage}")
 
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=config,
-        benchmark_returns=benchmark_returns, progress=_progress,
+        factor_panel=factor_panel,
+        forward_panel=forward_panel,
+        config=config,
+        benchmark_returns=benchmark_returns,
+        progress=_progress,
     )
     paths = save_fusion_artifacts(result, output_dir=output_dir)
-    typer.echo(f"n_trials={result.n_trials} frontier={len(result.frontier)} pbo={result.pbo:.4f} benchmark={result.benchmark_mode}")
+
+    typer.echo(
+        f"n_trials={result.n_trials} frontier={len(result.frontier)} "
+        f"pbo={result.pbo:.4f} benchmark={result.benchmark_mode}"
+    )
     preferred = result.preferred
     if preferred is not None:
         metrics = preferred.metrics
         typer.echo(
-            f"preferred={preferred.candidate_id} excess={metrics['excessReturn']:+.4f} annual={metrics['annualReturn']:+.4f} "
-            f"max_dd={metrics['maxDrawdown']:.4f} robustness={metrics['robustness']:.3f}"
+            f"preferred={preferred.candidate_id} "
+            f"excess={metrics['excessReturn']:+.4f} "
+            f"annual={metrics['annualReturn']:+.4f} "
+            f"max_dd={metrics['maxDrawdown']:.4f} "
+            f"robustness={metrics['robustness']:.3f}"
         )
     else:
         typer.echo("no candidate produced usable out-of-sample observations")

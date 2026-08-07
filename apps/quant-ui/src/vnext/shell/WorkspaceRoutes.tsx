@@ -26,10 +26,33 @@ const Settings = lazy(() => import("../../pages/SettingsPage").then((module) => 
 const Help = lazy(() => import("../../pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
 
 export function WorkspaceRoutes({ location }: { location: string }): JSX.Element {
-  return <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}><Routes location={location}>
-    <Route path="/" element={<VNextDashboard />} /><Route path="/training" element={<TrainingLab />} /><Route path="/strategy" element={<StrategyStudio />} /><Route path="/runs" element={<ResearchRuns />} /><Route path="/fusion" element={<AlphaFoundry />} /><Route path="/council" element={<DecisionCouncil />} />
-    <Route path="/market-intelligence" element={<MarketIntelligence />} /><Route path="/market-playbooks" element={<MarketPlaybooks />} /><Route path="/funds" element={<FundResearch />} /><Route path="/stock-replay" element={<StockReplay />} />
-    <Route path="/backtests" element={<Backtests />} /><Route path="/t-plus-one" element={<TPlusOne />} /><Route path="/factors" element={<Factors />} /><Route path="/selection" element={<Selection />} /><Route path="/models" element={<Models />} /><Route path="/risk" element={<Risk />} /><Route path="/runtime" element={<Runtime />} /><Route path="/parity" element={<Parity />} /><Route path="/governance" element={<Governance />} /><Route path="/reports" element={<Reports />} /><Route path="/settings" element={<Settings />} /><Route path="/help" element={<Help />} />
-    <Route path="*" element={<StateView state="unavailable" title="工作站模块不存在" detail="请使用 Global Command Bar 打开已注册模块。" />} />
-  </Routes></Suspense>;
+  return (
+    <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}>
+      <Routes location={location}>
+        <Route path="/" element={<VNextDashboard />} />
+        <Route path="/training" element={<TrainingLab />} />
+        <Route path="/strategy" element={<StrategyStudio />} />
+        <Route path="/runs" element={<ResearchRuns />} />
+        <Route path="/fusion" element={<AlphaFoundry />} />
+        <Route path="/council" element={<DecisionCouncil />} />
+        <Route path="/market-intelligence" element={<MarketIntelligence />} />
+        <Route path="/market-playbooks" element={<MarketPlaybooks />} />
+        <Route path="/funds" element={<FundResearch />} />
+        <Route path="/stock-replay" element={<StockReplay />} />
+        <Route path="/backtests" element={<Backtests />} />
+        <Route path="/t-plus-one" element={<TPlusOne />} />
+        <Route path="/factors" element={<Factors />} />
+        <Route path="/selection" element={<Selection />} />
+        <Route path="/models" element={<Models />} />
+        <Route path="/risk" element={<Risk />} />
+        <Route path="/runtime" element={<Runtime />} />
+        <Route path="/parity" element={<Parity />} />
+        <Route path="/governance" element={<Governance />} />
+        <Route path="/reports" element={<Reports />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/help" element={<Help />} />
+        <Route path="*" element={<StateView state="unavailable" title="工作站模块不存在" detail="请使用 Global Command Bar 打开已注册模块。" />} />
+      </Routes>
+    </Suspense>
+  );
 }

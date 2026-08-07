@@ -31,7 +31,28 @@ import "./vnext/styles/fusion.css";
 import "./vnext/styles/runs.css";
 import "./vnext/styles/council.css";
 
-const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1, refetchOnWindowFocus: false } } });
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
 const root = document.getElementById("root");
-if (!root) throw new Error("Quant UI root element is missing");
-createRoot(root).render(<React.StrictMode><QueryClientProvider client={queryClient}><BrowserRouter><App /></BrowserRouter></QueryClientProvider></React.StrictMode>);
+
+if (!root) {
+  throw new Error("Quant UI root element is missing");
+}
+
+createRoot(root).render(
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </QueryClientProvider>
+  </React.StrictMode>,
+);
