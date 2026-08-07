@@ -21,6 +21,7 @@ import "./vnext/styles/dashboard.css";
 import "./vnext/styles/training.css";
 import "./vnext/styles/workbench.css";
 import "./vnext/styles/market-workbench.css";
+import "./vnext/styles/market-intelligence.css";
 import "./vnext/styles/factor-intelligence.css";
 import "./vnext/styles/governance.css";
 import "./vnext/styles/strategy.css";

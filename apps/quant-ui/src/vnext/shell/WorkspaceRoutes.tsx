@@ -9,6 +9,7 @@ const ResearchRuns = lazy(() => import("../runs/ResearchRunsPage").then((module)
 const DecisionCouncil = lazy(() => import("../council/DecisionCouncilPage").then((module) => ({ default: module.DecisionCouncilPage })));
 const AlphaFoundry = lazy(() => import("../fusion/AlphaFoundryPage").then((module) => ({ default: module.AlphaFoundryPage })));
 const StockReplay = lazy(() => import("../market/MarketWorkbenchPage").then((module) => ({ default: module.MarketWorkbenchPage })));
+const MarketIntelligence = lazy(() => import("../market/MarketIntelligencePage").then((module) => ({ default: module.MarketIntelligencePage })));
 const Backtests = lazy(() => import("../../pages/BacktestLabPage").then((module) => ({ default: module.BacktestLabPage })));
 const TPlusOne = lazy(() => import("../../pages/TPlusOnePage").then((module) => ({ default: module.TPlusOnePage })));
 const Factors = lazy(() => import("../../pages/FactorCenterPage").then((module) => ({ default: module.FactorCenterPage })));
@@ -32,6 +33,7 @@ export function WorkspaceRoutes({ location }: { location: string }): JSX.Element
         <Route path="/runs" element={<ResearchRuns />} />
         <Route path="/fusion" element={<AlphaFoundry />} />
         <Route path="/council" element={<DecisionCouncil />} />
+        <Route path="/market-intelligence" element={<MarketIntelligence />} />
         <Route path="/stock-replay" element={<StockReplay />} />
         <Route path="/backtests" element={<Backtests />} />
         <Route path="/t-plus-one" element={<TPlusOne />} />
