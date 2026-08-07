@@ -9,16 +9,24 @@ the explicit factor table (``u0_pit_intervals.py``).
 
 Provider chain (first non-empty answer wins the symbol, never a blend):
 
+* ``fuyao``    — entitled HiThink/Fuyao REST source, raw OHLCV+turnover; API key required.
 * ``tickflow`` — entitled, publishes turnover (``amount``); hard 10 requests/min.
 * ``tencent``  — public, fast, every board, but publishes no turnover column.
+* ``sina``     — last-resort history for names no longer served elsewhere.
 
 Each symbol lands in its own parquet partition plus a ledger row recording the
 provider, retry class, row count and date range, so an interrupted run resumes
 without refetching and a permanent failure is not retried forever.
 
+Fuyao is opt-in here instead of silently becoming the default. Configure
+``HITHINK_FINANCE_API_KEY`` then put ``fuyao`` first in ``--providers``. For an
+initial full-market load prefer the Fuyao Market Dump path documented in
+``docs/fuyao_financial_api_integration.md``; this per-symbol command is retained
+for targeted repair, validation, and fallback.
+
 Usage:
   AI_quant_venv/bin/python3 scripts/u0_acquire_bars.py --allow-network \\
-      --providers tencent --max-minutes 180
+      --providers fuyao,tencent --max-minutes 180
   AI_quant_venv/bin/python3 scripts/u0_acquire_bars.py --allow-network \\
       --providers tickflow --staging-name tickflow --max-minutes 600
 """
@@ -41,6 +49,7 @@ from quantagent.data.ashare.acquire import (  # noqa: E402
     write_run_manifest,
 )
 from quantagent.data.ashare.env import load_repo_env  # noqa: E402
+from quantagent.data.ashare.fuyao import FUYAO_API_KEY_ENV, FuyaoSource  # noqa: E402
 from quantagent.data.ashare.http import HttpClient  # noqa: E402
 from quantagent.data.ashare.sources import SinaSource, TencentSource, TickFlowSource  # noqa: E402
 
@@ -48,6 +57,7 @@ BARS_ROOT = REPO / "runtime/data/u0/bars"
 MASTER = REPO / "runtime/data/u0/security_master.parquet"
 HISTORY_START = "1990-12-01"          # first A-share session
 TICKFLOW_PACE_S = 6.5                 # measured hard limit: 10 requests / minute
+FUYAO_PACE_S = 0.05                   # shared HttpClient host pacer is authoritative
 TENCENT_PACE_S = 0.05                 # module-level host pacer adds the real spacing
 
 
@@ -55,7 +65,20 @@ def build_providers(names: list[str], end: pd.Timestamp) -> list[ProviderSpec]:
     specs: list[ProviderSpec] = []
     client = HttpClient(timeout=20, max_attempts=3)
     for name in names:
-        if name == "tickflow":
+        if name == "fuyao":
+            source = FuyaoSource(client=client)
+            if not source.api.configured:
+                raise SystemExit(
+                    f"provider 'fuyao' requested but {FUYAO_API_KEY_ENV} is not configured; "
+                    "put the key in .env or the process environment"
+                )
+            specs.append(ProviderSpec(
+                "fuyao",
+                lambda symbol, s=source: s.daily_bars(
+                    symbol, HISTORY_START, str(end.date()), adjust="none"
+                ),
+                FUYAO_PACE_S))
+        elif name == "tickflow":
             source = TickFlowSource()
             specs.append(ProviderSpec(
                 "tickflow",
@@ -85,7 +108,7 @@ def main() -> int:
     parser.add_argument("--allow-network", action="store_true",
                         help="required: this command performs real vendor calls")
     parser.add_argument("--providers", default="tickflow,tencent",
-                        help="comma-separated fallback chain, highest priority first")
+                        help="comma-separated fallback chain, highest priority first; supports fuyao")
     parser.add_argument("--staging-name", default=None,
                         help="staging sub-directory (defaults to the first provider name)")
     parser.add_argument("--max-minutes", type=float, default=180.0)
