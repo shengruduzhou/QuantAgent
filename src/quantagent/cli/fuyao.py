@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import typer
@@ -23,6 +25,16 @@ def _parse_symbols(symbols: str) -> tuple[str, ...]:
                 f"Fuyao requires canonical thscode with exchange suffix, got {symbol!r}"
             )
     return values
+
+
+def _parse_params(raw: str) -> dict[str, object]:
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"params-json is not valid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("params-json must decode to a JSON object")
+    return payload
 
 
 @app.command("fetch-fuyao-daily")
@@ -83,6 +95,49 @@ def fetch_fuyao_daily(
         f"rows={len(frame)} symbols={frame['symbol'].nunique()} "
         f"output={output} manifest={manifest_path} source=hithink_fuyao"
     )
+    return output
+
+
+@app.command("fetch-fuyao-capability")
+def fetch_fuyao_capability(
+    path: str = typer.Option(..., help="documented read-only path under /api/, e.g. /api/a-share/special-data/hot-stock-list"),
+    params_json: str = typer.Option("{}", help="JSON object of query parameters"),
+    output: Path = typer.Option(..., dir_okay=False, help="JSON output path"),
+    allow_network: bool = typer.Option(False),
+):
+    """Fetch any documented Fuyao ``/api/*`` read capability as source-attributed JSON.
+
+    This is the forward-compatible path for funds, index/sector and special-data
+    endpoints that do not need a dedicated QuantAgent normalizer yet. The
+    adapter still owns authentication, retry and business-error handling; an
+    arbitrary external URL cannot be supplied here.
+    """
+    if not allow_network:
+        raise typer.BadParameter("network access is fail-closed; pass --allow-network")
+    if not path.startswith("/api/") or "://" in path or "?" in path or "#" in path:
+        raise typer.BadParameter("path must be a clean documented /api/* path; put query fields in --params-json")
+    if output.suffix.lower() != ".json":
+        raise typer.BadParameter("fetch-fuyao-capability output must use .json")
+
+    params = _parse_params(params_json)
+    provider = FuyaoProvider(allow_network=True)
+    data = provider.get_capability(path, params=params)
+    artifact = {
+        "source": "hithink_fuyao",
+        "source_endpoint": path,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "quality_status": "official_api",
+        "point_in_time_valid": False,
+        "pit_note": (
+            "generic capability output is not automatically PIT-safe; historical model use requires "
+            "an endpoint-specific availability timestamp and canonical normalizer"
+        ),
+        "request_params": params,
+        "data": data,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+    typer.echo(f"source=hithink_fuyao endpoint={path} output={output}")
     return output
 
 
