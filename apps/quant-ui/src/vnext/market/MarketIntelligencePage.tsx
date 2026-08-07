@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { EChartsOption } from "echarts";
-import { Activity, Buildings, ChartBar, Coins, Database, Fire, Pulse, TrendUp } from "@phosphor-icons/react";
+import { Buildings, ChartBar, Coins, Database, Fire, Pulse, TrendUp } from "@phosphor-icons/react";
 import { Link, useSearchParams } from "react-router-dom";
 import { EChart } from "../../components/EChart";
 import { StateView } from "../../components/StateView";
 import { StatusBadge } from "../../components/StatusBadge";
 import { useApi } from "../../hooks/useApi";
-import { formatCompact, formatNumber } from "../../utils/format";
+import { formatCompact } from "../../utils/format";
 import { useVNextChartPalette } from "../theme";
 
 interface HotItem {
@@ -300,7 +300,7 @@ export function MarketIntelligencePage(): JSX.Element {
         </section>
         {intelligence.data?.data?.issues?.length ? <div className="mi-issues">{intelligence.data.data.issues.map((issue) => <span key={issue.panel}>{issue.panel}: {issue.message}</span>)}</div> : null}
         <section className="mi-grid-2">
-          <article className="mi-panel"><header><div><strong>热度排名变化</strong><span>24h 热股 Top10</span></div><Activity size={18} /></header>{hotRows.length ? <EChart option={hotOption} className="mi-chart" ariaLabel="热股排名变化" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="热股榜暂不可用。" />}</article>
+          <article className="mi-panel"><header><div><strong>热度排名变化</strong><span>24h 热股 Top10</span></div><Pulse size={18} /></header>{hotRows.length ? <EChart option={hotOption} className="mi-chart" ariaLabel="热股排名变化" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="热股榜暂不可用。" />}</article>
           <article className="mi-panel"><header><div><strong>龙虎榜净额结构</strong><span>按绝对净额排序</span></div><ChartBar size={18} /></header>{dragonRows.length ? <EChart option={dragonOption} className="mi-chart" ariaLabel="龙虎榜净额" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="龙虎榜暂不可用。" />}</article>
           <article className="mi-panel"><header><div><strong>30 日连板高度</strong><span>仅使用天梯返回的有限样本</span></div><TrendUp size={18} /></header>{ladderSeries.length ? <EChart option={ladderOption} className="mi-chart" ariaLabel="连板最高板高度" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="连板天梯暂不可用。" />}</article>
           <article className="mi-panel"><header><div><strong>热股 / 飙升榜</strong><span>不同语义分栏，不合成为单一评分</span></div><Fire size={18} /></header><div className="mi-ranked-columns"><div><h3>热股</h3>{hotRows.slice(0, 8).map((item) => <div className="mi-ranked-row" key={`hot-${item.thscode}`}><b>{item.rank ?? "—"}</b><span>{item.name ?? item.thscode}</span><small>{item.rank_change == null ? "—" : `${item.rank_change > 0 ? "+" : ""}${item.rank_change}`}</small></div>)}</div><div><h3>飙升</h3>{skyrocketRows.slice(0, 8).map((item) => <div className="mi-ranked-row" key={`sky-${item.thscode}`}><b>{item.rank ?? "—"}</b><span>{item.name ?? item.thscode}</span><small>{item.rank_change == null ? "—" : `${item.rank_change > 0 ? "+" : ""}${item.rank_change}`}</small></div>)}</div></div></article>
