@@ -15,10 +15,13 @@ from quantagent.data.manifest import DataManifest, hash_file
 from quantagent.data.providers.fuyao_provider import FuyaoProvider
 
 
+# Current public contract (llms-full.txt / market-dumps) deliberately lives
+# outside /api/.  Keep these exact paths in one allow-listed map instead of
+# relaxing FuyaoProvider.get_capability() to arbitrary hosts or paths.
 DUMP_ENDPOINTS: Final[dict[str, str]] = {
-    "daily-k": "/api/dump/market-dumps/daily-k/download-url",
-    "daily-k-10d": "/api/dump/market-dumps/daily-k-10d/download-url",
-    "adjustment-factors": "/api/dump/market-dumps/adjustment-factors/download-url",
+    "daily-k": "/dump/market-dumps/daily-k/download-url",
+    "daily-k-10d": "/dump/market-dumps/daily-k-10d/download-url",
+    "adjustment-factors": "/dump/market-dumps/adjustment-factors/download-url",
 }
 
 _DAILY_REQUIRED = frozenset(
@@ -63,6 +66,18 @@ def _stream_https(url: str, output: Path, timeout: float) -> None:
     temporary.replace(output)
 
 
+def _request_dump_link(provider: FuyaoProvider, endpoint: str) -> dict:
+    """Call only an allow-listed official /dump endpoint.
+
+    FuyaoProvider.get_capability intentionally accepts only /api/* endpoints.
+    Market dumps are the documented exception and therefore stay constrained by
+    DUMP_ENDPOINTS here rather than broadening the generic capability boundary.
+    """
+    if endpoint not in DUMP_ENDPOINTS.values():
+        raise ValueError("unrecognised Fuyao market-dump endpoint")
+    return provider._request(endpoint)  # noqa: SLF001 - same-package governed transport reuse
+
+
 def download_fuyao_market_dump(
     dataset: str,
     output: str | Path,
@@ -86,7 +101,7 @@ def download_fuyao_market_dump(
 
     target = Path(output)
     client = provider or FuyaoProvider(allow_network=True)
-    signed = client.get_capability(DUMP_ENDPOINTS[dataset])
+    signed = _request_dump_link(client, DUMP_ENDPOINTS[dataset])
     presigned_url = str(signed.get("presigned_url") or "").strip()
     if not presigned_url:
         raise RuntimeError("Fuyao did not return presigned_url")
