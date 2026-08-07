@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from quantagent.data.fuyao_catalog import (
     ALL_CAPABILITIES,
@@ -12,9 +13,11 @@ from quantagent.data.fuyao_catalog import (
 )
 from quantagent.data.fuyao_docs_audit import compare_live_contract, parse_llms_full_contract
 from quantagent.data.fuyao_dump import DUMP_ENDPOINTS
+from quantagent.data.fuyao_exhaustive_sync import ExhaustiveFuyaoSynchronizer
 from quantagent.data.fuyao_full_sync import (
     DUMP_STRATEGIES,
     SYNC_STRATEGIES,
+    FuyaoUniverse,
     _date_ms,
     build_coverage_audit,
     validate_sync_coverage,
@@ -117,3 +120,53 @@ def test_live_contract_comparator_accepts_exact_registry_sets():
     result = compare_live_contract(parsed)
     assert result["ok"] is True
     assert all(not value for value in result["diffs"].values())
+
+
+class _PagedHistoryProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def get_capability(self, path: str, params=None):
+        assert path == "/api/a-share/prices/historical"
+        request = dict(params or {})
+        self.calls.append(request)
+        offset = int(request.get("offset", 0))
+        if offset == 0:
+            return {
+                "timestamp": 1,
+                "item": [
+                    {"date_ms": 1, "close_price": 10.0},
+                    {"date_ms": 2, "close_price": 11.0},
+                ],
+            }
+        if offset == 2:
+            return {"timestamp": 1, "item": [{"date_ms": 3, "close_price": 12.0}]}
+        return {"timestamp": 1, "item": []}
+
+
+def test_exhaustive_sync_consumes_every_historical_offset_page(tmp_path: Path):
+    provider = _PagedHistoryProvider()
+    sync = ExhaustiveFuyaoSynchronizer(tmp_path, provider=provider)  # type: ignore[arg-type]
+    universe = FuyaoUniverse(
+        a_shares=("600519.SH",),
+        indexes=(),
+        fund_otc=(),
+        fund_etf=(),
+        fund_lof=(),
+        fund_reits=(),
+    )
+
+    sync._sync_adjusted_stock_history(universe, date(2025, 1, 1), date(2026, 1, 1))
+
+    assert [(call["adjust"], call["offset"]) for call in provider.calls] == [
+        ("forward", 0),
+        ("forward", 2),
+        ("forward", 3),
+        ("backward", 0),
+        ("backward", 2),
+        ("backward", 3),
+    ]
+    assert not any(
+        event.status in {"pagination_stalled", "pagination_limit_reached"}
+        for event in sync.events
+    )
