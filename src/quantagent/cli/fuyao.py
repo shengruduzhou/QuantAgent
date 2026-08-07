@@ -10,6 +10,7 @@ import typer
 
 from quantagent.cli._utils import app
 from quantagent.data.fuyao_dump import DUMP_ENDPOINTS, download_fuyao_market_dump
+from quantagent.data.fuyao_full_sync import FuyaoFullSynchronizer, build_coverage_audit
 from quantagent.data.manifest import build_manifest_for_frame
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.providers.fuyao_provider import FuyaoProvider
@@ -25,6 +26,12 @@ def _parse_symbols(symbols: str) -> tuple[str, ...]:
                 f"Fuyao requires canonical thscode with exchange suffix, got {symbol!r}"
             )
     return values
+
+
+def _parse_optional_symbols(symbols: str) -> tuple[str, ...]:
+    if not symbols.strip():
+        return ()
+    return _parse_symbols(symbols)
 
 
 def _parse_params(raw: str) -> dict[str, object]:
@@ -164,3 +171,63 @@ def fetch_fuyao_dump(
         f"manifest={result.manifest} sha256={result.sha256[:12]}"
     )
     return result.output
+
+
+@app.command("audit-fuyao-coverage")
+def audit_fuyao_coverage(
+    output: Path | None = typer.Option(None, dir_okay=False, help="optional JSON audit output"),
+):
+    """Prove that every currently documented REST/MCP/dump capability is classified."""
+    audit = build_coverage_audit()
+    text = json.dumps(audit, ensure_ascii=False, indent=2)
+    if output is not None:
+        if output.suffix.lower() != ".json":
+            raise typer.BadParameter("coverage audit output must use .json")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
+        typer.echo(f"Fuyao coverage audit written to {output}")
+    else:
+        typer.echo(text)
+    counts = audit["counts"]
+    typer.echo(
+        "coverage="
+        f"rest:{counts['live_rest']} mcp:{counts['live_mcp']} "
+        f"dumps:{counts['market_dumps']} coming_soon:{counts['coming_soon']}"
+    )
+    return output
+
+
+@app.command("sync-fuyao-all")
+def sync_fuyao_all(
+    output_dir: Path = typer.Option(..., file_okay=False, help="raw archive + manifest root"),
+    deep: bool = typer.Option(True, help="enumerate per-symbol/per-date financial, index, fund and special-data history"),
+    include_dumps: bool = typer.Option(True, help="download all three official full-market Parquet dumps"),
+    resume: bool = typer.Option(True, help="reuse already archived request artifacts"),
+    stop_on_error: bool = typer.Option(False, help="fail immediately instead of recording a gap and continuing"),
+    extra_reits: str = typer.Option("", help="comma-separated REIT thscodes; official meta ticker-list currently has no fund-reit enum"),
+    dump_timeout: float = typer.Option(180.0, min=10.0, max=3600.0),
+    allow_network: bool = typer.Option(False),
+):
+    """Archive every documented live Fuyao data class within official retention limits.
+
+    This command is intentionally fail-closed for network access.  In deep mode
+    it can make a very large number of API calls; every request is resumable and
+    every permission/upstream failure is written into the final audit report.
+    """
+    if not allow_network:
+        raise typer.BadParameter("network access is fail-closed; pass --allow-network")
+    reits = _parse_optional_symbols(extra_reits)
+    sync = FuyaoFullSynchronizer(
+        output_dir,
+        provider=FuyaoProvider(allow_network=True),
+        resume=resume,
+        stop_on_error=stop_on_error,
+    )
+    report = sync.run(
+        deep=deep,
+        extra_reits=reits,
+        include_dumps=include_dumps,
+        dump_timeout=dump_timeout,
+    )
+    typer.echo(f"Fuyao full sync report={report}")
+    return report
