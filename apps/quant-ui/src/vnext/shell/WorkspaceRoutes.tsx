@@ -8,7 +8,7 @@ const StrategyStudio = lazy(() => import("../strategy/StrategyStudioPage").then(
 const ResearchRuns = lazy(() => import("../runs/ResearchRunsPage").then((module) => ({ default: module.ResearchRunsPage })));
 const DecisionCouncil = lazy(() => import("../council/DecisionCouncilPage").then((module) => ({ default: module.DecisionCouncilPage })));
 const AlphaFoundry = lazy(() => import("../fusion/AlphaFoundryPage").then((module) => ({ default: module.AlphaFoundryPage })));
-const StockReplay = lazy(() => import("../../pages/StockReplayPage").then((module) => ({ default: module.StockReplayPage })));
+const StockReplay = lazy(() => import("../market/MarketWorkbenchPage").then((module) => ({ default: module.MarketWorkbenchPage })));
 const Backtests = lazy(() => import("../../pages/BacktestLabPage").then((module) => ({ default: module.BacktestLabPage })));
 const TPlusOne = lazy(() => import("../../pages/TPlusOnePage").then((module) => ({ default: module.TPlusOnePage })));
 const Factors = lazy(() => import("../../pages/FactorCenterPage").then((module) => ({ default: module.FactorCenterPage })));
