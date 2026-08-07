@@ -11,7 +11,8 @@ import typer
 from quantagent.cli._utils import app
 from quantagent.data.fuyao_docs_audit import audit_live_documentation
 from quantagent.data.fuyao_dump import DUMP_ENDPOINTS, download_fuyao_market_dump
-from quantagent.data.fuyao_full_sync import FuyaoFullSynchronizer, build_coverage_audit
+from quantagent.data.fuyao_exhaustive_sync import ExhaustiveFuyaoSynchronizer
+from quantagent.data.fuyao_full_sync import build_coverage_audit
 from quantagent.data.manifest import build_manifest_for_frame
 from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.providers.fuyao_provider import FuyaoProvider
@@ -264,7 +265,7 @@ def sync_fuyao_all(
                 f"Fuyao live documentation drift detected before sync: {live['diffs']}"
             )
 
-    sync = FuyaoFullSynchronizer(
+    sync = ExhaustiveFuyaoSynchronizer(
         output_dir,
         provider=FuyaoProvider(allow_network=True),
         resume=resume,
