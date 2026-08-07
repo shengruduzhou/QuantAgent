@@ -8,6 +8,11 @@ from quantagent.research.forward_report import (
     render_forward_research_header,
     validate_forward_research_payload,
 )
+from quantagent.research.nonlinear_promotion import (
+    NonlinearPromotionConfig,
+    NonlinearPromotionReport,
+    evaluate_nonlinear_promotion,
+)
 from quantagent.research.selection_governance import (
     NestedSelectionConfig,
     OuterFoldSelection,
@@ -18,16 +23,8 @@ from quantagent.research.selection_governance import (
 )
 
 __all__ = [
-    "ForwardResearchContract",
-    "ForwardResearchValidation",
-    "NestedSelectionConfig",
-    "OuterFoldSelection",
-    "PredictionWindow",
-    "SelectionGovernanceReport",
-    "TrialRecord",
-    "TrialRegistry",
-    "build_forward_research_contract",
-    "nested_purged_select",
-    "render_forward_research_header",
-    "validate_forward_research_payload",
+    "ForwardResearchContract", "ForwardResearchValidation", "NestedSelectionConfig", "NonlinearPromotionConfig",
+    "NonlinearPromotionReport", "OuterFoldSelection", "PredictionWindow", "SelectionGovernanceReport", "TrialRecord",
+    "TrialRegistry", "build_forward_research_contract", "evaluate_nonlinear_promotion", "nested_purged_select",
+    "render_forward_research_header", "validate_forward_research_payload",
 ]

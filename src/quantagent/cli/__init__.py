@@ -12,12 +12,12 @@ import os
 
 from quantagent.cli._utils import app
 
-# Stable/governed command surfaces.
 from quantagent.cli import fusion  # noqa: F401,E402
 from quantagent.cli import fuyao  # noqa: F401,E402
 from quantagent.cli import governance  # noqa: F401,E402
 from quantagent.cli import paper  # noqa: F401,E402
 from quantagent.cli import qlib  # noqa: F401,E402
+from quantagent.cli import research_foundations  # noqa: F401,E402
 from quantagent.cli import v7_backtest  # noqa: F401,E402
 from quantagent.cli import v7_bond  # noqa: F401,E402
 from quantagent.cli import v7_data  # noqa: F401,E402
@@ -35,12 +35,7 @@ from quantagent.cli import v8_verify  # noqa: F401,E402
 
 
 def _legacy_enabled() -> bool:
-    return os.getenv("QUANTAGENT_ENABLE_LEGACY_CLI", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return os.getenv("QUANTAGENT_ENABLE_LEGACY_CLI", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 LEGACY_CLI_ENABLED = _legacy_enabled()

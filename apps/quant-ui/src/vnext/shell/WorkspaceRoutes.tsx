@@ -10,6 +10,8 @@ const DecisionCouncil = lazy(() => import("../council/DecisionCouncilPage").then
 const AlphaFoundry = lazy(() => import("../fusion/AlphaFoundryPage").then((module) => ({ default: module.AlphaFoundryPage })));
 const StockReplay = lazy(() => import("../market/MarketWorkbenchPage").then((module) => ({ default: module.MarketWorkbenchPage })));
 const MarketIntelligence = lazy(() => import("../market/MarketIntelligencePage").then((module) => ({ default: module.MarketIntelligencePage })));
+const MarketPlaybooks = lazy(() => import("../market/MarketPlaybooksPage").then((module) => ({ default: module.MarketPlaybooksPage })));
+const FundResearch = lazy(() => import("../market/FundResearchPage").then((module) => ({ default: module.FundResearchPage })));
 const Backtests = lazy(() => import("../../pages/BacktestLabPage").then((module) => ({ default: module.BacktestLabPage })));
 const TPlusOne = lazy(() => import("../../pages/TPlusOnePage").then((module) => ({ default: module.TPlusOnePage })));
 const Factors = lazy(() => import("../../pages/FactorCenterPage").then((module) => ({ default: module.FactorCenterPage })));
@@ -24,31 +26,10 @@ const Settings = lazy(() => import("../../pages/SettingsPage").then((module) => 
 const Help = lazy(() => import("../../pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
 
 export function WorkspaceRoutes({ location }: { location: string }): JSX.Element {
-  return (
-    <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}>
-      <Routes location={location}>
-        <Route path="/" element={<VNextDashboard />} />
-        <Route path="/training" element={<TrainingLab />} />
-        <Route path="/strategy" element={<StrategyStudio />} />
-        <Route path="/runs" element={<ResearchRuns />} />
-        <Route path="/fusion" element={<AlphaFoundry />} />
-        <Route path="/council" element={<DecisionCouncil />} />
-        <Route path="/market-intelligence" element={<MarketIntelligence />} />
-        <Route path="/stock-replay" element={<StockReplay />} />
-        <Route path="/backtests" element={<Backtests />} />
-        <Route path="/t-plus-one" element={<TPlusOne />} />
-        <Route path="/factors" element={<Factors />} />
-        <Route path="/selection" element={<Selection />} />
-        <Route path="/models" element={<Models />} />
-        <Route path="/risk" element={<Risk />} />
-        <Route path="/runtime" element={<Runtime />} />
-        <Route path="/parity" element={<Parity />} />
-        <Route path="/governance" element={<Governance />} />
-        <Route path="/reports" element={<Reports />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/help" element={<Help />} />
-        <Route path="*" element={<StateView state="unavailable" title="工作站模块不存在" detail="请使用 Global Command Bar 打开已注册模块。" />} />
-      </Routes>
-    </Suspense>
-  );
+  return <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}><Routes location={location}>
+    <Route path="/" element={<VNextDashboard />} /><Route path="/training" element={<TrainingLab />} /><Route path="/strategy" element={<StrategyStudio />} /><Route path="/runs" element={<ResearchRuns />} /><Route path="/fusion" element={<AlphaFoundry />} /><Route path="/council" element={<DecisionCouncil />} />
+    <Route path="/market-intelligence" element={<MarketIntelligence />} /><Route path="/market-playbooks" element={<MarketPlaybooks />} /><Route path="/funds" element={<FundResearch />} /><Route path="/stock-replay" element={<StockReplay />} />
+    <Route path="/backtests" element={<Backtests />} /><Route path="/t-plus-one" element={<TPlusOne />} /><Route path="/factors" element={<Factors />} /><Route path="/selection" element={<Selection />} /><Route path="/models" element={<Models />} /><Route path="/risk" element={<Risk />} /><Route path="/runtime" element={<Runtime />} /><Route path="/parity" element={<Parity />} /><Route path="/governance" element={<Governance />} /><Route path="/reports" element={<Reports />} /><Route path="/settings" element={<Settings />} /><Route path="/help" element={<Help />} />
+    <Route path="*" element={<StateView state="unavailable" title="工作站模块不存在" detail="请使用 Global Command Bar 打开已注册模块。" />} />
+  </Routes></Suspense>;
 }
