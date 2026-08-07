@@ -30,16 +30,39 @@ interface DragonItem {
   range_days?: number;
 }
 
+interface LimitUpItem {
+  thscode?: string;
+  ticker?: string;
+  name?: string;
+  last_price?: number;
+  price_change_ratio_pct?: number;
+  limit_up_time?: string;
+  limit_up_reason?: string | null;
+  continue_day_text?: string;
+  continue_day_cnt?: number;
+  seal_money?: number;
+  max_seal_money?: number;
+}
+
+interface AnomalyItem {
+  stock_name?: string;
+  analysis_content?: string;
+  keyword_list?: string[];
+  thscode?: string;
+  tag_name?: string;
+}
+
 interface LadderStock { thscode?: string; ticker?: string; name?: string; board_num?: number; }
 interface LadderRow { date?: string; boards?: Record<string, LadderStock[]>; }
 interface IntelligencePayload {
   timestamp?: number;
-  item?: HotItem[] | LadderRow[];
+  item?: HotItem[] | LimitUpItem[] | AnomalyItem[] | LadderRow[];
   stock_items?: DragonItem[];
   hot_money_items?: Array<Record<string, unknown>>;
   stock_count?: number;
   count?: number;
   trade_date?: string;
+  pagination?: { total?: number; pages?: number; size?: number; page?: number };
   window?: { length?: number; date_list?: string[] };
 }
 interface MarketIntelligenceData {
@@ -52,7 +75,9 @@ interface MarketIntelligenceData {
     dragonAll?: IntelligencePayload | null;
     dragonOrg?: IntelligencePayload | null;
     dragonHotMoney?: IntelligencePayload | null;
+    limitPool?: IntelligencePayload | null;
     limitLadder?: IntelligencePayload | null;
+    anomalyList?: IntelligencePayload | null;
   };
   issues: Array<{ panel: string; endpoint: string; message: string }>;
   provenance: Record<string, string>;
@@ -85,15 +110,15 @@ const COVERAGE = [
   ["01", "单股行情与趋势速览", "原生", "/stock-replay"],
   ["02", "单股财务体检", "原生", "financial"],
   ["03", "概念板块联动", "原生", "sector"],
-  ["04", "涨停池与连板天梯", "行情脉冲", "pulse"],
-  ["05", "自选股当日异动监控", "capability 可接", "pulse"],
+  ["04", "涨停池与连板天梯", "原生", "pulse"],
+  ["05", "自选股当日异动监控", "异动源已原生", "pulse"],
   ["06", "本地全市场趋势研究", "Data Lab", "/runtime?view=data"],
   ["07", "市场热度与飙升雷达", "原生", "pulse"],
   ["08", "龙虎榜机构与游资观察", "原生", "pulse"],
   ["09", "行业强度作战矩阵", "原生", "sector"],
   ["10", "现金流质量稽核台", "财务视图", "financial"],
   ["11", "热榜—股价关系观察台", "单股联动", "/stock-replay"],
-  ["12", "涨停情绪市场脉冲屏", "行情脉冲", "pulse"],
+  ["12", "涨停情绪市场脉冲屏", "原生", "pulse"],
   ["13", "价格成交量突破回测台", "Backtester", "/backtests"],
   ["14", "时间序列动量回测台", "Backtester", "/backtests"],
   ["15", "短期反转回测实验室", "Backtester", "/backtests"],
@@ -164,6 +189,8 @@ export function MarketIntelligencePage(): JSX.Element {
   const hotRows = panelItems<HotItem>(panels?.hotDay).slice(0, 12);
   const skyrocketRows = panelItems<HotItem>(panels?.skyrocketDay).slice(0, 12);
   const dragonRows = (panels?.dragonAll?.stock_items ?? []).slice().sort((a, b) => Math.abs(b.net_value ?? 0) - Math.abs(a.net_value ?? 0)).slice(0, 12);
+  const limitRows = panelItems<LimitUpItem>(panels?.limitPool).slice(0, 20);
+  const anomalyRows = panelItems<AnomalyItem>(panels?.anomalyList).slice(0, 20);
   const ladderRows = panelItems<LadderRow>(panels?.limitLadder);
 
   const ladderSeries = useMemo(() => ladderRows.slice().reverse().map((row) => {
@@ -295,6 +322,8 @@ export function MarketIntelligencePage(): JSX.Element {
         <section className="mi-metric-grid">
           <Metric label="24h 热股" value={String(panelItems<HotItem>(panels?.hotDay).length)} detail="hot-stock-list · day" />
           <Metric label="日榜飙升" value={String(skyrocketRows.length)} detail="skyrocket-list · day" />
+          <Metric label="今日涨停池" value={String(panels?.limitPool?.pagination?.total ?? limitRows.length)} detail="limit-up-pool" />
+          <Metric label="当日异动" value={String(anomalyRows.length)} detail="anomaly-analysis-list" />
           <Metric label="龙虎榜股票" value={String(panels?.dragonAll?.stock_count ?? dragonRows.length)} detail={panels?.dragonAll?.trade_date ?? "latest available"} />
           <Metric label="连板窗口" value={`${panels?.limitLadder?.window?.length ?? ladderRows.length} 日`} detail="limit-up-ladder" />
         </section>
@@ -304,8 +333,10 @@ export function MarketIntelligencePage(): JSX.Element {
           <article className="mi-panel"><header><div><strong>龙虎榜净额结构</strong><span>按绝对净额排序</span></div><ChartBar size={18} /></header>{dragonRows.length ? <EChart option={dragonOption} className="mi-chart" ariaLabel="龙虎榜净额" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="龙虎榜暂不可用。" />}</article>
           <article className="mi-panel"><header><div><strong>30 日连板高度</strong><span>仅使用天梯返回的有限样本</span></div><TrendUp size={18} /></header>{ladderSeries.length ? <EChart option={ladderOption} className="mi-chart" ariaLabel="连板最高板高度" /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="连板天梯暂不可用。" />}</article>
           <article className="mi-panel"><header><div><strong>热股 / 飙升榜</strong><span>不同语义分栏，不合成为单一评分</span></div><Fire size={18} /></header><div className="mi-ranked-columns"><div><h3>热股</h3>{hotRows.slice(0, 8).map((item) => <div className="mi-ranked-row" key={`hot-${item.thscode}`}><b>{item.rank ?? "—"}</b><span>{item.name ?? item.thscode}</span><small>{item.rank_change == null ? "—" : `${item.rank_change > 0 ? "+" : ""}${item.rank_change}`}</small></div>)}</div><div><h3>飙升</h3>{skyrocketRows.slice(0, 8).map((item) => <div className="mi-ranked-row" key={`sky-${item.thscode}`}><b>{item.rank ?? "—"}</b><span>{item.name ?? item.thscode}</span><small>{item.rank_change == null ? "—" : `${item.rank_change > 0 ? "+" : ""}${item.rank_change}`}</small></div>)}</div></div></article>
+          <article className="mi-panel"><header><div><strong>涨停池</strong><span>按连板数降序，最多取 200 条真实返回</span></div><Fire size={18} /></header>{limitRows.length ? <DataTable headers={["股票", "连板", "涨停时间", "封单额", "原因"]} rows={limitRows.slice(0, 15).map((item) => [item.name ?? item.thscode ?? "—", item.continue_day_text ?? String(item.continue_day_cnt ?? "—"), item.limit_up_time ?? "—", money(item.seal_money), item.limit_up_reason ?? "—"])} /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="涨停池暂不可用。" />}</article>
+          <article className="mi-panel"><header><div><strong>当日异动原因</strong><span>Fuyao REST anomaly analysis</span></div><Pulse size={18} /></header>{anomalyRows.length ? <DataTable headers={["标签", "股票", "代码", "异动解读"]} rows={anomalyRows.slice(0, 15).map((item) => [item.tag_name ?? "—", item.stock_name ?? "—", item.thscode ?? "—", item.analysis_content ?? "—"])} /> : <StateView state={intelligence.isLoading ? "loading" : "empty"} detail="当日异动数据暂不可用。" />}</article>
         </section>
-        <section className="mi-source-strip"><span>hot-stock-list / skyrocket-list</span><span>dragon-tiger-list: all · org · hot_money</span><span>limit-up-ladder: 30 trading days</span><strong>观察数据 ≠ 交易指令</strong></section>
+        <section className="mi-source-strip"><span>hot-stock-list / skyrocket-list</span><span>limit-up-pool / limit-up-ladder</span><span>anomaly-analysis-list</span><span>dragon-tiger-list: all · org · hot_money</span><strong>观察数据 ≠ 交易指令</strong></section>
       </> : null}
 
       {view === "sector" ? <>
