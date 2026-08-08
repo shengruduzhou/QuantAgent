@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from quantagent.execution.live_model_trust import evaluate_live_model_trust
@@ -12,21 +14,26 @@ from quantagent.execution.live_model_trust_v2 import (
     REQUIRED_ARTIFACT_ROLES,
     REQUIRED_METRIC_SEMANTICS,
     REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
-    issue_live_model_trust_v2,
     sha256_file,
+)
+from quantagent.execution.live_model_trust_v2_policy import (
+    issue_governed_live_model_trust_v2,
 )
 from quantagent.execution.trusted_backtest_semantics import (
     TRUSTED_EXECUTION_SEMANTICS,
     trusted_cost_model_config,
     trusted_simulation_config,
 )
+from quantagent.research.selection_governance import evaluate_frozen_candidate
 from quantagent.training.semantics import FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VERSION
 
 
 MODEL_ID = "ft-fresh-2026-v2"
 SOURCE_COMMIT = "a" * 40
-WINDOW_ID = "fresh-2026-02-01_2026-08-01"
+WINDOW_ID = "fresh-2026-02-02_2026-07-31"
 CANDIDATE_FAMILY = ["linear_control", "ft_transformer"]
+SELECTED = "ft_transformer"
+ISSUED_AT = datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -48,6 +55,46 @@ def _trial_ledger(count: int = 50) -> list[dict[str, str]]:
     ]
 
 
+def _write_statistical_returns(path: Path) -> object:
+    dates = pd.bdate_range(end="2026-01-30", periods=160)
+    rng = np.random.default_rng(42)
+    shared = rng.normal(0.0, 0.002, len(dates))
+    frame = pd.DataFrame(
+        {
+            "trade_date": dates.strftime("%Y-%m-%d"),
+            "benchmark": np.zeros(len(dates), dtype=float),
+            "linear_control": 0.00050 + shared,
+            "ft_transformer": 0.00055 + shared + rng.normal(0.0, 0.0001, len(dates)),
+        }
+    )
+    frame.to_csv(path, index=False)
+    candidate_returns = frame.set_index(pd.DatetimeIndex(dates))[CANDIDATE_FAMILY]
+    benchmark = pd.Series(frame["benchmark"].to_numpy(dtype=float), index=dates)
+    report = evaluate_frozen_candidate(
+        candidate_returns,
+        selected_candidate=SELECTED,
+        benchmark_returns=benchmark,
+        cumulative_trials=50,
+        minimum_observed_days=80,
+    )
+    assert report.accepted is True, report.rejection_reasons
+    return report
+
+
+def _write_fresh_predictions(path: Path) -> tuple[int, str, str]:
+    dates = pd.bdate_range("2026-02-02", periods=130)
+    rows: list[dict[str, object]] = []
+    for idx, day in enumerate(dates):
+        rows.append(
+            {"trade_date": day.date().isoformat(), "symbol": "600000.SH", "prediction": 0.01 + idx * 1e-6}
+        )
+        rows.append(
+            {"trade_date": day.date().isoformat(), "symbol": "000001.SZ", "prediction": 0.02 + idx * 1e-6}
+        )
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return len(dates), dates[0].date().isoformat(), dates[-1].date().isoformat()
+
+
 def _build_evidence(
     tmp_path: Path,
 ) -> tuple[Path, dict[str, Path], dict[str, tuple[str, str]], dict[str, Path]]:
@@ -59,14 +106,8 @@ def _build_evidence(
     files["fresh_oos_predictions"] = root / "fresh_oos_predictions.csv"
 
     files["model_checkpoint"].write_bytes(b"governed-ft-checkpoint-v2\x00\x01")
-    files["statistical_returns"].write_text(
-        "trade_date,return\n2026-02-02,0.001\n",
-        encoding="utf-8",
-    )
-    files["fresh_oos_predictions"].write_text(
-        "trade_date,symbol,prediction\n2026-02-02,600000.SH,0.01\n",
-        encoding="utf-8",
-    )
+    stat_report = _write_statistical_returns(files["statistical_returns"])
+    fresh_days, fresh_start, fresh_end = _write_fresh_predictions(files["fresh_oos_predictions"])
     checkpoint_sha = sha256_file(files["model_checkpoint"])
     returns_sha = sha256_file(files["statistical_returns"])
     predictions_sha = sha256_file(files["fresh_oos_predictions"])
@@ -78,7 +119,7 @@ def _build_evidence(
             "objective_semantics": REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
             "checkpoint_sha256": checkpoint_sha,
             "training_cutoff": "2025-12-31",
-            "validation_cutoff": "2026-01-31",
+            "validation_cutoff": "2026-01-30",
         },
     )
     _write_json(
@@ -90,8 +131,8 @@ def _build_evidence(
             "candidate_family": CANDIDATE_FAMILY,
             "max_search_trials": 50,
             "acceptance_window_id": WINDOW_ID,
-            "acceptance_start_date": "2026-02-01",
-            "acceptance_end_date": "2026-08-01",
+            "acceptance_start_date": fresh_start,
+            "acceptance_end_date": fresh_end,
         },
     )
     _write_json(
@@ -100,6 +141,7 @@ def _build_evidence(
         | {
             "trial_count": 50,
             "candidate_family": CANDIDATE_FAMILY,
+            "selected_candidate": SELECTED,
             "trials": _trial_ledger(),
             "completed_at": "2026-01-20T00:00:00+00:00",
             "final_holdout_used_for_selection": False,
@@ -113,7 +155,7 @@ def _build_evidence(
             "pit": True,
             "universe_pit": True,
             "training_cutoff": "2025-12-31",
-            "validation_cutoff": "2026-01-31",
+            "validation_cutoff": "2026-01-30",
         },
     )
     _write_json(
@@ -129,6 +171,8 @@ def _build_evidence(
             "benchmark_excess_positive": True,
             "variant_c_passed": True,
             "checkpoint_sha256": checkpoint_sha,
+            # This hash binds the complete early-OOS candidate return matrix;
+            # the governed layer derives the frozen selected column from it.
             "daily_returns_sha256": returns_sha,
         },
     )
@@ -136,9 +180,10 @@ def _build_evidence(
         files["statistical_gates"],
         _common()
         | {
-            "pbo": 0.20,
-            "dsr_probability": 0.97,
-            "spa_p_value": 0.02,
+            "selected_candidate": SELECTED,
+            "pbo": float(stat_report.pbo),
+            "dsr_probability": float(stat_report.dsr_probability),
+            "spa_p_value": float(stat_report.spa_pvalue),
             "trial_count": 50,
             "candidate_family": CANDIDATE_FAMILY,
             "returns_sha256": returns_sha,
@@ -148,11 +193,11 @@ def _build_evidence(
         files["fresh_oos"],
         _common()
         | {
-            "trading_days": 130,
+            "trading_days": fresh_days,
             "final_holdout_reads": 1,
             "contaminated_holdout": False,
-            "start_date": "2026-02-01",
-            "end_date": "2026-08-01",
+            "start_date": fresh_start,
+            "end_date": fresh_end,
             "acceptance_window_id": WINDOW_ID,
             "predictions_sha256": predictions_sha,
         },
@@ -178,12 +223,13 @@ def _build_evidence(
 def _issue(tmp_path: Path):
     root, files, locations, roots = _build_evidence(tmp_path)
     manifest = tmp_path / "live_model_trust_v2.json"
-    result = issue_live_model_trust_v2(
+    result = issue_governed_live_model_trust_v2(
         manifest,
         model_id=MODEL_ID,
         source_commit=SOURCE_COMMIT,
         artifact_locations=locations,
         artifact_roots=roots,
+        issued_at=ISSUED_AT,
     )
     return manifest, root, files, locations, roots, result
 
@@ -213,7 +259,10 @@ def test_valid_v2_real_artifact_bundle_passes(tmp_path: Path) -> None:
     assert report.model_id == MODEL_ID
     assert report.evidence["provenance_assurance"] == "hash_bound_unsigned_v1"
     assert report.evidence["fresh_oos_days"] == 130
-    assert report.evidence["final_holdout_reads"] == 1
+    assert report.evidence["fresh_prediction_rows"] == 260
+    assert report.evidence["fresh_prediction_symbols"] == 2
+    assert report.evidence["statistical_observed_days"] == 160
+    assert report.evidence["statistical_recomputed"] is True
     assert report.evidence["trial_count"] == 50
     assert report.evidence["pre_registered_max_search_trials"] == 50
     assert report.evidence["execution_semantics"] == TRUSTED_EXECUTION_SEMANTICS
@@ -296,6 +345,33 @@ def test_strict_backtest_execution_and_cost_parameters_are_exactly_bound(tmp_pat
     assert "strict_backtest:cost_model_config_mismatch" in report.reasons
 
 
+def test_fresh_oos_coverage_is_recomputed_from_predictions_not_summary(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    frame = pd.read_csv(files["fresh_oos_predictions"])
+    last_day = frame["trade_date"].max()
+    frame = frame.loc[frame["trade_date"] != last_day]
+    frame.to_csv(files["fresh_oos_predictions"], index=False)
+    new_sha = sha256_file(files["fresh_oos_predictions"])
+
+    fresh = json.loads(files["fresh_oos"].read_text(encoding="utf-8"))
+    fresh["predictions_sha256"] = new_sha
+    _write_json(files["fresh_oos"], fresh)
+    risk = json.loads(files["risk_capacity"].read_text(encoding="utf-8"))
+    risk["predictions_sha256"] = new_sha
+    _write_json(files["risk_capacity"], risk)
+    payload = _read_manifest(manifest)
+    payload["artifacts"]["fresh_oos_predictions"]["sha256"] = new_sha
+    payload["artifacts"]["fresh_oos"]["sha256"] = sha256_file(files["fresh_oos"])
+    payload["artifacts"]["risk_capacity"]["sha256"] = sha256_file(files["risk_capacity"])
+    _write_json(manifest, payload)
+
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert any("derived_trading_days_below_120" not in reason for reason in report.reasons)
+    assert any("trading_days_mismatch_predictions" in reason for reason in report.reasons)
+    assert any("end_date_mismatch_predictions" in reason for reason in report.reasons)
+
+
 def test_fresh_oos_days_and_one_shot_read_are_hard_integer_gates(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
 
@@ -339,6 +415,23 @@ def test_probability_fields_reject_bool_negative_and_over_one(tmp_path: Path) ->
     assert any("statistical_gates:spa" in reason for reason in report.reasons)
 
 
+def test_statistical_summary_must_match_recomputed_pbo_dsr_spa(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+
+    def misreport(doc: dict) -> None:
+        # All values remain inside the raw pass thresholds; only independent
+        # recomputation can detect that the summary was repackaged.
+        doc["pbo"] = 0.10
+        doc["dsr_probability"] = 0.96
+        doc["spa_p_value"] = 0.01
+
+    _rewrite_and_rebind(manifest, "statistical_gates", files["statistical_gates"], misreport)
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert any("pbo_mismatch_recomputed" in reason for reason in report.reasons)
+    assert any("dsr_probability_mismatch_recomputed" in reason for reason in report.reasons)
+
+
 def test_statistical_thresholds_cannot_be_repackaged_as_pass(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
 
@@ -368,7 +461,6 @@ def test_trial_budget_candidate_family_and_full_trial_ledger_are_bound(tmp_path:
     assert "statistical_gates:trial_count_mismatch_search_ledger" in report.reasons
     assert "statistical_gates:candidate_family_mismatch_search_ledger" in report.reasons
 
-    # Independently prove a ledger cannot merely claim N trials without listing them.
     manifest, _, files, _, roots, _ = _issue(tmp_path / "ledger")
     _rewrite_and_rebind(
         manifest,
@@ -399,7 +491,7 @@ def test_preregistration_must_name_exact_window_and_precede_it(tmp_path: Path) -
 
     def bad(doc: dict) -> None:
         doc["acceptance_window_id"] = "chosen-after-looking"
-        doc["registered_at"] = "2026-02-01T00:00:00+00:00"
+        doc["registered_at"] = "2026-02-02T00:00:00+00:00"
 
     _rewrite_and_rebind(manifest, "pre_registration", files["pre_registration"], bad)
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
@@ -414,7 +506,7 @@ def test_search_must_finish_before_fresh_window(tmp_path: Path) -> None:
         manifest,
         "search_ledger",
         files["search_ledger"],
-        lambda doc: doc.__setitem__("completed_at", "2026-02-01T00:00:00+00:00"),
+        lambda doc: doc.__setitem__("completed_at", "2026-02-02T00:00:00+00:00"),
     )
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
     assert report.ok is False
@@ -425,8 +517,8 @@ def test_training_or_validation_cutoff_cannot_enter_fresh_window(tmp_path: Path)
     manifest, _, files, _, roots, _ = _issue(tmp_path)
 
     def contaminate(doc: dict) -> None:
-        doc["training_cutoff"] = "2026-02-01"
-        doc["validation_cutoff"] = "2026-02-02"
+        doc["training_cutoff"] = "2026-02-02"
+        doc["validation_cutoff"] = "2026-02-03"
 
     _rewrite_and_rebind(manifest, "data_lineage", files["data_lineage"], contaminate)
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
@@ -437,14 +529,14 @@ def test_training_or_validation_cutoff_cannot_enter_fresh_window(tmp_path: Path)
 
 def test_issuer_cannot_sign_before_fresh_window_has_finished(tmp_path: Path) -> None:
     _, _, locations, roots = _build_evidence(tmp_path)
-    with pytest.raises(ValueError, match="v2 trust evidence rejected"):
-        issue_live_model_trust_v2(
+    with pytest.raises(ValueError, match="trust evidence rejected"):
+        issue_governed_live_model_trust_v2(
             tmp_path / "too-early.json",
             model_id=MODEL_ID,
             source_commit=SOURCE_COMMIT,
             artifact_locations=locations,
             artifact_roots=roots,
-            issued_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+            issued_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
         )
 
 
@@ -466,12 +558,13 @@ def test_issuer_refuses_incomplete_artifact_role_set(tmp_path: Path) -> None:
     _, _, locations, roots = _build_evidence(tmp_path)
     locations.pop("risk_capacity")
     with pytest.raises(ValueError, match="artifact role mismatch"):
-        issue_live_model_trust_v2(
+        issue_governed_live_model_trust_v2(
             tmp_path / "bad.json",
             model_id=MODEL_ID,
             source_commit=SOURCE_COMMIT,
             artifact_locations=locations,
             artifact_roots=roots,
+            issued_at=ISSUED_AT,
         )
 
 
