@@ -134,5 +134,4 @@ def test_implied_volatility_rejects_arbitrage_price() -> None:
             strike=100.0,
             maturity=1.0,
             rate=0.0,
-            volatility=0.2 if False else 0.2,  # type: ignore[call-arg]
         )
