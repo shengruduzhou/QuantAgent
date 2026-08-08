@@ -39,6 +39,7 @@ class DailyOHLCVIntegrityPolicy:
     expected_timezone: str | None = None
     allow_invalid_primary_fallback: bool = True
     expected_trade_dates: tuple[str, ...] = ()
+    expected_symbol_trade_dates: tuple[tuple[str, str], ...] = ()
     live_critical: bool = False
     expected_latest_trade_date: str | None = None
     max_staleness_calendar_days: int = 0
@@ -52,6 +53,7 @@ class DailyOHLCVIntegrityPolicy:
         cls,
         *,
         expected_trade_dates: tuple[str, ...] = (),
+        expected_symbol_trade_dates: tuple[tuple[str, str], ...] = (),
         expected_latest_trade_date: str | None = None,
         live_critical: bool = False,
         max_staleness_calendar_days: int = 0,
@@ -70,6 +72,7 @@ class DailyOHLCVIntegrityPolicy:
             expected_timezone="Asia/Shanghai",
             allow_invalid_primary_fallback=allow_invalid_primary_fallback,
             expected_trade_dates=expected_trade_dates,
+            expected_symbol_trade_dates=expected_symbol_trade_dates,
             live_critical=live_critical,
             expected_latest_trade_date=expected_latest_trade_date,
             max_staleness_calendar_days=max_staleness_calendar_days,
@@ -134,10 +137,36 @@ def expected_daily_keys(
     request: ProviderRequest,
     policy: DailyOHLCVIntegrityPolicy,
 ) -> set[tuple[str, str]]:
-    dates = _normalise_expected_dates(policy.expected_trade_dates)
-    if not request.symbols or not dates:
-        return set()
     start, end = _request_bounds(request)
+    requested_symbols = {str(symbol) for symbol in request.symbols}
+
+    if policy.expected_symbol_trade_dates:
+        keys: set[tuple[str, str]] = set()
+        for raw_symbol, raw_date in policy.expected_symbol_trade_dates:
+            symbol = str(raw_symbol)
+            date = _normalise_date(str(raw_date), label="expected_symbol_trade_date")
+            if requested_symbols and symbol not in requested_symbols:
+                raise ValueError(
+                    "expected_symbol_trade_dates contains a symbol outside the provider request: "
+                    f"{symbol}"
+                )
+            if not (start <= date <= end):
+                raise ValueError(
+                    "expected_symbol_trade_dates must stay inside the provider request window: "
+                    f"{symbol}@{date.date().isoformat()}"
+                )
+            keys.add((symbol, date.date().isoformat()))
+        return keys
+
+    dates = _normalise_expected_dates(policy.expected_trade_dates)
+    if not dates:
+        return set()
+    if len(requested_symbols) != 1:
+        raise ValueError(
+            "global expected_trade_dates are safe only for exactly one requested symbol; "
+            "multi-symbol coverage requires explicit expected_symbol_trade_dates after "
+            "listing/suspension/tradability filtering"
+        )
     out_of_range = [
         date for date in dates
         if not (start <= pd.Timestamp(date) <= end)
@@ -147,7 +176,8 @@ def expected_daily_keys(
             "expected_trade_dates must stay inside the provider request window: "
             f"{out_of_range}"
         )
-    return {(str(symbol), date) for symbol in request.symbols for date in dates}
+    symbol = next(iter(requested_symbols))
+    return {(symbol, date) for date in dates}
 
 
 def daily_bar_keys(frame: pd.DataFrame) -> set[tuple[str, str]]:
