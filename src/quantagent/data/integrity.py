@@ -190,6 +190,8 @@ def validate_daily_ohlcv(
     if policy.require_pit_semantics:
         if not _declared(pit_semantics):
             hard.append("pit_semantics_missing")
+            if not frame.empty:
+                invalid.loc[:] = True
     elif not _declared(pit_semantics):
         warnings.append("pit_semantics_missing")
 
