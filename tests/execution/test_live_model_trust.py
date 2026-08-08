@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from quantagent.execution.live_model_trust import (
     REQUIRED_METRIC_SEMANTICS,
     evaluate_live_model_trust,
@@ -41,6 +43,18 @@ def test_missing_manifest_fails_closed(tmp_path: Path) -> None:
     report = evaluate_live_model_trust(tmp_path / "missing.json")
     assert report.ok is False
     assert "model_trust_manifest_not_found" in report.reasons
+
+
+def test_symlinked_manifest_is_rejected_before_reading_target(tmp_path: Path) -> None:
+    target = _write(tmp_path / "target.json", _forged_v1_all_pass_payload())
+    link = tmp_path / "live_model_trust.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+    report = evaluate_live_model_trust(link)
+    assert report.ok is False
+    assert report.reasons == ("model_trust_manifest_symlink_not_allowed",)
 
 
 def test_forged_all_pass_schema_v1_is_never_production_eligible(tmp_path: Path) -> None:
