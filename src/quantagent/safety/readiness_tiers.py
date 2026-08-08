@@ -3,27 +3,21 @@
 One boolean cannot carry the difference between "the pipeline runs end to end"
 and "these numbers may be used to choose a model". Conflating them is how a
 smoke run becomes a performance claim. So readiness is four separate
-certificates, each naming what it *allows* and what it explicitly does not:
+certificates, each naming what it allows and what it explicitly does not:
 
-``ENGINEERING_PIPELINE_READY``  the plumbing works: UI, bounded builds,
-                               one-epoch smoke training, checkpoint/resume.
-                               Explicitly NOT a licence to rank strategies,
-                               quote performance, promote a model, or run a
-                               paper portfolio.
-``FULL_UNIVERSE_GOLD_READY``   the dataset is reproducible and complete enough
-                               to train on.
-``FULL_UNIVERSE_RESEARCH_READY`` the PIT universe is sound enough that a
-                               backtest result means something.
-``LOCAL_PAPER_READY``          a governed model plus a deterministic broker,
-                               ledger, risk engine and recovery.
+``ENGINEERING_PIPELINE_READY``  plumbing/UI/bounded-build readiness only.
+``FULL_UNIVERSE_GOLD_READY``   reproducible dataset readiness.
+``FULL_UNIVERSE_RESEARCH_READY`` PIT-safe formal research readiness.
+``LOCAL_PAPER_READY``          governed local simulation readiness.
 
-``LIVE_TRADING_READY`` is deliberately **not implemented**. Its absence is not
-an oversight to be filled in later; :func:`live_trading_certificate` exists only
-to return the refusal in machine-readable form.
+``LIVE_TRADING_READY`` is deliberately **not granted or armed**. An audited
+low-level QMT adapter and an explicit ``LiveTradingSession`` readiness boundary
+exist for controlled certification, but there is still no executable product
+LIVE mode. The refusal must describe that distinction truthfully rather than
+claiming broker-call source code does not exist.
 
 Tiers are derived from evidence, never asserted. Each requirement resolves to
-``PASS`` / ``FAIL`` / ``UNKNOWN``, and **UNKNOWN never counts as PASS** -- an
-unevaluated check is not a satisfied one.
+``PASS`` / ``FAIL`` / ``UNKNOWN``, and UNKNOWN never counts as PASS.
 """
 
 from __future__ import annotations
@@ -32,7 +26,9 @@ import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
+
+from quantagent.safety.operating_mode import describe_policy
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -50,7 +46,6 @@ TIERS: tuple[str, ...] = (
     LOCAL_PAPER_READY,
 )
 
-#: Lower tiers must hold before higher ones mean anything.
 TIER_PREREQUISITES: dict[str, tuple[str, ...]] = {
     ENGINEERING_PIPELINE_READY: (),
     FULL_UNIVERSE_GOLD_READY: (ENGINEERING_PIPELINE_READY,),
@@ -58,7 +53,6 @@ TIER_PREREQUISITES: dict[str, tuple[str, ...]] = {
     LOCAL_PAPER_READY: (FULL_UNIVERSE_RESEARCH_READY,),
 }
 
-#: What each tier permits, and -- more importantly -- what it does not.
 TIER_PERMISSIONS: dict[str, dict[str, tuple[str, ...]]] = {
     ENGINEERING_PIPELINE_READY: {
         "allows": ("ui_testing", "bounded_dataset_build", "one_epoch_smoke_training",
@@ -79,15 +73,13 @@ TIER_PERMISSIONS: dict[str, dict[str, tuple[str, ...]]] = {
     LOCAL_PAPER_READY: {
         "allows": ("historical_replay", "delayed_market_simulation",
                    "local_shadow_signals", "simulated_orders_and_fills"),
-        "forbids": ("live_trading", "real_broker_connection"),
+        "forbids": ("live_trading", "armed_real_broker_route"),
     },
 }
 
 
 @dataclass
 class Requirement:
-    """One named evidence check for a tier."""
-
     name: str
     verdict: str
     detail: str = ""
@@ -140,12 +132,9 @@ def _req(name: str, ok: bool | None, detail: str, evidence: Mapping[str, Any] | 
 
 
 class ReadinessEvaluator:
-    """Derives every tier certificate from artifacts on disk."""
-
     def __init__(self, runtime_root: str | Path = "runtime") -> None:
         self.runtime = Path(runtime_root)
 
-    # -- evidence loaders -------------------------------------------------
     def _u0_bar(self) -> dict[str, Any] | None:
         return _read_json(self.runtime / "data/u0/u0_bar_readiness_certificate.json")
 
@@ -156,16 +145,11 @@ class ReadinessEvaluator:
         return _read_json(self.runtime / "data/gold/full_universe/manifest.json")
 
     def _gold_quality(self) -> dict[str, Any] | None:
-        return _read_json(
-            self.runtime / "data/gold/full_universe/quality_certificate.json"
-        )
+        return _read_json(self.runtime / "data/gold/full_universe/quality_certificate.json")
 
     def _backtest_certificate(self) -> dict[str, Any] | None:
-        return _read_json(
-            self.runtime / "reports/full_universe/backtest_certificate.json"
-        )
+        return _read_json(self.runtime / "reports/full_universe/backtest_certificate.json")
 
-    # -- tiers ------------------------------------------------------------
     def engineering_pipeline(self) -> TierCertificate:
         bar = self._u0_bar()
         requirements = [
@@ -272,7 +256,6 @@ class ReadinessEvaluator:
         ]
         return self._assemble(LOCAL_PAPER_READY, requirements, lower)
 
-    # -- assembly ---------------------------------------------------------
     def _assemble(
         self, tier: str, requirements: Sequence[Requirement], granted_tiers: Mapping[str, bool]
     ) -> TierCertificate:
@@ -284,7 +267,6 @@ class ReadinessEvaluator:
         permissions = TIER_PERMISSIONS[tier]
         certificate = TierCertificate(
             tier=tier,
-            # UNKNOWN never counts as PASS: an unevaluated check is not satisfied.
             granted=not unmet and not unknown and not missing_prereq,
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             requirements=list(requirements),
@@ -297,17 +279,14 @@ class ReadinessEvaluator:
         )
         if unknown:
             certificate.notes.append(
-                f"{len(unknown)} requirement(s) could not be evaluated; an "
-                "unevaluated check is not a passed check, so the tier is withheld"
+                f"{len(unknown)} requirement(s) could not be evaluated; an unevaluated "
+                "check is not a passed check, so the tier is withheld"
             )
         if missing_prereq:
-            certificate.notes.append(
-                f"prerequisite tiers not granted: {missing_prereq}"
-            )
+            certificate.notes.append(f"prerequisite tiers not granted: {missing_prereq}")
         return certificate
 
     def evaluate_all(self) -> dict[str, Any]:
-        """Evaluate every tier in dependency order."""
         granted: dict[str, bool] = {}
         certificates: dict[str, TierCertificate] = {}
 
@@ -354,32 +333,27 @@ class ReadinessEvaluator:
 
 
 def live_trading_certificate() -> dict[str, Any]:
-    """The refusal, in the same shape a real certificate would take.
-
-    Returning a structured refusal rather than raising lets every surface render
-    the policy without special-casing an exception, while making it impossible
-    to mistake for a granted certificate.
-    """
+    """Structured, truthful refusal for the currently unarmed live tier."""
+    policy = describe_policy()
     return {
         "tier": "LIVE_TRADING_READY",
         "granted": False,
         "implemented": False,
-        "reason": "NOT_IMPLEMENTED_BY_POLICY",
-        "banner": "LIVE TRADING: DISABLED BY POLICY",
+        "reason": "NOT_ARMED_BY_POLICY",
+        "banner": policy["banner"],
+        "controlled_broker_adapter_present": bool(policy.get("controlledBrokerAdapterPresent")),
+        "controlled_broker_adapter_armed": bool(policy.get("controlledBrokerAdapterArmed")),
+        "arming_boundary_present": True,
         "detail": (
-            "This certificate is intentionally not implemented. The system has "
-            "no live order path, and no configuration, environment variable or "
-            "mode transition can create one."
+            "An audited low-level QMT adapter and fail-closed LiveTradingSession "
+            "readiness boundary exist for controlled certification. No executable "
+            "product LIVE mode, web job, or agent route is armed for real-money "
+            "transmission, and LIVE_TRADING_READY is not granted."
         ),
     }
 
 
 def permits(certificates: Mapping[str, Any], action: str) -> bool:
-    """Whether the granted tiers permit ``action``.
-
-    Fail-closed: an action nobody explicitly allows is denied, and an action any
-    granted tier forbids stays denied regardless of what a higher tier allows.
-    """
     granted = certificates.get("granted", {})
     allowed = False
     for tier in TIERS:
