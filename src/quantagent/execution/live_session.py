@@ -22,6 +22,10 @@ from quantagent.risk.risk_gate import RiskGate, RiskGateResult
 from quantagent.safety.operating_mode import describe_policy
 
 
+TARGET_RISK_AUTHORIZATION_SEMANTICS = "target_before_order_session_bound_v1"
+ORDER_RISK_AUTHORIZATION_SEMANTICS = "order_intent_gate_after_target_v1"
+
+
 @dataclass(frozen=True)
 class LiveSessionReadiness:
     query_only_ready: bool
@@ -231,4 +235,6 @@ __all__ = [
     "LiveSessionReadiness",
     "LiveTargetAuthorization",
     "LiveTradingSession",
+    "ORDER_RISK_AUTHORIZATION_SEMANTICS",
+    "TARGET_RISK_AUTHORIZATION_SEMANTICS",
 ]
