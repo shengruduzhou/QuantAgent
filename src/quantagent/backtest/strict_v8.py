@@ -13,10 +13,16 @@ extra metric computation + CSV emission demanded by the spec:
 The output bundle is a single :class:`StrictBacktestArtifactSet` so
 callers can ``set.write(output_dir)`` and get every file in one place.
 
-This module does NOT model anything new — it is a thin reporting
-layer on top of the existing simulator + cost_model. That keeps the
-PIT / T+1 / cost / slippage / kill-switch guarantees of the
-upstream layer intact.
+Metric semantics v2 use the configured ``initial_cash`` as the NAV baseline.
+The earlier implementation started the return series at the first *post-trade*
+NAV, which normalized away first-day slippage/fees/PnL.  A backtest now records
+the first economic return as ``first_post_trade_nav / initial_cash - 1`` and
+includes initial capital in the drawdown path.
+
+This module does NOT model anything new — it is a reporting layer on top of the
+existing simulator + cost model. That keeps the PIT / T+1 / cost / slippage
+semantics of the upstream layer intact while making the reported performance
+path economically complete from initial capital.
 """
 
 from __future__ import annotations
@@ -38,6 +44,9 @@ from quantagent.backtest.quarantine import (
     FORENSICS_TRUST_CLASS,
     check_window,
 )
+
+
+METRIC_SEMANTICS_VERSION = "strict_v8_nav_v2_initial_cash"
 
 
 def quarantine_trust_stamp(dates) -> dict[str, object] | None:
@@ -105,6 +114,8 @@ class StrictBacktestMetrics:
             "n_fills": int(self.n_fills),
             "start_date": self.start_date,
             "end_date": self.end_date,
+            "metric_semantics_version": METRIC_SEMANTICS_VERSION,
+            "nav_baseline": "configured_initial_cash",
         }
 
 
@@ -180,6 +191,7 @@ def _compute_metrics(
     order_audit: pd.DataFrame,
     *,
     periods: int = 252,
+    initial_nav: float | None = None,
 ) -> StrictBacktestMetrics:
     if nav is None or nav.empty:
         return StrictBacktestMetrics(
@@ -189,15 +201,38 @@ def _compute_metrics(
             profit_factor=0.0, gross_profit=0.0, gross_loss=0.0, total_cost=0.0,
             n_trades=0, n_fills=0, start_date="", end_date="",
         )
-    nav_clean = nav.sort_index().dropna()
-    daily_ret = nav_clean.pct_change().dropna()
+    nav_clean = nav.sort_index().replace([np.inf, -np.inf], np.nan).dropna().astype(float)
+    if nav_clean.empty:
+        return StrictBacktestMetrics(
+            total_return=0.0, annualized_return=0.0, max_drawdown=0.0,
+            sharpe=0.0, calmar=0.0, volatility=0.0, turnover=0.0,
+            win_rate=0.0, avg_profit_per_trade=0.0, median_profit_per_trade=0.0,
+            profit_factor=0.0, gross_profit=0.0, gross_loss=0.0, total_cost=0.0,
+            n_trades=0, n_fills=0, start_date="", end_date="",
+        )
+
+    if initial_nav is None:
+        base_nav = float(nav_clean.iloc[0])
+    else:
+        base_nav = float(initial_nav)
+        if not np.isfinite(base_nav) or base_nav <= 0:
+            raise ValueError("initial_nav must be finite and > 0")
+
+    # The first observation is an economic return from initial capital, not a
+    # synthetic zero.  This preserves first-day fees, slippage and PnL.
+    daily_ret = nav_clean.pct_change()
+    daily_ret.iloc[0] = float(nav_clean.iloc[0] / base_nav - 1.0)
+    daily_ret = daily_ret.replace([np.inf, -np.inf], np.nan).dropna()
     n_obs = max(1, len(daily_ret))
-    elapsed_calendar_days = max(1, int((nav_clean.index[-1] - nav_clean.index[0]).days))
+    # +1 includes the first trading observation represented by the initial->day1
+    # return. Sparse series still use elapsed clock time rather than pretending
+    # every observation is an adjacent trading day.
+    elapsed_calendar_days = max(1, int((nav_clean.index[-1] - nav_clean.index[0]).days) + 1)
     elapsed_years = max(elapsed_calendar_days / 365.25, 1.0 / periods)
-    elapsed_trading_days = max(1, len(pd.bdate_range(nav_clean.index[0], nav_clean.index[-1])) - 1)
+    elapsed_trading_days = max(1, len(pd.bdate_range(nav_clean.index[0], nav_clean.index[-1])))
     obs_per_year = n_obs / elapsed_years
-    total_return = float(nav_clean.iloc[-1] / nav_clean.iloc[0] - 1.0) if len(nav_clean) >= 2 else 0.0
-    ann_return = float((1.0 + total_return) ** (1.0 / elapsed_years) - 1.0) if elapsed_years > 0 else 0.0
+    total_return = float(nav_clean.iloc[-1] / base_nav - 1.0)
+    ann_return = float((1.0 + total_return) ** (1.0 / elapsed_years) - 1.0) if elapsed_years > 0 and total_return > -1.0 else -1.0
     if len(daily_ret) >= 2:
         std = float(daily_ret.std(ddof=1))
         sharpe = float(daily_ret.mean() / std * (obs_per_year ** 0.5)) if std > 1e-12 else 0.0
@@ -205,7 +240,7 @@ def _compute_metrics(
     else:
         sharpe = 0.0
         vol = 0.0
-    nav_curve = nav_clean.values
+    nav_curve = np.concatenate(([base_nav], nav_clean.to_numpy(dtype=float)))
     peaks = np.maximum.accumulate(nav_curve)
     drawdowns = nav_curve / peaks - 1.0
     max_dd = float(abs(drawdowns.min())) if len(drawdowns) else 0.0
@@ -219,7 +254,7 @@ def _compute_metrics(
             turnover_value = float(
                 (filled["filled_quantity"].astype(float).abs() * filled["avg_price"].astype(float)).sum()
             )
-            nav_mean = float(nav_clean.mean()) if not nav_clean.empty else 0.0
+            nav_mean = float((nav_clean.sum() + base_nav) / (len(nav_clean) + 1))
             turnover = turnover_value / max(1.0, nav_mean) / max(1, elapsed_trading_days)
             n_fills = int(len(filled))
 
@@ -454,14 +489,16 @@ def run_strict_backtest_v8(
     sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
         target_weights, market_panel, cfg,
     )
-    metrics = _compute_metrics(sim.nav, sim.order_audit)
+    metrics = _compute_metrics(sim.nav, sim.order_audit, initial_nav=cfg.initial_cash)
     realized_trades = _realized_round_trip_pnl(sim.order_audit)
     by_stock = _profit_by_stock(realized_trades, sim.order_audit)
     by_sector = _profit_by_sector(by_stock, sector_map)
 
     nav_series = sim.nav.copy() if sim.nav is not None else pd.Series(dtype=float)
     if not nav_series.empty:
-        daily_pnl = nav_series.pct_change().fillna(0.0).rename("daily_return").to_frame()
+        daily_return = nav_series.pct_change()
+        daily_return.iloc[0] = float(nav_series.iloc[0] / cfg.initial_cash - 1.0)
+        daily_pnl = daily_return.rename("daily_return").to_frame()
         daily_pnl["nav"] = nav_series.values
         daily_pnl = daily_pnl.reset_index().rename(columns={"index": "trade_date"})
     else:
@@ -485,6 +522,9 @@ def run_strict_backtest_v8(
 
     trades = sim.order_audit.copy() if sim.order_audit is not None else pd.DataFrame()
     failed = sim.failed_order_audit.copy() if sim.failed_order_audit is not None else pd.DataFrame()
+    artifact_config = dict(sim.config or {})
+    artifact_config["metric_semantics_version"] = METRIC_SEMANTICS_VERSION
+    artifact_config["nav_baseline"] = "configured_initial_cash"
 
     return StrictBacktestArtifactSet(
         metrics=metrics,
@@ -498,12 +538,13 @@ def run_strict_backtest_v8(
         profit_by_sector=by_sector,
         realized_trades=realized_trades,
         factor_weights=dict(factor_weights or {}),
-        config=dict(sim.config or {}),
+        config=artifact_config,
         trust_stamp=trust_stamp,
     )
 
 
 __all__ = [
+    "METRIC_SEMANTICS_VERSION",
     "StrictBacktestArtifactSet",
     "StrictBacktestMetrics",
     "run_strict_backtest_v8",
