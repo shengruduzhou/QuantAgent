@@ -112,6 +112,7 @@ def test_production_fallback_replaces_only_invalid_missing_key() -> None:
     assert by_date.loc["2026-01-06", "source_name"] == "fallback"
     assert result.primary_source == "primary"
     assert result.integrity["missing_expected_keys"] == []
+    assert result.integrity["semantic_signature"]["volume_unit"] == "shares"
     assert result.per_source["primary"]["integrity"]["status"] == "failed"
     assert fallback.calls == 1
 
@@ -162,6 +163,24 @@ def test_source_semantic_failure_is_not_partially_served() -> None:
     result = _router(wrong_adjustment, real).daily_ohlcv(_request(), integrity_policy=_policy())
     assert set(result.frame["source_name"]) == {"fallback"}
     assert "adjustment_mismatch:forward" in result.per_source["primary"]["integrity"]["hard_violations"]
+
+
+def test_cross_source_units_must_match_before_key_level_fallback() -> None:
+    primary = StaticDailyProvider(
+        pd.DataFrame([_row("2026-01-05", close=10.0)]),
+        source="primary-real",
+        metadata=_meta(volume_unit="shares"),
+    )
+    fallback = StaticDailyProvider(
+        pd.DataFrame([_row("2026-01-06", close=11.0)]),
+        source="fallback-real",
+        metadata=_meta(volume_unit="lots"),
+    )
+    with pytest.raises(RouterDataIntegrityError, match="coverage incomplete"):
+        _router(primary, fallback).daily_ohlcv(_request(), integrity_policy=_policy())
+    # The lower-priority row was structurally valid but was not allowed to mix
+    # a different volume unit into the same routed production frame.
+    assert fallback.calls == 1
 
 
 def test_production_without_authoritative_calendar_reports_observed_only_not_fake_gaps() -> None:
