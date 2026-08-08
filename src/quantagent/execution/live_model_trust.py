@@ -1,13 +1,14 @@
 """Machine-enforced model-trust gate for economic live trading.
 
-A broker connection is not a model promotion decision.  QuantAgent therefore
+A broker connection is not a model promotion decision. QuantAgent therefore
 requires a separate, explicit certificate before a live gateway may become
-ready.  The certificate is intentionally stricter than a backtest summary:
+ready. The certificate is intentionally stricter than a backtest summary:
 selection hygiene, statistical gates, a genuinely fresh one-shot OOS window,
-and benchmark evidence are all first-class fields.
+benchmark evidence, risk/capacity evidence, and the exact trusted backtest
+metric semantics are all first-class fields.
 
-This module does not *create* trust.  It only verifies a certificate produced by
-the governed research/promotion process.  Missing or ambiguous evidence fails
+This module does not *create* trust. It only verifies a certificate produced by
+the governed research/promotion process. Missing or ambiguous evidence fails
 closed.
 """
 
@@ -21,6 +22,7 @@ from typing import Any
 
 _ACCEPTED_STATUS = {"production_accepted", "live_accepted"}
 _ACCEPTED_TRUST = {"fresh_oos", "fresh_holdout_validated", "production_accepted"}
+REQUIRED_METRIC_SEMANTICS = "strict_v8_nav_v2_initial_cash"
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ def evaluate_live_model_trust(
     max_pbo: float = 0.25,
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
+    required_metric_semantics: str = REQUIRED_METRIC_SEMANTICS,
 ) -> LiveModelTrustReport:
     """Validate a live-model certificate; every required item is AND-gated."""
     if manifest_path is None or not str(manifest_path).strip():
@@ -135,6 +138,13 @@ def evaluate_live_model_trust(
     if evidence.get("contaminated_holdout") is not False:
         reasons.append("holdout_contamination_not_explicitly_false")
 
+    metric_semantics = str(evidence.get("strict_backtest_metric_semantics") or "").strip()
+    if metric_semantics != required_metric_semantics:
+        reasons.append(
+            "strict_backtest_metric_semantics_mismatch:"
+            f"{metric_semantics or 'missing'}!={required_metric_semantics}"
+        )
+
     return _report(str(path), payload, tuple(reasons))
 
 
@@ -166,4 +176,8 @@ def _finite_float(value: object) -> float | None:
     return number
 
 
-__all__ = ["LiveModelTrustReport", "evaluate_live_model_trust"]
+__all__ = [
+    "LiveModelTrustReport",
+    "REQUIRED_METRIC_SEMANTICS",
+    "evaluate_live_model_trust",
+]
