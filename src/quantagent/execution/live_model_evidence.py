@@ -1,16 +1,15 @@
 """Derive live-model trust facts from bound evidence files.
 
 Summary JSON is not authoritative for facts that can be recomputed from the
-underlying data.  This module validates FRESH prediction coverage directly and
-re-runs QuantAgent's frozen-candidate PBO/DSR/SPA governance from the bound early
-OOS return matrix.
+underlying data. This module validates FRESH prediction coverage, derives the
+frozen strict-backtest return outcome, and re-runs QuantAgent's PBO/DSR/SPA
+governance from the complete early-OOS candidate return matrix.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -32,6 +31,16 @@ class FreshPredictionEvidence:
 
 
 @dataclass(frozen=True)
+class StrictReturnEvidence:
+    trading_days: int
+    start_date: str
+    end_date: str
+    portfolio_total_return: float
+    benchmark_total_return: float
+    benchmark_excess_positive: bool
+
+
+@dataclass(frozen=True)
 class StatisticalEvidence:
     report: FrozenSelectionGateReport
     rows: int
@@ -49,13 +58,7 @@ def validate_fresh_predictions(path: str | Path) -> FreshPredictionEvidence:
     if frame.empty:
         raise ValueError("fresh_predictions_empty")
 
-    dates = pd.to_datetime(frame["trade_date"], errors="coerce")
-    if dates.isna().any():
-        raise ValueError("fresh_predictions_trade_date_invalid")
-    # Acceptance evidence is daily. Intraday timestamps would allow several
-    # observations from one trading day to masquerade as wider OOS coverage.
-    if not dates.dt.normalize().equals(dates):
-        raise ValueError("fresh_predictions_trade_date_not_daily")
+    dates = _daily_dates(frame["trade_date"], "fresh_predictions")
     symbols = frame["symbol"].astype(str).str.strip()
     if (symbols == "").any():
         raise ValueError("fresh_predictions_symbol_blank")
@@ -67,14 +70,52 @@ def validate_fresh_predictions(path: str | Path) -> FreshPredictionEvidence:
     if keys.duplicated(["trade_date", "symbol"]).any():
         raise ValueError("fresh_predictions_duplicate_symbol_date")
     unique_dates = pd.DatetimeIndex(dates.unique()).sort_values()
-    if unique_dates.has_duplicates:
-        raise ValueError("fresh_predictions_duplicate_date_identity")
     return FreshPredictionEvidence(
         trading_days=int(len(unique_dates)),
         start_date=unique_dates.min().date().isoformat(),
         end_date=unique_dates.max().date().isoformat(),
         rows=int(len(frame)),
         symbols=int(symbols.nunique()),
+    )
+
+
+def validate_strict_backtest_returns(path: str | Path) -> StrictReturnEvidence:
+    """Derive the frozen strict-backtest outcome from its own return artifact."""
+    frame = _read_table(Path(path))
+    required = {"trade_date", "portfolio_return", "benchmark_return"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"strict_returns_missing_columns:{','.join(missing)}")
+    unexpected = sorted(set(frame.columns).difference(required))
+    if unexpected:
+        raise ValueError(f"strict_returns_unexpected_columns:{','.join(unexpected)}")
+    if frame.empty:
+        raise ValueError("strict_returns_empty")
+
+    dates = _daily_dates(frame["trade_date"], "strict_returns")
+    if dates.duplicated().any():
+        raise ValueError("strict_returns_duplicate_trade_date")
+    if not dates.is_monotonic_increasing:
+        raise ValueError("strict_returns_not_monotonic")
+
+    numeric = frame[["portfolio_return", "benchmark_return"]].apply(pd.to_numeric, errors="coerce")
+    values = numeric.to_numpy(dtype=float)
+    if np.isnan(values).any() or not np.isfinite(values).all():
+        raise ValueError("strict_returns_not_finite")
+    # Returns below -100% are mechanically impossible for a long-only cash
+    # account and make geometric compounding nonsensical.
+    if (values < -1.0).any():
+        raise ValueError("strict_returns_below_minus_one")
+
+    portfolio_total = float(np.prod(1.0 + numeric["portfolio_return"].to_numpy(dtype=float)) - 1.0)
+    benchmark_total = float(np.prod(1.0 + numeric["benchmark_return"].to_numpy(dtype=float)) - 1.0)
+    return StrictReturnEvidence(
+        trading_days=int(len(frame)),
+        start_date=dates.iloc[0].date().isoformat(),
+        end_date=dates.iloc[-1].date().isoformat(),
+        portfolio_total_return=portfolio_total,
+        benchmark_total_return=benchmark_total,
+        benchmark_excess_positive=portfolio_total > benchmark_total,
     )
 
 
@@ -89,7 +130,7 @@ def recompute_statistical_evidence(
     max_spa_p_value: float,
     minimum_observed_days: int = 80,
 ) -> StatisticalEvidence:
-    """Re-run frozen-candidate PBO/DSR/SPA from the bound return matrix."""
+    """Re-run frozen-candidate PBO/DSR/SPA from the bound early-OOS matrix."""
     frame = _read_table(Path(path))
     required = {"trade_date", "benchmark", *candidate_family}
     missing = sorted(required.difference(frame.columns))
@@ -102,9 +143,7 @@ def recompute_statistical_evidence(
     if frame.empty:
         raise ValueError("statistical_returns_empty")
 
-    dates = pd.to_datetime(frame["trade_date"], errors="coerce")
-    if dates.isna().any() or not dates.dt.normalize().equals(dates):
-        raise ValueError("statistical_returns_trade_date_invalid")
+    dates = _daily_dates(frame["trade_date"], "statistical_returns")
     if dates.duplicated().any():
         raise ValueError("statistical_returns_duplicate_trade_date")
     if not dates.is_monotonic_increasing:
@@ -145,6 +184,15 @@ def recompute_statistical_evidence(
     )
 
 
+def _daily_dates(series: pd.Series, prefix: str) -> pd.Series:
+    dates = pd.to_datetime(series, errors="coerce")
+    if dates.isna().any():
+        raise ValueError(f"{prefix}_trade_date_invalid")
+    if not dates.dt.normalize().equals(dates):
+        raise ValueError(f"{prefix}_trade_date_not_daily")
+    return dates
+
+
 def _read_table(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -157,6 +205,8 @@ def _read_table(path: Path) -> pd.DataFrame:
 __all__ = [
     "FreshPredictionEvidence",
     "StatisticalEvidence",
+    "StrictReturnEvidence",
     "recompute_statistical_evidence",
     "validate_fresh_predictions",
+    "validate_strict_backtest_returns",
 ]
