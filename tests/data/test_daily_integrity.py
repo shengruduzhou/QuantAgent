@@ -22,7 +22,7 @@ def _metadata(**overrides):
         "timezone": "Asia/Shanghai",
         "volume_unit": "shares",
         "amount_unit": "CNY",
-        "adjustment": "none",
+        "adjustment": "raw",
         "pit_semantics": "trade_date_observed_no_future_adjustment",
     }
     base.update(overrides)
