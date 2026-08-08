@@ -1,15 +1,16 @@
 """Global operating mode and the live-order rejection boundary.
 
-This module is the single place that answers "may this system send a real
-order?" and the answer is structurally no. Not "no by configuration", not "no
-unless an environment variable is set" -- there is no mode in which a live order
-path becomes reachable, and :data:`LIVE_DISABLED` exists precisely to make that
-a stated policy rather than an omission.
+This module is the single place that answers "may an ordinary QuantAgent job,
+agent, API request or UI action send a real order?" and the answer remains
+structurally no.  A low-level, audited QMT adapter now exists so its broker
+contract can be tested and eventually exercised on a controlled trading host,
+but there is still no executable LIVE operating mode and no job/API/agent path
+that may arm that adapter.
 
-Why a terminal state rather than a missing feature: an absent capability is
-indistinguishable from an unfinished one. A named, asserted, non-executable
-state is auditable -- tests can prove the system is in it, and the UI can
-display it.
+That distinction matters for auditability.  Claiming that broker-call code does
+not exist would now be false; claiming that real-money transmission is not an
+executable product capability is accurate and testable.  :data:`LIVE_DISABLED`
+is therefore a policy/arming state, not a statement about source-code absence.
 
 The rejection happens **before** agent consultation, broker routing or job
 creation. Checking later would mean an intent to trade real money had already
@@ -21,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping
 
 # ---------------------------------------------------------------------------
 # operating modes
@@ -36,8 +37,8 @@ BACKTEST = "BACKTEST"
 PAPER = "PAPER"
 #: Signals and target positions generated, orders simulated but not acted on.
 SHADOW = "SHADOW"
-#: Terminal policy state. **Not executable.** Its only purpose is to be
-#: assertable: the system can prove live trading is unavailable.
+#: Terminal policy state. **Not executable.** Its purpose is to prove that no
+#: normal QuantAgent surface is armed for real-money transmission.
 LIVE_DISABLED = "LIVE_DISABLED"
 
 OPERATING_MODES: tuple[str, ...] = (
@@ -58,13 +59,13 @@ ORDER_SIMULATING_MODES: frozenset[str] = frozenset(
 POLICY_BANNER = "LIVE TRADING: DISABLED BY POLICY"
 PAPER_BANNER_LINES: tuple[str, ...] = (
     "LOCAL PAPER ONLY",
-    "NO BROKER CONNECTION",
-    "NO REAL ORDERS",
+    "NO ARMED BROKER ROUTE",
+    "NO REAL ORDERS FROM PRODUCT SURFACES",
 )
 
 
 class LiveTradingRejected(RuntimeError):
-    """Raised when a request carries live-order intent. Never catchable-and-continue."""
+    """Raised when a product-surface request carries live-order intent."""
 
     def __init__(self, matched: str, where: str, message: str) -> None:
         super().__init__(message)
@@ -94,9 +95,9 @@ ENGLISH_LIVE_MARKERS: tuple[str, ...] = (
     "enable_live", "enable live", "go live", "production trading",
 )
 
-#: Broker SDK entry points that would transmit an order. Their mere appearance
-#: in a request is treated as intent, because there is no benign reason for a
-#: research workstation request to name them.
+#: Broker SDK entry points that would transmit an order. Their appearance in a
+#: normal user/job request is treated as intent.  The audited adapter may name
+#: them in source; that is a separate static-code boundary enforced by tests.
 FORBIDDEN_API_MARKERS: tuple[str, ...] = (
     "order_stock_async", "order_stock", "xtquanttrader", "xt_trader",
     "order_send", "ordersendasync", "cancel_order_stock",
@@ -118,15 +119,7 @@ EXEMPT_CONTEXTS: frozenset[str] = frozenset({
 
 
 def _haystacks(text: str) -> tuple[str, ...]:
-    """Normalised variants of ``text`` to match markers against.
-
-    Two variants are needed because live intent arrives in different shapes.
-    Command ids are hyphenated by convention (``enable-live-trading``), so a
-    separator-flattened variant is required or the phrase markers miss them.
-    The raw variant is kept because the API markers are themselves
-    underscore-joined (``order_stock_async``) and would be destroyed by
-    flattening.
-    """
+    """Normalised variants of ``text`` to match markers against."""
     lowered = re.sub(r"\s+", " ", str(text)).strip().lower()
     flattened = re.sub(r"[-_./]+", " ", lowered)
     flattened = re.sub(r"\s+", " ", flattened).strip()
@@ -143,8 +136,6 @@ def scan_for_live_intent(payload: Any, *, where: str = "request") -> str | None:
     def _scan(value: Any) -> str | None:
         if isinstance(value, str):
             for haystack in _haystacks(value):
-                # Strip read-only contexts first so the l2*order* feed is not
-                # mistaken for order submission.
                 for exempt in EXEMPT_CONTEXTS:
                     haystack = haystack.replace(exempt, "")
                     haystack = haystack.replace(exempt.replace("_", " "), "")
@@ -170,10 +161,12 @@ def scan_for_live_intent(payload: Any, *, where: str = "request") -> str | None:
 
 
 def reject_live_intent(payload: Any, *, where: str = "request") -> None:
-    """Refuse a request carrying live-order intent.
+    """Refuse a product-surface request carrying live-order intent.
 
-    Called at every entry point *before* anything else happens -- before agent
-    consultation, before broker routing, before a job record is created.
+    Called at every normal entry point *before* anything else happens -- before
+    agent consultation, broker routing, or a job record is created.  Controlled
+    trading-host certification code is intentionally not exposed through this
+    free-form request surface.
     """
     matched = scan_for_live_intent(payload, where=where)
     if matched is None:
@@ -181,8 +174,10 @@ def reject_live_intent(payload: Any, *, where: str = "request") -> None:
     raise LiveTradingRejected(
         matched, where,
         f"refusing {where}: it references {matched!r}, which denotes real-money "
-        f"trading. This system operates in {LIVE_DISABLED} and has no live order "
-        "path; simulated orders exist only inside the local paper broker.",
+        f"trading. This build operates in {LIVE_DISABLED}: no executable product "
+        "mode, web job or agent route is armed for broker transmission. An audited "
+        "QMT adapter may exist for controlled certification, but it is not an "
+        "end-user live-trading capability.",
     )
 
 
@@ -207,9 +202,10 @@ class OperatingModeState:
             )
         if self.live_trading_available:
             raise ValueError(
-                "live_trading_available cannot be True: this build has no live "
-                "order path, and a flag claiming otherwise would be a lie the UI "
-                "would faithfully display"
+                "live_trading_available cannot be True: this build has no "
+                "executable LIVE operating mode or armed product route. The "
+                "presence of a controlled broker adapter does not satisfy that "
+                "production-readiness contract."
             )
 
     @property
@@ -224,7 +220,7 @@ class OperatingModeState:
         if not self.executable:
             raise ModeViolation(
                 f"{self.mode} is a terminal policy state, not an executable mode; "
-                "no job may run in it"
+                "no ordinary job may run in it"
             )
 
     def require_order_simulation(self) -> None:
@@ -244,12 +240,12 @@ class OperatingModeState:
 
 
 def policy_state() -> OperatingModeState:
-    """The terminal state proving live trading is unavailable."""
+    """The terminal state proving product-surface live trading is unavailable."""
     return OperatingModeState(mode=LIVE_DISABLED)
 
 
 def describe_policy() -> dict[str, Any]:
-    """Machine-readable statement of the safety boundary, for UI and reports."""
+    """Machine-readable statement of the safety/arming boundary for UI/reports."""
     return {
         "banner": POLICY_BANNER,
         "paperBannerLines": list(PAPER_BANNER_LINES),
@@ -258,14 +254,16 @@ def describe_policy() -> dict[str, Any]:
         "orderSimulatingModes": sorted(ORDER_SIMULATING_MODES),
         "liveTradingAvailable": False,
         "liveTradingCertificate": "NOT_IMPLEMENTED_BY_POLICY",
+        "controlledBrokerAdapterPresent": True,
+        "controlledBrokerAdapterArmed": False,
         "forbiddenApis": list(FORBIDDEN_API_MARKERS),
         "rejectionPoint": "before agent consultation, broker routing and job creation",
         "guarantees": [
-            "no live broker order transmission",
-            "no real account identifiers",
-            "no broker credentials",
-            "no account login workflow",
-            "no automatic transition from paper to live",
+            "no real-money transmission reachable from executable operating modes",
+            "no web job or agent route may arm the controlled broker adapter",
+            "no broker credentials accepted from free-form product requests",
+            "no automatic transition from paper/shadow to live",
             "no free-form shell command from the web UI",
+            "current live model trust certificate remains independently fail-closed",
         ],
     }
