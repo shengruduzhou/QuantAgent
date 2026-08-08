@@ -15,6 +15,7 @@ import pandas as pd
 
 from quantagent.data.integrity import (
     DailyOHLCVIntegrityPolicy,
+    DailyOHLCVIntegrityResult,
     daily_bar_keys,
     expected_daily_keys,
     validate_daily_ohlcv,
@@ -88,15 +89,18 @@ class RouterDataIntegrityError(RuntimeError):
 _SOURCE_FATAL_CODES = (
     "missing_column:",
     "provider_not_point_in_time",
+    "pit_semantics_missing",
     "mock_or_synthetic_source",
     "frequency_metadata_missing",
     "frequency_not_daily:",
     "timezone_metadata_missing",
+    "timezone_mismatch:",
     "volume_unit_missing",
     "amount_unit_missing",
     "adjustment_metadata_missing",
     "adjustment_mismatch:",
     "freshness_reference_missing",
+    "freshness_reference_outside_request_window",
     "freshness_unverifiable",
     "stale_daily_data:",
     "trade_date_after_freshness_reference",
@@ -105,6 +109,34 @@ _SOURCE_FATAL_CODES = (
 
 def _fatal_integrity(violations: tuple[str, ...]) -> bool:
     return any(any(code.startswith(prefix) for prefix in _SOURCE_FATAL_CODES) for code in violations)
+
+
+def _semantic_signature(report: DailyOHLCVIntegrityResult) -> tuple[str, str, str, str, str]:
+    """Merge-critical semantics; all fallback rows must share this signature.
+
+    PIT semantics is still recorded and independently required, but provider
+    wording can legitimately differ. Frequency, timezone, volume unit, amount
+    unit and adjustment directly change numeric interpretation and therefore
+    must match exactly across rows in one routed production frame.
+    """
+    metadata = report.metadata
+    return (
+        str(metadata.get("frequency", "")).strip().lower(),
+        str(metadata.get("timezone", "")).strip(),
+        str(metadata.get("volume_unit", "")).strip().lower(),
+        str(metadata.get("amount_unit", "")).strip().upper(),
+        str(metadata.get("adjustment", "")).strip().lower(),
+    )
+
+
+def _signature_dict(signature: tuple[str, str, str, str, str] | None) -> dict[str, str] | None:
+    if signature is None:
+        return None
+    return dict(zip(
+        ("frequency", "timezone", "volume_unit", "amount_unit", "adjustment"),
+        signature,
+        strict=True,
+    ))
 
 
 class MultiSourceDataRouter:
@@ -162,6 +194,7 @@ class MultiSourceDataRouter:
         served_symbols: set[str] = set()
         expected_keys = expected_daily_keys(request, policy)
         quarantined_total = 0
+        production_signature: tuple[str, str, str, str, str] | None = None
 
         for src_name in self.config.daily_priority:
             routed = self._providers.get(src_name)
@@ -225,6 +258,18 @@ class MultiSourceDataRouter:
                 continue
 
             if policy.mode == "production":
+                candidate_signature = _semantic_signature(report)
+                if production_signature is None:
+                    production_signature = candidate_signature
+                elif candidate_signature != production_signature:
+                    result.per_source[src_name]["status"] = "invalid"
+                    result.per_source[src_name]["router_semantics_mismatch"] = {
+                        "expected": _signature_dict(production_signature),
+                        "observed": _signature_dict(candidate_signature),
+                    }
+                    result.warnings.append(f"daily_cross_source_semantics_mismatch:{src_name}")
+                    continue
+
                 frame_keys = daily_bar_keys(valid_frame)
                 if not frame_keys:
                     continue
@@ -275,6 +320,7 @@ class MultiSourceDataRouter:
             "expected_key_count": len(expected_keys) if expected_keys else None,
             "missing_expected_keys": [f"{symbol}@{date}" for symbol, date in missing_expected],
             "coverage_basis": "authoritative_expected_trade_dates" if expected_keys else "observed_only",
+            "semantic_signature": _signature_dict(production_signature) if policy.mode == "production" else None,
         }
         if not expected_keys:
             result.warnings.append("daily_integrity_expected_calendar_not_supplied_observed_only")
