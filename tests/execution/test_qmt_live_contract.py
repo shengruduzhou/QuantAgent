@@ -72,6 +72,7 @@ def _gateway(tmp_path, *, require_risk_approval: bool = True) -> tuple[QMTGatewa
             require_preflight=True,
             require_risk_approval=require_risk_approval,
             audit_log_dir=str(tmp_path),
+            identity_map_path=str(tmp_path / "qmt_identity_map.jsonl"),
         )
     )
     gateway._bind_live_client(client, account, FakeConst)
@@ -114,11 +115,12 @@ def test_live_submit_requires_preflight_and_risk_approval(tmp_path) -> None:
     assert client.submit_calls == []
 
 
-def test_live_submit_is_idempotent_and_embeds_recovery_identity(tmp_path) -> None:
+def test_live_submit_is_idempotent_and_embeds_bounded_recovery_identity(tmp_path) -> None:
     gateway, client, _ = _gateway(tmp_path)
     assert gateway.preflight()["ok"] is True
 
-    order = _approved_order()
+    # Deliberately longer than QMT's order_remark limit when prefixed directly.
+    order = _approved_order("600000.SH-buy-1234567890")
     first = gateway.submit(order)
     second = gateway.submit(order)
 
@@ -131,13 +133,18 @@ def test_live_submit_is_idempotent_and_embeds_recovery_identity(tmp_path) -> Non
     assert call[2] == FakeConst.STOCK_BUY
     assert call[4] == FakeConst.FIX_PRICE
     assert call[5] == pytest.approx(10.25)
-    assert call[7] == "qa:cid-001"
+    remark = call[7]
+    assert remark.startswith("qa:")
+    assert len(remark) <= 24
+    assert remark != f"qa:{order.client_order_id}"
+    assert gateway._encode_remark(order.client_order_id) == remark
 
 
 def test_cancel_request_is_not_falsely_reported_as_cancelled(tmp_path) -> None:
     gateway, client, _ = _gateway(tmp_path)
     gateway.preflight()
     gateway.submit(_approved_order())
+    remark = gateway._encode_remark("cid-001")
 
     requested = gateway.cancel("cid-001")
     assert requested.status == OrderStatus.SUBMITTED
@@ -147,7 +154,7 @@ def test_cancel_request_is_not_falsely_reported_as_cancelled(tmp_path) -> None:
     client.orders = [
         SimpleNamespace(
             order_id=7001,
-            order_remark="qa:cid-001",
+            order_remark=remark,
             order_status=FakeConst.ORDER_CANCELED,
             traded_volume=0,
             traded_price=0.0,
@@ -160,10 +167,11 @@ def test_cancel_request_is_not_falsely_reported_as_cancelled(tmp_path) -> None:
 
 def test_startup_preflight_recovers_owned_broker_orders_after_restart(tmp_path) -> None:
     gateway, client, account = _gateway(tmp_path)
+    remark = gateway._encode_remark("restored-client-id")
     client.orders = [
         SimpleNamespace(
             order_id=8123,
-            order_remark="qa:restored-client-id",
+            order_remark=remark,
             order_status=FakeConst.ORDER_PART_SUCC,
             traded_volume=40,
             traded_price=9.91,
@@ -188,16 +196,55 @@ def test_startup_preflight_recovers_owned_broker_orders_after_restart(tmp_path) 
     assert recovered.avg_price == pytest.approx(9.91)
     assert len(gateway.query_orders()) == 1
 
-    # A new gateway instance against the same broker snapshot reconstructs the
-    # mapping from order_remark rather than relying on process memory.
+    # A new gateway instance loads the fsynced token -> client identity mapping
+    # before broker state is synchronised.
     restarted = QMTGateway(gateway.config)
     restarted._bind_live_client(client, account, FakeConst)
     assert restarted.preflight()["ok"] is True
     assert restarted.query_order("restored-client-id").broker_order_id == "8123"
 
 
+def test_preflight_fails_if_quantagent_owned_remark_cannot_be_resolved(tmp_path) -> None:
+    gateway, client, _ = _gateway(tmp_path)
+    # This has our namespace/prefix but no durable mapping. Silently treating it
+    # as a manual order could duplicate an existing live order after restart.
+    client.orders = [
+        SimpleNamespace(
+            order_id=9999,
+            order_remark="qa:0123456789abcdef0123",
+            order_status=FakeConst.ORDER_REPORTED,
+            traded_volume=0,
+            traded_price=0.0,
+            price=10.0,
+        )
+    ]
+
+    report = gateway.preflight()
+    assert report["ok"] is False
+    assert report["unresolved_owned_remarks"] == ["qa:0123456789abcdef0123"]
+    assert any("owned_order_identity_unresolved" in error for error in report["errors"])
+
+
+def test_manual_broker_order_does_not_fail_identity_preflight(tmp_path) -> None:
+    gateway, client, _ = _gateway(tmp_path)
+    client.orders = [
+        SimpleNamespace(
+            order_id=9998,
+            order_remark="manual-order",
+            order_status=FakeConst.ORDER_REPORTED,
+            traded_volume=0,
+            traded_price=0.0,
+            price=10.0,
+        )
+    ]
+    report = gateway.preflight()
+    assert report["ok"] is True
+    assert report["orders_synced"] == 0
+
+
 def test_live_queries_normalise_account_position_and_trade_state(tmp_path) -> None:
     gateway, client, _ = _gateway(tmp_path)
+    remark = gateway._encode_remark("cid-001")
     client.positions = [
         SimpleNamespace(
             stock_code="600000.SH",
@@ -209,7 +256,7 @@ def test_live_queries_normalise_account_position_and_trade_state(tmp_path) -> No
     client.orders = [
         SimpleNamespace(
             order_id=7001,
-            order_remark="qa:cid-001",
+            order_remark=remark,
             order_status=FakeConst.ORDER_SUCCEEDED,
             traded_volume=100,
             traded_price=10.25,
@@ -243,3 +290,14 @@ def test_live_queries_normalise_account_position_and_trade_state(tmp_path) -> No
     health = gateway.health()
     assert health["ok"] is True
     assert health["account_value"] == pytest.approx(1_250_000.0)
+
+
+def test_remark_prefix_that_cannot_fit_is_rejected(tmp_path) -> None:
+    with pytest.raises(ValueError, match="too long"):
+        QMTGateway(
+            QMTConfig(
+                order_remark_prefix="prefix-too-long",
+                audit_log_dir=str(tmp_path),
+                identity_map_path=str(tmp_path / "identity.jsonl"),
+            )
+        )
