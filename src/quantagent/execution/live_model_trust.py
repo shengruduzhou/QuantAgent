@@ -3,8 +3,8 @@
 Schema v1 remains readable for forensic and explicitly BLOCKED manifests, but
 it is not a production trust root: all of its acceptance fields live in one
 editable JSON object. Production acceptance therefore requires schema v2,
-whose claims are re-derived from SHA-256-bound governed artifacts by
-``live_model_trust_v2``.
+whose claims are verified through the governed policy layer that recomputes
+FRESH coverage and statistical gates from SHA-256-bound artifacts.
 """
 
 from __future__ import annotations
@@ -18,7 +18,9 @@ from quantagent.execution.live_model_trust_v2 import (
     CERTIFICATE_SCHEMA_VERSION,
     REQUIRED_METRIC_SEMANTICS,
     default_artifact_roots,
-    verify_live_model_trust_v2,
+)
+from quantagent.execution.live_model_trust_v2_policy import (
+    verify_governed_live_model_trust_v2,
 )
 
 
@@ -66,10 +68,6 @@ def evaluate_live_model_trust(
             reasons=("model_trust_manifest_missing",),
         )
     path = Path(manifest_path)
-    # The root certificate is itself part of the trust boundary.  Artifact
-    # bindings already reject symlink substitution; allowing the manifest to be
-    # replaced by a symlink would make the outermost trust object weaker than
-    # every artifact it indexes.
     if path.is_symlink():
         return _report(
             manifest_path=str(path),
@@ -109,7 +107,7 @@ def evaluate_live_model_trust(
 
     if schema_version == CERTIFICATE_SCHEMA_VERSION:
         roots = artifact_roots or default_artifact_roots(path)
-        verification = verify_live_model_trust_v2(
+        verification = verify_governed_live_model_trust_v2(
             payload,
             artifact_roots=roots,
             min_fresh_oos_days=min_fresh_oos_days,
@@ -118,9 +116,6 @@ def evaluate_live_model_trust(
             max_spa_p_value=max_spa_p_value,
         )
         reasons = list(verification.reasons)
-        # The v2 policy is deliberately fixed to the canonical trusted evaluator
-        # semantics. A caller requesting anything else cannot silently weaken or
-        # fork the trust policy.
         if required_metric_semantics != REQUIRED_METRIC_SEMANTICS:
             reasons.append(
                 "v2_required_metric_semantics_not_canonical:"
