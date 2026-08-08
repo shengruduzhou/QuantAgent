@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "blocked",
+  "model_id": "production_blend_v1",
+  "trust_class": "likely_overfit",
+  "source_manifest": "configs/production_blend.json",
+  "as_of": "2026-08-08",
+  "evidence": {
+    "fresh_oos_days": 0,
+    "final_holdout_reads": 9,
+    "pbo": 0.886,
+    "dsr_probability": 0.919,
+    "spa_p_value": null,
+    "variant_c_passed": false,
+    "benchmark_excess_positive": false,
+    "risk_capacity_passed": false,
+    "selection_pre_registered": false,
+    "contaminated_holdout": true
+  },
+  "blocking_reasons": [
+    "production_blend.json classifies the current blend as likely_overfit",
+    "PBO 0.886 exceeds the <=0.25 production threshold",
+    "DSR probability 0.919 is below the >=0.95 production threshold",
+    "the adopted 38.6% CAGR is classified contaminated_holdout and is not valid live evidence",
+    "no one-shot >=120-trading-day FRESH OOS acceptance certificate exists",
+    "no complete SPA/variant-C/benchmark-excess/risk-capacity production certificate exists"
+  ],
+  "promotion_requirements": {
+    "status": "production_accepted",
+    "trust_class": "fresh_holdout_validated",
+    "fresh_oos_days_min": 120,
+    "final_holdout_reads": 1,
+    "pbo_max": 0.25,
+    "dsr_probability_min": 0.95,
+    "spa_p_value_max": 0.05,
+    "variant_c_passed": true,
+    "benchmark_excess_positive": true,
+    "risk_capacity_passed": true,
+    "selection_pre_registered": true,
+    "contaminated_holdout": false
+  },
+  "note": "This file is intentionally BLOCKED. Do not edit it to unlock trading. It must be regenerated from governed research evidence after the fresh-OOS acceptance process."
+}
