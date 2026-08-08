@@ -8,10 +8,15 @@ scheme, and writes the candidate set, the Pareto frontier and a hashed manifest.
 The command deliberately exposes no ``--n-trials`` flag: the trial count is a
 property of the enumerated search space, and letting an operator declare it
 would make the deflated Sharpe ratio meaningless.
+
+A research preference is not a production approval.  Every run now emits an
+independent ``promotion_gate.json`` using the project-wide PBO/DSR/SPA, PIT,
+benchmark and holdout policy.  Missing evidence fails closed.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 from typing import Optional
@@ -20,6 +25,10 @@ import pandas as pd
 import typer
 
 from quantagent.cli._utils import app, default_reports_root
+from quantagent.research.foundation_gates import (
+    evaluate_research_gates,
+    fusion_statistical_evidence,
+)
 
 
 # Factor panels often carry labels beside features for convenience. A typo in
@@ -61,6 +70,20 @@ def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
         )
 
 
+def _pit_evidence(frame: pd.DataFrame) -> bool | None:
+    if "point_in_time_valid" in frame.columns:
+        values = frame["point_in_time_valid"].dropna()
+        return bool(len(values) and values.astype(bool).all())
+    if {"available_at", "trade_date"}.issubset(frame.columns):
+        available = pd.to_datetime(frame["available_at"], errors="coerce")
+        decision = pd.to_datetime(frame["trade_date"], errors="coerce")
+        valid = available.notna() & decision.notna()
+        if not bool(valid.any()):
+            return None
+        return bool((available.loc[valid] <= decision.loc[valid]).all())
+    return None
+
+
 @app.command("search-factor-fusion")
 def search_factor_fusion(
     factor_panel_path: Path = typer.Option(..., exists=True, dir_okay=False),
@@ -80,13 +103,15 @@ def search_factor_fusion(
     single_factor_baselines: int = typer.Option(6, min=0, max=64),
     seed: int = typer.Option(17),
     benchmark_path: Optional[Path] = typer.Option(None, exists=True, dir_okay=False),
-    benchmark_symbol: str = typer.Option(""),
+    benchmark_symbol: str = typer.Option("", help="Explicit benchmark, e.g. 000300.SH. Required for promotion eligibility."),
+    holdout_untouched: bool = typer.Option(False, help="Set only when an external final holdout was preserved and not used in selection."),
+    enforce_promotion_gates: bool = typer.Option(False, help="Exit non-zero when the production promotion gate fails."),
     preference_excess_return: float = typer.Option(0.40, min=0.0, max=1.0),
     preference_annual_return: float = typer.Option(0.20, min=0.0, max=1.0),
     preference_drawdown_control: float = typer.Option(0.25, min=0.0, max=1.0),
     preference_robustness: float = typer.Option(0.15, min=0.0, max=1.0),
 ):
-    """Search factor blends and rank the out-of-sample Pareto frontier."""
+    """Search factor blends, rank the OOS frontier, then audit promotion eligibility."""
     from quantagent.fusion import (
         FusionSearchConfig,
         ObjectivePreference,
@@ -106,9 +131,7 @@ def search_factor_fusion(
 
     missing = [name for name in names if name not in factor_panel.columns]
     if missing:
-        raise typer.BadParameter(
-            f"factor columns missing from the panel: {missing}"
-        )
+        raise typer.BadParameter(f"factor columns missing from the panel: {missing}")
 
     benchmark_returns = None
     if benchmark_path is not None:
@@ -116,17 +139,11 @@ def search_factor_fusion(
         if "trade_date" not in benchmark_frame.columns:
             raise typer.BadParameter("benchmark file must contain a trade_date column")
         value_column = next(
-            (
-                column
-                for column in ("benchmark_return", "forward_return", "return")
-                if column in benchmark_frame.columns
-            ),
+            (column for column in ("benchmark_return", "forward_return", "return") if column in benchmark_frame.columns),
             None,
         )
         if value_column is None:
-            raise typer.BadParameter(
-                "benchmark file must contain benchmark_return, forward_return or return"
-            )
+            raise typer.BadParameter("benchmark file must contain benchmark_return, forward_return or return")
         benchmark_returns = (
             benchmark_frame.assign(trade_date=pd.to_datetime(benchmark_frame["trade_date"]))
             .set_index("trade_date")[value_column]
@@ -147,7 +164,7 @@ def search_factor_fusion(
         random_controls=random_controls,
         single_factor_baselines=single_factor_baselines,
         seed=seed,
-        benchmark_symbol=benchmark_symbol,
+        benchmark_symbol=benchmark_symbol.strip().upper(),
         preference=ObjectivePreference(
             excess_return=preference_excess_return,
             annual_return=preference_annual_return,
@@ -157,7 +174,6 @@ def search_factor_fusion(
     )
 
     def _progress(stage: str, completed: int, total: int) -> None:
-        # Bracket form is what the web JobRunner's progress parser understands.
         typer.echo(f"[{completed} / {total}] {stage}")
 
     result = run_fusion_search(
@@ -169,11 +185,35 @@ def search_factor_fusion(
     )
     paths = save_fusion_artifacts(result, output_dir=output_dir)
 
+    preferred = result.preferred
+    evidence = fusion_statistical_evidence(
+        candidate_navs={candidate.candidate_id: candidate.nav for candidate in result.candidates},
+        preferred_id=preferred.candidate_id if preferred is not None else None,
+        benchmark_returns=benchmark_returns,
+        periods_per_year=config.periods_per_year,
+    )
+    gate = evaluate_research_gates(
+        pbo=result.pbo,
+        dsr_probability=evidence.get("dsrProbability"),
+        spa_p_value=evidence.get("spaPValue"),
+        benchmark_symbol=config.benchmark_symbol,
+        pit_valid=_pit_evidence(factor_panel),
+        holdout_untouched=holdout_untouched,
+    )
+    gate_payload = {
+        **gate.as_dict(),
+        "preferredCandidate": evidence.get("preferred"),
+        "statisticalEvidence": evidence,
+        "note": "Pareto preference is a research ranking. Production eligibility is controlled only by this gate.",
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    gate_path = output_dir / "promotion_gate.json"
+    gate_path.write_text(json.dumps(gate_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     typer.echo(
         f"n_trials={result.n_trials} frontier={len(result.frontier)} "
         f"pbo={result.pbo:.4f} benchmark={result.benchmark_mode}"
     )
-    preferred = result.preferred
     if preferred is not None:
         metrics = preferred.metrics
         typer.echo(
@@ -185,5 +225,14 @@ def search_factor_fusion(
         )
     else:
         typer.echo("no candidate produced usable out-of-sample observations")
-    typer.echo(f"wrote {len(paths)} artifacts to {output_dir}")
+    typer.echo(
+        "promotion=" + ("ELIGIBLE" if gate.eligible else "BLOCKED")
+        + f" dsr={evidence.get('dsrProbability')} spa={evidence.get('spaPValue')}"
+    )
+    for blocker in gate.blockers:
+        typer.echo(f"promotion_blocker: {blocker}")
+    typer.echo(f"wrote {len(paths) + 1} artifacts to {output_dir}")
+
+    if enforce_promotion_gates and not gate.eligible:
+        raise typer.Exit(code=2)
     return output_dir
