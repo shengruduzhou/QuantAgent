@@ -1,15 +1,17 @@
 """Hash-bound schema-v2 model-trust provenance.
 
-This module deliberately borrows the *verification pattern* of provenance
-systems (bind named inputs to digests, then verify both digests and expected
-semantics) without claiming SLSA conformance.  A v2 QuantAgent certificate is
-therefore a compact index over governed evidence, not a bag of self-attested
-PASS fields.
+The design follows a provenance *verification pattern*: bind named inputs to
+cryptographic digests, reopen the exact artifacts, and compare their semantics
+against verifier-owned expectations.  It does **not** claim SLSA conformance or
+signed-provenance strength.  The current assurance is explicitly
+``hash_bound_unsigned_v1``: strong against accidental drift and post-issuance
+artifact mutation, but not a substitute for a separately protected signing
+root against a malicious insider who can rewrite all evidence and re-issue it.
 
-The issuer can only write a production-accepted certificate after the same
-verifier that live execution uses has re-opened every bound artifact and
-validated cross-artifact consistency.  Any later byte change invalidates the
-certificate through SHA-256 mismatch.
+A production-accepted v2 certificate is therefore an index over governed
+artifacts, never a bag of self-attested PASS fields.  The issuer writes only
+after the same verifier used by live execution has re-opened the full bundle and
+validated digest, type, timing, search-budget and cross-artifact consistency.
 """
 
 from __future__ import annotations
@@ -24,11 +26,17 @@ import re
 from typing import Any, Mapping
 
 from quantagent.config.paths import quant_paths
+from quantagent.execution.trusted_backtest_semantics import (
+    TRUSTED_EXECUTION_SEMANTICS,
+    trusted_cost_model_config,
+    trusted_simulation_config,
+)
 from quantagent.training.semantics import FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VERSION
 
 
 CERTIFICATE_SCHEMA_VERSION = 2
 CERTIFICATE_TYPE = "quantagent.live_model_trust.v2"
+PROVENANCE_ASSURANCE = "hash_bound_unsigned_v1"
 REQUIRED_METRIC_SEMANTICS = "strict_v8_nav_v2_initial_cash"
 REQUIRED_TRAINER_OBJECTIVE_SEMANTICS = FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VERSION
 
@@ -87,13 +95,7 @@ class LiveModelTrustV2IssueResult:
 
 
 def default_artifact_roots(manifest_path: str | Path) -> dict[str, Path]:
-    """Resolve the canonical ``repo`` and ``runtime`` roots for a certificate.
-
-    ``configs/live_model_trust.json`` resolves ``repo`` to its repository root.
-    Tests/bundles outside a ``configs`` directory resolve ``repo`` to the
-    manifest's parent.  The runtime root follows QuantAgent's canonical path
-    resolver (and therefore respects ``QUANTAGENT_HOME``).
-    """
+    """Resolve canonical ``repo``/``runtime`` roots for live verification."""
     manifest = Path(manifest_path).resolve(strict=False)
     repo_root = manifest.parent.parent if manifest.parent.name == "configs" else manifest.parent
     return {
@@ -123,12 +125,13 @@ def issue_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> LiveModelTrustV2IssueResult:
-    """Create a v2 acceptance certificate from already-existing evidence.
-
-    The issuer does not calculate research results and does not repair evidence.
-    It hashes the supplied artifacts, builds the certificate, then invokes the
-    production verifier before atomically writing anything.
-    """
+    """Issue a v2 certificate from existing evidence, without calculating it."""
+    _validate_policy_thresholds(
+        min_fresh_oos_days=min_fresh_oos_days,
+        max_pbo=max_pbo,
+        min_dsr_probability=min_dsr_probability,
+        max_spa_p_value=max_spa_p_value,
+    )
     manifest = Path(manifest_path)
     clean_model_id = str(model_id).strip()
     clean_commit = str(source_commit).strip().lower()
@@ -162,19 +165,18 @@ def issue_live_model_trust_v2(
     payload: dict[str, Any] = {
         "schema_version": CERTIFICATE_SCHEMA_VERSION,
         "certificate_type": CERTIFICATE_TYPE,
+        "provenance_assurance": PROVENANCE_ASSURANCE,
         "status": "production_accepted",
         "trust_class": "fresh_oos",
         "model_id": clean_model_id,
         "source_commit": clean_commit,
         "issued_at": now.astimezone(timezone.utc).isoformat(),
-        "policy": {
-            "trainer_objective_semantics": REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
-            "strict_backtest_metric_semantics": REQUIRED_METRIC_SEMANTICS,
-            "min_fresh_oos_days": int(min_fresh_oos_days),
-            "max_pbo": float(max_pbo),
-            "min_dsr_probability": float(min_dsr_probability),
-            "max_spa_p_value": float(max_spa_p_value),
-        },
+        "policy": _expected_policy(
+            min_fresh_oos_days=min_fresh_oos_days,
+            max_pbo=max_pbo,
+            min_dsr_probability=min_dsr_probability,
+            max_spa_p_value=max_spa_p_value,
+        ),
         "artifacts": bindings,
     }
     verification = verify_live_model_trust_v2(
@@ -210,14 +212,27 @@ def verify_live_model_trust_v2(
 ) -> V2VerificationResult:
     """Verify all v2 digests, schemas, semantics and cross-artifact claims."""
     reasons: list[str] = []
+    try:
+        _validate_policy_thresholds(
+            min_fresh_oos_days=min_fresh_oos_days,
+            max_pbo=max_pbo,
+            min_dsr_probability=min_dsr_probability,
+            max_spa_p_value=max_spa_p_value,
+        )
+    except ValueError as exc:
+        return V2VerificationResult(False, (f"verifier_policy_invalid:{exc}",), {}, {})
+
     roots = _normalise_roots(artifact_roots)
     model_id = str(payload.get("model_id") or "").strip()
     source_commit = str(payload.get("source_commit") or "").strip().lower()
+    issued_at = _parse_timestamp(payload.get("issued_at"))
 
     if payload.get("schema_version") != CERTIFICATE_SCHEMA_VERSION:
         reasons.append("v2_schema_version_mismatch")
     if payload.get("certificate_type") != CERTIFICATE_TYPE:
         reasons.append("v2_certificate_type_mismatch")
+    if payload.get("provenance_assurance") != PROVENANCE_ASSURANCE:
+        reasons.append("v2_provenance_assurance_mismatch")
     if str(payload.get("status") or "").lower() != "production_accepted":
         reasons.append("v2_status_not_production_accepted")
     if str(payload.get("trust_class") or "").lower() != "fresh_oos":
@@ -226,18 +241,16 @@ def verify_live_model_trust_v2(
         reasons.append("v2_model_id_missing")
     if not _HEX40.fullmatch(source_commit):
         reasons.append("v2_source_commit_invalid")
-    if _parse_timestamp(payload.get("issued_at")) is None:
+    if issued_at is None:
         reasons.append("v2_issued_at_invalid")
 
     policy = payload.get("policy") if isinstance(payload.get("policy"), Mapping) else {}
-    expected_policy = {
-        "trainer_objective_semantics": REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
-        "strict_backtest_metric_semantics": REQUIRED_METRIC_SEMANTICS,
-        "min_fresh_oos_days": int(min_fresh_oos_days),
-        "max_pbo": float(max_pbo),
-        "min_dsr_probability": float(min_dsr_probability),
-        "max_spa_p_value": float(max_spa_p_value),
-    }
+    expected_policy = _expected_policy(
+        min_fresh_oos_days=min_fresh_oos_days,
+        max_pbo=max_pbo,
+        min_dsr_probability=min_dsr_probability,
+        max_spa_p_value=max_spa_p_value,
+    )
     for key, expected in expected_policy.items():
         observed = policy.get(key)
         if observed != expected:
@@ -246,7 +259,7 @@ def verify_live_model_trust_v2(
     raw_artifacts = payload.get("artifacts")
     artifacts = raw_artifacts if isinstance(raw_artifacts, Mapping) else {}
     missing_roles = [role for role in REQUIRED_ARTIFACT_ROLES if role not in artifacts]
-    unexpected_roles = sorted(set(artifacts).difference(REQUIRED_ARTIFACT_ROLES))
+    unexpected_roles = sorted(str(key) for key in set(artifacts).difference(REQUIRED_ARTIFACT_ROLES))
     if missing_roles:
         reasons.append("v2_artifacts_missing:" + ",".join(missing_roles))
     if unexpected_roles:
@@ -288,35 +301,47 @@ def verify_live_model_trust_v2(
         if not isinstance(doc, dict):
             reasons.append(f"{role}:json_not_object")
             continue
+        if doc.get("schema_version") != 1:
+            reasons.append(f"{role}:schema_version_mismatch")
         json_docs[role] = doc
 
-    # Every structured evidence artifact must be tied to the same selected
-    # model and code revision.  This prevents a certificate from mixing a good
-    # backtest from model A with a checkpoint from model B.
+    # All structured artifacts must be from the same model/code revision.
     for role, doc in json_docs.items():
         if str(doc.get("model_id") or "") != model_id:
             reasons.append(f"{role}:model_id_mismatch")
         if str(doc.get("source_commit") or "").lower() != source_commit:
             reasons.append(f"{role}:source_commit_mismatch")
 
+    checkpoint_binding = bindings.get("model_checkpoint")
+    returns_binding = bindings.get("statistical_returns")
+    fresh_predictions = bindings.get("fresh_oos_predictions")
+
     trainer = json_docs.get("trainer_manifest", {})
     if trainer:
         if trainer.get("objective_semantics") != REQUIRED_TRAINER_OBJECTIVE_SEMANTICS:
             reasons.append("trainer_manifest:objective_semantics_mismatch")
-        checkpoint_sha = bindings.get("model_checkpoint")
-        if checkpoint_sha is not None and trainer.get("checkpoint_sha256") != checkpoint_sha.sha256:
+        if checkpoint_binding is not None and trainer.get("checkpoint_sha256") != checkpoint_binding.sha256:
             reasons.append("trainer_manifest:checkpoint_sha256_mismatch")
 
     prereg = json_docs.get("pre_registration", {})
+    prereg_family = _string_list(prereg.get("candidate_family")) if prereg else None
+    prereg_budget = _positive_int(prereg.get("max_search_trials")) if prereg else None
+    prereg_registered_at = _parse_timestamp(prereg.get("registered_at")) if prereg else None
     if prereg:
         if prereg.get("selection_pre_registered") is not True:
             reasons.append("pre_registration:selection_not_pre_registered")
-        if _parse_timestamp(prereg.get("registered_at")) is None:
+        if prereg_registered_at is None:
             reasons.append("pre_registration:registered_at_invalid")
+        if not prereg_family:
+            reasons.append("pre_registration:candidate_family_invalid")
+        if prereg_budget is None:
+            reasons.append("pre_registration:max_search_trials_invalid")
 
     search = json_docs.get("search_ledger", {})
     trial_count = _positive_int(search.get("trial_count")) if search else None
     candidate_family = _string_list(search.get("candidate_family")) if search else None
+    trials = search.get("trials") if search else None
+    search_completed_at = _parse_timestamp(search.get("completed_at")) if search else None
     if search:
         if search.get("final_holdout_used_for_selection") is not False:
             reasons.append("search_ledger:final_holdout_used_for_selection_not_false")
@@ -326,6 +351,13 @@ def verify_live_model_trust_v2(
             reasons.append("search_ledger:trial_count_invalid")
         if not candidate_family:
             reasons.append("search_ledger:candidate_family_invalid")
+        if search_completed_at is None:
+            reasons.append("search_ledger:completed_at_invalid")
+        _validate_trial_ledger(trials, trial_count, candidate_family, reasons)
+        if prereg_family and candidate_family != prereg_family:
+            reasons.append("search_ledger:candidate_family_mismatch_pre_registration")
+        if prereg_budget is not None and trial_count is not None and trial_count > prereg_budget:
+            reasons.append("search_ledger:trial_count_exceeds_pre_registered_budget")
 
     lineage = json_docs.get("data_lineage", {})
     if lineage:
@@ -335,25 +367,32 @@ def verify_live_model_trust_v2(
             reasons.append("data_lineage:universe_pit_not_true")
 
     strict = json_docs.get("strict_backtest", {})
-    returns_binding = bindings.get("statistical_returns")
     if strict:
         if strict.get("metric_semantics") != REQUIRED_METRIC_SEMANTICS:
             reasons.append("strict_backtest:metric_semantics_mismatch")
+        if strict.get("execution_semantics") != TRUSTED_EXECUTION_SEMANTICS:
+            reasons.append("strict_backtest:execution_semantics_mismatch")
         if strict.get("t_plus_one") is not True:
             reasons.append("strict_backtest:t_plus_one_not_true")
         if strict.get("costs_included") is not True:
             reasons.append("strict_backtest:costs_not_proven")
+        if strict.get("simulation_config") != trusted_simulation_config():
+            reasons.append("strict_backtest:simulation_config_mismatch")
+        if strict.get("cost_model_config") != trusted_cost_model_config():
+            reasons.append("strict_backtest:cost_model_config_mismatch")
         if strict.get("benchmark_excess_positive") is not True:
             reasons.append("strict_backtest:benchmark_excess_not_positive")
         if strict.get("variant_c_passed") is not True:
             reasons.append("strict_backtest:variant_c_not_proven")
         if returns_binding is not None and strict.get("daily_returns_sha256") != returns_binding.sha256:
             reasons.append("strict_backtest:daily_returns_sha256_mismatch")
+        if checkpoint_binding is not None and strict.get("checkpoint_sha256") != checkpoint_binding.sha256:
+            reasons.append("strict_backtest:checkpoint_sha256_mismatch")
 
     stats = json_docs.get("statistical_gates", {})
-    pbo = _finite_float(stats.get("pbo")) if stats else None
-    dsr = _finite_float(stats.get("dsr_probability")) if stats else None
-    spa = _finite_float(stats.get("spa_p_value")) if stats else None
+    pbo = _probability(stats.get("pbo")) if stats else None
+    dsr = _probability(stats.get("dsr_probability")) if stats else None
+    spa = _probability(stats.get("spa_p_value")) if stats else None
     stats_trial_count = _positive_int(stats.get("trial_count")) if stats else None
     stats_family = _string_list(stats.get("candidate_family")) if stats else None
     if stats:
@@ -371,7 +410,6 @@ def verify_live_model_trust_v2(
             reasons.append("statistical_gates:candidate_family_mismatch_search_ledger")
 
     fresh = json_docs.get("fresh_oos", {})
-    fresh_predictions = bindings.get("fresh_oos_predictions")
     fresh_days = _positive_int(fresh.get("trading_days")) if fresh else None
     fresh_reads = _positive_int(fresh.get("final_holdout_reads")) if fresh else None
     fresh_start = _parse_date(fresh.get("start_date")) if fresh else None
@@ -391,7 +429,6 @@ def verify_live_model_trust_v2(
         if fresh_predictions is not None and fresh.get("predictions_sha256") != fresh_predictions.sha256:
             reasons.append("fresh_oos:predictions_sha256_mismatch")
 
-    # Pre-registration must identify the exact untouched acceptance window.
     if prereg and fresh:
         if str(prereg.get("acceptance_window_id") or "") != fresh_window:
             reasons.append("pre_registration:acceptance_window_id_mismatch")
@@ -399,13 +436,14 @@ def verify_live_model_trust_v2(
             reasons.append("pre_registration:acceptance_start_date_mismatch")
         if _parse_date(prereg.get("acceptance_end_date")) != fresh_end:
             reasons.append("pre_registration:acceptance_end_date_mismatch")
-        registered_at = _parse_timestamp(prereg.get("registered_at"))
-        if registered_at is not None and fresh_start is not None and registered_at.date() > fresh_start:
-            reasons.append("pre_registration:registered_after_fresh_oos_start")
+        if prereg_registered_at is not None and fresh_start is not None and prereg_registered_at.date() >= fresh_start:
+            reasons.append("pre_registration:registered_not_strictly_before_fresh_oos")
 
-    # The final trained model and its tuning window must end strictly before the
-    # final acceptance window starts.  Walk-forward validation is tuning
-    # evidence; it is not the final untouched holdout.
+    if search_completed_at is not None and fresh_start is not None and search_completed_at.date() >= fresh_start:
+        reasons.append("search_ledger:completed_not_strictly_before_fresh_oos")
+    if issued_at is not None and fresh_end is not None and issued_at.date() < fresh_end:
+        reasons.append("v2_issued_before_fresh_oos_end")
+
     training_cutoff = _parse_date(lineage.get("training_cutoff")) if lineage else None
     validation_cutoff = _parse_date(lineage.get("validation_cutoff")) if lineage else None
     trainer_cutoff = _parse_date(trainer.get("training_cutoff")) if trainer else None
@@ -426,13 +464,20 @@ def verify_live_model_trust_v2(
         reasons.append("trainer_manifest:validation_cutoff_mismatch_data_lineage")
 
     risk = json_docs.get("risk_capacity", {})
-    if risk and risk.get("passed") is not True:
-        reasons.append("risk_capacity:gate_not_passed")
+    if risk:
+        if risk.get("passed") is not True:
+            reasons.append("risk_capacity:gate_not_passed")
+        if checkpoint_binding is not None and risk.get("checkpoint_sha256") != checkpoint_binding.sha256:
+            reasons.append("risk_capacity:checkpoint_sha256_mismatch")
+        if fresh_predictions is not None and risk.get("predictions_sha256") != fresh_predictions.sha256:
+            reasons.append("risk_capacity:predictions_sha256_mismatch")
 
     evidence = {
         "schema_version": CERTIFICATE_SCHEMA_VERSION,
+        "provenance_assurance": PROVENANCE_ASSURANCE,
         "trainer_objective_semantics": trainer.get("objective_semantics"),
         "strict_backtest_metric_semantics": strict.get("metric_semantics"),
+        "execution_semantics": strict.get("execution_semantics"),
         "fresh_oos_days": fresh_days,
         "final_holdout_reads": fresh_reads,
         "fresh_oos_start": None if fresh_start is None else fresh_start.isoformat(),
@@ -443,6 +488,7 @@ def verify_live_model_trust_v2(
         "spa_p_value": spa,
         "trial_count": stats_trial_count,
         "candidate_family": stats_family,
+        "pre_registered_max_search_trials": prereg_budget,
         "benchmark_excess_positive": strict.get("benchmark_excess_positive"),
         "variant_c_passed": strict.get("variant_c_passed"),
         "risk_capacity_passed": risk.get("passed"),
@@ -456,6 +502,73 @@ def verify_live_model_trust_v2(
         evidence=evidence,
         resolved_paths={role: str(path) for role, path in resolved_paths.items()},
     )
+
+
+def _expected_policy(
+    *,
+    min_fresh_oos_days: int,
+    max_pbo: float,
+    min_dsr_probability: float,
+    max_spa_p_value: float,
+) -> dict[str, Any]:
+    return {
+        "trainer_objective_semantics": REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
+        "strict_backtest_metric_semantics": REQUIRED_METRIC_SEMANTICS,
+        "execution_semantics": TRUSTED_EXECUTION_SEMANTICS,
+        "simulation_config": trusted_simulation_config(),
+        "cost_model_config": trusted_cost_model_config(),
+        "min_fresh_oos_days": int(min_fresh_oos_days),
+        "max_pbo": float(max_pbo),
+        "min_dsr_probability": float(min_dsr_probability),
+        "max_spa_p_value": float(max_spa_p_value),
+    }
+
+
+def _validate_policy_thresholds(
+    *,
+    min_fresh_oos_days: int,
+    max_pbo: float,
+    min_dsr_probability: float,
+    max_spa_p_value: float,
+) -> None:
+    if isinstance(min_fresh_oos_days, bool) or not isinstance(min_fresh_oos_days, int) or min_fresh_oos_days <= 0:
+        raise ValueError("min_fresh_oos_days must be a positive integer")
+    for name, value in (
+        ("max_pbo", max_pbo),
+        ("min_dsr_probability", min_dsr_probability),
+        ("max_spa_p_value", max_spa_p_value),
+    ):
+        probability = _probability(value)
+        if probability is None:
+            raise ValueError(f"{name} must be a finite probability in [0, 1]")
+
+
+def _validate_trial_ledger(
+    trials: object,
+    trial_count: int | None,
+    candidate_family: list[str] | None,
+    reasons: list[str],
+) -> None:
+    if not isinstance(trials, list):
+        reasons.append("search_ledger:trials_not_list")
+        return
+    if trial_count is not None and len(trials) != trial_count:
+        reasons.append("search_ledger:trials_length_mismatch_trial_count")
+    ids: list[str] = []
+    for index, item in enumerate(trials):
+        if not isinstance(item, Mapping):
+            reasons.append(f"search_ledger:trial_{index}_not_object")
+            continue
+        trial_id = str(item.get("trial_id") or "").strip()
+        candidate = str(item.get("candidate") or "").strip()
+        if not trial_id:
+            reasons.append(f"search_ledger:trial_{index}_id_missing")
+        else:
+            ids.append(trial_id)
+        if not candidate or (candidate_family is not None and candidate not in candidate_family):
+            reasons.append(f"search_ledger:trial_{index}_candidate_invalid")
+    if len(ids) != len(set(ids)):
+        reasons.append("search_ledger:duplicate_trial_id")
 
 
 def _normalise_roots(roots: Mapping[str, str | Path]) -> dict[str, Path]:
@@ -504,6 +617,11 @@ def _resolve_artifact(
         return None, "artifact_missing"
     if not candidate.is_file():
         return None, "artifact_not_regular_file"
+    try:
+        if candidate.stat().st_size <= 0:
+            return None, "artifact_empty"
+    except OSError:
+        return None, "artifact_stat_failed"
     return candidate, None
 
 
@@ -524,24 +642,22 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
-def _finite_float(value: object) -> float | None:
+def _probability(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None
-    return number
+    return number if 0.0 <= number <= 1.0 else None
 
 
 def _positive_int(value: object) -> int | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    try:
-        number = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
+    return value if value > 0 else None
 
 
 def _string_list(value: object) -> list[str] | None:
@@ -556,6 +672,7 @@ __all__ = [
     "CERTIFICATE_SCHEMA_VERSION",
     "CERTIFICATE_TYPE",
     "LiveModelTrustV2IssueResult",
+    "PROVENANCE_ASSURANCE",
     "REQUIRED_ARTIFACT_ROLES",
     "REQUIRED_METRIC_SEMANTICS",
     "REQUIRED_TRAINER_OBJECTIVE_SEMANTICS",
