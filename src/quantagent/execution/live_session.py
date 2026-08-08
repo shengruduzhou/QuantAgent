@@ -1,26 +1,23 @@
-"""Canonical research-to-broker readiness gate.
+"""Canonical research-to-broker readiness and risk-authorisation boundary.
 
-A connected broker adapter is not permission to trade.  ``LiveTradingSession``
-AND-composes the independent evidence domains that must agree before an economic
-live route could ever be armed: model trust, persistent operational risk state,
-broker preflight/health, and the global product policy.
-
-The current product policy remains LIVE_DISABLED, so ``economic_submit_allowed``
-is intentionally false on today's mainline even if a controlled QMT host is
-query-ready.  This class exists to create one explicit arming boundary instead
-of letting future callers compose those checks ad hoc.
+A connected broker adapter is not permission to trade. ``LiveTradingSession``
+AND-composes independent evidence domains and, critically, requires portfolio-
+level target authorisation before order-level authorisation. The class still
+contains no broker-submit call. Current product policy remains LIVE_DISABLED.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import secrets
 from typing import Any
 
 import pandas as pd
 
 from quantagent.execution.broker_base import OrderIntent
 from quantagent.execution.live_model_trust import LiveModelTrustReport, evaluate_live_model_trust
+from quantagent.risk.portfolio_risk import PortfolioRiskSnapshot
 from quantagent.risk.risk_gate import RiskGate, RiskGateResult
 from quantagent.safety.operating_mode import describe_policy
 
@@ -44,11 +41,22 @@ class LiveSessionReadiness:
 
 
 @dataclass(frozen=True)
+class LiveTargetAuthorization:
+    allowed: bool
+    reasons: tuple[str, ...]
+    risk_result: RiskGateResult
+    readiness: LiveSessionReadiness
+    target_fingerprint: str | None
+    session_token: str = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class LiveOrderAuthorization:
     allowed: bool
     reasons: tuple[str, ...]
     risk_result: RiskGateResult
     readiness: LiveSessionReadiness
+    target_authorization_present: bool
 
 
 class LiveTradingSession:
@@ -64,6 +72,10 @@ class LiveTradingSession:
         self.gateway = gateway
         self.risk_gate = risk_gate
         self.model_trust_manifest = Path(model_trust_manifest)
+        # Capability-style nonce: target authorisations are valid only inside the
+        # exact session instance that issued them. This prevents accidental or
+        # cross-session construction from bypassing the target-level gate.
+        self._target_authorization_token = secrets.token_hex(32)
 
     def readiness(self) -> LiveSessionReadiness:
         reasons: list[str] = []
@@ -101,15 +113,11 @@ class LiveTradingSession:
             reasons.append("product_policy_live_disabled")
 
         # Query-only certification deliberately does NOT require model alpha to
-        # be promoted or product live policy to be armed.  It proves only that
+        # be promoted or product live policy to be armed. It proves only that
         # the controlled broker/account state can be read and reconciled while
         # operational risk is not already killed.
         query_only_ready = bool(kill_clear and preflight_ok and health_ok)
-        economic_allowed = bool(
-            query_only_ready
-            and model.ok
-            and policy_armed
-        )
+        economic_allowed = bool(query_only_ready and model.ok and policy_armed)
         return LiveSessionReadiness(
             query_only_ready=query_only_ready,
             economic_submit_allowed=economic_allowed,
@@ -124,10 +132,53 @@ class LiveTradingSession:
             broker_health=health,
         )
 
+    def authorize_targets(
+        self,
+        target_weights: pd.Series,
+        *,
+        current_weights: pd.Series | None = None,
+        market_state: pd.DataFrame | None = None,
+        sector: pd.Series | None = None,
+        data_quality_score: float = 1.0,
+        model_drift_score: float = 0.0,
+        conformal_width: pd.Series | None = None,
+        risk_snapshot: PortfolioRiskSnapshot | None = None,
+    ) -> LiveTargetAuthorization:
+        """Production-profile portfolio gate that must precede order creation."""
+        readiness = self.readiness()
+        risk = self.risk_gate.check_target_weights(
+            target_weights,
+            current_weights=current_weights,
+            market_state=market_state,
+            sector=sector,
+            data_quality_score=data_quality_score,
+            model_drift_score=model_drift_score,
+            conformal_width=conformal_width,
+            risk_snapshot=risk_snapshot,
+            production_mode=True,
+        )
+        reasons = list(readiness.reasons)
+        if not risk.passed:
+            reasons.extend(f"target:{reason}" for reason in risk.violations)
+            reasons.extend(f"target:unknown:{reason}" for reason in risk.unknowns)
+            reasons.extend(f"target:{key}:{value}" for key, value in risk.rejected_symbols.items())
+        allowed = bool(readiness.economic_submit_allowed and risk.passed)
+        if not allowed and not reasons:
+            reasons.append("target_authorization_not_allowed")
+        return LiveTargetAuthorization(
+            allowed=allowed,
+            reasons=tuple(dict.fromkeys(reasons)),
+            risk_result=risk,
+            readiness=readiness,
+            target_fingerprint=None if risk_snapshot is None else risk_snapshot.target_fingerprint,
+            session_token=self._target_authorization_token,
+        )
+
     def authorize_order(
         self,
         intent: OrderIntent,
         *,
+        target_authorization: LiveTargetAuthorization | None = None,
         market_state: pd.DataFrame | None = None,
         cash_available: float = float("inf"),
     ) -> LiveOrderAuthorization:
@@ -138,10 +189,32 @@ class LiveTradingSession:
             cash_available=cash_available,
         )
         reasons = list(readiness.reasons)
+
+        target_ok = False
+        if target_authorization is None:
+            reasons.append("target_risk_authorization_missing")
+        elif not secrets.compare_digest(
+            target_authorization.session_token,
+            self._target_authorization_token,
+        ):
+            reasons.append("target_risk_session_mismatch")
+        elif not target_authorization.allowed:
+            reasons.append("target_risk_authorization_blocked")
+        else:
+            checked = target_authorization.risk_result.checked_weights
+            if checked is None:
+                reasons.append("target_risk_checked_weights_missing")
+            elif intent.symbol not in checked.index:
+                reasons.append("target_risk_symbol_missing")
+            elif abs(float(checked.loc[intent.symbol]) - float(intent.target_weight)) > 1e-10:
+                reasons.append("target_risk_target_mismatch")
+            else:
+                target_ok = True
+
         if not risk.passed:
             reasons.extend(risk.violations)
             reasons.extend(f"order:{key}:{value}" for key, value in risk.rejected_symbols.items())
-        allowed = bool(readiness.economic_submit_allowed and risk.passed)
+        allowed = bool(readiness.economic_submit_allowed and target_ok and risk.passed)
         if not allowed and not reasons:
             reasons.append("live_session_not_authorized")
         return LiveOrderAuthorization(
@@ -149,11 +222,13 @@ class LiveTradingSession:
             reasons=tuple(dict.fromkeys(reasons)),
             risk_result=risk,
             readiness=readiness,
+            target_authorization_present=target_authorization is not None,
         )
 
 
 __all__ = [
     "LiveOrderAuthorization",
     "LiveSessionReadiness",
+    "LiveTargetAuthorization",
     "LiveTradingSession",
 ]

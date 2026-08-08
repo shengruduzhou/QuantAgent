@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 from quantagent.execution.broker_base import OrderIntent, OrderSide
 from quantagent.risk.kill_switch import KillSwitch
+from quantagent.risk.portfolio_risk import PortfolioRiskSnapshot, portfolio_fingerprint
 from quantagent.risk.risk_limits import V6RiskLimits
 
 
@@ -14,6 +16,8 @@ class RiskGateResult:
     passed: bool
     rejected_symbols: dict[str, str] = field(default_factory=dict)
     violations: tuple[str, ...] = ()
+    unknowns: tuple[str, ...] = ()
+    status: str = "pass"
     checked_weights: pd.Series | None = None
 
 
@@ -21,6 +25,147 @@ class RiskGate:
     def __init__(self, limits: V6RiskLimits | None = None, kill_switch: KillSwitch | None = None) -> None:
         self.limits = limits or V6RiskLimits()
         self.kill_switch = kill_switch or KillSwitch()
+
+    @staticmethod
+    def _final_result(
+        *,
+        rejected: dict[str, str],
+        violations: list[str],
+        unknowns: list[str],
+        checked_weights: pd.Series | None = None,
+    ) -> RiskGateResult:
+        violations = list(dict.fromkeys(violations))
+        unknowns = list(dict.fromkeys(unknowns))
+        if violations or rejected:
+            status = "blocked"
+        elif unknowns:
+            status = "unknown"
+        else:
+            status = "pass"
+        return RiskGateResult(
+            passed=status == "pass",
+            rejected_symbols=rejected,
+            violations=tuple(violations),
+            unknowns=tuple(unknowns),
+            status=status,
+            checked_weights=checked_weights,
+        )
+
+    @staticmethod
+    def _evidence_problem(
+        code: str,
+        *,
+        production_mode: bool,
+        violations: list[str],
+        unknowns: list[str],
+    ) -> None:
+        if production_mode:
+            violations.append(code)
+        else:
+            unknowns.append(code)
+
+    def _check_portfolio_snapshot(
+        self,
+        *,
+        target_weights: pd.Series,
+        gross_exposure: float,
+        risk_snapshot: PortfolioRiskSnapshot | None,
+        production_mode: bool,
+        violations: list[str],
+        unknowns: list[str],
+    ) -> None:
+        def evidence_problem(code: str) -> None:
+            self._evidence_problem(
+                code,
+                production_mode=production_mode,
+                violations=violations,
+                unknowns=unknowns,
+            )
+
+        if risk_snapshot is None:
+            if production_mode:
+                violations.append("portfolio_risk_snapshot_missing")
+            return
+
+        if risk_snapshot.target_fingerprint != portfolio_fingerprint(target_weights):
+            violations.append("portfolio_risk_snapshot_target_mismatch")
+
+        beta_ready = True
+        if risk_snapshot.beta_coverage < self.limits.min_beta_coverage:
+            evidence_problem("beta_coverage_below_threshold")
+            beta_ready = False
+        if risk_snapshot.beta_pit_safe is not True:
+            evidence_problem("beta_pit_evidence_missing")
+            beta_ready = False
+        if risk_snapshot.beta_freshness_days is None:
+            evidence_problem("beta_freshness_missing")
+            beta_ready = False
+        elif risk_snapshot.beta_freshness_days > self.limits.max_risk_evidence_age_days:
+            evidence_problem("beta_evidence_stale")
+            beta_ready = False
+        if risk_snapshot.beta_exposure is None or not np.isfinite(risk_snapshot.beta_exposure):
+            evidence_problem("beta_exposure_missing")
+            beta_ready = False
+        if beta_ready and abs(float(risk_snapshot.beta_exposure)) > self.limits.beta_exposure_limit:
+            violations.append("beta_exposure_limit")
+
+        sector_ready = True
+        if risk_snapshot.sector_coverage < self.limits.min_sector_coverage:
+            evidence_problem("sector_coverage_below_threshold")
+            sector_ready = False
+        if risk_snapshot.sector_pit_safe is not True:
+            evidence_problem("sector_pit_evidence_missing")
+            sector_ready = False
+        if risk_snapshot.sector_freshness_days is None:
+            evidence_problem("sector_freshness_missing")
+            sector_ready = False
+        elif risk_snapshot.sector_freshness_days > self.limits.max_risk_evidence_age_days:
+            evidence_problem("sector_evidence_stale")
+            sector_ready = False
+        if gross_exposure > 1e-15 and not risk_snapshot.sector_exposures:
+            evidence_problem("sector_exposure_missing")
+            sector_ready = False
+        if sector_ready:
+            for sector_name, value in risk_snapshot.sector_exposures.items():
+                if abs(float(value)) > self.limits.max_sector_weight:
+                    violations.append(f"max_sector_weight:{sector_name}")
+
+        style_limits = dict(self.limits.style_exposure_limits)
+        style_factors = set(risk_snapshot.style_exposures) | set(style_limits)
+        if style_factors:
+            style_metadata_ready = True
+            if risk_snapshot.style_pit_safe is not True:
+                evidence_problem("style_pit_evidence_missing")
+                style_metadata_ready = False
+            if risk_snapshot.style_freshness_days is None:
+                evidence_problem("style_freshness_missing")
+                style_metadata_ready = False
+            elif risk_snapshot.style_freshness_days > self.limits.max_risk_evidence_age_days:
+                evidence_problem("style_evidence_stale")
+                style_metadata_ready = False
+            for factor in sorted(style_factors):
+                if factor not in risk_snapshot.style_exposures:
+                    evidence_problem(f"style_exposure_missing:{factor}")
+                    continue
+                coverage = float(risk_snapshot.style_coverage.get(factor, 0.0))
+                if coverage < self.limits.min_style_coverage:
+                    evidence_problem(f"style_coverage_below_threshold:{factor}")
+                    continue
+                if style_metadata_ready and factor in style_limits:
+                    if abs(float(risk_snapshot.style_exposures[factor])) > float(style_limits[factor]):
+                        violations.append(f"style_exposure_limit:{factor}")
+
+        if self.limits.tracking_error_limit is not None:
+            if risk_snapshot.tracking_overlap < self.limits.min_tracking_overlap:
+                evidence_problem("tracking_error_overlap_insufficient")
+            elif risk_snapshot.tracking_error is None or not np.isfinite(risk_snapshot.tracking_error):
+                evidence_problem("tracking_error_missing")
+            elif float(risk_snapshot.tracking_error) > float(self.limits.tracking_error_limit):
+                violations.append("tracking_error_limit")
+            if not risk_snapshot.benchmark_symbol:
+                evidence_problem("tracking_error_benchmark_missing")
+            if not risk_snapshot.tracking_frequency:
+                evidence_problem("tracking_error_frequency_missing")
 
     def check_target_weights(
         self,
@@ -31,38 +176,104 @@ class RiskGate:
         data_quality_score: float = 1.0,
         model_drift_score: float = 0.0,
         conformal_width: pd.Series | None = None,
+        risk_snapshot: PortfolioRiskSnapshot | None = None,
+        *,
+        production_mode: bool = False,
     ) -> RiskGateResult:
-        weights = target_weights.fillna(0.0).astype(float).copy()
+        numeric = pd.to_numeric(target_weights, errors="coerce").astype(float)
         rejected: dict[str, str] = {}
         violations: list[str] = []
+        unknowns: list[str] = []
+
+        invalid_mask = numeric.isna() | ~np.isfinite(numeric)
+        for symbol in numeric.index[invalid_mask]:
+            rejected[str(symbol)] = "non_finite_target_weight"
+        weights = numeric.replace([np.inf, -np.inf], np.nan).fillna(0.0).copy()
+
         if self.kill_switch.triggered:
             violations.append("kill_switch_triggered")
         if data_quality_score < self.limits.min_data_quality_score:
             violations.append("data_quality_below_threshold")
         if model_drift_score > self.limits.max_model_drift_score:
             violations.append("model_drift_above_threshold")
+
+        gross_exposure = float(weights.abs().sum())
+        if gross_exposure > float(self.limits.max_leverage) + 1e-12:
+            violations.append("max_leverage")
+
         oversized = weights[weights.abs() > self.limits.max_name_weight]
         for symbol in oversized.index:
             rejected[str(symbol)] = "max_name_weight"
         weights = weights.clip(upper=self.limits.max_name_weight, lower=-self.limits.max_name_weight)
-        if sector is not None:
+
+        self._check_portfolio_snapshot(
+            target_weights=target_weights,
+            gross_exposure=gross_exposure,
+            risk_snapshot=risk_snapshot,
+            production_mode=production_mode,
+            violations=violations,
+            unknowns=unknowns,
+        )
+
+        # Backward-compatible research diagnostic. Production mode must carry a
+        # PortfolioRiskSnapshot and cannot rely on an unversioned sector series.
+        if risk_snapshot is None and sector is not None:
             sector_weights = weights.groupby(sector.reindex(weights.index).fillna("unknown")).sum().abs()
             for sector_name, value in sector_weights.items():
                 if value > self.limits.max_sector_weight:
                     violations.append(f"max_sector_weight:{sector_name}")
+
         if current_weights is not None:
-            turnover = float((weights - current_weights.reindex(weights.index).fillna(0.0)).abs().sum())
+            current = pd.to_numeric(current_weights, errors="coerce").reindex(weights.index).fillna(0.0)
+            turnover = float((weights - current).abs().sum())
             if turnover > self.limits.max_turnover:
                 violations.append("max_turnover")
-        if conformal_width is not None:
-            wide = conformal_width.reindex(weights.index).fillna(0.0)
-            for symbol in wide[wide > self.limits.conformal_uncertainty_threshold].index:
+
+        relevant_symbols = set(weights.index[weights.abs() > 1e-12])
+        if current_weights is not None:
+            current_for_relevance = pd.to_numeric(current_weights, errors="coerce").fillna(0.0)
+            relevant_symbols.update(current_for_relevance.index[current_for_relevance.abs() > 1e-12])
+
+        if conformal_width is None:
+            if production_mode and relevant_symbols:
+                violations.append("conformal_evidence_missing")
+        else:
+            wide = pd.to_numeric(conformal_width, errors="coerce").reindex(sorted(relevant_symbols))
+            missing_width = wide.isna() | ~np.isfinite(wide)
+            for symbol in wide.index[missing_width]:
+                self._evidence_problem(
+                    f"conformal_evidence_missing:{symbol}",
+                    production_mode=production_mode,
+                    violations=violations,
+                    unknowns=unknowns,
+                )
+            valid_wide = wide[~missing_width]
+            for symbol in valid_wide[valid_wide > self.limits.conformal_uncertainty_threshold].index:
                 rejected[str(symbol)] = "conformal_uncertainty"
-                weights.loc[symbol] = 0.0
-        if market_state is not None and not market_state.empty:
+                if symbol in weights.index:
+                    weights.loc[symbol] = 0.0
+
+        duplicate_symbols: set[object] = set()
+        if market_state is None or market_state.empty:
+            if production_mode and relevant_symbols:
+                violations.append("market_state_missing")
+        elif "symbol" not in market_state.columns:
+            violations.append("market_state_symbol_column_missing")
+        else:
             state = market_state.set_index("symbol")
-            for symbol in weights.index:
+            duplicate_symbols = set(state.index[state.index.duplicated(keep=False)])
+            for symbol in sorted(duplicate_symbols & relevant_symbols):
+                violations.append(f"market_state_duplicate:{symbol}")
+            for symbol in sorted(relevant_symbols):
                 if symbol not in state.index:
+                    self._evidence_problem(
+                        f"market_state_missing:{symbol}",
+                        production_mode=production_mode,
+                        violations=violations,
+                        unknowns=unknowns,
+                    )
+            for symbol in weights.index:
+                if symbol not in state.index or symbol in duplicate_symbols:
                     continue
                 row = state.loc[symbol]
                 if bool(row.get("is_suspended", row.get("suspended", False))):
@@ -74,11 +285,22 @@ class RiskGate:
                 if self.limits.no_buy_limit_up and bool(row.get("is_limit_up", False)) and weights.loc[symbol] > 0:
                     rejected[str(symbol)] = "limit_up_no_buy"
                     weights.loc[symbol] = 0.0
-                if self.limits.no_sell_limit_down and bool(row.get("is_limit_down", False)) and current_weights is not None and weights.loc[symbol] < current_weights.reindex(weights.index).fillna(0.0).loc[symbol]:
-                    rejected[str(symbol)] = "limit_down_no_sell"
-                    weights.loc[symbol] = current_weights.reindex(weights.index).fillna(0.0).loc[symbol]
-        passed = not violations and not rejected
-        return RiskGateResult(passed=passed, rejected_symbols=rejected, violations=tuple(violations), checked_weights=weights)
+                if (
+                    self.limits.no_sell_limit_down
+                    and bool(row.get("is_limit_down", False))
+                    and current_weights is not None
+                ):
+                    current = pd.to_numeric(current_weights, errors="coerce").reindex(weights.index).fillna(0.0)
+                    if weights.loc[symbol] < current.loc[symbol]:
+                        rejected[str(symbol)] = "limit_down_no_sell"
+                        weights.loc[symbol] = current.loc[symbol]
+
+        return self._final_result(
+            rejected=rejected,
+            violations=violations,
+            unknowns=unknowns,
+            checked_weights=weights,
+        )
 
     def check_order_intents(
         self,
@@ -112,4 +334,4 @@ class RiskGate:
                     rejected[intent.intent_id] = "limit_down_no_sell"
         if buy_value > cash_available:
             violations.append("cash_constraint")
-        return RiskGateResult(passed=not violations and not rejected, rejected_symbols=rejected, violations=tuple(violations))
+        return self._final_result(rejected=rejected, violations=violations, unknowns=[])
