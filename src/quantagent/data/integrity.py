@@ -10,7 +10,6 @@ the router seek a lower-priority real provider for missing keys.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import math
 from typing import Any, Literal
 
 import numpy as np
@@ -34,6 +33,7 @@ class DailyOHLCVIntegrityPolicy:
     require_frequency_metadata: bool = False
     require_timezone_metadata: bool = False
     require_point_in_time: bool = False
+    require_pit_semantics: bool = False
     reject_mock_or_synthetic: bool = False
     expected_adjustment: str | None = None
     allow_invalid_primary_fallback: bool = True
@@ -63,6 +63,7 @@ class DailyOHLCVIntegrityPolicy:
             require_frequency_metadata=True,
             require_timezone_metadata=True,
             require_point_in_time=True,
+            require_pit_semantics=True,
             reject_mock_or_synthetic=True,
             expected_adjustment="none",
             allow_invalid_primary_fallback=allow_invalid_primary_fallback,
@@ -141,6 +142,13 @@ def _metadata_value(result: ProviderResult, *keys: str) -> Any:
     return None
 
 
+def _declared(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"unknown", "unspecified", "n/a", "none"}
+
+
 def _looks_mock_or_synthetic(result: ProviderResult) -> bool:
     source = str(result.source).lower()
     metadata = result.metadata
@@ -173,43 +181,52 @@ def validate_daily_ohlcv(
     missing_columns = sorted(required - set(frame.columns))
     if missing_columns:
         hard.extend(f"missing_column:{column}" for column in missing_columns)
+        if not frame.empty:
+            invalid.loc[:] = True
 
     if policy.require_point_in_time and result.point_in_time is not True:
         hard.append("provider_not_point_in_time")
+    pit_semantics = _metadata_value(result, "pit_semantics", "point_in_time_semantics")
+    if policy.require_pit_semantics:
+        if not _declared(pit_semantics):
+            hard.append("pit_semantics_missing")
+    elif not _declared(pit_semantics):
+        warnings.append("pit_semantics_missing")
+
     if policy.reject_mock_or_synthetic and _looks_mock_or_synthetic(result):
         hard.append("mock_or_synthetic_source")
 
     frequency = _metadata_value(result, "frequency", "interval", "freq")
     if policy.require_frequency_metadata:
-        if frequency is None:
+        if not _declared(frequency):
             hard.append("frequency_metadata_missing")
         elif str(frequency).strip().lower() not in _DAILY_FREQUENCIES:
             hard.append(f"frequency_not_daily:{frequency}")
-    elif frequency is None:
+    elif not _declared(frequency):
         warnings.append("frequency_metadata_missing")
 
     timezone = _metadata_value(result, "timezone", "time_zone", "tz")
-    if policy.require_timezone_metadata and not timezone:
+    if policy.require_timezone_metadata and not _declared(timezone):
         hard.append("timezone_metadata_missing")
-    elif not timezone:
+    elif not _declared(timezone):
         warnings.append("timezone_metadata_missing")
 
     volume_unit = _metadata_value(result, "volume_unit")
     amount_unit = _metadata_value(result, "amount_unit")
     if policy.require_declared_units:
-        if not volume_unit:
+        if not _declared(volume_unit):
             hard.append("volume_unit_missing")
-        if not amount_unit:
+        if not _declared(amount_unit):
             hard.append("amount_unit_missing")
     else:
-        if not volume_unit:
+        if not _declared(volume_unit):
             warnings.append("volume_unit_missing")
-        if not amount_unit:
+        if not _declared(amount_unit):
             warnings.append("amount_unit_missing")
 
     adjustment = _metadata_value(result, "adjust", "adjustment")
     if policy.expected_adjustment is not None:
-        if adjustment is None:
+        if not _declared(adjustment):
             hard.append("adjustment_metadata_missing")
         elif str(adjustment).strip().lower() != str(policy.expected_adjustment).strip().lower():
             hard.append(f"adjustment_mismatch:{adjustment}")
@@ -231,11 +248,13 @@ def validate_daily_ohlcv(
                 "amount_unit": amount_unit,
                 "adjustment": adjustment,
                 "point_in_time": bool(result.point_in_time),
+                "pit_semantics": pit_semantics,
+                "mock_or_synthetic": _looks_mock_or_synthetic(result),
+                "policy_mode": policy.mode,
             },
         )
         return ValidatedDailyOHLCV(frame, frame.copy(), report)
 
-    # Do not attempt row validation when the identity schema itself is missing.
     identity_ready = set(DAILY_IDENTITY_COLUMNS).issubset(frame.columns)
     if identity_ready:
         symbols = frame["symbol"].astype("string")
@@ -245,8 +264,6 @@ def validate_daily_ohlcv(
         parsed_dates = pd.to_datetime(frame["trade_date"], errors="coerce")
         bad_date = parsed_dates.isna()
         invalid |= bad_date
-        # Daily bars are date-level observations; intraday timestamps are a
-        # frequency/semantic mismatch even when parseable.
         valid_dates = parsed_dates[~bad_date]
         non_midnight = (
             (valid_dates.dt.hour != 0)
@@ -309,7 +326,6 @@ def validate_daily_ohlcv(
         if bool(bad.fillna(False).any()):
             warnings.append("ohlc_relationship_rows_quarantined")
 
-    # Symbols outside an explicit request are never silently served as a bonus.
     if request.symbols and "symbol" in frame.columns:
         allowed_symbols = {str(symbol) for symbol in request.symbols}
         unexpected = ~frame["symbol"].astype(str).isin(allowed_symbols)
@@ -347,13 +363,13 @@ def validate_daily_ohlcv(
     if expected_keys and missing_expected and policy.mode == "production":
         hard.append("expected_trade_date_coverage_incomplete")
 
-    # Any row-level quarantine is a hard source-integrity failure in production;
-    # valid rows remain available for key-level fallback/merge, but the report
-    # cannot claim PASS for this provider.
     if policy.mode == "production" and not quarantine.empty:
         hard.append("invalid_daily_rows_present")
 
-    observed_dates = pd.to_datetime(valid.get("trade_date", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
+    observed_dates = pd.to_datetime(
+        valid.get("trade_date", pd.Series(dtype="datetime64[ns]")),
+        errors="coerce",
+    ).dropna()
     observed_symbols = tuple(sorted(set(valid.get("symbol", pd.Series(dtype=str)).astype(str))))
     hard = list(dict.fromkeys(hard))
     warnings = list(dict.fromkeys(warnings))
@@ -387,6 +403,7 @@ def validate_daily_ohlcv(
             "amount_unit": amount_unit,
             "adjustment": adjustment,
             "point_in_time": bool(result.point_in_time),
+            "pit_semantics": pit_semantics,
             "mock_or_synthetic": _looks_mock_or_synthetic(result),
             "policy_mode": policy.mode,
         },
