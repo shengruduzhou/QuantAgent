@@ -5,7 +5,7 @@ recomputes facts that must not be trusted from summaries:
 
 - FRESH coverage from the bound prediction artifact;
 - frozen strict-backtest return/benchmark outcome from its own return artifact;
-- PBO, DSR and SPA from the complete early-OOS candidate matrix.
+- PBO, DSR and SPA from the complete early-OOS candidate return matrix.
 
 Only this governed verifier/issuer is used by the live trust boundary.
 """
@@ -58,6 +58,7 @@ def verify_governed_live_model_trust_v2(
     reasons = list(base.reasons)
     evidence = dict(base.evidence)
     resolved = dict(base.resolved_paths)
+    fresh_start_date: str | None = None
 
     fresh_path = resolved.get("fresh_oos_predictions")
     fresh_summary_path = resolved.get("fresh_oos")
@@ -82,6 +83,7 @@ def verify_governed_live_model_trust_v2(
                 reasons.append("fresh_oos:start_date_mismatch_predictions")
             if str(summary.get("end_date") or "") != derived.end_date:
                 reasons.append("fresh_oos:end_date_mismatch_predictions")
+            fresh_start_date = derived.start_date
             evidence.update(
                 {
                     "fresh_oos_days": derived.trading_days,
@@ -116,6 +118,8 @@ def verify_governed_live_model_trust_v2(
                 reasons.append("strict_backtest:benchmark_excess_positive_mismatch_recomputed")
             if not derived_strict.benchmark_excess_positive:
                 reasons.append("strict_backtest:recomputed_benchmark_excess_not_positive")
+            if fresh_start_date is not None and derived_strict.end_date >= fresh_start_date:
+                reasons.append("strict_backtest_returns:end_not_strictly_before_fresh_oos")
             evidence.update(
                 {
                     "strict_return_days": derived_strict.trading_days,
@@ -179,6 +183,8 @@ def verify_governed_live_model_trust_v2(
                     f"statistical_gates:recomputed_reject:{reason}"
                     for reason in report.rejection_reasons
                 )
+            if fresh_start_date is not None and derived_stats.end_date >= fresh_start_date:
+                reasons.append("statistical_returns:end_not_strictly_before_fresh_oos")
             evidence.update(
                 {
                     **recomputed,
