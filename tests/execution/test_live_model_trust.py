@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from quantagent.execution.live_model_trust import evaluate_live_model_trust
+from quantagent.execution.live_model_trust import (
+    REQUIRED_METRIC_SEMANTICS,
+    evaluate_live_model_trust,
+)
 
 
 def _write(path: Path, payload: dict) -> Path:
@@ -28,6 +31,7 @@ def _accepted_payload() -> dict:
             "risk_capacity_passed": True,
             "selection_pre_registered": True,
             "contaminated_holdout": False,
+            "strict_backtest_metric_semantics": REQUIRED_METRIC_SEMANTICS,
         },
     }
 
@@ -54,6 +58,7 @@ def test_every_required_acceptance_gate_must_pass(tmp_path: Path) -> None:
         ("risk_capacity_passed", False),
         ("selection_pre_registered", False),
         ("contaminated_holdout", True),
+        ("strict_backtest_metric_semantics", "legacy_post_trade_nav_baseline"),
     ):
         candidate = _accepted_payload()
         candidate["evidence"][key] = bad
@@ -61,11 +66,19 @@ def test_every_required_acceptance_gate_must_pass(tmp_path: Path) -> None:
         assert report.ok is False, key
 
 
+def test_missing_metric_semantics_cannot_be_live_accepted(tmp_path: Path) -> None:
+    candidate = _accepted_payload()
+    candidate["evidence"].pop("strict_backtest_metric_semantics")
+    report = evaluate_live_model_trust(_write(tmp_path / "missing-semantics.json", candidate))
+    assert report.ok is False
+    assert any("metric_semantics_mismatch" in reason for reason in report.reasons)
+
+
 def test_repository_current_model_manifest_is_intentionally_blocked() -> None:
     # The current production blend is explicitly classified likely_overfit in
-    # configs/production_blend.json.  This regression prevents a future code
+    # configs/production_blend.json. This regression prevents a future code
     # cleanup from silently turning the machine live gate green without fresh
-    # evidence being written.
+    # evidence being written under the current trusted evaluator semantics.
     path = Path("configs/live_model_trust.json")
     report = evaluate_live_model_trust(path)
     assert report.ok is False
@@ -74,3 +87,4 @@ def test_repository_current_model_manifest_is_intentionally_blocked() -> None:
     assert any("pbo" in reason for reason in report.reasons)
     assert any("dsr_probability" in reason for reason in report.reasons)
     assert any("holdout" in reason for reason in report.reasons)
+    assert any("metric_semantics" in reason for reason in report.reasons)
