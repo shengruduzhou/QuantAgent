@@ -20,6 +20,7 @@ def _meta(**overrides):
         "volume_unit": "shares",
         "amount_unit": "CNY",
         "adjustment": "none",
+        "pit_semantics": "trade_date_observed_no_future_adjustment",
     }
     metadata.update(overrides)
     return metadata
@@ -190,7 +191,7 @@ def test_authoritative_expected_calendar_fails_if_final_key_is_missing() -> None
         _router(primary, fallback).daily_ohlcv(_request(), integrity_policy=_policy())
 
 
-def test_research_field_slice_keeps_historical_first-source_semantics() -> None:
+def test_research_field_slice_keeps_historical_first_source_semantics() -> None:
     frame = pd.DataFrame(
         {
             "symbol": ["600000.SH"],
@@ -213,7 +214,7 @@ def test_research_field_slice_keeps_historical_first-source_semantics() -> None:
     assert fallback.calls == 0
 
 
-def test_production_requires_declared_units_frequency_timezone_and_adjustment() -> None:
+def test_production_requires_declared_units_frequency_timezone_adjustment_and_pit_semantics() -> None:
     primary = StaticDailyProvider(
         pd.DataFrame([_row("2026-01-05", close=10.0), _row("2026-01-06", close=11.0)]),
         source="undeclared-provider",
@@ -222,7 +223,7 @@ def test_production_requires_declared_units_frequency_timezone_and_adjustment() 
     fallback = StaticDailyProvider(pd.DataFrame(), source="empty-fallback")
     with pytest.raises(RouterDataIntegrityError, match="no daily rows satisfied"):
         _router(primary, fallback).daily_ohlcv(_request(), integrity_policy=_policy())
-    integrity = validate_result = primary.daily_ohlcv(_request())
+    validate_result = primary.daily_ohlcv(_request())
     # The provider response itself is untouched; the router does not invent
-    # unit/frequency metadata to make it production-eligible.
+    # unit/frequency/PIT metadata to make it production-eligible.
     assert validate_result.metadata == {}
