@@ -19,7 +19,12 @@ def probabilistic_sharpe_ratio(
     sr_benchmark: float = 0.0,
     periods_per_year: int = 252,
 ) -> float:
-    """Bailey & Lopez de Prado 2012 PSR adjusted for skew and kurtosis."""
+    """Bailey & Lopez de Prado PSR adjusted for skew and Pearson kurtosis.
+
+    pandas ``Series.kurt`` returns excess kurtosis. The PSR denominator is
+    expressed with Pearson kurtosis as ``(gamma4 - 1) / 4``; therefore the
+    pandas-convention coefficient is ``(excess_kurtosis + 2) / 4``.
+    """
     clean = returns.dropna()
     n = len(clean)
     if n < 4:
@@ -33,9 +38,9 @@ def probabilistic_sharpe_ratio(
         skew_raw = clean.skew()
         kurt_raw = clean.kurt()
     skew = 0.0 if not np.isfinite(skew_raw) else float(skew_raw)
-    kurt = 0.0 if not np.isfinite(kurt_raw) else float(kurt_raw)
+    excess_kurtosis = 0.0 if not np.isfinite(kurt_raw) else float(kurt_raw)
     sr_b = sr_benchmark / np.sqrt(periods_per_year)
-    denom = np.sqrt(max(1.0 - skew * sr + kurt / 4.0 * sr ** 2, 1e-12))
+    denom = np.sqrt(max(1.0 - skew * sr + (excess_kurtosis + 2.0) / 4.0 * sr ** 2, 1e-12))
     z = (sr - sr_b) * np.sqrt(n - 1) / denom
     return float(_normal_cdf(z))
 
@@ -224,7 +229,6 @@ def probability_of_backtest_overfitting(
         offset = int(rng.integers(0, n_rows - keep + 1))
         arr = arr[offset : offset + keep]
 
-    # Aggregate per chunk by mean — this is robust to within-chunk noise.
     chunks = arr.reshape(n_partitions, rows_per_chunk, n_strats).mean(axis=1)
 
     half = n_partitions // 2
@@ -235,14 +239,10 @@ def probability_of_backtest_overfitting(
         oos_idx = [i for i in indices if i not in is_set]
         is_score = chunks[list(is_idx)].mean(axis=0)
         oos_score = chunks[oos_idx].mean(axis=0)
-        # IS argmax
         n_star = int(np.argmax(is_score))
-        # OOS rank (1 = best, n_strats = worst); use average rank for ties.
         order = pd.Series(oos_score).rank(method="average", ascending=False)
         rank_n_star = float(order.iloc[n_star])
-        # Map rank → relative rank in (0, 1) where 1 = best, 0 = worst.
         w = (n_strats - rank_n_star) / (n_strats - 1) if n_strats > 1 else 0.5
-        # Logit; clip to avoid divide-by-zero at the boundaries.
         w = float(min(max(w, 1.0 / (n_strats + 1.0)), 1.0 - 1.0 / (n_strats + 1.0)))
         logits.append(float(np.log(w / (1.0 - w))))
 
@@ -259,12 +259,10 @@ def _politis_romano_block_length(series: np.ndarray) -> int:
     var = float(np.dot(centered, centered) / n)
     if var <= 1e-15:
         return 1
-    # Use a generous lag cap; the kernel weighting damps long lags.
     max_lag = min(n - 1, int(np.floor(8.0 * (n / 100.0) ** (1.0 / 3.0))) + 1)
     auto = np.array(
         [float(np.dot(centered[k:], centered[:-k]) / n) / var for k in range(1, max_lag + 1)]
     )
-    # Flat-top lag-window weights from Politis & White (2004).
     g_hat = 0.0
     sigma_hat = var
     for k in range(1, max_lag + 1):
@@ -348,7 +346,6 @@ def spa_test(
             excess.mean(axis=1) if m > 1 else excess[:, 0]
         )
 
-    # Per-strategy variance via stationary-bootstrap-implied long-run variance.
     var_lr = np.empty(m)
     for j in range(m):
         col = centered[:, j]
@@ -366,7 +363,6 @@ def spa_test(
     test_stat = float(max(standardized.max(), 0.0))
     best_idx = int(np.argmax(standardized))
 
-    # Three recentering schemes (lower / consistent / upper) per Hansen 2005.
     threshold_consistent = -np.sqrt(2.0 * np.log(np.log(n)) / n)
     mu_consistent = np.where(standardized <= threshold_consistent, 0.0, mean_excess)
     mu_lower = np.zeros(m)
