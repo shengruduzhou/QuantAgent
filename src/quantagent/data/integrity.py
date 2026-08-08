@@ -36,6 +36,7 @@ class DailyOHLCVIntegrityPolicy:
     require_pit_semantics: bool = False
     reject_mock_or_synthetic: bool = False
     expected_adjustment: str | None = None
+    expected_timezone: str | None = None
     allow_invalid_primary_fallback: bool = True
     expected_trade_dates: tuple[str, ...] = ()
     live_critical: bool = False
@@ -66,6 +67,7 @@ class DailyOHLCVIntegrityPolicy:
             require_pit_semantics=True,
             reject_mock_or_synthetic=True,
             expected_adjustment="raw",
+            expected_timezone="Asia/Shanghai",
             allow_invalid_primary_fallback=allow_invalid_primary_fallback,
             expected_trade_dates=expected_trade_dates,
             live_critical=live_critical,
@@ -104,13 +106,28 @@ class ValidatedDailyOHLCV:
     report: DailyOHLCVIntegrityResult
 
 
+def _normalise_date(value: str, *, label: str) -> pd.Timestamp:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"{label} is not a valid date: {value!r}")
+    return pd.Timestamp(parsed).normalize()
+
+
+def _request_bounds(request: ProviderRequest) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = _normalise_date(request.start_date, label="start_date")
+    end = _normalise_date(request.end_date, label="end_date")
+    if start > end:
+        raise ValueError("start_date must be on or before end_date")
+    return start, end
+
+
 def _normalise_expected_dates(values: tuple[str, ...]) -> tuple[str, ...]:
     if not values:
         return ()
     parsed = pd.to_datetime(pd.Series(list(values)), errors="coerce")
     if parsed.isna().any():
         raise ValueError("expected_trade_dates contains an invalid date")
-    return tuple(sorted({ts.date().isoformat() for ts in parsed}))
+    return tuple(sorted({pd.Timestamp(ts).date().isoformat() for ts in parsed}))
 
 
 def expected_daily_keys(
@@ -120,6 +137,16 @@ def expected_daily_keys(
     dates = _normalise_expected_dates(policy.expected_trade_dates)
     if not request.symbols or not dates:
         return set()
+    start, end = _request_bounds(request)
+    out_of_range = [
+        date for date in dates
+        if not (start <= pd.Timestamp(date) <= end)
+    ]
+    if out_of_range:
+        raise ValueError(
+            "expected_trade_dates must stay inside the provider request window: "
+            f"{out_of_range}"
+        )
     return {(str(symbol), date) for symbol in request.symbols for date in dates}
 
 
@@ -167,6 +194,7 @@ def validate_daily_ohlcv(
     policy: DailyOHLCVIntegrityPolicy | None = None,
 ) -> ValidatedDailyOHLCV:
     policy = policy or DailyOHLCVIntegrityPolicy.research()
+    request_start, request_end = _request_bounds(request)
     frame = pd.DataFrame() if result.frame is None else result.frame.copy()
     hard: list[str] = []
     warnings: list[str] = []
@@ -212,6 +240,9 @@ def validate_daily_ohlcv(
         hard.append("timezone_metadata_missing")
     elif not _declared(timezone):
         warnings.append("timezone_metadata_missing")
+    if policy.expected_timezone is not None and _declared(timezone):
+        if str(timezone).strip() != str(policy.expected_timezone).strip():
+            hard.append(f"timezone_mismatch:{timezone}")
 
     volume_unit = _metadata_value(result, "volume_unit")
     amount_unit = _metadata_value(result, "amount_unit")
@@ -276,6 +307,14 @@ def validate_daily_ohlcv(
         if bool(non_midnight.any()):
             invalid.loc[non_midnight.index[non_midnight]] = True
             warnings.append("non_daily_trade_date_rows_quarantined")
+
+        normalised_dates = parsed_dates.dt.normalize()
+        outside_request = (~bad_date) & (
+            (normalised_dates < request_start) | (normalised_dates > request_end)
+        )
+        invalid |= outside_request
+        if bool(outside_request.any()):
+            warnings.append("out_of_request_window_rows_quarantined")
 
         key_frame = pd.DataFrame(
             {
@@ -351,7 +390,12 @@ def validate_daily_ohlcv(
             hard.append("freshness_unverifiable")
         else:
             observed = pd.to_datetime(valid["trade_date"], errors="coerce").dropna()
-            expected_latest = pd.Timestamp(policy.expected_latest_trade_date).normalize()
+            expected_latest = _normalise_date(
+                policy.expected_latest_trade_date,
+                label="expected_latest_trade_date",
+            )
+            if not (request_start <= expected_latest <= request_end):
+                hard.append("freshness_reference_outside_request_window")
             if observed.empty:
                 hard.append("freshness_unverifiable")
             else:
