@@ -65,7 +65,7 @@ class DailyOHLCVIntegrityPolicy:
             require_point_in_time=True,
             require_pit_semantics=True,
             reject_mock_or_synthetic=True,
-            expected_adjustment="none",
+            expected_adjustment="raw",
             allow_invalid_primary_fallback=allow_invalid_primary_fallback,
             expected_trade_dates=expected_trade_dates,
             live_critical=live_critical,
