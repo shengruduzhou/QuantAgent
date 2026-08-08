@@ -1,17 +1,15 @@
 """Grid / random search for V7 alpha and portfolio hyperparameters.
 
-The search loop is intentionally simple and deterministic. For each
-candidate hyperparameter combination the executor:
+The optimiser is a *research selection* layer, not a live-trading shortcut.
+Every candidate is trained/evaluated out of sample by the V7 experiment and a
+candidate that fails an anti-overfit requirement is ineligible to become the
+champion, regardless of its raw objective value.
 
-1. Trains the alpha model on the training window via
-   ``run_v7_training_experiment``.
-2. Evaluates walk-forward metrics: rank IC mean, rank IC stability,
-   turnover-adjusted return after cost, max drawdown, hit rate.
-3. Records the candidate, metrics and any constraint-violation count
-   into a report written under the unified reports root.
-
-The optimiser does **not** touch live trading and obeys the same
-acceptance gates as the standalone trainer.
+Metric names in this module deliberately preserve their financial meaning.  In
+particular, a return/drawdown ratio is not called a Sharpe ratio and the sign of
+mean Rank IC is not called a hit rate.  If a true Sharpe or hit-rate metric is
+produced by the trainer it is passed through unchanged; otherwise it is left
+unavailable rather than fabricated.
 """
 
 from __future__ import annotations
@@ -69,12 +67,16 @@ def _iter_candidates(config: OptimizationConfig) -> Iterable[dict[str, object]]:
         yield {}
         return
     values = [list(config.parameter_space[k]) for k in keys]
+    if any(not value for value in values):
+        raise ValueError("every optimization parameter must have at least one candidate value")
     if config.sampler == "grid":
         for combo in product(*values):
             yield dict(zip(keys, combo))
     elif config.sampler == "random":
         rng = random.Random(config.seed)
         trials = config.n_trials or 16
+        if trials <= 0:
+            raise ValueError("n_trials must be positive")
         for _ in range(trials):
             yield {key: rng.choice(value) for key, value in zip(keys, values)}
     else:
@@ -85,18 +87,26 @@ def run_alpha_param_search(
     dataset: pd.DataFrame,
     config: OptimizationConfig,
 ) -> OptimizationResult:
-    """Run a grid / random search over alpha training hyperparameters.
+    """Run a governed grid/random search over V7 training hyperparameters.
 
-    The search delegates training to
-    :func:`quantagent.training.v7_experiment.run_v7_training_experiment`
-    and reads metrics from its returned payload, so any model supported
-    by the V7 trainer (ridge, elastic_net, lightgbm, xgboost) can be
-    optimised through this entry point.
+    A raw objective value never overrides a rejection.  This matters because
+    parameter mining tends to make the most extreme-looking trial the most
+    attractive one; allowing a trial with too few folds or unstable IC to win
+    would invert the purpose of the anti-overfit gate.
     """
     if dataset is None or dataset.empty:
         raise ValueError("optimization requires a non-empty dataset")
     if config.objective not in _SUPPORTED_OBJECTIVES:
-        raise ValueError(f"unsupported objective {config.objective}; supported: {sorted(_SUPPORTED_OBJECTIVES)}")
+        raise ValueError(
+            f"unsupported objective {config.objective}; supported: {sorted(_SUPPORTED_OBJECTIVES)}. "
+            "The old synthetic objectives sharpe_like/information_ratio_like/hit_rate were removed "
+            "because they did not represent those financial statistics."
+        )
+    if config.mode not in {"max", "min"}:
+        raise ValueError("mode must be 'max' or 'min'")
+    if config.min_folds < 1:
+        raise ValueError("min_folds must be >= 1")
+
     from quantagent.training.v7_experiment import V7TrainingConfig, run_v7_training_experiment
 
     output_dir = Path(config.output_dir)
@@ -112,19 +122,29 @@ def run_alpha_param_search(
         kwargs.setdefault("output_dir", str(output_dir / f"trial_{trial_id:03d}"))
         result = run_v7_training_experiment(dataset, V7TrainingConfig(**kwargs))
         metrics = _extract_metrics(result)
-        if metrics.get("fold_count", 0.0) < config.min_folds:
+        rejection_reasons = _trial_rejection_reasons(metrics, config)
+        eligible = not rejection_reasons
+        if not eligible:
             metrics["anti_overfit_rejected"] = 1.0
-        if metrics.get("rank_ic_stability", 0.0) < config.stability_threshold:
-            metrics["anti_overfit_rejected"] = 1.0
+
         score = float(metrics.get(config.objective, float("nan")))
+        if not np.isfinite(score):
+            rejection_reasons.append(f"objective_{config.objective}_not_finite")
+            eligible = False
+
         trial = {
             "trial_id": trial_id,
             "candidate": candidate,
             "metrics": metrics,
             "score": score,
+            "eligible": eligible,
+            "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
         }
         trials.append(trial)
-        if np.isnan(score):
+
+        # Critical governance boundary: a rejected trial can be recorded and
+        # inspected, but it can never be promoted as the best candidate.
+        if not eligible:
             continue
         if best_score is None or (config.mode == "max" and score > best_score) or (config.mode == "min" and score < best_score):
             best_score = score
@@ -134,6 +154,8 @@ def run_alpha_param_search(
     if best_candidate is None:
         best_candidate = {}
         best_metrics = {}
+
+    eligible_trial_count = sum(bool(trial["eligible"]) for trial in trials)
     report_path = output_dir / "optimization_report.json"
     report_path.write_text(
         json.dumps(
@@ -144,6 +166,9 @@ def run_alpha_param_search(
                 "date_range": _date_range(dataset),
                 "best_candidate": best_candidate,
                 "best_metrics": best_metrics,
+                "eligible_trial_count": eligible_trial_count,
+                "rejected_trial_count": len(trials) - eligible_trial_count,
+                "selection_policy": "only finite, anti-overfit-eligible trials may become champion",
                 "trials": trials,
             },
             ensure_ascii=False,
@@ -166,10 +191,37 @@ _SUPPORTED_OBJECTIVES = {
     "rank_ic_stability",
     "turnover_adjusted_net_return",
     "max_drawdown",
-    "sharpe_like",
-    "information_ratio_like",
+    "return_to_drawdown",
+    # These are accepted only when the trainer actually emits the named
+    # statistic.  _extract_metrics never manufactures them.
+    "sharpe",
+    "information_ratio",
     "hit_rate",
+    "annualised_return",
+    "excess_annualised_return",
 }
+
+
+def _trial_rejection_reasons(metrics: dict[str, float], config: OptimizationConfig) -> list[str]:
+    reasons: list[str] = []
+    if metrics.get("anti_overfit_rejected", 0.0) > 0.0:
+        reasons.append("trainer_anti_overfit_rejected")
+
+    fold_count = metrics.get("fold_count")
+    if fold_count is None or not np.isfinite(fold_count):
+        reasons.append("fold_count_missing")
+    elif fold_count < config.min_folds:
+        reasons.append(f"fold_count={fold_count:g}<min_folds={config.min_folds}")
+
+    stability = metrics.get("rank_ic_stability")
+    if config.stability_threshold != float("-inf"):
+        if stability is None or not np.isfinite(stability):
+            reasons.append("rank_ic_stability_missing")
+        elif stability < config.stability_threshold:
+            reasons.append(
+                f"rank_ic_stability={stability:.6g}<threshold={config.stability_threshold:.6g}"
+            )
+    return reasons
 
 
 def _extract_metrics(training_result: object) -> dict[str, float]:
@@ -179,6 +231,7 @@ def _extract_metrics(training_result: object) -> dict[str, float]:
         metrics_block = getattr(training_result, "metrics", None)
     if not isinstance(metrics_block, dict):
         return {}
+
     flat: dict[str, float] = {}
     for key, value in metrics_block.items():
         if isinstance(value, bool):
@@ -191,12 +244,16 @@ def _extract_metrics(training_result: object) -> dict[str, float]:
                     flat[f"{key}.{sub_key}"] = 1.0 if sub_value else 0.0
                 elif isinstance(sub_value, (int, float)):
                     flat[f"{key}.{sub_key}"] = float(sub_value)
-    if "sharpe_like" not in flat:
-        returns = float(flat.get("turnover_adjusted_net_return", 0.0))
-        drawdown = abs(float(flat.get("max_drawdown", 0.0))) + 1e-12
-        flat["sharpe_like"] = returns / drawdown
-    flat.setdefault("information_ratio_like", flat.get("rank_ic_stability", 0.0))
-    flat.setdefault("hit_rate", 1.0 if flat.get("rank_ic_mean", 0.0) > 0 else 0.0)
+
+    # A useful diagnostic, but name it for what it is.  This is deliberately
+    # *not* called Sharpe: no volatility estimate appears in the denominator.
+    net_return = flat.get("turnover_adjusted_net_return")
+    max_drawdown = flat.get("max_drawdown")
+    if net_return is not None and max_drawdown is not None and np.isfinite(net_return) and np.isfinite(max_drawdown):
+        drawdown_abs = abs(float(max_drawdown))
+        flat["return_to_drawdown"] = (
+            float(net_return) / drawdown_abs if drawdown_abs > 1e-12 else float("nan")
+        )
     return flat
 
 
