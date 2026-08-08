@@ -26,10 +26,6 @@ jobs:
         run: python -m pip install -e ".[test]"
       - name: Compile
         run: python -m compileall -q src services scripts
-      # Runs before the suite so an undeclared production dependency is reported
-      # as itself rather than as a collection crash 1,700 tests later. This is
-      # the exact failure that broke CI: quantagent.data.ashare.http imports
-      # requests at module scope while pyproject did not declare it.
       - name: Declared-dependency audit
         run: python -m pytest tests/test_declared_dependencies.py -q
       - name: Verify collection in the installed environment
@@ -52,10 +48,7 @@ jobs:
 
   # QMT/MiniQMT is a Windows-only client requiring a funded broker account, so
   # it cannot be genuinely exercised on a hosted Ubuntu runner. This job runs
-  # the mock and contract tests that CAN run anywhere, and records the platform
-  # verdict explicitly. It must never report a pass for a capability that was
-  # not exercised -- the probe itself classifies unreachable capabilities as
-  # PLATFORM_BLOCKED rather than as absent.
+  # the portable production contracts and always records that limitation.
   qmt-contract:
     runs-on: ubuntu-latest
     steps:
@@ -67,14 +60,22 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
       - name: Install
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -e ".[test]"
       - name: QMT contract and mock tests
-        run: python -m pytest tests/data/test_qmt_gateway.py tests/data/test_market_data_providers.py -q
+        run: |
+          python -m pytest \
+            tests/data/test_qmt_gateway.py \
+            tests/data/test_market_data_providers.py \
+            tests/execution/test_qmt_live_contract.py \
+            tests/execution/test_order_manager_pretrade_risk.py \
+            tests/execution/test_live_model_trust.py \
+            -q
       - name: Record platform verdict
+        if: always()
         shell: bash
         run: |
           echo "QMT live probe: NOT_RUN_PLATFORM (hosted runner is Linux; QMT/MiniQMT requires Windows + broker entitlement)" | tee qmt-platform-verdict.txt

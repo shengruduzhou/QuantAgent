@@ -41,8 +41,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 # ---------------------------------------------------------------------------
@@ -59,20 +63,21 @@ class AuctionPhase(str, Enum):
 
 
 def classify_auction_phase(ts: datetime | pd.Timestamp) -> AuctionPhase:
-    """Classify an A-share timestamp into one of the trading phases.
+    """Classify an A-share timestamp in the ``Asia/Shanghai`` session clock.
 
-    All A-share venues observe the same intraday phase boundaries.
-    Times outside ``09:15–15:00`` (China local) are reported as
-    :attr:`AuctionPhase.CLOSED`.
+    Naive timestamps are interpreted as already being China-local for backwards
+    compatibility.  Timezone-aware timestamps are *converted* to Shanghai time
+    before their wall clock is compared with exchange session boundaries.  Do
+    not merely strip ``tzinfo``: QuantAgent order timestamps are commonly UTC,
+    and dropping the timezone would move the apparent A-share session by eight
+    hours and silently disable/trigger auction safeguards at the wrong time.
     """
-    if isinstance(ts, pd.Timestamp):
-        if ts.tzinfo is not None:
-            ts = ts.tz_localize(None)
-        wall = ts.to_pydatetime()
-    elif isinstance(ts, datetime):
-        wall = ts.replace(tzinfo=None) if ts.tzinfo is not None else ts
-    else:
+    if not isinstance(ts, (pd.Timestamp, datetime)):
         raise TypeError(f"unsupported timestamp type: {type(ts)!r}")
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert(_SHANGHAI_TZ)
+    wall = stamp.tz_localize(None).to_pydatetime()
     t = wall.time()
     if dtime(9, 15) <= t < dtime(9, 25):
         return AuctionPhase.PRE_AUCTION_OPEN

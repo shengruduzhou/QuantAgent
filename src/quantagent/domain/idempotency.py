@@ -9,22 +9,22 @@ on *one* economic order.
 
 The guarantee here is claim-once: the first caller to claim a key performs the
 action, and every later caller for that key is told what the first one decided.
-Two properties make it hold where a naive in-memory `set` would not:
+Two properties make it hold where a naive in-memory ``set`` would not:
 
 * **Durability.** Claims are appended to disk and fsynced before the claim is
   reported as won, so a process killed between claiming and acting still sees
-  the claim on restart. An in-memory guard forgets everything on SIGKILL, which
-  is exactly when duplicates are most likely.
+  the claim on restart.
+* **Cross-process exclusion.** The same lock-file protocol works with POSIX
+  ``flock`` on Unix and ``msvcrt.locking`` on Windows.  QMT/MiniQMT is normally
+  deployed on Windows, so importing a Unix-only ``fcntl`` module at package
+  import time would make the live execution safety layer unusable on the very
+  host where it is required.
 * **Content-derived keys.** The key is a digest of what makes the action
   economically distinct. A random id would make every retry look new, and a key
-  that is too coarse (say symbol+side, with no date) silently swallows a
-  legitimate re-trade on a later day — the INC-E1 defect this project already
-  paid for once.
+  that is too coarse silently swallows legitimate re-trades.
 
 What this does *not* do: decide whether two actions are economically the same.
-That is the caller's job when it builds the key, and getting it wrong is
-visible in both directions — too coarse drops real orders, too fine admits
-duplicates.
+That is the caller's job when it builds the key.
 """
 
 from __future__ import annotations
@@ -32,12 +32,21 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator, Mapping
+
+try:  # POSIX production/research hosts
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:  # QMT/MiniQMT production hosts
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on Unix
+    _msvcrt = None
 
 from quantagent.domain.lineage import content_id
 
@@ -63,7 +72,6 @@ class ClaimRecord:
 
     key: str
     claimed_at: str
-    #: Free-form marker of what the winner produced — typically an order_id.
     outcome: str | None = None
     payload: Mapping[str, Any] = field(default_factory=dict)
 
@@ -90,7 +98,6 @@ class ClaimRecord:
 class ClaimResult:
     """Outcome of a claim attempt."""
 
-    #: True only for the caller that won the right to perform the action.
     granted: bool
     record: ClaimRecord
 
@@ -109,13 +116,7 @@ def order_intent_key(
     trade_date: str,
     extra: Mapping[str, Any] | None = None,
 ) -> str:
-    """The economic identity of one order intent.
-
-    `trade_date` is deliberately part of the key: without it, buying a symbol
-    on Monday would suppress the identical buy on Wednesday. `quantity` is
-    included so a revised intent for the same signal is a genuinely new action
-    rather than a silent no-op.
-    """
+    """The economic identity of one order intent."""
     return content_id(
         "idem",
         run_id=run_id,
@@ -134,11 +135,7 @@ def broker_callback_key(
     execution_id: str,
     event_type: str,
 ) -> str:
-    """The identity of one broker message.
-
-    Brokers redeliver. The same execution report arriving twice must apply once,
-    or a position is credited twice and the book silently diverges from reality.
-    """
+    """The identity of one broker message."""
     return content_id(
         "cb",
         broker_order_id=broker_order_id,
@@ -150,21 +147,15 @@ def broker_callback_key(
 class IdempotencyStore:
     """Durable claim-once registry.
 
-    Backed by an append-only JSONL file. Appending (rather than rewriting)
-    means a crash mid-write can at worst leave a trailing partial line, which
-    `_load` skips; it can never corrupt an earlier claim.
-
-    Pass ``path=None`` for an in-memory store. That is appropriate for a single
-    backtest process, and inappropriate anywhere a restart must not replay an
-    economic action.
+    Backed by an append-only JSONL file. Appending rather than rewriting means a
+    crash mid-write can at worst leave a trailing partial line; it cannot corrupt
+    an earlier claim. Pass ``path=None`` only for single-process research uses.
     """
 
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         self._lock = RLock()
         self._path = Path(path) if path is not None else None
         self._claims: dict[str, ClaimRecord] = {}
-        #: Bytes of the file already folded into `_claims`. Claims appended by
-        #: *other* processes after we started are read from here on each claim.
         self._read_offset = 0
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,21 +163,16 @@ class IdempotencyStore:
 
     # -- persistence --------------------------------------------------------
     def _load(self) -> None:
-        """Fold any records appended since we last looked.
-
-        Re-reading (rather than loading once at construction) is what makes the
-        store safe for *concurrent* workers. Loading once was safe only for
-        sequential processes: two recovery workers started together each held an
-        empty view and both granted the same key, producing two economic orders.
-        """
+        """Fold any complete records appended since the previous read."""
         if self._path is None or not self._path.exists():
             return
         with self._path.open("r", encoding="utf-8") as handle:
             handle.seek(self._read_offset)
             for line in handle:
                 if not line.endswith("\n"):
-                    # A torn trailing write from a killed process. Stop before
-                    # it and leave the offset so a later complete write is read.
+                    # Torn trailing write: leave the offset before it so a later
+                    # complete append/recovery can be observed rather than
+                    # treating a partial record as evidence.
                     break
                 stripped = line.strip()
                 self._read_offset += len(line.encode("utf-8"))
@@ -205,8 +191,8 @@ class IdempotencyStore:
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
             handle.flush()
-            # Without the fsync a SIGKILL can lose the claim while the action it
-            # guarded already happened — the exact window duplicates come from.
+            # The claim must be durable before the guarded economic action can
+            # happen.  Otherwise SIGKILL/power-loss can resurrect the order.
             os.fsync(handle.fileno())
 
     # -- claiming -----------------------------------------------------------
@@ -218,18 +204,8 @@ class IdempotencyStore:
         payload: Mapping[str, Any] | None = None,
         strict: bool = False,
     ) -> ClaimResult:
-        """Attempt to claim `key`.
-
-        Returns ``granted=True`` exactly once per key across the store's
-        lifetime, including across process restarts when the store is durable.
-        With ``strict=True`` a duplicate raises instead of being reported, for
-        call sites where a repeat indicates a genuine bug rather than an
-        expected retry.
-        """
+        """Attempt to claim ``key`` exactly once across process restarts."""
         with self._lock, self._exclusive_file_lock():
-            # Refresh under the lock: another process may have claimed this key
-            # since we last read. Deciding from a stale in-memory view is how
-            # two concurrent workers both "win".
             self._load()
             existing = self._claims.get(key)
             if existing is not None:
@@ -248,29 +224,54 @@ class IdempotencyStore:
 
     @contextmanager
     def _exclusive_file_lock(self):
-        """Cross-process mutual exclusion around the claim decision.
+        """Cross-process mutual exclusion on Unix *and* Windows.
 
-        The in-process `RLock` only serialises threads of one interpreter; two
-        worker *processes* need the OS to arbitrate. A separate lock file is used
-        so the ledger itself is only ever opened for append.
+        A sibling ``.lock`` file is used so the append-only evidence file stays
+        append-only. POSIX uses ``flock``. Windows ``msvcrt.locking`` locks a
+        byte range, so the lock file is guaranteed to contain one sentinel byte
+        and byte zero is held for the duration of the claim decision.
         """
         if self._path is None:
             yield
             return
         lock_path = self._path.with_suffix(self._path.suffix + ".lock")
-        with lock_path.open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with lock_path.open("a+b") as handle:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                return
 
-    def resolve(self, key: str, *, outcome: str, payload: Mapping[str, Any] | None = None) -> ClaimRecord:
-        """Record what the winning caller produced.
+            if _msvcrt is not None:  # pragma: no cover - executed on Windows CI/host
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+                return
 
-        Written as a second append rather than an in-place edit so the file
-        stays append-only and the original claim remains readable.
-        """
+            raise RuntimeError(
+                "no supported cross-process file-lock backend is available; "
+                "durable economic idempotency cannot be guaranteed"
+            )
+
+    def resolve(
+        self,
+        key: str,
+        *,
+        outcome: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> ClaimRecord:
+        """Record what the winning caller produced as a second append."""
         with self._lock, self._exclusive_file_lock():
             self._load()
             existing = self._claims.get(key)
@@ -291,12 +292,6 @@ class IdempotencyStore:
     # -- reading ------------------------------------------------------------
     @property
     def path(self) -> Path | None:
-        """Where claims are durable, or None for an in-memory store.
-
-        Public so a caller that shares one claim file between two stores can
-        assert they really do share it — a store silently constructed with
-        ``path=None`` is an in-memory guard wearing a durable one's name.
-        """
         return self._path
 
     def get(self, key: str) -> ClaimRecord | None:

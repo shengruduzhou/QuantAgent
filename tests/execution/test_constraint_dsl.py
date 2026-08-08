@@ -54,6 +54,14 @@ def test_classify_auction_phase_each_band():
     assert classify_auction_phase(pd.Timestamp("2024-03-01 08:00:00")) == AuctionPhase.CLOSED
 
 
+def test_classify_auction_phase_converts_aware_timestamps_to_shanghai():
+    # 01:20 UTC == 09:20 Asia/Shanghai.  Stripping tzinfo instead of converting
+    # would classify this as CLOSED and silently disable auction safeguards.
+    assert classify_auction_phase(pd.Timestamp("2024-03-01 01:20:00", tz="UTC")) == AuctionPhase.PRE_AUCTION_OPEN
+    assert classify_auction_phase(pd.Timestamp("2024-03-01 02:30:00", tz="UTC")) == AuctionPhase.CONTINUOUS
+    assert classify_auction_phase(pd.Timestamp("2024-03-01 06:58:00", tz="UTC")) == AuctionPhase.PRE_AUCTION_CLOSE
+
+
 # ---------------------------------------------------------------------------
 # Posture + global limits
 # ---------------------------------------------------------------------------

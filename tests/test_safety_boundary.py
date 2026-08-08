@@ -1,8 +1,15 @@
-"""The safety boundary: no live order path, and honest readiness tiers.
+"""The safety boundary: live remains globally disabled, and broker reachability is narrow.
 
 These are the tests that must not be allowed to rot. Each names a way a
 research system quietly becomes capable of losing real money, or a way a smoke
 run gets mistaken for a validated strategy.
+
+A low-level QMT adapter now contains broker API calls for contract testing and a
+future controlled trading host. That does *not* make LIVE an operating mode:
+the policy layer still rejects live intent and the current model trust
+certificate is blocked. Static scanning therefore changed from "no broker call
+exists anywhere" to the stronger production invariant "only the audited QMT
+adapter may contain the exact broker calls we intentionally introduced".
 """
 
 from __future__ import annotations
@@ -107,12 +114,22 @@ class TestLiveIntentRejection:
         assert "LIVE_DISABLED" in str(exc.value)
 
 
-class TestNoLiveOrderPathInSource:
-    """Static proof: no production module reaches a broker order API."""
+class TestControlledLiveOrderPathInSource:
+    """Static proof: broker APIs can only exist inside one audited adapter.
 
-    FORBIDDEN_CALLS = {
+    This keeps the original boundary useful after adding a low-level QMT
+    implementation.  Moving an order API into a service, strategy, agent, web
+    handler, or a second broker module remains a hard failure.  Expanding the
+    QMT adapter to a new broker API name also fails until this allowlist is
+    deliberately reviewed.
+    """
+
+    BROKER_CALLS = {
         "order_stock", "order_stock_async", "cancel_order_stock",
         "order_send", "OrderSendAsync",
+    }
+    AUDITED_ALLOWLIST = {
+        "src/quantagent/execution/qmt_gateway.py": {"order_stock", "cancel_order_stock"},
     }
     FORBIDDEN_IMPORTS = {"xtquant.xttrader", "MetaTrader5"}
 
@@ -123,8 +140,8 @@ class TestNoLiveOrderPathInSource:
                     continue
                 yield path
 
-    def test_no_module_calls_a_broker_order_api(self):
-        offenders: dict[str, list[str]] = {}
+    def test_broker_order_calls_exist_only_in_the_audited_adapter(self):
+        observed: dict[str, list[str]] = {}
         for path in self._production_files():
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
@@ -138,11 +155,27 @@ class TestNoLiveOrderPathInSource:
                     func.attr if isinstance(func, ast.Attribute)
                     else func.id if isinstance(func, ast.Name) else None
                 )
-                if name in self.FORBIDDEN_CALLS:
-                    offenders.setdefault(
-                        str(path.relative_to(REPO)), []
-                    ).append(name)
-        assert not offenders, f"live order calls found: {offenders}"
+                if name in self.BROKER_CALLS:
+                    observed.setdefault(str(path.relative_to(REPO)), []).append(name)
+
+        unexpected: dict[str, list[str]] = {}
+        for path, names in observed.items():
+            allowed = self.AUDITED_ALLOWLIST.get(path, set())
+            extras = sorted({name for name in names if name not in allowed})
+            if path not in self.AUDITED_ALLOWLIST:
+                extras = sorted(set(names))
+            if extras:
+                unexpected[path] = extras
+        assert not unexpected, f"unaudited live order calls found: {unexpected}"
+
+        # The allowlist is not a wildcard exemption. If the adapter stops using
+        # one of these exact calls, the test forces the boundary to be reviewed
+        # rather than silently leaving stale permissions behind.
+        for path, expected in self.AUDITED_ALLOWLIST.items():
+            assert set(observed.get(path, [])) == expected, (
+                f"broker-call allowlist drift for {path}: "
+                f"expected {sorted(expected)}, observed {sorted(set(observed.get(path, [])))}"
+            )
 
     def test_no_module_imports_a_trading_client_at_module_scope(self):
         offenders: dict[str, list[str]] = {}

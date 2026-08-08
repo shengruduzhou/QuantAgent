@@ -268,8 +268,9 @@ def test_a_risk_decision_is_recorded_with_the_order(tmp_path):
         if event.risk_decision is not None
     ]
     assert decisions, "the order manager must record why it allowed the order"
-    assert decisions[0].rule == "order_manager_pretrade"
+    assert decisions[0].rule == "order_manager_basic_admissibility"
     assert decisions[0].approved is True
+    assert "not production risk certification" in decisions[0].reason
 
 
 # -- M1-13: idempotency is mandatory, not opportunistic ----------------------
