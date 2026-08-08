@@ -1,18 +1,18 @@
 """QMT / MiniQMT broker gateway.
 
-The gateway is dry-run by default.  Live mode is deliberately fail-closed and
-requires all of the following before an economic submission can leave the
-process:
+The gateway is dry-run by default. Live mode is deliberately fail-closed and
+requires explicit enablement, a connected/subscribed XtQuantTrader session,
+startup state synchronisation, and an upstream approved risk decision.
 
-* ``dry_run=False`` and ``live_trading_enabled=True``;
-* a successful XtQuantTrader connection + account subscription;
-* startup preflight/state synchronisation (unless explicitly disabled for a
-  controlled test harness);
-* an upstream risk decision marked approved on the order;
-* a client order id which is written into ``order_remark`` so broker state can
-  be reconciled after a restart.
+QMT's ``order_remark`` field is length constrained.  QuantAgent therefore does
+*not* place the full client-order id in that field.  It writes a deterministic
+short token and fsyncs a durable token -> client-id claim **before** submitting
+the economic order.  Startup preflight reloads that mapping and refuses to arm
+if a broker order carries the QuantAgent prefix but cannot be resolved.  Manual
+or unrelated broker orders are never invented into QuantAgent's canonical
+identity space.
 
-QMT callbacks are treated as the authority for final order state.  In
+QMT callbacks are treated as the authority for final order state. In
 particular, a successful cancel *request* is not reported as CANCELLED until a
 broker order snapshot/callback confirms the terminal state.
 """
@@ -21,9 +21,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha1
 from typing import Any
 
 from quantagent.config.paths import quant_paths
+from quantagent.domain.idempotency import IdempotencyStore
 from quantagent.execution.audit import AuditLogger
 from quantagent.execution.broker_base import (
     BrokerBase,
@@ -39,6 +41,8 @@ from quantagent.execution.broker_base import (
 
 _TERMINAL = {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
 _APPROVED_RISK = {"approved", "approve", "pass", "passed", "ok"}
+_QMT_ORDER_REMARK_MAX_ENGLISH_CHARS = 24
+_REMARK_DIGEST_CHARS = 20
 
 
 @dataclass
@@ -51,10 +55,14 @@ class QMTConfig:
     live_trading_enabled: bool = False
     timeout_seconds: float = 5.0
     strategy_name: str = "QuantAgent"
+    # Keep this short: QMT order_remark is documented as max 24 English chars.
     order_remark_prefix: str = "qa"
     require_preflight: bool = True
     require_risk_approval: bool = True
     audit_log_dir: str = field(default_factory=lambda: str(quant_paths().logs / "execution"))
+    identity_map_path: str = field(
+        default_factory=lambda: str(quant_paths().logs / "execution" / "qmt_identity_map.jsonl")
+    )
 
 
 @dataclass
@@ -67,12 +75,19 @@ class QMTGateway(BrokerBase):
     _trade_handlers: list[object] = field(default_factory=list, repr=False)
     _orders: dict[str, OrderState] = field(default_factory=dict, repr=False)
     _broker_to_client: dict[str, str] = field(default_factory=dict, repr=False)
+    _remark_to_client: dict[str, str] = field(default_factory=dict, repr=False)
+    _client_to_remark: dict[str, str] = field(default_factory=dict, repr=False)
+    _unresolved_owned_remarks: set[str] = field(default_factory=set, repr=False)
+    _identity_store: IdempotencyStore | None = field(default=None, init=False, repr=False)
     _audit: AuditLogger | None = field(default=None, repr=False)
     _connected: bool = field(default=False, repr=False)
     _preflight_ok: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         self._audit = AuditLogger(self.config.audit_log_dir, "qmt_gateway.jsonl")
+        self._validate_remark_prefix()
+        self._identity_store = IdempotencyStore(self.config.identity_map_path)
+        self._load_identity_map()
 
     # ------------------------------------------------------------------
     # Connection / readiness
@@ -180,15 +195,18 @@ class QMTGateway(BrokerBase):
     def preflight(self) -> dict[str, object]:
         """Query broker state before allowing live submissions.
 
-        Startup synchronisation is intentionally query-based even when callbacks
-        are registered: callbacks only describe events observed *after* this
-        process attached, whereas open orders/trades/positions may pre-date the
-        current process after a restart.
+        Callback registration only covers events observed after this process
+        attached.  Preflight therefore rebuilds broker-visible orders/trades and
+        positions after a restart.  Any broker order carrying QuantAgent's
+        remark prefix but lacking a durable identity mapping is a hard error:
+        treating it as a manual/unowned order could duplicate an existing live
+        order on recovery.
         """
         if self.config.dry_run:
             self._preflight_ok = True
             return {"ok": True, "mode": "dry_run", "errors": []}
         self._ensure_connected(require_preflight=False)
+        self._unresolved_owned_remarks.clear()
         errors: list[str] = []
         try:
             asset = self._client.query_stock_asset(self._account)  # type: ignore[attr-defined]
@@ -197,9 +215,7 @@ class QMTGateway(BrokerBase):
             else:
                 broker_account = str(getattr(asset, "account_id", "") or "")
                 if broker_account and broker_account != self.config.account_id:
-                    errors.append(
-                        f"account_mismatch:{broker_account}!={self.config.account_id}"
-                    )
+                    errors.append(f"account_mismatch:{broker_account}!={self.config.account_id}")
         except Exception as exc:
             errors.append(f"asset_query_failed:{type(exc).__name__}:{exc}")
 
@@ -213,12 +229,17 @@ class QMTGateway(BrokerBase):
             except Exception as exc:
                 errors.append(f"{label}_sync_failed:{type(exc).__name__}:{exc}")
 
+        for remark in sorted(self._unresolved_owned_remarks):
+            errors.append(f"owned_order_identity_unresolved:{remark}")
+
         self._preflight_ok = not errors
         report = {
             "ok": self._preflight_ok,
             "connected": self._connected,
             "account_id": self.config.account_id,
             "orders_synced": len(self._orders),
+            "identity_mappings": len(self._remark_to_client),
+            "unresolved_owned_remarks": sorted(self._unresolved_owned_remarks),
             "errors": errors,
             "checked_at": _utc_now(),
         }
@@ -240,6 +261,8 @@ class QMTGateway(BrokerBase):
         try:
             asset_value = self.query_account_value()
             self.query_orders()
+            if self._unresolved_owned_remarks:
+                errors.append("owned_order_identity_unresolved")
         except Exception as exc:
             errors.append(f"heartbeat_query_failed:{type(exc).__name__}:{exc}")
         return {
@@ -257,8 +280,6 @@ class QMTGateway(BrokerBase):
     # ------------------------------------------------------------------
     def submit(self, order: Order) -> OrderState:
         if order.client_order_id in self._orders:
-            # Idempotent replay in-process; startup preflight reconstructs the
-            # same mapping from order_remark after a restart.
             return self._orders[order.client_order_id]
         if self.config.dry_run:
             state = OrderState(
@@ -294,6 +315,8 @@ class QMTGateway(BrokerBase):
             price_type = getattr(self._xt_const, "MARKET_PEER_PRICE_FIRST")
             price = 0.0
 
+        # This call fsyncs the token -> full client-id mapping before the broker
+        # can possibly accept the economic order.
         remark = self._encode_remark(order.client_order_id)
         broker_order_id = self._client.order_stock(  # type: ignore[attr-defined]
             self._account,
@@ -331,6 +354,7 @@ class QMTGateway(BrokerBase):
             {
                 "client_order_id": order.client_order_id,
                 "broker_order_id": state.broker_order_id,
+                "order_remark": remark,
                 "symbol": order.symbol,
                 "side": order.side.value,
                 "quantity": order.quantity,
@@ -453,19 +477,88 @@ class QMTGateway(BrokerBase):
         return _float_attr(asset, "total_asset", "asset", default=float("nan"))
 
     # ------------------------------------------------------------------
+    # Durable broker-remark identity
+    # ------------------------------------------------------------------
+    def _validate_remark_prefix(self) -> None:
+        prefix = self.config.order_remark_prefix
+        if not prefix or not prefix.isascii() or not prefix.isalnum():
+            raise ValueError("QMT order_remark_prefix must be non-empty ASCII alphanumeric text")
+        if len(prefix) + 1 + _REMARK_DIGEST_CHARS > _QMT_ORDER_REMARK_MAX_ENGLISH_CHARS:
+            raise ValueError(
+                "QMT order_remark_prefix is too long for a durable recovery token: "
+                f"{prefix!r}"
+            )
+
+    def _load_identity_map(self) -> None:
+        if self._identity_store is None:
+            return
+        for record in self._identity_store:
+            if not record.key.startswith("qmt-remark:"):
+                continue
+            remark = record.key.split(":", 1)[1]
+            client_id = str(record.payload.get("clientOrderId") or "")
+            if not client_id:
+                continue
+            previous = self._remark_to_client.get(remark)
+            if previous is not None and previous != client_id:
+                raise RuntimeError(
+                    f"QMT identity map collision for {remark}: {previous!r} vs {client_id!r}"
+                )
+            self._remark_to_client[remark] = client_id
+            self._client_to_remark[client_id] = remark
+
+    def _remark_token(self, client_order_id: str) -> str:
+        digest = sha1(client_order_id.encode("utf-8")).hexdigest()[:_REMARK_DIGEST_CHARS]
+        remark = f"{self.config.order_remark_prefix}:{digest}"
+        if len(remark) > _QMT_ORDER_REMARK_MAX_ENGLISH_CHARS or not remark.isascii():
+            raise RuntimeError(f"QMT recovery remark violates broker limit: {remark!r}")
+        return remark
+
+    def _register_client_identity(self, client_order_id: str) -> str:
+        existing = self._client_to_remark.get(client_order_id)
+        if existing is not None:
+            return existing
+        remark = self._remark_token(client_order_id)
+        if self._identity_store is None:
+            raise RuntimeError("QMT identity store is unavailable")
+        result = self._identity_store.claim(
+            f"qmt-remark:{remark}",
+            payload={"clientOrderId": client_order_id},
+        )
+        stored_client = str(result.record.payload.get("clientOrderId") or "")
+        if stored_client != client_order_id:
+            raise RuntimeError(
+                "QMT recovery token collision: "
+                f"{remark} maps to {stored_client!r}, attempted {client_order_id!r}"
+            )
+        self._remark_to_client[remark] = client_order_id
+        self._client_to_remark[client_order_id] = remark
+        return remark
+
+    def _is_owned_remark(self, remark: str) -> bool:
+        return bool(remark) and remark.startswith(f"{self.config.order_remark_prefix}:")
+
+    # ------------------------------------------------------------------
     # Callback/query normalisation
     # ------------------------------------------------------------------
     def _ingest_order_snapshot(self, row: object, *, source: str) -> OrderState | None:
         broker_id = str(getattr(row, "order_id", "") or "")
         client_id = self._client_id_for_snapshot(row, broker_id)
         if not client_id:
-            # Do not invent a QuantAgent identity for unrelated manual/QMT
-            # orders.  They remain visible to account-level reconciliation but
-            # cannot be merged into this process' canonical order chain.
-            self._write_audit(
-                "unowned_broker_order",
-                {"broker_order_id": broker_id, "source": source},
-            )
+            remark = str(getattr(row, "order_remark", "") or "")
+            if self._is_owned_remark(remark):
+                self._unresolved_owned_remarks.add(remark)
+                self._write_audit(
+                    "owned_broker_order_identity_unresolved",
+                    {"broker_order_id": broker_id, "order_remark": remark, "source": source},
+                )
+            else:
+                # Manual/unrelated orders remain visible to account-level
+                # reconciliation but never get invented into QuantAgent identity.
+                self._write_audit(
+                    "unowned_broker_order",
+                    {"broker_order_id": broker_id, "order_remark": remark, "source": source},
+                )
             return None
         if broker_id:
             self._broker_to_client[broker_id] = client_id
@@ -530,9 +623,9 @@ class QMTGateway(BrokerBase):
             fill_quantity=_int_attr(row, "traded_volume", "fill_volume", default=0),
             fill_price=_float_attr(row, "traded_price", "price", default=0.0),
             fill_time=str(getattr(row, "traded_time", getattr(row, "trade_time", _utc_now()))),
-            # XtQuant trade callbacks do not expose the final broker statement
-            # fee breakdown consistently.  Keep zero here and reconcile fees
-            # from the canonical execution/cash ledger instead of fabricating.
+            # QMT trade callbacks do not expose a universally authoritative final
+            # statement fee breakdown. Keep zero here and reconcile the actual
+            # broker statement/cash ledger rather than fabricating charges.
             commission=0.0,
             stamp_duty=0.0,
             transfer_fee=0.0,
@@ -561,13 +654,10 @@ class QMTGateway(BrokerBase):
         if broker_id and broker_id in self._broker_to_client:
             return self._broker_to_client[broker_id]
         remark = str(getattr(row, "order_remark", "") or "")
-        prefix = f"{self.config.order_remark_prefix}:"
-        if remark.startswith(prefix) and len(remark) > len(prefix):
-            return remark[len(prefix):]
-        return None
+        return self._remark_to_client.get(remark)
 
     def _encode_remark(self, client_order_id: str) -> str:
-        return f"{self.config.order_remark_prefix}:{client_order_id}"
+        return self._register_client_identity(client_order_id)
 
     def _map_broker_status(self, status: object) -> OrderStatus:
         c = self._xt_const
@@ -622,12 +712,7 @@ class QMTGateway(BrokerBase):
 
     @staticmethod
     def map_status(qmt_status: int) -> OrderStatus:
-        """Legacy numeric fallback for older xtquant status encodings.
-
-        Live mode prefers symbolic ``xtconstant.ORDER_*`` values through
-        ``_map_broker_status`` so a library release can change numeric encodings
-        without silently changing QuantAgent semantics.
-        """
+        """Legacy numeric fallback for older xtquant status encodings."""
         return {
             48: OrderStatus.PENDING,
             49: OrderStatus.SUBMITTED,
