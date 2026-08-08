@@ -2,7 +2,7 @@
 
 Schema v1 remains readable for forensic and explicitly BLOCKED manifests, but
 it is not a production trust root: all of its acceptance fields live in one
-editable JSON object.  Production acceptance therefore requires schema v2,
+editable JSON object. Production acceptance therefore requires schema v2,
 whose claims are re-derived from SHA-256-bound governed artifacts by
 ``live_model_trust_v2``.
 """
@@ -66,6 +66,16 @@ def evaluate_live_model_trust(
             reasons=("model_trust_manifest_missing",),
         )
     path = Path(manifest_path)
+    # The root certificate is itself part of the trust boundary.  Artifact
+    # bindings already reject symlink substitution; allowing the manifest to be
+    # replaced by a symlink would make the outermost trust object weaker than
+    # every artifact it indexes.
+    if path.is_symlink():
+        return _report(
+            manifest_path=str(path),
+            payload={},
+            reasons=("model_trust_manifest_symlink_not_allowed",),
+        )
     if not path.exists() or not path.is_file():
         return _report(
             manifest_path=str(path),
@@ -109,7 +119,7 @@ def evaluate_live_model_trust(
         )
         reasons = list(verification.reasons)
         # The v2 policy is deliberately fixed to the canonical trusted evaluator
-        # semantics.  A caller requesting anything else cannot silently weaken or
+        # semantics. A caller requesting anything else cannot silently weaken or
         # fork the trust policy.
         if required_metric_semantics != REQUIRED_METRIC_SEMANTICS:
             reasons.append(
@@ -130,7 +140,7 @@ def evaluate_live_model_trust(
             reasons=(f"model_trust_schema_version_unsupported:{schema_version}",),
         )
 
-    # Legacy schema v1.  Preserve detailed diagnostics for the current blocked
+    # Legacy schema v1. Preserve detailed diagnostics for the current blocked
     # repository manifest, but make production acceptance impossible regardless
     # of how its scalar fields are edited.
     reasons = _legacy_v1_reasons(
