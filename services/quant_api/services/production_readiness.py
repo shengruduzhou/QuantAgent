@@ -1,9 +1,9 @@
 """Read-only production-readiness truth for the operator Governance surface.
 
-This service deliberately does not connect to a broker, instantiate a fresh
-KillSwitch, or infer runtime certification from code existence.  It only reads
-machine evidence from fixed repository/runtime locations and verifies the
-existing model-trust certificate.  Missing evidence remains non-green.
+The service never connects to a broker, probes QMT, instantiates a fresh
+KillSwitch, or infers certification from code existence. It reads only fixed
+repository/runtime evidence and verifies the existing model-trust certificate.
+Missing or malformed evidence remains non-green.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ class ProductionReadinessService:
     RECONCILIATION_CERT = Path("certificates/reconciliation.json")
     HOST_CERT = Path("certificates/qmt_host_certification.json")
     KILL_SWITCH_STATE = Path("live/kill_switch_state.json")
+    KILL_SWITCH_SCHEMA_VERSION = 1
 
     def __init__(
         self,
@@ -73,6 +74,8 @@ class ProductionReadinessService:
         return {
             "schemaVersion": 1,
             "generatedAt": self._now().isoformat(),
+            # Deliberately absent as a decision. A green broker-query certificate
+            # must never hide a blocked model, reconciliation or product policy.
             "aggregateTradingReady": None,
             "aggregateStateSemantics": "intentionally_not_computed_show_all_dimensions",
             "cards": [card.to_dict() for card in cards],
@@ -81,26 +84,24 @@ class ProductionReadinessService:
     def _model_trust(self) -> ReadinessDimension:
         manifest = self.project_root / "configs/live_model_trust.json"
         report = evaluate_live_model_trust(manifest)
-        evidence = {
-            "modelId": report.model_id,
-            "certificateStatus": report.status,
-            "trustClass": report.trust_class,
-            "requiredMetricSemantics": REQUIRED_METRIC_SEMANTICS,
-            "observedMetricSemantics": report.evidence.get("strict_backtest_metric_semantics"),
-            "manifest": self._display_path(manifest),
-        }
         return ReadinessDimension(
             key="modelTrust",
             label="Model Trust",
             state="PASS" if report.ok else "BLOCKED",
             severity="ok" if report.ok else "blocked",
             reasons=tuple(report.reasons),
-            evidence=evidence,
+            evidence={
+                "modelId": report.model_id,
+                "certificateStatus": report.status,
+                "trustClass": report.trust_class,
+                "requiredMetricSemantics": REQUIRED_METRIC_SEMANTICS,
+                "observedMetricSemantics": report.evidence.get("strict_backtest_metric_semantics"),
+                "manifest": self._display_path(manifest),
+            },
         )
 
     def _broker_query_readiness(self) -> ReadinessDimension:
-        path = self.runtime_root / self.BROKER_QUERY_CERT
-        cert, error = self._read_json(path)
+        path, cert, error = self._read_runtime_json(self.BROKER_QUERY_CERT)
         if cert is None:
             return self._missing_or_invalid(
                 key="brokerQuery",
@@ -120,12 +121,11 @@ class ProductionReadinessService:
             )
         required_true = ("query_only_ready", "preflight_ok", "health_ok")
         failures = [name for name in required_true if cert.get(name) is not True]
-        ready = not failures
         return ReadinessDimension(
             key="brokerQuery",
             label="Broker Query Readiness",
-            state="READY" if ready else "BLOCKED",
-            severity="ok" if ready else "blocked",
+            state="READY" if not failures else "BLOCKED",
+            severity="ok" if not failures else "blocked",
             reasons=tuple(f"certificate_{name}_not_true" for name in failures),
             evidence={
                 "certificate": self._display_path(path),
@@ -158,8 +158,7 @@ class ProductionReadinessService:
         )
 
     def _kill_switch(self) -> ReadinessDimension:
-        path = self.runtime_root / self.KILL_SWITCH_STATE
-        payload, error = self._read_json(path)
+        path, payload, error = self._read_runtime_json(self.KILL_SWITCH_STATE)
         if payload is None:
             return self._missing_or_invalid(
                 key="killSwitch",
@@ -168,9 +167,18 @@ class ProductionReadinessService:
                 error=error,
                 missing_state="NOT_CONFIGURED",
             )
-        triggered = payload.get("triggered")
-        reasons = payload.get("reasons")
-        if not isinstance(triggered, bool) or not isinstance(reasons, list):
+
+        # Read the canonical durable KillSwitch schema. The persisted state does
+        # not contain a derived ``triggered`` field; reconstruct it from the two
+        # authoritative causes rather than requiring an invented duplicate value.
+        version = payload.get("version")
+        manual = payload.get("manual_triggered")
+        raw_reasons = payload.get("reasons")
+        if (
+            version != self.KILL_SWITCH_SCHEMA_VERSION
+            or not isinstance(manual, bool)
+            or not isinstance(raw_reasons, list)
+        ):
             return ReadinessDimension(
                 key="killSwitch",
                 label="KillSwitch",
@@ -179,22 +187,23 @@ class ProductionReadinessService:
                 reasons=("kill_switch_state_schema_invalid",),
                 evidence={"stateFile": self._display_path(path)},
             )
-        clean_reasons = tuple(str(item) for item in reasons if str(item).strip())
+        reasons = tuple(str(item).strip() for item in raw_reasons if str(item).strip())
+        triggered = bool(manual or reasons)
         return ReadinessDimension(
             key="killSwitch",
             label="KillSwitch",
             state="KILLED" if triggered else "CLEAR",
             severity="blocked" if triggered else "ok",
-            reasons=clean_reasons if triggered else (),
+            reasons=reasons if triggered else (),
             evidence={
                 "stateFile": self._display_path(path),
-                "updatedAt": payload.get("updated_at"),
+                "stateVersion": version,
+                "manualTriggered": manual,
             },
         )
 
     def _reconciliation(self) -> ReadinessDimension:
-        path = self.runtime_root / self.RECONCILIATION_CERT
-        cert, error = self._read_json(path)
+        path, cert, error = self._read_runtime_json(self.RECONCILIATION_CERT)
         if cert is None:
             return self._missing_or_invalid(
                 key="reconciliation",
@@ -218,14 +227,14 @@ class ProductionReadinessService:
             "unexplained_position_differences",
             "unexplained_cash_differences",
         )
-        invalid_fields = [name for name in fields if not self._nonnegative_int(cert.get(name))]
-        if invalid_fields:
+        invalid = [name for name in fields if not self._nonnegative_int(cert.get(name))]
+        if invalid:
             return ReadinessDimension(
                 key="reconciliation",
                 label="Reconciliation",
                 state="INVALID",
                 severity="blocked",
-                reasons=tuple(f"invalid_{name}" for name in invalid_fields),
+                reasons=tuple(f"invalid_{name}" for name in invalid),
                 evidence={"certificate": self._display_path(path)},
             )
         mismatches = {name: int(cert[name]) for name in fields}
@@ -233,7 +242,7 @@ class ProductionReadinessService:
         reasons: list[str] = []
         if cert.get("complete") is not True:
             reasons.append("reconciliation_not_complete")
-        reasons.extend(f"{name}:{value}" for name, value in mismatches.items() if value != 0)
+        reasons.extend(f"{name}:{value}" for name, value in mismatches.items() if value)
         return ReadinessDimension(
             key="reconciliation",
             label="Reconciliation",
@@ -266,8 +275,8 @@ class ProductionReadinessService:
         )
 
     def _host_certification(self) -> ReadinessDimension:
-        path = self.runtime_root / self.HOST_CERT
-        cert, error = self._read_json(path)
+        path, cert, error = self._read_runtime_json(self.HOST_CERT)
+        extra = {"portableContractIsNotHostCertification": True}
         if cert is None:
             return self._missing_or_invalid(
                 key="hostCertification",
@@ -275,7 +284,7 @@ class ProductionReadinessService:
                 path=path,
                 error=error,
                 missing_state="NOT_CERTIFIED",
-                extra={"portableContractIsNotHostCertification": True},
+                extra=extra,
             )
         temporal = self._certificate_time_state(cert)
         if temporal is not None:
@@ -285,7 +294,7 @@ class ProductionReadinessService:
                 path=path,
                 cert=cert,
                 temporal=temporal,
-                extra={"portableContractIsNotHostCertification": True},
+                extra=extra,
             )
         platform = str(cert.get("platform") or "").strip().lower()
         broker = str(cert.get("broker") or "").strip().lower()
@@ -314,9 +323,41 @@ class ProductionReadinessService:
                 "platform": cert.get("platform"),
                 "broker": cert.get("broker"),
                 "validUntil": cert.get("valid_until"),
-                "portableContractIsNotHostCertification": True,
+                **extra,
             },
         )
+
+    def _read_runtime_json(
+        self,
+        relative_path: Path,
+    ) -> tuple[Path, dict[str, Any] | None, str | None]:
+        """Read a fixed runtime artifact without allowing symlink/path substitution."""
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            return self.runtime_root, None, "invalid_relative_path"
+        candidate = self.runtime_root / relative_path
+
+        # Reject a symlink at any existing path component. Otherwise a fixed
+        # certificate name can silently be redirected after review.
+        current = self.runtime_root
+        for part in relative_path.parts:
+            current = current / part
+            if current.is_symlink():
+                return candidate, None, "symlink_not_allowed"
+
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(self.runtime_root)
+        except (OSError, ValueError):
+            return candidate, None, "path_outside_runtime"
+        if not candidate.exists() or not candidate.is_file():
+            return candidate, None, "not_found"
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 - corruption is operator evidence
+            return candidate, None, type(exc).__name__
+        if not isinstance(payload, dict):
+            return candidate, None, "not_object"
+        return candidate, payload, None
 
     def _certificate_time_state(self, cert: dict[str, Any]) -> tuple[str, str] | None:
         raw = cert.get("valid_until")
@@ -375,23 +416,9 @@ class ProductionReadinessService:
             label=label,
             state=missing_state if missing else "INVALID",
             severity="unknown" if missing else "blocked",
-            reasons=(
-                f"runtime_evidence_{'missing' if missing else 'invalid'}:{error or 'unknown'}",
-            ),
+            reasons=(f"runtime_evidence_{'missing' if missing else 'invalid'}:{error or 'unknown'}",),
             evidence=evidence,
         )
-
-    @staticmethod
-    def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-        if not path.exists() or not path.is_file():
-            return None, "not_found"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001 — corruption is operator evidence
-            return None, f"{type(exc).__name__}"
-        if not isinstance(payload, dict):
-            return None, "not_object"
-        return payload, None
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime | None:
@@ -411,13 +438,13 @@ class ProductionReadinessService:
         return now.astimezone(timezone.utc)
 
     def _display_path(self, path: Path) -> str:
-        resolved = path.resolve()
-        for root, prefix in ((self.project_root, "repo"), (self.runtime_root, "runtime")):
+        resolved = path.resolve(strict=False)
+        for root, prefix in ((self.runtime_root, "runtime"), (self.project_root, "repo")):
             try:
                 return f"{prefix}/{resolved.relative_to(root)}"
             except ValueError:
                 continue
-        return resolved.name
+        return path.name
 
     @staticmethod
     def _nonnegative_int(value: object) -> bool:
