@@ -174,7 +174,7 @@ def test_tracking_error_limit_requires_aligned_overlap_and_benchmark_metadata() 
     idx = pd.date_range("2026-01-01", periods=4, freq="B")
     snapshot = _snapshot(
         weights,
-        portfolio_returns=pd.Series([0.02, 0.02, 0.02, 0.02], index=idx),
+        portfolio_returns=pd.Series([0.02, 0.01, -0.01, 0.03], index=idx),
         benchmark_returns=pd.Series([0.00, 0.00, 0.00, 0.00], index=idx),
         min_tracking_overlap=3,
     )
