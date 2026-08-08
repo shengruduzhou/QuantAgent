@@ -21,7 +21,7 @@ const Models = lazy(() => import("../../pages/ModelLabPage").then((module) => ({
 const Risk = lazy(() => import("../../pages/RiskCenterPage").then((module) => ({ default: module.RiskCenterPage })));
 const Runtime = lazy(() => import("../../pages/RuntimeExplorerPage").then((module) => ({ default: module.RuntimeExplorerPage })));
 const Parity = lazy(() => import("../../pages/VnpyParityPage").then((module) => ({ default: module.VnpyParityPage })));
-const Governance = lazy(() => import("../governance/GovernancePage").then((module) => ({ default: module.GovernancePage })));
+const Governance = lazy(() => import("../governance/GovernanceOperatorPage").then((module) => ({ default: module.GovernanceOperatorPage })));
 const Reports = lazy(() => import("../../pages/ReportsPage").then((module) => ({ default: module.ReportsPage })));
 const Settings = lazy(() => import("../../pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const Help = lazy(() => import("../../pages/HelpCenterPage").then((module) => ({ default: module.HelpCenterPage })));
