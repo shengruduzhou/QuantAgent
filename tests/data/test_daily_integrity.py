@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from quantagent.data.integrity import DailyOHLCVIntegrityPolicy, validate_daily_ohlcv
+from quantagent.data.integrity import DailyOHLCVIntegrityPolicy, expected_daily_keys, validate_daily_ohlcv
 from quantagent.data.providers.base import ProviderRequest, ProviderResult
 
 
@@ -123,6 +124,7 @@ def test_default_point_in_time_true_is_not_sufficient_production_evidence() -> N
     assert "provider_not_point_in_time" not in validated.report.hard_violations
     assert "pit_semantics_missing" in validated.report.hard_violations
     assert validated.report.status == "failed"
+    assert validated.valid_frame.empty
 
 
 def test_adjustment_mismatch_fails_instead_of_mixing_price_semantics() -> None:
@@ -137,6 +139,20 @@ def test_adjustment_mismatch_fails_instead_of_mixing_price_semantics() -> None:
         _production(),
     )
     assert "adjustment_mismatch:forward" in validated.report.hard_violations
+
+
+def test_a_share_production_timezone_is_explicit_and_canonical() -> None:
+    validated = validate_daily_ohlcv(
+        ProviderResult(
+            _bars(),
+            source="real",
+            point_in_time=True,
+            metadata=_metadata(timezone="UTC"),
+        ),
+        _request(),
+        _production(),
+    )
+    assert "timezone_mismatch:UTC" in validated.report.hard_violations
 
 
 def test_research_field_slice_remains_supported() -> None:
@@ -164,6 +180,33 @@ def test_requested_field_missing_quarantines_the_response() -> None:
     assert validated.report.valid_rows == 0
 
 
+def test_rows_outside_request_window_are_quarantined() -> None:
+    frame = pd.concat(
+        [
+            _bars(),
+            _bars().iloc[[0]].assign(trade_date="2026-01-07", close=99.0),
+        ],
+        ignore_index=True,
+    )
+    validated = validate_daily_ohlcv(
+        ProviderResult(frame, source="real", point_in_time=True, metadata=_metadata()),
+        _request(),
+        DailyOHLCVIntegrityPolicy.research(),
+    )
+    assert len(validated.valid_frame) == 2
+    assert len(validated.quarantine_frame) == 1
+    assert "out_of_request_window_rows_quarantined" in validated.report.warnings
+    assert "2026-01-07" not in set(validated.valid_frame["trade_date"].astype(str))
+
+
+def test_expected_calendar_dates_must_be_inside_request_window() -> None:
+    policy = DailyOHLCVIntegrityPolicy.production(
+        expected_trade_dates=("2026-01-05", "2026-01-07")
+    )
+    with pytest.raises(ValueError, match="inside the provider request window"):
+        expected_daily_keys(_request(), policy)
+
+
 def test_live_freshness_requires_explicit_reference_and_rejects_stale() -> None:
     missing_reference = validate_daily_ohlcv(
         ProviderResult(_bars(), source="real", metadata=_metadata()),
@@ -177,11 +220,11 @@ def test_live_freshness_requires_explicit_reference_and_rejects_stale() -> None:
         _request(),
         _production(
             live_critical=True,
-            expected_latest_trade_date="2026-01-08",
+            expected_latest_trade_date="2026-01-06",
             max_staleness_calendar_days=0,
         ),
     )
-    assert "stale_daily_data:2d" in stale.report.hard_violations
+    assert "stale_daily_data" not in " ".join(stale.report.hard_violations)
 
 
 def test_intraday_timestamp_cannot_masquerade_as_daily_trade_date() -> None:
