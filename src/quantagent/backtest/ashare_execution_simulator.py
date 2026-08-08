@@ -1,67 +1,69 @@
-"""Production-grade A-share execution simulation around target_weights and OrderManager."""
+"""Strict A-share cash-account execution simulator facade.
+
+The historical implementation is retained in
+``ashare_execution_simulator_impl.py``.  This facade makes one broker capability
+explicit: the simulator models a long-only cash stock account and therefore
+cannot establish a negative stock position.
+
+Research code may still construct hypothetical long-short weights, but those
+weights must not silently pass through a cash-account simulator where the short
+orders are rejected one-by-one and the remaining long leg is then mistaken for
+the intended market-neutral strategy.
+"""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-import json
-from pathlib import Path
+from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 
-from quantagent.config.paths import quant_paths
-from quantagent.execution.fill_simulator import FillSimulator
-from quantagent.domain.lineage import Lineage
-from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
-from quantagent.execution.virtual_broker import VirtualBroker
+from quantagent.backtest import ashare_execution_simulator_impl as _impl
 
 
-@dataclass(frozen=True)
-class AShareExecutionSimulationConfig:
-    initial_cash: float = 1_000_000.0
-    lot_size: int = 100
-    min_order_value_yuan: float = 100.0
-    allow_odd_lot_sell_only_for_full_liquidation: bool = True
-    volume_participation_cap: float = 0.10
-    slippage_bps: float = 8.0
-    block_st_buy: bool = True
-    max_st_weight: float = 0.0
-    audit_log_dir: str | None = None
-    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md): PROMOTED to trusted-evaluator
-    # default 2026-07-06 with user approval (all pre-INC-E1 numbers re-run under
-    # the corrected simulator). When True (default): reset per-symbol order
-    # counters each simulated day AND stamp orders with a per-day signal_id so a
-    # later-day repeat (symbol, side) is no longer silently deduped against the
-    # never-cleared history -- each symbol can now re-trade across days as a live
-    # book would. Set False ONLY to reproduce the legacy pre-INC-E1 (buggy)
-    # simulator for forensic comparison against stamped pre-INC-E1 artifacts.
-    # Live-trading idempotency (OrderManager.reconcile default signal_id="manual",
-    # same-day retry -> same id) is unaffected either way.
-    fix_cross_day_order_dedup: bool = True
+STRICT_CASH_ACCOUNT_SEMANTICS = "ashare_cash_long_only_v1_no_naked_stock_short"
+
+AShareExecutionSimulationConfig = _impl.AShareExecutionSimulationConfig
+AShareExecutionSimulationResult = _impl.AShareExecutionSimulationResult
 
 
-@dataclass(frozen=True)
-class AShareExecutionSimulationResult:
-    nav: pd.Series
-    order_audit: pd.DataFrame
-    position_history: pd.DataFrame
-    failed_order_audit: pd.DataFrame
-    skipped_order_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
-    risk_events: list[dict] = field(default_factory=list)
-    config: dict[str, object] = field(default_factory=dict)
+class UnsupportedStockShortError(ValueError):
+    """Raised when cash-account target weights require a negative stock position."""
 
-    def write_risk_events(self, path: str | Path) -> Path:
-        """Write the per-day risk_events list to a JSON file.
 
-        Spec section 9 requires ``risk_events.json`` alongside the
-        other backtest outputs. The file is rewritten on every call;
-        callers wanting append semantics should merge externally.
-        """
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(self.risk_events, indent=2, default=str), encoding="utf-8"
-        )
-        return target
+def validate_cash_account_target_weights(
+    target_weight_history: pd.DataFrame | None,
+    *,
+    tolerance: float = 1e-12,
+) -> None:
+    """Fail closed if final stock targets require naked short positions.
+
+    Zero targets remain valid and may liquidate an existing long position in an
+    execution engine that carries holdings.  A negative *final* stock weight is
+    different: it requires an explicit securities-lending/margin capability,
+    borrow inventory and financing/recall economics that this simulator does not
+    model.
+    """
+    if target_weight_history is None or target_weight_history.empty:
+        return
+    numeric = target_weight_history.apply(pd.to_numeric, errors="coerce")
+    negative = numeric < -abs(float(tolerance))
+    if not bool(negative.to_numpy().any()):
+        return
+    locations = np.argwhere(negative.to_numpy())
+    samples: list[str] = []
+    for row_idx, col_idx in locations[:5]:
+        date = target_weight_history.index[int(row_idx)]
+        symbol = target_weight_history.columns[int(col_idx)]
+        value = numeric.iat[int(row_idx), int(col_idx)]
+        samples.append(f"{pd.Timestamp(date).date()}:{symbol}={float(value):.6g}")
+    suffix = ", ".join(samples)
+    raise UnsupportedStockShortError(
+        "strict A-share cash-account simulation cannot establish negative stock "
+        "weights; use an explicit securities-lending/margin simulator with "
+        "borrow inventory/fees/recall rules or a separately modelled index-futures "
+        f"hedge. offending targets: {suffix}"
+    )
 
 
 def simulate_ashare_target_weights(
@@ -69,196 +71,29 @@ def simulate_ashare_target_weights(
     market_panel: pd.DataFrame,
     config: AShareExecutionSimulationConfig | None = None,
 ) -> AShareExecutionSimulationResult:
-    config = config or AShareExecutionSimulationConfig()
-    audit_log_dir = config.audit_log_dir or str(quant_paths().logs / "v7_backtest")
-    if target_weight_history is None or target_weight_history.empty:
-        return AShareExecutionSimulationResult(pd.Series(dtype=float), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), asdict(config))
-    market = market_panel.copy()
-    market["trade_date"] = pd.to_datetime(market["trade_date"], errors="coerce")
-    market = market.dropna(subset=["trade_date", "symbol"]).sort_values(["trade_date", "symbol"])
-    target = target_weight_history.copy()
-    target.index = pd.to_datetime(target.index, errors="coerce")
-    target = target[~target.index.isna()].sort_index()
-
-    broker = VirtualBroker(
-        initial_cash=config.initial_cash,
-        dry_run=True,
-        audit_log_dir=audit_log_dir,
-        fill_simulator=FillSimulator(
-            participation_rate=config.volume_participation_cap,
-            slippage_bps=config.slippage_bps,
-        ),
+    validate_cash_account_target_weights(target_weight_history)
+    result = _impl.simulate_ashare_target_weights(
+        target_weight_history,
+        market_panel,
+        config,
     )
-    manager = OrderManager(
-        broker=broker,
-        # Economic submission requires canonical lineage; the simulator is a
-        # real order path and supplies a run identity per simulation.
-        lineage=Lineage(run_id=f"ashare_sim_{id(config):x}", strategy_version_id="v7_ashare_simulation"),
-        forensic_replay=not config.fix_cross_day_order_dedup,
-        config=OrderManagerConfig(
-            lot_size=config.lot_size,
-            min_order_value_yuan=config.min_order_value_yuan,
-            allow_odd_lot_sell_only_for_full_liquidation=config.allow_odd_lot_sell_only_for_full_liquidation,
-            max_participation_rate=config.volume_participation_cap,
-            strategy_version="v7_ashare_simulation",
-        ),
-    )
-    nav_rows: list[tuple[pd.Timestamp, float]] = []
-    order_rows: list[dict[str, object]] = []
-    skipped_rows: list[dict[str, object]] = []
-    position_rows: list[dict[str, object]] = []
-    risk_events: list[dict[str, object]] = []
-
-    for date, weights in target.iterrows():
-        day_market = market[market["trade_date"] == date]
-        if day_market.empty:
-            continue
-        broker.advance_trading_day()
-        if config.fix_cross_day_order_dedup:
-            manager.reset_daily_counters()
-        broker.set_market_state(day_market.to_dict("records"))
-        prices = pd.to_numeric(day_market.set_index("symbol")["close"], errors="coerce")
-        invalid_price_symbols = set(prices[prices.isna() | (prices <= 0)].index.astype(str))
-        if invalid_price_symbols:
-            active_invalid_symbols = invalid_price_symbols & set(weights[weights.astype(float).abs() > 0].index.astype(str))
-            for symbol in sorted(active_invalid_symbols):
-                skipped_rows.append(
-                    {
-                        "trade_date": date,
-                        "symbol": symbol,
-                        "side": "buy",
-                        "quantity": 0,
-                        "target_weight": float(weights.get(symbol, 0.0)),
-                        "reference_price": 0.0,
-                        "reason": "skipped_invalid_price",
-                        "delta_value": 0.0,
-                        "timestamp": str(date),
-                    }
-                )
-        prices = prices.dropna()
-        prices = prices[prices > 0]
-        if prices.empty:
-            continue
-        current_weights = _current_weights(broker, prices)
-        adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
-        nav = _mark_to_market_nav(broker, prices)
-        day_signal_id = (
-            f"bt-{pd.Timestamp(date):%Y%m%d}"
-            if config.fix_cross_day_order_dedup
-            else "manual"
-        )
-        states = manager.reconcile(adjusted, prices, nav, signal_id=day_signal_id)
-        for skipped in manager.last_skipped_orders:
-            skipped_rows.append({"trade_date": date, **skipped})
-        for state in states:
-            order = broker.order_objects.get(state.client_order_id)
-            row = {
-                "trade_date": date,
-                "client_order_id": state.client_order_id,
-                "status": state.status.value,
-                "filled_quantity": state.filled_quantity,
-                "avg_price": state.avg_price,
-                "last_message": state.last_message,
-            }
-            if order is not None:
-                row |= {
-                    "symbol": order.symbol,
-                    "side": order.side.value,
-                    "quantity": order.quantity,
-                    "reference_price": order.price,
-                }
-            order_rows.append(row)
-            # Spec section 9 — surface any non-OK status as a risk_event
-            if state.status.value in ("rejected", "cancelled", "partial"):
-                risk_events.append(
-                    {
-                        "trade_date": str(date),
-                        "event_type": f"order_{state.status.value}",
-                        "client_order_id": state.client_order_id,
-                        "symbol": getattr(order, "symbol", None) if order else None,
-                        "reason": state.last_message,
-                        "filled_quantity": state.filled_quantity,
-                    }
-                )
-        # Skipped orders are also risk-relevant events
-        for skipped in manager.last_skipped_orders:
-            risk_events.append(
-                {
-                    "trade_date": str(date),
-                    "event_type": "order_skipped",
-                    "symbol": skipped.get("symbol"),
-                    "side": skipped.get("side"),
-                    "reason": skipped.get("reason"),
-                    "target_weight": skipped.get("target_weight"),
-                }
-            )
-        nav_after = _mark_to_market_nav(broker, prices)
-        nav_rows.append((date, nav_after))
-        for position in broker.query_positions():
-            price = _position_price(position, prices)
-            position_rows.append(
-                {
-                    "trade_date": date,
-                    "symbol": position.symbol,
-                    "available_shares": position.available_shares,
-                    "frozen_shares": position.frozen_shares,
-                    "market_value": (position.available_shares + position.frozen_shares) * price,
-                }
-            )
-
-    order_audit = pd.DataFrame(order_rows)
-    failed = order_audit[order_audit["status"].isin(["rejected", "cancelled"])] if not order_audit.empty else pd.DataFrame()
-    return AShareExecutionSimulationResult(
-        nav=pd.Series(dict(nav_rows), name="nav").sort_index(),
-        order_audit=order_audit,
-        position_history=pd.DataFrame(position_rows),
-        failed_order_audit=failed.reset_index(drop=True),
-        skipped_order_audit=pd.DataFrame(skipped_rows),
-        risk_events=risk_events,
-        config=asdict(config),
-    )
+    metadata = dict(result.config or {})
+    metadata["stock_shorting_capability"] = "cash_long_only"
+    metadata["execution_semantics_version"] = STRICT_CASH_ACCOUNT_SEMANTICS
+    return replace(result, config=metadata)
 
 
-def _current_weights(broker: VirtualBroker, prices: pd.Series) -> pd.Series:
-    positions = broker.query_positions()
-    nav = _mark_to_market_nav(broker, prices)
-    values = {
-        position.symbol: (position.available_shares + position.frozen_shares) * _position_price(position, prices)
-        for position in positions
-    }
-    return pd.Series(values, dtype=float).div(nav).fillna(0.0) if nav > 0 else pd.Series(dtype=float)
+def __getattr__(name: str):
+    # Preserve compatibility for private forensic helpers while keeping the
+    # public simulator boundary governed above.
+    return getattr(_impl, name)
 
 
-def _mark_to_market_nav(broker: VirtualBroker, prices: pd.Series) -> float:
-    cash = float(broker.ledger.cash)
-    value = 0.0
-    for position in broker.query_positions():
-        shares = position.available_shares + position.frozen_shares
-        value += shares * _position_price(position, prices)
-    return cash + value
-
-
-def _position_price(position: object, prices: pd.Series) -> float:
-    fallback = float(getattr(position, "avg_cost", 0.0))
-    price_value = prices.get(getattr(position, "symbol", ""), fallback)
-    return fallback if pd.isna(price_value) else float(price_value)
-
-
-def _apply_st_policy(
-    target_weights: pd.Series,
-    current_weights: pd.Series,
-    day_market: pd.DataFrame,
-    config: AShareExecutionSimulationConfig,
-) -> pd.Series:
-    if "is_st" not in day_market.columns:
-        return target_weights
-    st_symbols = set(day_market.loc[day_market["is_st"].fillna(False).astype(bool), "symbol"].astype(str))
-    adjusted = target_weights.copy()
-    for symbol in st_symbols:
-        current = float(current_weights.get(symbol, 0.0))
-        desired = float(adjusted.get(symbol, 0.0))
-        if config.block_st_buy and desired > current:
-            adjusted.loc[symbol] = current
-        if config.max_st_weight >= 0 and desired > config.max_st_weight:
-            adjusted.loc[symbol] = min(float(adjusted.get(symbol, 0.0)), max(current, config.max_st_weight))
-    return adjusted
+__all__ = [
+    "STRICT_CASH_ACCOUNT_SEMANTICS",
+    "UnsupportedStockShortError",
+    "AShareExecutionSimulationConfig",
+    "AShareExecutionSimulationResult",
+    "validate_cash_account_target_weights",
+    "simulate_ashare_target_weights",
+]
