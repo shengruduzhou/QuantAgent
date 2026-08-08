@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -7,11 +8,17 @@ import pytest
 
 from quantagent.execution.live_model_trust import evaluate_live_model_trust
 from quantagent.execution.live_model_trust_v2 import (
+    PROVENANCE_ASSURANCE,
     REQUIRED_ARTIFACT_ROLES,
     REQUIRED_METRIC_SEMANTICS,
     REQUIRED_TRAINER_OBJECTIVE_SEMANTICS,
     issue_live_model_trust_v2,
     sha256_file,
+)
+from quantagent.execution.trusted_backtest_semantics import (
+    TRUSTED_EXECUTION_SEMANTICS,
+    trusted_cost_model_config,
+    trusted_simulation_config,
 )
 from quantagent.training.semantics import FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VERSION
 
@@ -19,6 +26,7 @@ from quantagent.training.semantics import FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VER
 MODEL_ID = "ft-fresh-2026-v2"
 SOURCE_COMMIT = "a" * 40
 WINDOW_ID = "fresh-2026-02-01_2026-08-01"
+CANDIDATE_FAMILY = ["linear_control", "ft_transformer"]
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -30,7 +38,19 @@ def _common() -> dict[str, object]:
     return {"schema_version": 1, "model_id": MODEL_ID, "source_commit": SOURCE_COMMIT}
 
 
-def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tuple[str, str]], dict[str, Path]]:
+def _trial_ledger(count: int = 50) -> list[dict[str, str]]:
+    return [
+        {
+            "trial_id": f"trial-{idx:03d}",
+            "candidate": CANDIDATE_FAMILY[idx % len(CANDIDATE_FAMILY)],
+        }
+        for idx in range(count)
+    ]
+
+
+def _build_evidence(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, Path], dict[str, tuple[str, str]], dict[str, Path]]:
     root = tmp_path / "evidence"
     root.mkdir(parents=True, exist_ok=True)
     files = {role: root / f"{role}.json" for role in REQUIRED_ARTIFACT_ROLES}
@@ -39,7 +59,10 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
     files["fresh_oos_predictions"] = root / "fresh_oos_predictions.csv"
 
     files["model_checkpoint"].write_bytes(b"governed-ft-checkpoint-v2\x00\x01")
-    files["statistical_returns"].write_text("trade_date,return\n2026-02-02,0.001\n", encoding="utf-8")
+    files["statistical_returns"].write_text(
+        "trade_date,return\n2026-02-02,0.001\n",
+        encoding="utf-8",
+    )
     files["fresh_oos_predictions"].write_text(
         "trade_date,symbol,prediction\n2026-02-02,600000.SH,0.01\n",
         encoding="utf-8",
@@ -64,6 +87,8 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
         | {
             "selection_pre_registered": True,
             "registered_at": "2026-01-15T00:00:00+00:00",
+            "candidate_family": CANDIDATE_FAMILY,
+            "max_search_trials": 50,
             "acceptance_window_id": WINDOW_ID,
             "acceptance_start_date": "2026-02-01",
             "acceptance_end_date": "2026-08-01",
@@ -74,7 +99,9 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
         _common()
         | {
             "trial_count": 50,
-            "candidate_family": ["linear_control", "ft_transformer"],
+            "candidate_family": CANDIDATE_FAMILY,
+            "trials": _trial_ledger(),
+            "completed_at": "2026-01-20T00:00:00+00:00",
             "final_holdout_used_for_selection": False,
             "selection_frozen_before_fresh_oos": True,
         },
@@ -94,10 +121,14 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
         _common()
         | {
             "metric_semantics": REQUIRED_METRIC_SEMANTICS,
+            "execution_semantics": TRUSTED_EXECUTION_SEMANTICS,
             "t_plus_one": True,
             "costs_included": True,
+            "simulation_config": trusted_simulation_config(),
+            "cost_model_config": trusted_cost_model_config(),
             "benchmark_excess_positive": True,
             "variant_c_passed": True,
+            "checkpoint_sha256": checkpoint_sha,
             "daily_returns_sha256": returns_sha,
         },
     )
@@ -109,7 +140,7 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
             "dsr_probability": 0.97,
             "spa_p_value": 0.02,
             "trial_count": 50,
-            "candidate_family": ["linear_control", "ft_transformer"],
+            "candidate_family": CANDIDATE_FAMILY,
             "returns_sha256": returns_sha,
         },
     )
@@ -126,7 +157,15 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, tu
             "predictions_sha256": predictions_sha,
         },
     )
-    _write_json(files["risk_capacity"], _common() | {"passed": True})
+    _write_json(
+        files["risk_capacity"],
+        _common()
+        | {
+            "passed": True,
+            "checkpoint_sha256": checkpoint_sha,
+            "predictions_sha256": predictions_sha,
+        },
+    )
 
     locations = {
         role: ("bundle", files[role].relative_to(root).as_posix())
@@ -166,17 +205,18 @@ def test_valid_v2_real_artifact_bundle_passes(tmp_path: Path) -> None:
     manifest, _, _, _, roots, issued = _issue(tmp_path)
     assert issued.verification.ok is True
     payload = _read_manifest(manifest)
-    assert "evidence" not in payload  # display evidence is re-derived by the verifier
+    assert "evidence" not in payload
+    assert payload["provenance_assurance"] == PROVENANCE_ASSURANCE
 
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
     assert report.ok is True
     assert report.model_id == MODEL_ID
+    assert report.evidence["provenance_assurance"] == "hash_bound_unsigned_v1"
     assert report.evidence["fresh_oos_days"] == 130
     assert report.evidence["final_holdout_reads"] == 1
     assert report.evidence["trial_count"] == 50
-    assert report.evidence["artifact_sha256"]["model_checkpoint"] == sha256_file(
-        tmp_path / "evidence" / "model_checkpoint.pt"
-    )
+    assert report.evidence["pre_registered_max_search_trials"] == 50
+    assert report.evidence["execution_semantics"] == TRUSTED_EXECUTION_SEMANTICS
 
 
 def test_one_byte_artifact_tamper_invalidates_certificate(tmp_path: Path) -> None:
@@ -242,7 +282,21 @@ def test_rehashed_but_wrong_trainer_semantics_still_fails(tmp_path: Path) -> Non
     assert "trainer_manifest:objective_semantics_mismatch" in report.reasons
 
 
-def test_fresh_oos_days_and_one_shot_read_are_hard_gates(tmp_path: Path) -> None:
+def test_strict_backtest_execution_and_cost_parameters_are_exactly_bound(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+
+    def weaken(doc: dict) -> None:
+        doc["simulation_config"]["slippage_bps"] = 0.0
+        doc["cost_model_config"]["commission_rate"] = 0.0
+
+    _rewrite_and_rebind(manifest, "strict_backtest", files["strict_backtest"], weaken)
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert "strict_backtest:simulation_config_mismatch" in report.reasons
+    assert "strict_backtest:cost_model_config_mismatch" in report.reasons
+
+
+def test_fresh_oos_days_and_one_shot_read_are_hard_integer_gates(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
 
     def bad(doc: dict) -> None:
@@ -254,6 +308,35 @@ def test_fresh_oos_days_and_one_shot_read_are_hard_gates(tmp_path: Path) -> None
     assert report.ok is False
     assert any("trading_days_below_120" in reason for reason in report.reasons)
     assert any("final_holdout_reads_must_equal_1" in reason for reason in report.reasons)
+
+
+def test_fractional_trial_count_is_invalid_not_truncated(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    _rewrite_and_rebind(
+        manifest,
+        "search_ledger",
+        files["search_ledger"],
+        lambda doc: doc.__setitem__("trial_count", 1.7),
+    )
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert "search_ledger:trial_count_invalid" in report.reasons
+
+
+def test_probability_fields_reject_bool_negative_and_over_one(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+
+    def bad(doc: dict) -> None:
+        doc["pbo"] = -0.1
+        doc["dsr_probability"] = True
+        doc["spa_p_value"] = 1.2
+
+    _rewrite_and_rebind(manifest, "statistical_gates", files["statistical_gates"], bad)
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert any("statistical_gates:pbo" in reason for reason in report.reasons)
+    assert any("statistical_gates:dsr" in reason for reason in report.reasons)
+    assert any("statistical_gates:spa" in reason for reason in report.reasons)
 
 
 def test_statistical_thresholds_cannot_be_repackaged_as_pass(tmp_path: Path) -> None:
@@ -272,31 +355,70 @@ def test_statistical_thresholds_cannot_be_repackaged_as_pass(tmp_path: Path) -> 
     assert any("spa_above_0.05" in reason for reason in report.reasons)
 
 
-def test_trial_budget_and_candidate_family_are_bound_to_statistical_evidence(tmp_path: Path) -> None:
+def test_trial_budget_candidate_family_and_full_trial_ledger_are_bound(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
 
-    def bad(doc: dict) -> None:
+    def bad_stats(doc: dict) -> None:
         doc["trial_count"] = 2
         doc["candidate_family"] = ["ft_transformer"]
 
-    _rewrite_and_rebind(manifest, "statistical_gates", files["statistical_gates"], bad)
+    _rewrite_and_rebind(manifest, "statistical_gates", files["statistical_gates"], bad_stats)
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
     assert report.ok is False
     assert "statistical_gates:trial_count_mismatch_search_ledger" in report.reasons
     assert "statistical_gates:candidate_family_mismatch_search_ledger" in report.reasons
 
+    # Independently prove a ledger cannot merely claim N trials without listing them.
+    manifest, _, files, _, roots, _ = _issue(tmp_path / "ledger")
+    _rewrite_and_rebind(
+        manifest,
+        "search_ledger",
+        files["search_ledger"],
+        lambda doc: doc.__setitem__("trials", doc["trials"][:-1]),
+    )
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert "search_ledger:trials_length_mismatch_trial_count" in report.reasons
 
-def test_preregistration_must_name_the_exact_acceptance_window(tmp_path: Path) -> None:
+
+def test_search_cannot_exceed_pre_registered_budget(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
     _rewrite_and_rebind(
         manifest,
         "pre_registration",
         files["pre_registration"],
-        lambda doc: doc.__setitem__("acceptance_window_id", "chosen-after-looking"),
+        lambda doc: doc.__setitem__("max_search_trials", 10),
     )
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
     assert report.ok is False
+    assert "search_ledger:trial_count_exceeds_pre_registered_budget" in report.reasons
+
+
+def test_preregistration_must_name_exact_window_and_precede_it(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+
+    def bad(doc: dict) -> None:
+        doc["acceptance_window_id"] = "chosen-after-looking"
+        doc["registered_at"] = "2026-02-01T00:00:00+00:00"
+
+    _rewrite_and_rebind(manifest, "pre_registration", files["pre_registration"], bad)
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
     assert "pre_registration:acceptance_window_id_mismatch" in report.reasons
+    assert "pre_registration:registered_not_strictly_before_fresh_oos" in report.reasons
+
+
+def test_search_must_finish_before_fresh_window(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    _rewrite_and_rebind(
+        manifest,
+        "search_ledger",
+        files["search_ledger"],
+        lambda doc: doc.__setitem__("completed_at", "2026-02-01T00:00:00+00:00"),
+    )
+    report = evaluate_live_model_trust(manifest, artifact_roots=roots)
+    assert report.ok is False
+    assert "search_ledger:completed_not_strictly_before_fresh_oos" in report.reasons
 
 
 def test_training_or_validation_cutoff_cannot_enter_fresh_window(tmp_path: Path) -> None:
@@ -313,16 +435,31 @@ def test_training_or_validation_cutoff_cannot_enter_fresh_window(tmp_path: Path)
     assert any("data_lineage:validation_cutoff_not_before_fresh_oos" in r for r in report.reasons)
 
 
+def test_issuer_cannot_sign_before_fresh_window_has_finished(tmp_path: Path) -> None:
+    _, _, locations, roots = _build_evidence(tmp_path)
+    with pytest.raises(ValueError, match="v2 trust evidence rejected"):
+        issue_live_model_trust_v2(
+            tmp_path / "too-early.json",
+            model_id=MODEL_ID,
+            source_commit=SOURCE_COMMIT,
+            artifact_locations=locations,
+            artifact_roots=roots,
+            issued_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        )
+
+
 def test_certificate_cannot_weaken_verifier_policy(tmp_path: Path) -> None:
     manifest, _, _, _, roots, _ = _issue(tmp_path)
     payload = _read_manifest(manifest)
     payload["policy"]["max_pbo"] = 0.99
     payload["policy"]["min_fresh_oos_days"] = 1
+    payload["policy"]["simulation_config"]["slippage_bps"] = 0.0
     _write_json(manifest, payload)
     report = evaluate_live_model_trust(manifest, artifact_roots=roots)
     assert report.ok is False
     assert any("v2_policy_mismatch:max_pbo" in reason for reason in report.reasons)
     assert any("v2_policy_mismatch:min_fresh_oos_days" in reason for reason in report.reasons)
+    assert any("v2_policy_mismatch:simulation_config" in reason for reason in report.reasons)
 
 
 def test_issuer_refuses_incomplete_artifact_role_set(tmp_path: Path) -> None:
