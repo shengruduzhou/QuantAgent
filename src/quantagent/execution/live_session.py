@@ -8,8 +8,9 @@ contains no broker-submit call. Current product policy remains LIVE_DISABLED.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import secrets
 from typing import Any
 
 import pandas as pd
@@ -46,6 +47,7 @@ class LiveTargetAuthorization:
     risk_result: RiskGateResult
     readiness: LiveSessionReadiness
     target_fingerprint: str | None
+    session_token: str = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,10 @@ class LiveTradingSession:
         self.gateway = gateway
         self.risk_gate = risk_gate
         self.model_trust_manifest = Path(model_trust_manifest)
+        # Capability-style nonce: target authorisations are valid only inside the
+        # exact session instance that issued them. This prevents accidental or
+        # cross-session construction from bypassing the target-level gate.
+        self._target_authorization_token = secrets.token_hex(32)
 
     def readiness(self) -> LiveSessionReadiness:
         reasons: list[str] = []
@@ -165,6 +171,7 @@ class LiveTradingSession:
             risk_result=risk,
             readiness=readiness,
             target_fingerprint=None if risk_snapshot is None else risk_snapshot.target_fingerprint,
+            session_token=self._target_authorization_token,
         )
 
     def authorize_order(
@@ -186,6 +193,11 @@ class LiveTradingSession:
         target_ok = False
         if target_authorization is None:
             reasons.append("target_risk_authorization_missing")
+        elif not secrets.compare_digest(
+            target_authorization.session_token,
+            self._target_authorization_token,
+        ):
+            reasons.append("target_risk_session_mismatch")
         elif not target_authorization.allowed:
             reasons.append("target_risk_authorization_blocked")
         else:
