@@ -60,6 +60,8 @@ class TestOperatingModes:
         assert policy["liveTradingAvailable"] is False
         assert policy["liveTradingCertificate"] == "NOT_IMPLEMENTED_BY_POLICY"
         assert policy["banner"] == "LIVE TRADING: DISABLED BY POLICY"
+        assert policy["controlledBrokerAdapterPresent"] is True
+        assert policy["controlledBrokerAdapterArmed"] is False
 
 
 class TestLiveIntentRejection:
@@ -87,7 +89,6 @@ class TestLiveIntentRejection:
             om.reject_live_intent(f"call {api} for 600000.SH")
 
     def test_intent_is_found_in_nested_job_parameters(self):
-        """Intent can arrive in a nested parameter, not just a top-level prompt."""
         payload = {"command": "train", "params": {"notes": ["请帮我实盘下单"]}}
         with pytest.raises(om.LiveTradingRejected):
             om.reject_live_intent(payload)
@@ -97,7 +98,6 @@ class TestLiveIntentRejection:
             om.reject_live_intent({"实盘": True})
 
     def test_read_only_level2_order_feed_is_not_intent(self):
-        """l2order is a market-data feed; misreading it would block real research."""
         om.reject_live_intent({"period": "l2order", "symbols": ["600000.SH"]})
         om.reject_live_intent("read orderbook and order_flow features")
         om.reject_live_intent("write simulated_order to paper_order ledger")
@@ -115,14 +115,7 @@ class TestLiveIntentRejection:
 
 
 class TestControlledLiveOrderPathInSource:
-    """Static proof: broker APIs can only exist inside one audited adapter.
-
-    This keeps the original boundary useful after adding a low-level QMT
-    implementation.  Moving an order API into a service, strategy, agent, web
-    handler, or a second broker module remains a hard failure.  Expanding the
-    QMT adapter to a new broker API name also fails until this allowlist is
-    deliberately reviewed.
-    """
+    """Static proof: broker APIs can only exist inside one audited adapter."""
 
     BROKER_CALLS = {
         "order_stock", "order_stock_async", "cancel_order_stock",
@@ -168,9 +161,6 @@ class TestControlledLiveOrderPathInSource:
                 unexpected[path] = extras
         assert not unexpected, f"unaudited live order calls found: {unexpected}"
 
-        # The allowlist is not a wildcard exemption. If the adapter stops using
-        # one of these exact calls, the test forces the boundary to be reviewed
-        # rather than silently leaving stale permissions behind.
         for path, expected in self.AUDITED_ALLOWLIST.items():
             assert set(observed.get(path, [])) == expected, (
                 f"broker-call allowlist drift for {path}: "
@@ -198,7 +188,6 @@ class TestControlledLiveOrderPathInSource:
         assert not offenders, f"trading client imports found: {offenders}"
 
     def test_audit_detects_a_planted_violation(self, tmp_path):
-        """A scan that cannot fail proves nothing."""
         planted = tmp_path / "bad.py"
         planted.write_text("trader.order_stock('600000.SH', 100)\n", encoding="utf-8")
         tree = ast.parse(planted.read_text(encoding="utf-8"))
@@ -211,7 +200,6 @@ class TestControlledLiveOrderPathInSource:
 
 class TestReadinessTiers:
     def test_unknown_never_counts_as_pass(self, tmp_path):
-        """The failure mode that produced 'gates are literal True constants'."""
         evaluator = rt.ReadinessEvaluator(tmp_path)
         certificate = evaluator.full_universe_gold({rt.ENGINEERING_PIPELINE_READY: True})
         assert certificate.granted is False
@@ -237,12 +225,10 @@ class TestReadinessTiers:
         assert rt.permits(certificates, "an_action_nobody_declared") is False
 
     def test_forbid_beats_allow_across_tiers(self):
-        """A lower tier's forbid must not be overridden by a higher tier's allow."""
         certificates = {"granted": {
             rt.ENGINEERING_PIPELINE_READY: True,
             rt.FULL_UNIVERSE_GOLD_READY: True,
         }}
-        # Gold allows full_universe_training but still forbids performance claims.
         assert rt.permits(certificates, "full_universe_training") is True
         assert rt.permits(certificates, "performance_claims") is False
 
@@ -259,7 +245,6 @@ class TestReadinessTiers:
             assert any("strict PIT remains blocked" in n for n in certificate.notes)
 
     def test_st_intervals_stays_a_mandatory_requirement(self):
-        """PIT must not be weakened to force a higher tier."""
         evaluator = rt.ReadinessEvaluator(REPO / "runtime")
         certificate = evaluator.full_universe_research({
             rt.FULL_UNIVERSE_GOLD_READY: True
@@ -268,11 +253,15 @@ class TestReadinessTiers:
         assert "st_intervals_available" in names
         assert "no_blocked_pit_fields" in names
 
-    def test_live_trading_certificate_is_a_refusal(self):
+    def test_live_trading_certificate_is_a_truthful_refusal(self):
         certificate = rt.live_trading_certificate()
         assert certificate["granted"] is False
         assert certificate["implemented"] is False
-        assert certificate["reason"] == "NOT_IMPLEMENTED_BY_POLICY"
+        assert certificate["reason"] == "NOT_ARMED_BY_POLICY"
+        assert certificate["controlled_broker_adapter_present"] is True
+        assert certificate["controlled_broker_adapter_armed"] is False
+        assert certificate["arming_boundary_present"] is True
+        assert "no live order path" not in certificate["detail"].lower()
 
     def test_live_trading_ready_is_not_a_tier(self):
         assert "LIVE_TRADING_READY" not in rt.TIERS
@@ -295,17 +284,8 @@ class TestReadinessTiers:
 
 
 class TestJobRunnerRejectsLiveIntent:
-    """The guard must sit on the real enforcement path, not only in a module.
-
-    A safety helper nobody calls is decoration. These tests exercise the actual
-    JobManager validation entry point that every web-submitted job passes
-    through.
-    """
-
     def _manager(self):
         from services.quant_api.services.jobs import JobManager
-
-        # Only _validate is exercised; it runs the guard before touching state.
         return JobManager.__new__(JobManager)
 
     @pytest.mark.parametrize("command_id", ["实盘下单", "enable-live-trading"])
@@ -328,12 +308,10 @@ class TestJobRunnerRejectsLiveIntent:
         assert exc.value.matched == "order_stock_async"
 
     def test_rejection_happens_before_the_command_is_resolved(self):
-        """An unknown command with live intent must fail as live intent."""
         with pytest.raises(om.LiveTradingRejected):
             self._manager()._validate("data", "totally-unknown-实盘", {})
 
     def test_benign_job_passes_the_guard(self):
-        """The guard must not block ordinary research jobs."""
         manager = self._manager()
         try:
             manager._validate("data", "probe-qmt-entitlements",
@@ -341,4 +319,4 @@ class TestJobRunnerRejectsLiveIntent:
         except om.LiveTradingRejected:
             pytest.fail("benign research job was wrongly rejected as live intent")
         except Exception:
-            pass  # later stages need real settings; the guard is what matters here
+            pass
