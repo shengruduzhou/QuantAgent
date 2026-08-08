@@ -247,8 +247,12 @@ def test_nested_selection_dsr_is_monotonically_non_increasing_in_cumulative_tria
 
 def test_heavily_mined_champion_is_rejected_where_a_lightly_mined_one_passes() -> None:
     """The false accept this guards: the trainer raises on rejection, so a gate
-    that loosened under mining would have promoted an overfit champion."""
-    returns = _family(champion_drift=0.0016, with_degenerate=False)
+    that loosened under mining would have promoted an overfit champion.
+
+    Keep this synthetic case comfortably on opposite sides of the fixed 0.95
+    DSR policy under the corrected Pearson-kurtosis PSR denominator.
+    """
+    returns = _family(champion_drift=0.00162, with_degenerate=False)
 
     lightly_mined = evaluate_frozen_candidate(
         returns,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, type CSSProperties, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
-import { BarChart, CandlestickChart, LineChart, RadarChart, ScatterChart } from "echarts/charts";
+import { BarChart, CandlestickChart, GraphChart, LineChart, RadarChart, ScatterChart } from "echarts/charts";
 import {
   DataZoomComponent,
   GridComponent,
@@ -16,6 +16,7 @@ import { useVNextChartPalette, type VNextChartPalette } from "../vnext/theme";
 use([
   BarChart,
   CandlestickChart,
+  GraphChart,
   LineChart,
   RadarChart,
   ScatterChart,

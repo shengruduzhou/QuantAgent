@@ -16,7 +16,9 @@ the search statistically honest:
   deflated Sharpe ratio — the operator cannot set it by hand;
 * fitted schemes see only the training segment of each fold;
 * the Pareto frontier is reported instead of a single "best" configuration,
-  because the four objectives genuinely conflict.
+  because the four objectives genuinely conflict;
+* statistical promotion evidence is reconstructed from within-fold NAV changes,
+  so fold reset jumps and overlapping horizon labels cannot inflate PBO/DSR.
 """
 
 from quantagent.fusion.evaluation import (
@@ -45,9 +47,9 @@ from quantagent.fusion.search import (
     FusionCandidate,
     FusionSearchConfig,
     FusionSearchResult,
-    run_fusion_search,
     save_fusion_artifacts,
 )
+from quantagent.fusion.search_corrected import run_fusion_search
 
 __all__ = [
     "BlendScheme",

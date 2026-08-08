@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from services.quant_api.config import ApiSettings
 from services.quant_api.events.routes import router as events_router
 from services.quant_api.routes import router
+from services.quant_api.routes.fuyao_playbooks import router as fuyao_playbooks_router
 from services.quant_api.routes.market import router as market_router
 from services.quant_api.routes.parity import router as parity_router
 from services.quant_api.services import ServiceContainer
@@ -42,6 +43,7 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     )
     app.include_router(router)
     app.include_router(market_router)
+    app.include_router(fuyao_playbooks_router)
     app.include_router(parity_router)
     app.include_router(events_router)
 
