@@ -1,12 +1,12 @@
 """Fail-closed promotion gates for QuantAgent quantitative research.
 
-This module deliberately sits *after* model/factor search.  Search is allowed to
-produce interesting candidates; promotion is not.  A candidate can move from
+This module deliberately sits *after* model/factor search. Search is allowed to
+produce interesting candidates; promotion is not. A candidate can move from
 research to a production-eligible state only when the core statistical,
-point-in-time, benchmark and execution contracts are all explicitly evidenced.
+point-in-time, benchmark and holdout contracts are explicitly evidenced.
 
-The thresholds are intentionally policy, not optimiser hyperparameters.  They
-must not be relaxed by the search procedure that they supervise.
+The thresholds are policy, not optimiser hyperparameters. They must not be
+relaxed by the search procedure that they supervise.
 """
 
 from __future__ import annotations
@@ -78,10 +78,9 @@ def evaluate_research_gates(
 ) -> ResearchGateReport:
     """Evaluate the non-negotiable research promotion contract.
 
-    ``None`` never means pass.  It means the run has not produced enough
+    ``None`` never means pass. It means the run has not produced enough
     evidence to be promoted.
     """
-
     policy = policy or ResearchGatePolicy()
     checks: list[GateCheck] = []
 
@@ -128,7 +127,45 @@ def evaluate_research_gates(
             "close-derived signals must not execute on the same close",
         ))
 
-    return ResearchGateReport(eligible=all(check.passed for check in checks), checks=tuple(checks), policy=policy)
+    return ResearchGateReport(
+        eligible=all(check.passed for check in checks),
+        checks=tuple(checks),
+        policy=policy,
+    )
+
+
+def _staggered_daily_returns(horizon_returns: pd.Series, horizon_days: int) -> pd.Series:
+    """Convert overlapping H-day forward benchmark returns to an H-sleeve NAV.
+
+    Fusion evaluates one non-overlapping cohort for each date offset. Promotion
+    evidence must compare the resulting staggered portfolio to a benchmark with
+    the same capital deployment, rather than comparing daily NAV changes to raw
+    H-day forward returns.
+    """
+    clean = pd.Series(horizon_returns, dtype=float).replace([np.inf, -np.inf], np.nan).dropna().sort_index()
+    if clean.empty:
+        return pd.Series(dtype=float)
+    clean.index = pd.to_datetime(clean.index)
+    horizon = max(1, int(horizon_days))
+    if horizon == 1:
+        return clean
+
+    sleeves: list[pd.Series] = []
+    full_index = clean.index
+    for offset in range(min(horizon, len(clean))):
+        cohort = clean.iloc[offset::horizon]
+        if cohort.empty:
+            continue
+        nav = (1.0 + cohort).cumprod()
+        # Before the sleeve has its first completed H-day return, its allocated
+        # capital remains cash at NAV=1.0. This avoids changing sleeve count
+        # during warm-up.
+        aligned = nav.reindex(full_index).ffill().fillna(1.0)
+        sleeves.append(aligned)
+    if not sleeves:
+        return pd.Series(dtype=float)
+    portfolio_nav = pd.concat(sleeves, axis=1).mean(axis=1)
+    return portfolio_nav.pct_change(fill_method=None).dropna()
 
 
 def fusion_statistical_evidence(
@@ -137,43 +174,59 @@ def fusion_statistical_evidence(
     preferred_id: str | None,
     benchmark_returns: pd.Series | None,
     periods_per_year: int = 252,
-) -> dict[str, float | str | None]:
-    """Derive DSR and SPA evidence from already-OOS candidate NAVs.
+) -> dict[str, float | str | int | None]:
+    """Derive DSR and SPA from already-OOS candidate NAVs.
 
-    No model selection happens here.  The caller supplies the already-selected
-    research candidate; this function only measures whether its OOS return
-    record survives multiple-testing diagnostics.
+    ``candidate_navs`` are the stitched business-daily staggered NAVs emitted
+    by :mod:`quantagent.fusion.search_corrected`. ``periods_per_year`` retains
+    the legacy CLI meaning for the input *forward benchmark* (typically
+    ``252 / horizon_days``); it is used only to infer that horizon. Statistical
+    tests themselves run at 252 business-day frequency.
     """
-
     returns: dict[str, pd.Series] = {}
     for name, nav in candidate_navs.items():
         clean = pd.Series(nav, dtype=float).dropna().sort_index()
         if len(clean) >= 2:
-            r = clean.pct_change().dropna()
+            r = clean.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna()
             if not r.empty:
                 returns[name] = r
 
+    horizon_days = max(1, int(round(252 / max(1, int(periods_per_year)))))
+    statistical_periods = 252
     if not preferred_id or preferred_id not in returns:
-        return {"preferred": preferred_id, "dsrProbability": None, "spaPValue": None}
+        return {
+            "preferred": preferred_id,
+            "dsrProbability": None,
+            "spaPValue": None,
+            "statisticalPeriodsPerYear": statistical_periods,
+            "benchmarkHorizonDays": horizon_days,
+        }
 
     preferred = returns[preferred_id]
-    annual_sharpes = []
+    annual_sharpes: list[float] = []
     for series in returns.values():
-        value = sharpe_ratio(series, periods_per_year=periods_per_year)
+        value = sharpe_ratio(series, periods_per_year=statistical_periods)
         if np.isfinite(value):
             annual_sharpes.append(float(value))
-    per_period_sharpes = np.asarray(annual_sharpes, dtype=float) / np.sqrt(periods_per_year)
-    dsr = deflated_sharpe_ratio(
-        preferred,
-        per_period_sharpes,
-        periods_per_year=periods_per_year,
-        n_trials=max(len(candidate_navs), len(per_period_sharpes)),
-    ) if len(per_period_sharpes) >= 2 else float("nan")
+    per_period_sharpes = np.asarray(annual_sharpes, dtype=float) / np.sqrt(statistical_periods)
+    dsr = (
+        deflated_sharpe_ratio(
+            preferred,
+            per_period_sharpes,
+            periods_per_year=statistical_periods,
+            n_trials=max(len(candidate_navs), len(per_period_sharpes)),
+        )
+        if len(per_period_sharpes) >= 2
+        else float("nan")
+    )
 
     spa_p = float("nan")
     if benchmark_returns is not None and returns:
         common = pd.DataFrame(returns).dropna(how="all")
-        benchmark = pd.Series(benchmark_returns, dtype=float).reindex(common.index)
+        benchmark_daily = _staggered_daily_returns(
+            pd.Series(benchmark_returns, dtype=float), horizon_days
+        )
+        benchmark = benchmark_daily.reindex(common.index)
         spa = spa_test(common, benchmark)
         spa_p = float(spa.get("p_consistent", float("nan")))
 
@@ -181,6 +234,8 @@ def fusion_statistical_evidence(
         "preferred": preferred_id,
         "dsrProbability": None if not np.isfinite(dsr) else float(dsr),
         "spaPValue": None if not np.isfinite(spa_p) else float(spa_p),
+        "statisticalPeriodsPerYear": statistical_periods,
+        "benchmarkHorizonDays": horizon_days,
     }
 
 
