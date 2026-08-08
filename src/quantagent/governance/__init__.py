@@ -1,19 +1,17 @@
 """Multi-agent research governance: roles, evidence envelopes, hard vetoes.
 
 The problem this package solves is not "how do several models cooperate" but
-"how does a system refuse to fool itself". Its three commitments:
+"how does a system refuse to fool itself". Its commitments include evidence-
+backed approvals, hard vetoes, fail-closed missing checks, and an isolated
+production-audit board where a finding author cannot approve its own work.
 
-* an approval must cite the artifacts it read, by hash;
-* an agent guarding a class of harm can stop a decision outright, and no
-  quantity of confident approvals overturns it;
-* an absent check never reads as a passed check.
-
-``envelopes``  the per-agent decision envelope and its validity rules
-``agents``     role definitions: scope, tools, authority, failure behaviour
-``protocol``   sequencing and outcome resolution
-``audit``      hash-chained append-only log, persisted outside Git
+``envelopes``                 per-agent decision envelope and validity rules
+``agents``                    role definitions and veto authority
+``protocol``                  sequencing and outcome resolution
+``audit``                     hash-chained append-only log
+``isolated_production_audit`` cross-review gate before the main repair role
 """
 
-from quantagent.governance import agents, audit, envelopes, protocol  # noqa: F401
+from quantagent.governance import agents, audit, envelopes, isolated_production_audit, protocol  # noqa: F401
 
-__all__ = ["agents", "audit", "envelopes", "protocol"]
+__all__ = ["agents", "audit", "envelopes", "protocol", "isolated_production_audit"]
