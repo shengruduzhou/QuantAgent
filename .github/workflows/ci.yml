@@ -73,7 +73,14 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -e ".[test]"
       - name: QMT contract and mock tests
-        run: python -m pytest tests/data/test_qmt_gateway.py tests/data/test_market_data_providers.py -q
+        run: |
+          python -m pytest \
+            tests/data/test_qmt_gateway.py \
+            tests/data/test_market_data_providers.py \
+            tests/execution/test_qmt_gateway.py \
+            tests/execution/test_qmt_live_contract.py \
+            tests/execution/test_order_manager_pretrade_risk.py \
+            -q
       - name: Record platform verdict
         shell: bash
         run: |
