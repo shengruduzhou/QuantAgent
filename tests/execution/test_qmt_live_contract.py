@@ -119,7 +119,6 @@ def test_live_submit_is_idempotent_and_embeds_bounded_recovery_identity(tmp_path
     gateway, client, _ = _gateway(tmp_path)
     assert gateway.preflight()["ok"] is True
 
-    # Deliberately longer than QMT's order_remark limit when prefixed directly.
     order = _approved_order("600000.SH-buy-1234567890")
     first = gateway.submit(order)
     second = gateway.submit(order)
@@ -177,7 +176,6 @@ def test_startup_preflight_recovers_owned_broker_orders_after_restart(tmp_path) 
             traded_price=9.91,
             price=10.00,
         ),
-        # Manual/unowned order must not be invented into QuantAgent's ledger.
         SimpleNamespace(
             order_id=9000,
             order_remark="manual-order",
@@ -196,8 +194,6 @@ def test_startup_preflight_recovers_owned_broker_orders_after_restart(tmp_path) 
     assert recovered.avg_price == pytest.approx(9.91)
     assert len(gateway.query_orders()) == 1
 
-    # A new gateway instance loads the fsynced token -> client identity mapping
-    # before broker state is synchronised.
     restarted = QMTGateway(gateway.config)
     restarted._bind_live_client(client, account, FakeConst)
     assert restarted.preflight()["ok"] is True
@@ -206,8 +202,6 @@ def test_startup_preflight_recovers_owned_broker_orders_after_restart(tmp_path) 
 
 def test_preflight_fails_if_quantagent_owned_remark_cannot_be_resolved(tmp_path) -> None:
     gateway, client, _ = _gateway(tmp_path)
-    # This has our namespace/prefix but no durable mapping. Silently treating it
-    # as a manual order could duplicate an existing live order after restart.
     client.orders = [
         SimpleNamespace(
             order_id=9999,
@@ -296,7 +290,9 @@ def test_remark_prefix_that_cannot_fit_is_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="too long"):
         QMTGateway(
             QMTConfig(
-                order_remark_prefix="prefix-too-long",
+                # Pure ASCII alphanumeric text passes the character-class gate
+                # and reaches the independent 24-character length check.
+                order_remark_prefix="prefixlong",
                 audit_log_dir=str(tmp_path),
                 identity_map_path=str(tmp_path / "identity.jsonl"),
             )
