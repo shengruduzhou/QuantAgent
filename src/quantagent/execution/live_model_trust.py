@@ -1,15 +1,10 @@
 """Machine-enforced model-trust gate for economic live trading.
 
-A broker connection is not a model promotion decision. QuantAgent therefore
-requires a separate, explicit certificate before a live gateway may become
-ready. The certificate is intentionally stricter than a backtest summary:
-selection hygiene, statistical gates, a genuinely fresh one-shot OOS window,
-benchmark evidence, risk/capacity evidence, and the exact trusted backtest
-metric semantics are all first-class fields.
-
-This module does not *create* trust. It only verifies a certificate produced by
-the governed research/promotion process. Missing or ambiguous evidence fails
-closed.
+Schema v1 remains readable for forensic and explicitly BLOCKED manifests, but
+it is not a production trust root: all of its acceptance fields live in one
+editable JSON object.  Production acceptance therefore requires schema v2,
+whose claims are re-derived from SHA-256-bound governed artifacts by
+``live_model_trust_v2``.
 """
 
 from __future__ import annotations
@@ -17,12 +12,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from quantagent.execution.live_model_trust_v2 import (
+    CERTIFICATE_SCHEMA_VERSION,
+    REQUIRED_METRIC_SEMANTICS,
+    default_artifact_roots,
+    verify_live_model_trust_v2,
+)
 
 
 _ACCEPTED_STATUS = {"production_accepted", "live_accepted"}
 _ACCEPTED_TRUST = {"fresh_oos", "fresh_holdout_validated", "production_accepted"}
-REQUIRED_METRIC_SEMANTICS = "strict_v8_nav_v2_initial_cash"
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,9 @@ def evaluate_live_model_trust(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
     required_metric_semantics: str = REQUIRED_METRIC_SEMANTICS,
+    artifact_roots: Mapping[str, str | Path] | None = None,
 ) -> LiveModelTrustReport:
-    """Validate a live-model certificate; every required item is AND-gated."""
+    """Validate a model-trust certificate; missing/ambiguous evidence fails closed."""
     if manifest_path is None or not str(manifest_path).strip():
         return _report(
             manifest_path="",
@@ -85,6 +87,75 @@ def evaluate_live_model_trust(
             reasons=("model_trust_manifest_not_object",),
         )
 
+    raw_schema = payload.get("schema_version", 1)
+    try:
+        schema_version = int(raw_schema)
+    except (TypeError, ValueError):
+        return _report(
+            manifest_path=str(path),
+            payload=payload,
+            reasons=(f"model_trust_schema_version_invalid:{raw_schema!r}",),
+        )
+
+    if schema_version == CERTIFICATE_SCHEMA_VERSION:
+        roots = artifact_roots or default_artifact_roots(path)
+        verification = verify_live_model_trust_v2(
+            payload,
+            artifact_roots=roots,
+            min_fresh_oos_days=min_fresh_oos_days,
+            max_pbo=max_pbo,
+            min_dsr_probability=min_dsr_probability,
+            max_spa_p_value=max_spa_p_value,
+        )
+        reasons = list(verification.reasons)
+        # The v2 policy is deliberately fixed to the canonical trusted evaluator
+        # semantics.  A caller requesting anything else cannot silently weaken or
+        # fork the trust policy.
+        if required_metric_semantics != REQUIRED_METRIC_SEMANTICS:
+            reasons.append(
+                "v2_required_metric_semantics_not_canonical:"
+                f"{required_metric_semantics}!={REQUIRED_METRIC_SEMANTICS}"
+            )
+        return _report(
+            manifest_path=str(path),
+            payload=payload,
+            reasons=tuple(dict.fromkeys(reasons)),
+            evidence=verification.evidence,
+        )
+
+    if schema_version != 1:
+        return _report(
+            manifest_path=str(path),
+            payload=payload,
+            reasons=(f"model_trust_schema_version_unsupported:{schema_version}",),
+        )
+
+    # Legacy schema v1.  Preserve detailed diagnostics for the current blocked
+    # repository manifest, but make production acceptance impossible regardless
+    # of how its scalar fields are edited.
+    reasons = _legacy_v1_reasons(
+        payload,
+        min_fresh_oos_days=min_fresh_oos_days,
+        max_pbo=max_pbo,
+        min_dsr_probability=min_dsr_probability,
+        max_spa_p_value=max_spa_p_value,
+        required_metric_semantics=required_metric_semantics,
+    )
+    status = str(payload.get("status") or "").strip().lower()
+    if status in _ACCEPTED_STATUS:
+        reasons.insert(0, "legacy_schema_v1_not_production_eligible")
+    return _report(str(path), payload, tuple(dict.fromkeys(reasons)))
+
+
+def _legacy_v1_reasons(
+    payload: dict[str, Any],
+    *,
+    min_fresh_oos_days: int,
+    max_pbo: float,
+    min_dsr_probability: float,
+    max_spa_p_value: float,
+    required_metric_semantics: str,
+) -> list[str]:
     reasons: list[str] = []
     status = str(payload.get("status") or "").strip().lower()
     trust_class = str(payload.get("trust_class") or "").strip().lower()
@@ -144,16 +215,19 @@ def evaluate_live_model_trust(
             "strict_backtest_metric_semantics_mismatch:"
             f"{metric_semantics or 'missing'}!={required_metric_semantics}"
         )
-
-    return _report(str(path), payload, tuple(reasons))
+    return reasons
 
 
 def _report(
     manifest_path: str,
     payload: dict[str, Any],
     reasons: tuple[str, ...],
+    *,
+    evidence: dict[str, Any] | None = None,
 ) -> LiveModelTrustReport:
-    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    if evidence is None:
+        raw_evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+        evidence = dict(raw_evidence)
     status = str(payload.get("status") or "missing")
     return LiveModelTrustReport(
         ok=not reasons,
