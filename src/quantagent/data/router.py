@@ -1,12 +1,9 @@
 """MultiSourceDataRouter — unified TickFlow + Fuyao + Qlib + public fallbacks.
 
-The router is capability-oriented and fails loud when every registered real
-provider is unavailable. TickFlow remains the primary A-share path for the
-capabilities it owns; Fuyao/HiThink is the high-quality official daily and
-fundamental fallback; Qlib remains the local research baseline.
-
-A critical integrity rule is preserved here: provider attribution is retained
-row by row and synthetic data is never silently substituted in production.
+Generic capabilities keep their historical routing semantics. A-share daily bars
+add an explicit integrity boundary: research can quarantine malformed rows with
+evidence, while production can only serve validated real bars and performs
+priority-preserving fallback at ``(symbol, trade_date)`` key granularity.
 """
 
 from __future__ import annotations
@@ -16,6 +13,12 @@ from typing import Any, Callable, Protocol
 
 import pandas as pd
 
+from quantagent.data.integrity import (
+    DailyOHLCVIntegrityPolicy,
+    daily_bar_keys,
+    expected_daily_keys,
+    validate_daily_ohlcv,
+)
 from quantagent.data.providers.base import (
     ProviderRequest,
     ProviderResult,
@@ -61,6 +64,7 @@ class RouterResult:
     fallback_chain: list[str] = field(default_factory=list)
     per_source: dict[str, dict[str, Any]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    integrity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,11 +73,38 @@ class RouterResult:
             "per_source": {k: dict(v) for k, v in self.per_source.items()},
             "warnings": list(self.warnings),
             "row_count": int(len(self.frame)),
+            "integrity": dict(self.integrity),
         }
 
 
 class RouterAllSourcesUnavailable(RuntimeError):
     """Raised when no registered source could serve the request."""
+
+
+class RouterDataIntegrityError(RuntimeError):
+    """Raised when an explicit production integrity policy cannot be satisfied."""
+
+
+_SOURCE_FATAL_CODES = (
+    "missing_column:",
+    "provider_not_point_in_time",
+    "mock_or_synthetic_source",
+    "frequency_metadata_missing",
+    "frequency_not_daily:",
+    "timezone_metadata_missing",
+    "volume_unit_missing",
+    "amount_unit_missing",
+    "adjustment_metadata_missing",
+    "adjustment_mismatch:",
+    "freshness_reference_missing",
+    "freshness_unverifiable",
+    "stale_daily_data:",
+    "trade_date_after_freshness_reference",
+)
+
+
+def _fatal_integrity(violations: tuple[str, ...]) -> bool:
+    return any(any(code.startswith(prefix) for prefix in _SOURCE_FATAL_CODES) for code in violations)
 
 
 class MultiSourceDataRouter:
@@ -92,11 +123,15 @@ class MultiSourceDataRouter:
     def list_sources(self) -> list[str]:
         return list(self._providers.keys())
 
-    def daily_ohlcv(self, request: ProviderRequest) -> RouterResult:
-        return self._serve(
+    def daily_ohlcv(
+        self,
+        request: ProviderRequest,
+        *,
+        integrity_policy: DailyOHLCVIntegrityPolicy | None = None,
+    ) -> RouterResult:
+        return self._serve_daily(
             request,
-            method_name="daily_ohlcv",
-            priority=self.config.daily_priority,
+            policy=integrity_policy or DailyOHLCVIntegrityPolicy.research(),
         )
 
     def minute_ohlcv(
@@ -114,6 +149,155 @@ class MultiSourceDataRouter:
             priority=self.config.minute_priority,
             invoke=call,
         )
+
+    def _serve_daily(
+        self,
+        request: ProviderRequest,
+        *,
+        policy: DailyOHLCVIntegrityPolicy,
+    ) -> RouterResult:
+        result = RouterResult(frame=pd.DataFrame(), primary_source=None)
+        served = pd.DataFrame()
+        served_keys: set[tuple[str, str]] = set()
+        served_symbols: set[str] = set()
+        expected_keys = expected_daily_keys(request, policy)
+        quarantined_total = 0
+
+        for src_name in self.config.daily_priority:
+            routed = self._providers.get(src_name)
+            if routed is None:
+                continue
+            result.fallback_chain.append(src_name)
+            method = getattr(routed.provider, "daily_ohlcv", None)
+            if method is None:
+                result.per_source[src_name] = {
+                    "status": "unavailable",
+                    "reason": f"{src_name} does not implement daily_ohlcv",
+                    "rows": 0,
+                }
+                continue
+            try:
+                res = method(request)
+            except ProviderUnavailable as exc:
+                result.per_source[src_name] = {
+                    "status": "unavailable",
+                    "reason": str(exc),
+                    "rows": 0,
+                }
+                continue
+            except Exception as exc:  # noqa: BLE001 — provider failures are evidence
+                result.per_source[src_name] = {
+                    "status": "error",
+                    "reason": str(exc),
+                    "rows": 0,
+                }
+                continue
+
+            validated = validate_daily_ohlcv(res, request, policy)
+            report = validated.report
+            quarantined_total += int(report.quarantined_rows)
+            result.per_source[src_name] = {
+                "status": "invalid" if report.status == "failed" else "ok",
+                "rows": int(report.input_rows),
+                "valid_rows": int(report.valid_rows),
+                "quarantined_rows": int(report.quarantined_rows),
+                "quality_score": float(res.quality_score),
+                "point_in_time": bool(res.point_in_time),
+                "warnings": list(res.warnings),
+                "integrity": report.to_dict(),
+            }
+
+            if report.hard_violations and policy.mode == "production" and not policy.allow_invalid_primary_fallback:
+                raise RouterDataIntegrityError(
+                    f"daily integrity failed at {src_name}: {list(report.hard_violations)}"
+                )
+
+            # Source-level semantic/provenance failures contaminate the entire
+            # provider response. Row-level failures may still leave independently
+            # valid keys that are safe to keep while lower-priority sources fill
+            # quarantined keys.
+            if _fatal_integrity(report.hard_violations):
+                result.warnings.append(f"daily_integrity_source_rejected:{src_name}")
+                continue
+
+            valid_frame = _attribute_source(validated.valid_frame, src_name)
+            if valid_frame.empty:
+                continue
+
+            if policy.mode == "production":
+                frame_keys = daily_bar_keys(valid_frame)
+                if not frame_keys:
+                    continue
+                if served.empty:
+                    accepted = valid_frame
+                else:
+                    key_series = _daily_key_series(valid_frame)
+                    accepted = valid_frame.loc[~key_series.isin(served_keys)].copy()
+                if not accepted.empty:
+                    if result.primary_source is None:
+                        result.primary_source = src_name
+                    served = pd.concat([served, accepted], ignore_index=True)
+                    served_keys |= daily_bar_keys(accepted)
+                    served_symbols = set(served["symbol"].astype(str))
+                if expected_keys and served_keys >= expected_keys:
+                    break
+                # Without an authoritative expected trading calendar we must not
+                # infer completeness; consult every registered priority source
+                # and union additional valid keys without overriding higher
+                # priority observations.
+                continue
+
+            # Historical research semantics remain symbol-priority based so
+            # existing callers do not unexpectedly fan out to every provider.
+            if result.primary_source is None:
+                result.primary_source = src_name
+                served = valid_frame
+            elif self.config.merge_partial_results:
+                missing_symbols = set(valid_frame["symbol"].astype(str)) - served_symbols
+                if missing_symbols:
+                    backfill = valid_frame[valid_frame["symbol"].astype(str).isin(missing_symbols)]
+                    served = pd.concat([served, backfill], ignore_index=True)
+            served = _deduplicate_daily_priority(served)
+            served_symbols = set(served.get("symbol", pd.Series(dtype=str)).astype(str))
+            if request.symbols and served_symbols >= set(request.symbols):
+                break
+
+        if not served.empty:
+            served = _deduplicate_daily_priority(served).reset_index(drop=True)
+            served_keys = daily_bar_keys(served)
+
+        missing_expected = sorted(expected_keys - served_keys)
+        result.integrity = {
+            "capability": "daily_ohlcv",
+            "policy_mode": policy.mode,
+            "served_key_count": len(served_keys),
+            "quarantined_rows": int(quarantined_total),
+            "expected_key_count": len(expected_keys) if expected_keys else None,
+            "missing_expected_keys": [f"{symbol}@{date}" for symbol, date in missing_expected],
+            "coverage_basis": "authoritative_expected_trade_dates" if expected_keys else "observed_only",
+        }
+        if not expected_keys:
+            result.warnings.append("daily_integrity_expected_calendar_not_supplied_observed_only")
+        if policy.mode == "production" and missing_expected:
+            raise RouterDataIntegrityError(
+                "daily integrity coverage incomplete: "
+                f"{len(missing_expected)} expected (symbol,trade_date) keys are missing"
+            )
+
+        if served.empty:
+            if policy.mode == "production":
+                raise RouterDataIntegrityError(
+                    "no daily rows satisfied the production integrity contract; "
+                    f"sources={ {name: row.get('status') for name, row in result.per_source.items()} }"
+                )
+            if not self.config.allow_mock_fallback and self.config.fail_when_all_unavailable:
+                raise RouterAllSourcesUnavailable(
+                    "all sources failed for daily_ohlcv: "
+                    f"{ {name: row.get('status') for name, row in result.per_source.items()} }"
+                )
+            result.warnings.append("router_all_sources_empty")
+        result.frame = served
+        return result
 
     def _serve(
         self,
@@ -198,6 +382,20 @@ def _attribute_source(frame: pd.DataFrame, source_name: str) -> pd.DataFrame:
     out = frame.copy()
     out["source_name"] = source_name
     return out
+
+
+def _daily_key_series(frame: pd.DataFrame) -> pd.Series:
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date.astype("string")
+    return pd.Series(list(zip(frame["symbol"].astype(str), dates.astype(str), strict=False)), index=frame.index)
+
+
+def _deduplicate_daily_priority(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty or not {"symbol", "trade_date"}.issubset(frame.columns):
+        return pd.DataFrame() if frame is None else frame
+    out = frame.copy()
+    out["__router_trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce").dt.date
+    out = out.drop_duplicates(["symbol", "__router_trade_date"], keep="first")
+    return out.drop(columns=["__router_trade_date"])
 
 
 def build_default_router(
@@ -290,9 +488,11 @@ def build_default_router(
 
 
 __all__ = [
+    "DailyOHLCVIntegrityPolicy",
     "MultiSourceDataRouter",
     "RouterAllSourcesUnavailable",
     "RouterConfig",
+    "RouterDataIntegrityError",
     "RouterResult",
     "RoutedProvider",
     "build_default_router",
