@@ -11,9 +11,9 @@ import typer
 
 from quantagent.cli._utils import app, json_dump
 from quantagent.config.paths import quant_paths
-from quantagent.execution.live_model_trust_v2 import (
-    REQUIRED_ARTIFACT_ROLES,
-    issue_live_model_trust_v2 as issue_v2_certificate,
+from quantagent.execution.live_model_trust_v2 import REQUIRED_ARTIFACT_ROLES
+from quantagent.execution.live_model_trust_v2_policy import (
+    issue_governed_live_model_trust_v2 as issue_v2_certificate,
 )
 from quantagent.training.feature_contract import PRODUCTION_CONTRACT, RESEARCH_CONTRACT
 
@@ -94,10 +94,12 @@ def issue_live_model_trust_v2_command(
         help="Must equal current git HEAD; omitted means use current HEAD.",
     ),
 ) -> None:
-    """Issue hash-bound schema-v2 live trust from a complete governed evidence map.
+    """Issue governed schema-v2 live trust from a complete evidence map.
 
     This command performs no training, data fetching, backtest, broker access or
-    gate override.  It only binds and verifies evidence that already exists.
+    gate override. It only binds and verifies evidence that already exists. The
+    governed policy re-derives FRESH coverage and PBO/DSR/SPA from the bound data
+    before atomically publishing a certificate.
     """
     runtime_root = quant_paths().home.resolve(strict=False)
     roots = {"repo": _REPO_ROOT.resolve(strict=False), "runtime": runtime_root}
