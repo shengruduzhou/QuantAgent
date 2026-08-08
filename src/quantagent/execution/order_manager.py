@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Iterable
@@ -16,6 +16,10 @@ from quantagent.execution.broker_base import (
     OrderState,
     OrderStatus,
     OrderType,
+)
+from quantagent.execution.constraints import (
+    ExecutionConstraintEvaluator,
+    OrderIntentRecord,
 )
 from quantagent.domain.idempotency import IdempotencyStore, order_intent_key
 from quantagent.domain.ledger import CanonicalLedger, mirror_open
@@ -50,6 +54,10 @@ class IdempotencyConflict(RuntimeError):
 
 class ForensicHarnessLeak(RuntimeError):
     """A forensic replay was pointed at a broker that can execute economically."""
+
+
+class PreTradeRiskRejected(RuntimeError):
+    """A production pre-trade rule refused an order before the broker was touched."""
 
 
 def _request_fingerprint(order: Order) -> str:
@@ -106,7 +114,20 @@ class OrderRecord:
 
 @dataclass
 class OrderManager:
-    """Idempotent order router. Generates per-symbol delta orders from target weights."""
+    """Idempotent order router. Generates per-symbol delta orders from target weights.
+
+    The canonical ``RISK_APPROVED`` event is a fact, not a routing convenience.
+    A QMT live gateway advertises that it requires explicit risk approval; in
+    that case the OMS runs :class:`ExecutionConstraintEvaluator` before opening
+    the broker side of the lifecycle and replaces ``risk_check_result`` with the
+    literal ``approved`` only when the evaluator passes.  A rejected order is
+    recorded canonically as ``RISK_REJECTED`` and never reaches ``broker.submit``.
+
+    Non-live/research brokers retain their existing economic path, but their
+    canonical decision is now named ``order_manager_basic_admissibility`` so it
+    no longer falsely claims that cash/T+1/band/portfolio production risk was
+    checked when it was not.
+    """
 
     broker: BrokerBase
     config: OrderManagerConfig = field(default_factory=OrderManagerConfig)
@@ -134,6 +155,11 @@ class OrderManager:
     #: each side build its own would double-count every order that crosses them.
     canonical_ledger: CanonicalLedger | None = None
     order_book: OrderBook | None = None
+    #: Production constraint evaluator.  It is only promoted to an authoritative
+    #: live gate when the broker declares ``require_risk_approval`` in live mode;
+    #: this avoids silently changing historical backtest economics while still
+    #: making the real broker path fail closed.
+    constraint_evaluator: ExecutionConstraintEvaluator = field(default_factory=ExecutionConstraintEvaluator)
 
     def __post_init__(self) -> None:
         if self.forensic_replay:
@@ -171,9 +197,16 @@ class OrderManager:
         #: canonical order_id -> broker client_order_id, the one-way link
         #: that lets the wire cache be projected from the ledger.
         self._client_order_ids: dict[str, str] = {}
+        #: Intraday live-submit history used by the stateful constraint DSL.
+        #: It counts orders that actually passed local risk and were attempted
+        #: at the venue.  Runtime-state persistence across process restart is a
+        #: separate production gate; broker preflight remains authoritative for
+        #: open orders/trades/positions after restart.
+        self._risk_intents_today: list[OrderIntentRecord] = []
 
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
+        self._risk_intents_today.clear()
 
     def reconcile(self, target_weights: pd.Series, prices: pd.Series, nav: float,
                   signal_id: str = "manual") -> list[OrderState]:
@@ -343,20 +376,12 @@ class OrderManager:
         return results
 
     def _submit_all(self, orders: Iterable[Order]) -> Iterable[OrderState]:
-        for order in orders:
+        for original_order in orders:
+            order = original_order
             # Durable claim before the broker is touched. The in-memory
             # `history` check that used to guard this was lost on restart, so a
             # worker killed after submit but before _update resubmitted the same
             # intent on recovery — a second economic order.
-            #
-            # Opt-in via `lineage.run_id`: the pre-INC-E1 forensic replay in
-            # tests/test_order_dedup_regression.py deliberately reproduces the
-            # old cross-day drop, and a correct durable guard would make that
-            # historical bug unreproducible. Real runs set a run_id and are
-            # protected; the forensic path sets none and is left byte-identical.
-            # Idempotency is mandatory. A submission that cannot be identified
-            # cannot be de-duplicated, so it fails closed *before* the broker is
-            # touched rather than being allowed through unprotected.
             if not self.forensic_replay and not self.lineage.run_id:
                 raise MissingIdempotencyLineage(
                     f"order {order.client_order_id} has no lineage.run_id; economic "
@@ -379,27 +404,53 @@ class OrderManager:
                 if not claim.granted:
                     stored = claim.record.payload.get("fingerprint")
                     if stored is not None and stored != fingerprint:
-                        # Same key, different economics: returning the original
-                        # would silently answer a question nobody asked.
                         raise IdempotencyConflict(key, str(stored), fingerprint)
                     existing = self._wire.get(str(claim.record.payload.get("clientOrderId") or ""))
                     if existing is not None:
                         yield existing.state
                     continue
-            # The pre-INC-E1 de-duplication: a never-cleared per-(symbol, side)
-            # client_order_id. It *is* the historical bug, reproduced only
-            # inside the isolated forensic harness. On the live path the durable
-            # key is the authority — `_make_id` omits quantity, so this check
-            # would silently drop a genuine revised-quantity replace.
             if self.forensic_replay and order.client_order_id in self.history:
                 continue
 
-            canonical_order = self._open_canonical(order)
+            # Open the canonical intent/order in PENDING_RISK first.  Risk is
+            # applied next and therefore cannot be retrospectively invented
+            # after the venue has already seen the order.
+            canonical_order = self._open_canonical_pending(order)
             self._client_order_ids[canonical_order.order_id] = order.client_order_id
+            order, risk_decision, risk_intent = self._pretrade_decision(order, canonical_order)
+            if not risk_decision.approved:
+                self._apply_canonical_risk(canonical_order, risk_decision, approved=False)
+                state = OrderState(
+                    client_order_id=order.client_order_id,
+                    broker_order_id=None,
+                    status=OrderStatus.REJECTED,
+                    filled_quantity=0,
+                    avg_price=0.0,
+                    last_message=f"pretrade_risk_rejected:{risk_decision.reason}",
+                )
+                self._update(order, state)
+                if not self.forensic_replay:
+                    self.claims.resolve(
+                        key,
+                        outcome=order.client_order_id,
+                        payload={
+                            "clientOrderId": order.client_order_id,
+                            "orderId": canonical_order.order_id,
+                            "fingerprint": fingerprint,
+                            "riskApproved": False,
+                            "riskReason": risk_decision.reason,
+                        },
+                    )
+                yield state
+                continue
+
+            canonical_order = self._apply_canonical_risk(canonical_order, risk_decision, approved=True)
+            if risk_intent is not None:
+                # Count the local approved attempt before touching the venue so
+                # a broker-level rejection still counts toward order-rate and
+                # turnover constraints for the current process/session.
+                self._risk_intents_today.append(risk_intent)
             if self._venue_is_canonical:
-                # Hand the venue the order it is executing. Without this the
-                # venue opens its own canonical order and the same economic
-                # order is recorded twice on one chain.
                 self.broker.attach_canonical(order.client_order_id, canonical_order.order_id)
             state = self.broker.submit(order)
             self._update(order, state)
@@ -408,16 +459,153 @@ class OrderManager:
             if not self.forensic_replay:
                 self.claims.resolve(
                     key, outcome=order.client_order_id,
-                    payload={"clientOrderId": order.client_order_id,
-                             "orderId": canonical_order.order_id,
-                             "fingerprint": fingerprint},
+                    payload={
+                        "clientOrderId": order.client_order_id,
+                        "orderId": canonical_order.order_id,
+                        "fingerprint": fingerprint,
+                        "riskApproved": True,
+                    },
                 )
             self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
             yield state
 
+    def _requires_production_pretrade(self) -> bool:
+        """Whether the attached broker declares a fail-closed live risk contract."""
+        broker_config = getattr(self.broker, "config", None)
+        if broker_config is None:
+            return False
+        return bool(
+            getattr(broker_config, "require_risk_approval", False)
+            and getattr(broker_config, "live_trading_enabled", False)
+            and not getattr(broker_config, "dry_run", True)
+        )
+
+    def _pretrade_decision(
+        self,
+        order: Order,
+        canonical_order,
+    ) -> tuple[Order, CanonicalRiskDecision, OrderIntentRecord | None]:
+        """Evaluate pre-submit risk and return a canonical first-class decision."""
+        explicit = (order.risk_check_result or "not_checked").strip().lower()
+        if explicit in {"rejected", "reject", "blocked", "failed", "fail", "denied"}:
+            return (
+                order,
+                CanonicalRiskDecision.create(
+                    approved=False,
+                    rule="upstream_risk",
+                    threshold="approved",
+                    measured=explicit,
+                    reason="upstream risk explicitly rejected the order",
+                    lineage=canonical_order.lineage,
+                ),
+                None,
+            )
+
+        # Basic order-shape admissibility is always real and auditable.  It does
+        # not pretend to be portfolio/live risk.
+        if int(order.quantity) <= 0:
+            return (
+                order,
+                CanonicalRiskDecision.create(
+                    approved=False,
+                    rule="order_manager_basic_admissibility",
+                    threshold="quantity>0",
+                    measured=int(order.quantity),
+                    reason="order quantity must be positive",
+                    lineage=canonical_order.lineage,
+                ),
+                None,
+            )
+        if order.order_type == OrderType.LIMIT and (order.price is None or float(order.price) <= 0):
+            return (
+                order,
+                CanonicalRiskDecision.create(
+                    approved=False,
+                    rule="order_manager_basic_admissibility",
+                    threshold="limit_price>0",
+                    measured=order.price,
+                    reason="limit order requires a positive price",
+                    lineage=canonical_order.lineage,
+                ),
+                None,
+            )
+
+        if not self._requires_production_pretrade():
+            decision = CanonicalRiskDecision.create(
+                approved=True,
+                rule="order_manager_basic_admissibility",
+                threshold="positive_quantity+valid_limit_price",
+                measured={"upstream": explicit, "mode": "non_live_or_research"},
+                reason="basic OMS admissibility passed; this is not production risk certification",
+                lineage=canonical_order.lineage,
+                decided_by="order_manager",
+            )
+            return order, decision, None
+
+        # Live QMT: an unbounded market order has no price with which to enforce
+        # order-value/deviation/board protection.  The production path therefore
+        # fails closed even though the low-level broker adapter knows how to send
+        # a QMT market-price type.
+        if order.order_type == OrderType.MARKET or order.price is None or float(order.price) <= 0:
+            return (
+                order,
+                CanonicalRiskDecision.create(
+                    approved=False,
+                    rule="execution_constraint_dsl",
+                    threshold="bounded_limit_order",
+                    measured={"order_type": order.order_type.value, "price": order.price},
+                    reason="live A-share order requires a bounded positive reference/limit price",
+                    lineage=canonical_order.lineage,
+                ),
+                None,
+            )
+
+        timestamp = pd.Timestamp(
+            order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        )
+        nav: float | None = None
+        try:
+            queried_nav = float(self.broker.query_account_value())
+            if pd.notna(queried_nav) and queried_nav > 0:
+                nav = queried_nav
+        except Exception:
+            # Missing account state must not be converted into an invented NAV.
+            # The DSL will skip NAV-dependent checks; QMT preflight is separately
+            # required to make a live submit reachable at all.
+            nav = None
+        risk_intent = OrderIntentRecord(
+            intent_id=order.client_order_id,
+            symbol=order.symbol,
+            side=order.side.value,
+            quantity=int(order.quantity),
+            price=float(order.price),
+            timestamp=timestamp,
+            order_value=float(order.quantity) * float(order.price),
+            portfolio_nav=nav,
+            daily_volume_hint=None,
+        )
+        report = self.constraint_evaluator.evaluate([*self._risk_intents_today, risk_intent])
+        decision = CanonicalRiskDecision.create(
+            approved=report.passed,
+            rule="execution_constraint_dsl",
+            threshold=self.constraint_evaluator.constraints.as_dict(),
+            measured=report.to_dict(),
+            reason=(
+                "all production pre-submit execution constraints passed"
+                if report.passed
+                else "blocking execution constraint violation: "
+                + ",".join(sorted(report.by_constraint))
+            ),
+            lineage=canonical_order.lineage,
+            decided_by="execution_constraint_dsl",
+        )
+        if not report.passed:
+            return order, decision, None
+        return replace(order, risk_check_result="approved"), decision, risk_intent
+
     # -- canonical emission --------------------------------------------------
-    def _open_canonical(self, order: Order):
-        """Signal -> OrderIntent -> Order on the canonical ledger."""
+    def _open_canonical_pending(self, order: Order):
+        """Signal -> OrderIntent -> PENDING_RISK order on the canonical ledger."""
         session = str(order.timestamp)[:10]
         signal = Signal.create(
             symbol=order.symbol, trade_date=f"{session}-{order.signal_id or 'manual'}",
@@ -431,19 +619,23 @@ class OrderManager:
             lineage=signal.lineage,
             reference_price=order.price,
         )
-        canonical = mirror_open(self.book, self.canonical, intent, trade_date=session)
-        decision = CanonicalRiskDecision.create(
-            approved=True, rule="order_manager_pretrade",
-            threshold="lot+band+cash+t+1", measured=order.risk_check_result or "not_checked",
-            reason="passed order-manager constraints", lineage=canonical.lineage,
+        return mirror_open(self.book, self.canonical, intent, trade_date=session)
+
+    def _apply_canonical_risk(self, canonical_order, decision: CanonicalRiskDecision, *, approved: bool):
+        session = canonical_order.trade_date
+        risk_event = CanonicalEventType.RISK_APPROVED if approved else CanonicalEventType.RISK_REJECTED
+        self.book.apply(
+            canonical_order.order_id,
+            risk_event,
+            risk_decision=decision,
+            reason=None if approved else decision.reason,
         )
-        for event in (CanonicalEventType.RISK_APPROVED, CanonicalEventType.SUBMITTED):
-            self.book.apply(
-                canonical.order_id, event,
-                risk_decision=decision if event is CanonicalEventType.RISK_APPROVED else None,
-            )
-            self.canonical.append(self.book.history_of(canonical.order_id)[-1], trade_date=session)
-        return self.book.state_of(canonical.order_id)
+        self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
+        if not approved:
+            return self.book.state_of(canonical_order.order_id)
+        self.book.apply(canonical_order.order_id, CanonicalEventType.SUBMITTED)
+        self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
+        return self.book.state_of(canonical_order.order_id)
 
     def _record_canonical_state(self, canonical, state: OrderState) -> None:
         """Fold the broker's reply into the canonical order.
