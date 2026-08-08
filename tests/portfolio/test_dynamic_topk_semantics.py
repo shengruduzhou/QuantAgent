@@ -24,7 +24,12 @@ def test_score_dispersion_is_invariant_to_positive_scale() -> None:
     scores = pd.Series([-0.5, -0.2, 0.0, 0.3, 0.7])
     a = resolve_dynamic_top_k(eligible_count=100, predictions_for_date=scores)
     b = resolve_dynamic_top_k(eligible_count=100, predictions_for_date=scores * 100.0)
-    assert a.diagnostics["score_dispersion"] == b.diagnostics["score_dispersion"]
+    assert np.isclose(
+        float(a.diagnostics["score_dispersion"]),
+        float(b.diagnostics["score_dispersion"]),
+        rtol=1e-12,
+        atol=1e-15,
+    )
     assert a.top_k == b.top_k
 
 
