@@ -23,6 +23,7 @@ def _metadata(**overrides):
         "volume_unit": "shares",
         "amount_unit": "CNY",
         "adjustment": "none",
+        "pit_semantics": "trade_date_observed_no_future_adjustment",
     }
     base.update(overrides)
     return base
@@ -102,12 +103,26 @@ def test_production_requires_real_pit_declared_semantics() -> None:
     validated = validate_daily_ohlcv(result, _request(), _production())
     violations = set(validated.report.hard_violations)
     assert "provider_not_point_in_time" in violations
+    assert "pit_semantics_missing" in violations
     assert "mock_or_synthetic_source" in violations
     assert "frequency_metadata_missing" in violations
     assert "timezone_metadata_missing" in violations
     assert "volume_unit_missing" in violations
     assert "amount_unit_missing" in violations
     assert "adjustment_metadata_missing" in violations
+
+
+def test_default_point_in_time_true_is_not_sufficient_production_evidence() -> None:
+    metadata = _metadata()
+    metadata.pop("pit_semantics")
+    validated = validate_daily_ohlcv(
+        ProviderResult(_bars(), source="real", metadata=metadata),
+        _request(),
+        _production(),
+    )
+    assert "provider_not_point_in_time" not in validated.report.hard_violations
+    assert "pit_semantics_missing" in validated.report.hard_violations
+    assert validated.report.status == "failed"
 
 
 def test_adjustment_mismatch_fails_instead_of_mixing_price_semantics() -> None:
@@ -136,7 +151,7 @@ def test_research_field_slice_remains_supported() -> None:
     assert not validated.report.hard_violations
 
 
-def test_requested_field_missing_is_a_hard_contract_error() -> None:
+def test_requested_field_missing_quarantines_the_response() -> None:
     frame = _bars()[["symbol", "trade_date", "close"]]
     validated = validate_daily_ohlcv(
         ProviderResult(frame, source="research", metadata={}),
@@ -144,6 +159,9 @@ def test_requested_field_missing_is_a_hard_contract_error() -> None:
         DailyOHLCVIntegrityPolicy.research(),
     )
     assert "missing_column:open" in validated.report.hard_violations
+    assert validated.valid_frame.empty
+    assert len(validated.quarantine_frame) == 2
+    assert validated.report.valid_rows == 0
 
 
 def test_live_freshness_requires_explicit_reference_and_rejects_stale() -> None:
