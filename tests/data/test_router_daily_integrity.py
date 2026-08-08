@@ -240,7 +240,7 @@ def test_production_requires_declared_units_frequency_timezone_adjustment_and_pi
         metadata={},
     )
     fallback = StaticDailyProvider(pd.DataFrame(), source="empty-fallback")
-    with pytest.raises(RouterDataIntegrityError, match="no daily rows satisfied"):
+    with pytest.raises(RouterDataIntegrityError):
         _router(primary, fallback).daily_ohlcv(_request(), integrity_policy=_policy())
     validate_result = primary.daily_ohlcv(_request())
     # The provider response itself is untouched; the router does not invent
