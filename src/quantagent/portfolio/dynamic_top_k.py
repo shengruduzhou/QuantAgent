@@ -1,32 +1,28 @@
 """Lifecycle / conviction-aware top_k resolver.
 
-The default V7 optimiser holds ``top_k`` constant. That is the right
-starting point for back-testing because it gives a clean lever to study,
-but it ignores everything the upstream evidence pipeline already knows:
-when a theme is in ``POLICY_SEED`` we should be holding fewer names with
-higher conviction; when it's in ``CAPITAL_INFLOW`` we want a wider net;
-when it's in ``DECAY`` or ``INVALIDATED`` we should be unwinding into
-cash.
+The default V7 optimiser holds ``top_k`` constant. That is the right starting
+point for back-testing because it gives a clean lever to study. The optional
+dynamic resolver remains a research feature and uses deterministic state
+variables: lifecycle stage, policy strength, and **prediction-score
+dispersion**.
 
-This module produces a per-date ``top_k`` recommendation in the closed
-interval ``[top_k_min, top_k_max]``. The implementation is intentionally
-deterministic and explainable: a base ``top_k`` is shifted by additive
-rules from three signals (lifecycle stage, average policy strength,
-cross-sectional alpha IC) and then clamped. Callers receive both the
-resolved ``top_k`` and an audit payload describing each contribution.
+Score dispersion is deliberately not called information coefficient. IC is an
+ex-post association between a signal and subsequent returns; dispersion is an
+ex-ante property of the score cross-section and cannot establish predictive
+quality. In particular, a signal and its sign-inverted (wrong-way) version have
+the same dispersion.
 
-The function is also defensive about small universes: on a smoke
-universe of 5 names a base ``top_k`` of 30 would crash the
-``fail_if_top_k_covers_universe`` invariant, so the resolver always
-clamps to ``max(top_k_min, min(top_k_max, eligible_count - 1))``.
+This module produces a per-date ``top_k`` recommendation in the closed interval
+``[top_k_min, top_k_max]`` and returns an audit payload describing each
+contribution. Production promotion of an adaptive Top-K rule still requires the
+same pre-registration / OOS / search-budget governance as any other strategy
+parameter.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
 
-import numpy as np
 import pandas as pd
 
 
@@ -49,12 +45,12 @@ class DynamicTopKConfig:
     lifecycle_delta: tuple[tuple[str, int], ...] = field(
         default_factory=lambda: tuple(LIFECYCLE_DELTA.items())
     )
-    ic_strong_threshold: float = 0.05
-    ic_weak_threshold: float = 0.02
-    ic_strong_bonus: int = 6
-    ic_weak_penalty: int = -6
-    policy_strength_bonus: float = 8.0  # +k = policy_strength_bonus * mean_policy_strength
-    keep_min_floor: bool = True  # never go below top_k_min even if universe is small
+    score_dispersion_strong_threshold: float = 0.05
+    score_dispersion_weak_threshold: float = 0.02
+    score_dispersion_strong_bonus: int = 6
+    score_dispersion_weak_penalty: int = -6
+    policy_strength_bonus: float = 8.0
+    keep_min_floor: bool = True
 
 
 @dataclass(frozen=True)
@@ -73,10 +69,7 @@ def _lifecycle_summary(theme_signals: pd.DataFrame | None) -> tuple[str | None, 
         stage = None
     else:
         stages = theme_signals["lifecycle_stage"].astype(str).str.upper().dropna()
-        if stages.empty:
-            stage = None
-        else:
-            stage = stages.value_counts().idxmax()
+        stage = stages.value_counts().idxmax() if not stages.empty else None
     if "policy_strength" in theme_signals.columns:
         ps = pd.to_numeric(theme_signals["policy_strength"], errors="coerce").dropna()
         policy_strength = float(ps.mean()) if not ps.empty else None
@@ -85,18 +78,12 @@ def _lifecycle_summary(theme_signals: pd.DataFrame | None) -> tuple[str | None, 
     return stage, policy_strength
 
 
-def _alpha_ic_cross_sectional(
-    predictions_row: pd.Series,
-    benchmark_row: pd.Series | None,
-) -> float:
-    """Simple proxy: the standardised dispersion of predictions.
+def _score_dispersion_cross_sectional(predictions_row: pd.Series | None) -> float:
+    """Scale-normalised dispersion of the available prediction scores.
 
-    A truly strong cross-sectional signal exhibits high dispersion of
-    predictions; a weak signal is roughly flat. We do not have access to
-    the next-day return at decision time, so this proxy is the best we
-    can do without leaking labels into the optimiser.
+    This quantity is intentionally *not* IC. It uses no future returns and has
+    no sign/direction information about predictive correctness.
     """
-
     if predictions_row is None or predictions_row.empty:
         return 0.0
     clean = pd.to_numeric(predictions_row, errors="coerce").dropna()
@@ -121,9 +108,7 @@ def resolve_dynamic_top_k(
 
     lifecycle_map: dict[str, int] = dict(cfg.lifecycle_delta)
     stage, policy_strength = _lifecycle_summary(theme_signals_for_date)
-    lifecycle_contribution = 0
-    if stage is not None:
-        lifecycle_contribution = int(lifecycle_map.get(stage, 0))
+    lifecycle_contribution = int(lifecycle_map.get(stage, 0)) if stage is not None else 0
     contributions["lifecycle"] = lifecycle_contribution
 
     policy_contribution = 0
@@ -131,21 +116,18 @@ def resolve_dynamic_top_k(
         policy_contribution = int(round(float(cfg.policy_strength_bonus) * float(policy_strength)))
     contributions["policy_strength"] = policy_contribution
 
-    ic_proxy = _alpha_ic_cross_sectional(predictions_for_date, None)
-    if ic_proxy >= cfg.ic_strong_threshold:
-        ic_contribution = int(cfg.ic_strong_bonus)
-    elif ic_proxy <= cfg.ic_weak_threshold:
-        ic_contribution = int(cfg.ic_weak_penalty)
+    score_dispersion = _score_dispersion_cross_sectional(predictions_for_date)
+    if score_dispersion >= cfg.score_dispersion_strong_threshold:
+        dispersion_contribution = int(cfg.score_dispersion_strong_bonus)
+    elif score_dispersion <= cfg.score_dispersion_weak_threshold:
+        dispersion_contribution = int(cfg.score_dispersion_weak_penalty)
     else:
-        ic_contribution = 0
-    contributions["alpha_ic_proxy"] = ic_contribution
+        dispersion_contribution = 0
+    contributions["score_dispersion"] = dispersion_contribution
 
-    raw = base + lifecycle_contribution + policy_contribution + ic_contribution
+    raw = base + lifecycle_contribution + policy_contribution + dispersion_contribution
     contributions["raw_sum"] = int(raw)
 
-    # Smoke-universe defense: never exceed eligible_count - 1 (top_k must
-    # leave at least one symbol unselected for the selection-pressure
-    # invariant). On a 5-name universe with top_k_max=50, clamp to 4.
     universe_ceiling = max(0, int(eligible_count) - 1)
     upper_bound = min(int(cfg.top_k_max), universe_ceiling) if universe_ceiling > 0 else 0
     lower_bound = int(cfg.top_k_min)
@@ -159,7 +141,8 @@ def resolve_dynamic_top_k(
         "eligible_count": int(eligible_count),
         "lifecycle_stage": stage,
         "policy_strength": policy_strength,
-        "alpha_ic_proxy": float(ic_proxy),
+        "score_dispersion": float(score_dispersion),
+        "score_dispersion_semantics": "prediction_cross_section_only_not_information_coefficient",
         "universe_ceiling": universe_ceiling,
         "lower_bound": int(lower_bound),
         "upper_bound": int(upper_bound),
