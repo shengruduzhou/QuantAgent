@@ -39,6 +39,27 @@ function finiteValues(chart: ResearchReportChart): number[] {
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 }
 
+function derivedCharts(sections: ResearchReportSection[]): ResearchReportChart[] {
+  const charts: ResearchReportChart[] = [];
+  for (const section of sections) {
+    const percentRows = section.rows.flatMap(([label, value]) => {
+      const match = value.trim().match(/^([+-]?(?:\d+(?:\.\d+)?|\.\d+))%$/);
+      if (!match) return [];
+      const parsed = Number(match[1]) / 100;
+      return Number.isFinite(parsed) ? [[label, parsed] as const] : [];
+    });
+    if (percentRows.length >= 2) {
+      charts.push({
+        title: `${section.title} · 百分比指标`,
+        labels: percentRows.map(([label]) => label),
+        series: [{ name: section.title, values: percentRows.map(([, value]) => value) }],
+        valueFormat: "percent",
+      });
+    }
+  }
+  return charts.slice(0, 3);
+}
+
 function renderChart(chart: ResearchReportChart, chartIndex: number): string {
   const width = 920;
   const height = 280;
@@ -102,10 +123,11 @@ export function buildOfflineResearchHtml(report: OfflineResearchReport): string 
       <h2>${escapeHtml(section.title)}</h2>
       <table><tbody>${section.rows.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`).join("")}</tbody></table>
     </section>`).join("");
-  const charts = (report.charts ?? []).map(renderChart).join("");
+  const effectiveCharts = report.charts?.length ? report.charts : derivedCharts(report.sections);
+  const charts = effectiveCharts.map(renderChart).join("");
   const provenance = report.provenance.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td><code>${escapeHtml(value)}</code></td></tr>`).join("");
   const limitations = report.limitations.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-  const chartData = JSON.stringify(report.charts ?? []).replaceAll("<", "\\u003c");
+  const chartData = JSON.stringify(effectiveCharts).replaceAll("<", "\\u003c");
 
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
