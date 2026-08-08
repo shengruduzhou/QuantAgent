@@ -1,14 +1,13 @@
 """Production policy layer for schema-v2 model trust.
 
-The low-level v2 module verifies path safety, SHA-256 bindings and structured
-cross-artifact claims.  This layer adds the facts that must be *recomputed* from
-bound data rather than trusted from summary JSON:
+The low-level binder verifies roots, digests and structured identity. This layer
+recomputes facts that must not be trusted from summaries:
 
-- FRESH OOS trading-day coverage from the prediction artifact itself;
-- PBO, DSR and SPA from the complete early-OOS candidate return matrix using
-  QuantAgent's existing frozen-candidate governance implementation.
+- FRESH coverage from the bound prediction artifact;
+- frozen strict-backtest return/benchmark outcome from its own return artifact;
+- PBO, DSR and SPA from the complete early-OOS candidate matrix.
 
-Only this governed verifier/issuer is suitable for the live trust boundary.
+Only this governed verifier/issuer is used by the live trust boundary.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from uuid import uuid4
 from quantagent.execution.live_model_evidence import (
     recompute_statistical_evidence,
     validate_fresh_predictions,
+    validate_strict_backtest_returns,
 )
 from quantagent.execution.live_model_trust_v2 import (
     LiveModelTrustV2IssueResult,
@@ -46,7 +46,7 @@ def verify_governed_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> V2VerificationResult:
-    """Verify digest provenance, then independently derive FRESH/statistical facts."""
+    """Verify provenance, then independently derive FRESH/strict/statistical facts."""
     base = _verify_digest_bound_v2(
         payload,
         artifact_roots=artifact_roots,
@@ -59,48 +59,72 @@ def verify_governed_live_model_trust_v2(
     evidence = dict(base.evidence)
     resolved = dict(base.resolved_paths)
 
-    # If a required artifact did not even pass digest/path verification, do not
-    # attempt to parse an untrusted or missing path.  The base reasons remain the
-    # authoritative failure evidence.
     fresh_path = resolved.get("fresh_oos_predictions")
     fresh_summary_path = resolved.get("fresh_oos")
     if fresh_path and fresh_summary_path:
         try:
-            derived_fresh = validate_fresh_predictions(fresh_path)
-            fresh_summary = _read_json_object(Path(fresh_summary_path), "fresh_oos")
+            derived = validate_fresh_predictions(fresh_path)
+            summary = _read_json_object(Path(fresh_summary_path), "fresh_oos")
         except ValueError as exc:
             reasons.append(str(exc))
         else:
-            claimed_days = _strict_positive_int(fresh_summary.get("trading_days"))
-            claimed_start = str(fresh_summary.get("start_date") or "")
-            claimed_end = str(fresh_summary.get("end_date") or "")
-            if derived_fresh.trading_days < int(min_fresh_oos_days):
+            claimed_days = _strict_positive_int(summary.get("trading_days"))
+            if derived.trading_days < int(min_fresh_oos_days):
                 reasons.append(
-                    "fresh_oos_predictions:derived_trading_days_below_"
-                    f"{int(min_fresh_oos_days)}:{derived_fresh.trading_days}"
+                    f"fresh_oos_predictions:derived_trading_days_below_{int(min_fresh_oos_days)}:"
+                    f"{derived.trading_days}"
                 )
-            if claimed_days != derived_fresh.trading_days:
+            if claimed_days != derived.trading_days:
                 reasons.append(
-                    "fresh_oos:trading_days_mismatch_predictions:"
-                    f"{claimed_days}!={derived_fresh.trading_days}"
+                    f"fresh_oos:trading_days_mismatch_predictions:{claimed_days}!={derived.trading_days}"
                 )
-            if claimed_start != derived_fresh.start_date:
-                reasons.append(
-                    "fresh_oos:start_date_mismatch_predictions:"
-                    f"{claimed_start}!={derived_fresh.start_date}"
-                )
-            if claimed_end != derived_fresh.end_date:
-                reasons.append(
-                    "fresh_oos:end_date_mismatch_predictions:"
-                    f"{claimed_end}!={derived_fresh.end_date}"
-                )
+            if str(summary.get("start_date") or "") != derived.start_date:
+                reasons.append("fresh_oos:start_date_mismatch_predictions")
+            if str(summary.get("end_date") or "") != derived.end_date:
+                reasons.append("fresh_oos:end_date_mismatch_predictions")
             evidence.update(
                 {
-                    "fresh_oos_days": derived_fresh.trading_days,
-                    "fresh_oos_start": derived_fresh.start_date,
-                    "fresh_oos_end": derived_fresh.end_date,
-                    "fresh_prediction_rows": derived_fresh.rows,
-                    "fresh_prediction_symbols": derived_fresh.symbols,
+                    "fresh_oos_days": derived.trading_days,
+                    "fresh_oos_start": derived.start_date,
+                    "fresh_oos_end": derived.end_date,
+                    "fresh_prediction_rows": derived.rows,
+                    "fresh_prediction_symbols": derived.symbols,
+                }
+            )
+
+    strict_returns_path = resolved.get("strict_backtest_returns")
+    strict_summary_path = resolved.get("strict_backtest")
+    if strict_returns_path and strict_summary_path:
+        try:
+            derived_strict = validate_strict_backtest_returns(strict_returns_path)
+            strict_summary = _read_json_object(Path(strict_summary_path), "strict_backtest")
+        except ValueError as exc:
+            reasons.append(str(exc))
+        else:
+            claimed_portfolio = _finite_number(strict_summary.get("portfolio_total_return"))
+            claimed_benchmark = _finite_number(strict_summary.get("benchmark_total_return"))
+            claimed_excess = strict_summary.get("benchmark_excess_positive")
+            if claimed_portfolio is None or not math.isclose(
+                claimed_portfolio, derived_strict.portfolio_total_return, rel_tol=1e-9, abs_tol=1e-12
+            ):
+                reasons.append("strict_backtest:portfolio_total_return_mismatch_recomputed")
+            if claimed_benchmark is None or not math.isclose(
+                claimed_benchmark, derived_strict.benchmark_total_return, rel_tol=1e-9, abs_tol=1e-12
+            ):
+                reasons.append("strict_backtest:benchmark_total_return_mismatch_recomputed")
+            if claimed_excess is not derived_strict.benchmark_excess_positive:
+                reasons.append("strict_backtest:benchmark_excess_positive_mismatch_recomputed")
+            if not derived_strict.benchmark_excess_positive:
+                reasons.append("strict_backtest:recomputed_benchmark_excess_not_positive")
+            evidence.update(
+                {
+                    "strict_return_days": derived_strict.trading_days,
+                    "strict_returns_start": derived_strict.start_date,
+                    "strict_returns_end": derived_strict.end_date,
+                    "strict_portfolio_total_return": derived_strict.portfolio_total_return,
+                    "strict_benchmark_total_return": derived_strict.benchmark_total_return,
+                    "benchmark_excess_positive": derived_strict.benchmark_excess_positive,
+                    "strict_returns_recomputed": True,
                 }
             )
 
@@ -120,10 +144,9 @@ def verify_governed_live_model_trust_v2(
             if family != prereg_family:
                 raise ValueError("statistical_returns:candidate_family_not_pre_registered")
             selected = str(search.get("selected_candidate") or "").strip()
-            stats_selected = str(stats.get("selected_candidate") or "").strip()
             if not selected or selected not in family:
                 raise ValueError("search_ledger:selected_candidate_invalid")
-            if stats_selected != selected:
+            if str(stats.get("selected_candidate") or "").strip() != selected:
                 raise ValueError("statistical_gates:selected_candidate_mismatch_search_ledger")
             trial_count = _strict_positive_int(search.get("trial_count"))
             if trial_count is None:
@@ -142,27 +165,15 @@ def verify_governed_live_model_trust_v2(
             reasons.append(str(exc))
         else:
             report = derived_stats.report
-            claimed = {
-                "pbo": _probability(stats.get("pbo")),
-                "dsr_probability": _probability(stats.get("dsr_probability")),
-                "spa_p_value": _probability(stats.get("spa_p_value")),
-            }
             recomputed = {
                 "pbo": float(report.pbo),
                 "dsr_probability": float(report.dsr_probability),
                 "spa_p_value": float(report.spa_pvalue),
             }
             for key, actual in recomputed.items():
-                stated = claimed[key]
-                if stated is None or not math.isclose(
-                    stated,
-                    actual,
-                    rel_tol=1e-9,
-                    abs_tol=1e-12,
-                ):
-                    reasons.append(
-                        f"statistical_gates:{key}_mismatch_recomputed:{stated}!={actual}"
-                    )
+                stated = _probability(stats.get(key))
+                if stated is None or not math.isclose(stated, actual, rel_tol=1e-9, abs_tol=1e-12):
+                    reasons.append(f"statistical_gates:{key}_mismatch_recomputed:{stated}!={actual}")
             if not report.accepted:
                 reasons.extend(
                     f"statistical_gates:recomputed_reject:{reason}"
@@ -202,6 +213,8 @@ def issue_governed_live_model_trust_v2(
     max_spa_p_value: float = 0.05,
 ) -> LiveModelTrustV2IssueResult:
     """Stage a digest-bound cert, apply governed verification, then atomically publish."""
+    if artifact_roots is None:
+        raise ValueError("governed v2 issuer requires explicit artifact_roots")
     final = Path(manifest_path)
     final.parent.mkdir(parents=True, exist_ok=True)
     stage = final.with_name(f".{final.name}.{uuid4().hex}.stage")
@@ -218,15 +231,9 @@ def issue_governed_live_model_trust_v2(
             min_dsr_probability=min_dsr_probability,
             max_spa_p_value=max_spa_p_value,
         )
-        roots = artifact_roots
-        if roots is None:
-            # The low-level issuer resolved its defaults from the staging path;
-            # governed production callers should pass roots explicitly.  Refuse
-            # ambiguity rather than deriving a potentially different runtime root.
-            raise ValueError("governed v2 issuer requires explicit artifact_roots")
         verification = verify_governed_live_model_trust_v2(
             staged.payload,
-            artifact_roots=roots,
+            artifact_roots=artifact_roots,
             min_fresh_oos_days=min_fresh_oos_days,
             max_pbo=max_pbo,
             min_dsr_probability=min_dsr_probability,
@@ -237,11 +244,7 @@ def issue_governed_live_model_trust_v2(
                 "governed v2 trust evidence rejected: " + "; ".join(verification.reasons)
             )
         os.replace(stage, final)
-        return LiveModelTrustV2IssueResult(
-            manifest_path=str(final),
-            payload=staged.payload,
-            verification=verification,
-        )
+        return LiveModelTrustV2IssueResult(str(final), staged.payload, verification)
     finally:
         try:
             if stage.exists() or stage.is_symlink():
@@ -275,16 +278,19 @@ def _strict_positive_int(value: object) -> int | None:
     return value
 
 
-def _probability(value: object) -> float | None:
+def _finite_number(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
-        return None
-    return number
+    return number if math.isfinite(number) else None
+
+
+def _probability(value: object) -> float | None:
+    number = _finite_number(value)
+    return number if number is not None and 0.0 <= number <= 1.0 else None
 
 
 __all__ = [
