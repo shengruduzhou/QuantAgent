@@ -33,8 +33,6 @@ class _DailyProvider(Protocol):
 
 @dataclass(frozen=True)
 class RoutedProvider:
-    """One named source registered into the router."""
-
     name: str
     provider: Any
     is_paid: bool = False
@@ -79,11 +77,11 @@ class RouterResult:
 
 
 class RouterAllSourcesUnavailable(RuntimeError):
-    """Raised when no registered source could serve the request."""
+    pass
 
 
 class RouterDataIntegrityError(RuntimeError):
-    """Raised when an explicit production integrity policy cannot be satisfied."""
+    pass
 
 
 _SOURCE_FATAL_CODES = (
@@ -111,14 +109,7 @@ def _fatal_integrity(violations: tuple[str, ...]) -> bool:
     return any(any(code.startswith(prefix) for prefix in _SOURCE_FATAL_CODES) for code in violations)
 
 
-def _semantic_signature(report: DailyOHLCVIntegrityResult) -> tuple[str, str, str, str, str]:
-    """Merge-critical semantics; all fallback rows must share this signature.
-
-    PIT semantics is still recorded and independently required, but provider
-    wording can legitimately differ. Frequency, timezone, volume unit, amount
-    unit and adjustment directly change numeric interpretation and therefore
-    must match exactly across rows in one routed production frame.
-    """
+def _semantic_signature(report: DailyOHLCVIntegrityResult) -> tuple[str, str, str, str, str, str]:
     metadata = report.metadata
     return (
         str(metadata.get("frequency", "")).strip().lower(),
@@ -126,22 +117,29 @@ def _semantic_signature(report: DailyOHLCVIntegrityResult) -> tuple[str, str, st
         str(metadata.get("volume_unit", "")).strip().lower(),
         str(metadata.get("amount_unit", "")).strip().upper(),
         str(metadata.get("adjustment", "")).strip().lower(),
+        str(metadata.get("pit_semantics", "")).strip(),
     )
 
 
-def _signature_dict(signature: tuple[str, str, str, str, str] | None) -> dict[str, str] | None:
+def _signature_dict(signature: tuple[str, str, str, str, str, str] | None) -> dict[str, str] | None:
     if signature is None:
         return None
     return dict(zip(
-        ("frequency", "timezone", "volume_unit", "amount_unit", "adjustment"),
+        ("frequency", "timezone", "volume_unit", "amount_unit", "adjustment", "pit_semantics"),
         signature,
         strict=True,
     ))
 
 
-class MultiSourceDataRouter:
-    """Order-preserving router across registered real-data providers."""
+def _coverage_basis(policy: DailyOHLCVIntegrityPolicy) -> str:
+    if policy.expected_symbol_trade_dates:
+        return "authoritative_per_symbol_expected_keys"
+    if policy.expected_trade_dates:
+        return "authoritative_single_symbol_expected_dates"
+    return "observed_only"
 
+
+class MultiSourceDataRouter:
     def __init__(self, config: RouterConfig | None = None) -> None:
         self.config = config or RouterConfig()
         self._providers: dict[str, RoutedProvider] = {}
@@ -194,7 +192,7 @@ class MultiSourceDataRouter:
         served_symbols: set[str] = set()
         expected_keys = expected_daily_keys(request, policy)
         quarantined_total = 0
-        production_signature: tuple[str, str, str, str, str] | None = None
+        production_signature: tuple[str, str, str, str, str, str] | None = None
 
         for src_name in self.config.daily_priority:
             routed = self._providers.get(src_name)
@@ -212,18 +210,10 @@ class MultiSourceDataRouter:
             try:
                 res = method(request)
             except ProviderUnavailable as exc:
-                result.per_source[src_name] = {
-                    "status": "unavailable",
-                    "reason": str(exc),
-                    "rows": 0,
-                }
+                result.per_source[src_name] = {"status": "unavailable", "reason": str(exc), "rows": 0}
                 continue
-            except Exception as exc:  # noqa: BLE001 — provider failures are evidence
-                result.per_source[src_name] = {
-                    "status": "error",
-                    "reason": str(exc),
-                    "rows": 0,
-                }
+            except Exception as exc:  # noqa: BLE001
+                result.per_source[src_name] = {"status": "error", "reason": str(exc), "rows": 0}
                 continue
 
             validated = validate_daily_ohlcv(res, request, policy)
@@ -245,10 +235,6 @@ class MultiSourceDataRouter:
                     f"daily integrity failed at {src_name}: {list(report.hard_violations)}"
                 )
 
-            # Source-level semantic/provenance failures contaminate the entire
-            # provider response. Row-level failures may still leave independently
-            # valid keys that are safe to keep while lower-priority sources fill
-            # quarantined keys.
             if _fatal_integrity(report.hard_violations):
                 result.warnings.append(f"daily_integrity_source_rejected:{src_name}")
                 continue
@@ -286,14 +272,8 @@ class MultiSourceDataRouter:
                     served_symbols = set(served["symbol"].astype(str))
                 if expected_keys and served_keys >= expected_keys:
                     break
-                # Without an authoritative expected trading calendar we must not
-                # infer completeness; consult every registered priority source
-                # and union additional valid keys without overriding higher
-                # priority observations.
                 continue
 
-            # Historical research semantics remain symbol-priority based so
-            # existing callers do not unexpectedly fan out to every provider.
             if result.primary_source is None:
                 result.primary_source = src_name
                 served = valid_frame
@@ -312,6 +292,7 @@ class MultiSourceDataRouter:
             served_keys = daily_bar_keys(served)
 
         missing_expected = sorted(expected_keys - served_keys)
+        basis = _coverage_basis(policy)
         result.integrity = {
             "capability": "daily_ohlcv",
             "policy_mode": policy.mode,
@@ -319,10 +300,10 @@ class MultiSourceDataRouter:
             "quarantined_rows": int(quarantined_total),
             "expected_key_count": len(expected_keys) if expected_keys else None,
             "missing_expected_keys": [f"{symbol}@{date}" for symbol, date in missing_expected],
-            "coverage_basis": "authoritative_expected_trade_dates" if expected_keys else "observed_only",
+            "coverage_basis": basis,
             "semantic_signature": _signature_dict(production_signature) if policy.mode == "production" else None,
         }
-        if not expected_keys:
+        if basis == "observed_only":
             result.warnings.append("daily_integrity_expected_calendar_not_supplied_observed_only")
         if policy.mode == "production" and missing_expected:
             raise RouterDataIntegrityError(
@@ -367,23 +348,13 @@ class MultiSourceDataRouter:
                 else:
                     method = getattr(routed.provider, method_name, None)
                     if method is None:
-                        raise ProviderUnavailable(
-                            f"{src_name} does not implement {method_name}"
-                        )
+                        raise ProviderUnavailable(f"{src_name} does not implement {method_name}")
                     res = method(request)
             except ProviderUnavailable as exc:
-                result.per_source[src_name] = {
-                    "status": "unavailable",
-                    "reason": str(exc),
-                    "rows": 0,
-                }
+                result.per_source[src_name] = {"status": "unavailable", "reason": str(exc), "rows": 0}
                 continue
-            except Exception as exc:  # noqa: BLE001 — surface provider errors
-                result.per_source[src_name] = {
-                    "status": "error",
-                    "reason": str(exc),
-                    "rows": 0,
-                }
+            except Exception as exc:  # noqa: BLE001
+                result.per_source[src_name] = {"status": "error", "reason": str(exc), "rows": 0}
                 continue
 
             served_frame = _attribute_source(res.frame, src_name)
@@ -400,10 +371,7 @@ class MultiSourceDataRouter:
                 result.primary_source = src_name
                 served = served_frame
             elif self.config.merge_partial_results:
-                missing_symbols = (
-                    set(served_frame.get("symbol", pd.Series(dtype=str)).astype(str))
-                    - served_symbols
-                )
+                missing_symbols = set(served_frame.get("symbol", pd.Series(dtype=str)).astype(str)) - served_symbols
                 if missing_symbols:
                     backfill = served_frame[served_frame["symbol"].astype(str).isin(missing_symbols)]
                     served = pd.concat([served, backfill], ignore_index=True)
@@ -454,82 +422,25 @@ def build_default_router(
     tushare_provider=None,
     config: RouterConfig | None = None,
 ) -> MultiSourceDataRouter:
-    """Wire the canonical real-data router.
-
-    TickFlow stays first because it also supplies minute/tick/depth paths.
-    Fuyao is inserted immediately after it for official daily coverage and is
-    intentionally not advertised as a minute/tick source. Qlib stays the local
-    research/training baseline.
-    """
     router = MultiSourceDataRouter(config=config)
     if tickflow_provider is not None:
         router.register(RoutedProvider(
-            name="tickflow",
-            provider=tickflow_provider,
-            is_paid=True,
-            quality_baseline=0.95,
-            capabilities=(
-                "daily_ohlcv",
-                "adjusted_prices",
-                "tradability",
-                "minute_ohlcv_5",
-                "financials",
-            ),
+            name="tickflow", provider=tickflow_provider, is_paid=True, quality_baseline=0.95,
+            capabilities=("daily_ohlcv", "adjusted_prices", "tradability", "minute_ohlcv_5", "financials"),
         ))
     if fuyao_provider is not None:
         router.register(RoutedProvider(
-            name="fuyao",
-            provider=fuyao_provider,
-            is_paid=True,
-            quality_baseline=0.98,
-            capabilities=(
-                "daily_ohlcv",
-                "adjusted_prices",
-                "fundamentals",
-                "trading_calendar",
-                "index_daily",
-                "valuations",
-                "corporate_actions",
-            ),
+            name="fuyao", provider=fuyao_provider, is_paid=True, quality_baseline=0.98,
+            capabilities=("daily_ohlcv", "adjusted_prices", "fundamentals", "trading_calendar", "index_daily", "valuations", "corporate_actions"),
         ))
     if qlib_provider is not None:
-        router.register(RoutedProvider(
-            name="qlib",
-            provider=qlib_provider,
-            is_paid=False,
-            quality_baseline=0.90,
-            capabilities=("daily_ohlcv", "index_daily"),
-        ))
+        router.register(RoutedProvider(name="qlib", provider=qlib_provider, is_paid=False, quality_baseline=0.90, capabilities=("daily_ohlcv", "index_daily")))
     if akshare_provider is not None:
-        router.register(RoutedProvider(
-            name="akshare",
-            provider=akshare_provider,
-            is_paid=False,
-            quality_baseline=0.80,
-            capabilities=("daily_ohlcv", "minute_ohlcv_5"),
-        ))
+        router.register(RoutedProvider(name="akshare", provider=akshare_provider, is_paid=False, quality_baseline=0.80, capabilities=("daily_ohlcv", "minute_ohlcv_5")))
     if baostock_provider is not None:
-        router.register(RoutedProvider(
-            name="baostock",
-            provider=baostock_provider,
-            is_paid=False,
-            quality_baseline=0.85,
-            capabilities=(
-                "daily_ohlcv",
-                "minute_ohlcv_5",
-                "minute_ohlcv_15",
-                "minute_ohlcv_30",
-                "minute_ohlcv_60",
-            ),
-        ))
+        router.register(RoutedProvider(name="baostock", provider=baostock_provider, is_paid=False, quality_baseline=0.85, capabilities=("daily_ohlcv", "minute_ohlcv_5", "minute_ohlcv_15", "minute_ohlcv_30", "minute_ohlcv_60")))
     if tushare_provider is not None:
-        router.register(RoutedProvider(
-            name="tushare",
-            provider=tushare_provider,
-            is_paid=True,
-            quality_baseline=0.88,
-            capabilities=("daily_ohlcv", "fundamentals"),
-        ))
+        router.register(RoutedProvider(name="tushare", provider=tushare_provider, is_paid=True, quality_baseline=0.88, capabilities=("daily_ohlcv", "fundamentals")))
     return router
 
 
