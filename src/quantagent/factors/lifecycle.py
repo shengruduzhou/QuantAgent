@@ -8,27 +8,30 @@ import pandas as pd
 from quantagent.factors.evaluation import (
     capacity_proxy,
     factor_correlation_matrix,
-    factor_decay_curve,
     information_coefficient,
     quantile_group_backtest,
+)
+from quantagent.factors.executable_labels import (
+    FACTOR_LABEL_SEMANTICS,
+    executable_factor_decay_curve,
 )
 
 
 @dataclass(frozen=True)
 class LifecycleThresholds:
+    # Historical field name retained for API compatibility. Crossing this gate
+    # now means VALIDATED, never economically ACTIVE; ACTIVE is owned by the
+    # state machine after shadow/promotion evidence.
     active_rank_icir: float = 0.10
     degraded_rank_icir: float = 0.0
     positive_ratio: float = 0.50
     monotonicity: float = 0.20
     retirement_rank_icir: float = -0.05
     drift_limit: float = 3.0
-    # A factor that is effectively a duplicate of an existing production
-    # factor may be useful diagnostically but should not earn an independent
-    # ACTIVE slot merely because its own IC is good.
+    min_effective_dates: int = 60
+    min_median_symbols_per_date: int = 20
+    min_newey_west_rank_t_stat: float = 2.0
     max_existing_correlation_for_active: float = 0.90
-    # Capacity remains strategy/account specific.  A positive value makes it a
-    # production promotion gate; zero preserves research-only workflows that do
-    # not carry an amount column.
     min_capacity_rmb_for_active: float = 0.0
 
 
@@ -48,6 +51,9 @@ class FactorLifecycleReport:
     crowding_proxy: float
     max_correlation_to_existing: float
     live_drift: float
+    effective_dates: int
+    median_symbols_per_date: float
+    label_semantics: str
     recommended_status: str
 
 
@@ -59,13 +65,42 @@ def build_factor_lifecycle_report(
     amount_column: str = "amount",
     thresholds: LifecycleThresholds | None = None,
 ) -> FactorLifecycleReport:
+    """Build a research lifecycle diagnostic using executable decay semantics.
+
+    ``return_column`` is caller-supplied and may be used for research analysis;
+    the decay evidence is always recomputed with the governed T-close -> next
+    session entry convention when prices are available.  A strong report can
+    recommend ``validated`` but can never directly declare a factor ``active``.
+    """
+
     thresholds = thresholds or LifecycleThresholds()
-    ic = information_coefficient(frame, factor_column, return_column)
-    groups = quantile_group_backtest(frame, factor_column, return_column)
-    decay = factor_decay_curve(frame, factor_column, horizons=(1,)) if "close" in frame.columns else None
-    capacity = capacity_proxy(frame, factor_column, amount_column=amount_column) if amount_column in frame.columns else None
-    max_corr = _max_existing_corr(frame, factor_column, existing_factor_columns)
-    live_drift = _live_drift(frame, factor_column)
+    required = {"trade_date", "symbol", factor_column, return_column}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"factor lifecycle frame missing columns: {missing}")
+    data = frame.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "symbol"])
+    if data.duplicated(["trade_date", "symbol"]).any():
+        raise ValueError("factor lifecycle requires unique trade_date/symbol rows")
+
+    counts = data.groupby("trade_date")["symbol"].nunique()
+    effective_dates = int(len(counts))
+    median_symbols = float(counts.median()) if not counts.empty else 0.0
+    ic = information_coefficient(data, factor_column, return_column)
+    groups = quantile_group_backtest(data, factor_column, return_column)
+    decay = (
+        executable_factor_decay_curve(data, factor_column, horizons=(1,))
+        if "close" in data.columns
+        else None
+    )
+    capacity = (
+        capacity_proxy(data, factor_column, amount_column=amount_column)
+        if amount_column in data.columns
+        else None
+    )
+    max_corr = _max_existing_corr(data, factor_column, existing_factor_columns)
+    live_drift = _live_drift(data, factor_column)
     crowding = float(max_corr) if np.isfinite(max_corr) else np.nan
     capacity_rmb = float(capacity.capacity_rmb) if capacity is not None else np.nan
     status = recommend_factor_status(
@@ -75,6 +110,9 @@ def build_factor_lifecycle_report(
         live_drift=live_drift,
         max_existing_correlation=max_corr,
         capacity_rmb=capacity_rmb,
+        effective_dates=effective_dates,
+        median_symbols_per_date=median_symbols,
+        newey_west_rank_t_stat=ic.summary.rank_t_stat,
         thresholds=thresholds,
     )
     return FactorLifecycleReport(
@@ -85,13 +123,20 @@ def build_factor_lifecycle_report(
         rank_icir=ic.summary.rank_icir,
         positive_ic_ratio=ic.summary.positive_ratio,
         newey_west_t_stat=ic.summary.rank_t_stat,
-        decay_1d=float(decay.rank_ic.loc[1]) if decay is not None and 1 in decay.rank_ic.index else np.nan,
+        decay_1d=(
+            float(decay.rank_ic.loc[1])
+            if decay is not None and 1 in decay.rank_ic.index
+            else np.nan
+        ),
         monotonicity=groups.monotonicity,
         turnover=float(groups.turnover.mean()) if not groups.turnover.empty else np.nan,
         capacity_proxy=capacity_rmb,
         crowding_proxy=crowding,
         max_correlation_to_existing=float(max_corr),
         live_drift=float(live_drift),
+        effective_dates=effective_dates,
+        median_symbols_per_date=median_symbols,
+        label_semantics=FACTOR_LABEL_SEMANTICS,
         recommended_status=status,
     )
 
@@ -103,29 +148,43 @@ def recommend_factor_status(
     live_drift: float = 0.0,
     max_existing_correlation: float = 0.0,
     capacity_rmb: float = np.nan,
+    effective_dates: int | None = None,
+    median_symbols_per_date: float | None = None,
+    newey_west_rank_t_stat: float = np.nan,
     thresholds: LifecycleThresholds | None = None,
 ) -> str:
+    """Recommend a *research* lifecycle status, never direct economic ACTIVE."""
+
     thresholds = thresholds or LifecycleThresholds()
     rank_icir = _finite_or(rank_icir, -np.inf)
     positive_ratio = _finite_or(positive_ratio, 0.0)
     monotonicity = _finite_or(monotonicity, 0.0)
 
-    # Unknown drift is not the same thing as zero drift.  The lifecycle report
-    # must collect enough history before the factor can be called ACTIVE.
-    if not np.isfinite(live_drift):
+    # Coverage is mandatory. Legacy direct callers that do not provide it are
+    # deliberately held in WATCH rather than treating missing evidence as safe.
+    if effective_dates is None or int(effective_dates) < thresholds.min_effective_dates:
         return "watch"
-    if abs(float(live_drift)) > thresholds.drift_limit:
+    if (
+        median_symbols_per_date is None
+        or not np.isfinite(median_symbols_per_date)
+        or float(median_symbols_per_date) < thresholds.min_median_symbols_per_date
+    ):
+        return "watch"
+    if (
+        not np.isfinite(newey_west_rank_t_stat)
+        or float(newey_west_rank_t_stat) < thresholds.min_newey_west_rank_t_stat
+    ):
         return "watch"
 
-    # If correlation evidence exists, highly redundant factors cannot be
-    # promoted as an independent active signal.  They remain visible for
-    # combination/ablation work rather than silently double-counting exposure.
+    if not np.isfinite(live_drift) or abs(float(live_drift)) > thresholds.drift_limit:
+        return "watch"
+
     if np.isfinite(max_existing_correlation):
         if abs(float(max_existing_correlation)) > thresholds.max_existing_correlation_for_active:
             return "watch"
 
     if rank_icir <= thresholds.retirement_rank_icir:
-        return "retired"
+        return "retired_candidate"
 
     capacity_gate = True
     if thresholds.min_capacity_rmb_for_active > 0:
@@ -140,24 +199,36 @@ def recommend_factor_status(
         and monotonicity >= thresholds.monotonicity
         and capacity_gate
     ):
-        return "active"
+        return "validated"
     if rank_icir >= thresholds.degraded_rank_icir:
-        return "degraded"
-    return "watch"
+        return "watch"
+    return "degraded_candidate"
 
 
 def lifecycle_reports_to_frame(reports: list[FactorLifecycleReport]) -> pd.DataFrame:
     return pd.DataFrame([report.__dict__ for report in reports])
 
 
-def _max_existing_corr(frame: pd.DataFrame, factor_column: str, existing_factor_columns: list[str] | None) -> float:
+def _max_existing_corr(
+    frame: pd.DataFrame,
+    factor_column: str,
+    existing_factor_columns: list[str] | None,
+) -> float:
     if not existing_factor_columns:
         return 0.0
-    cols = [factor_column, *existing_factor_columns]
-    matrix = factor_correlation_matrix(frame[cols], factor_columns=cols).abs()
+    existing = [column for column in existing_factor_columns if column in frame.columns]
+    if not existing:
+        return np.nan
+    cols = [factor_column, *existing]
+    # Correlation used for redundancy is cross-sectional rank correlation, not
+    # raw pooled scale correlation. Rank each date first so market-level scale
+    # drift cannot manufacture similarity.
+    ranked = frame[["trade_date", *cols]].copy()
+    ranked[cols] = ranked.groupby("trade_date")[cols].rank(pct=True)
+    matrix = factor_correlation_matrix(ranked[cols], factor_columns=cols, method="spearman").abs()
     if factor_column not in matrix.index:
         return np.nan
-    values = matrix.loc[factor_column, [c for c in existing_factor_columns if c in matrix.columns]].dropna()
+    values = matrix.loc[factor_column, existing].dropna()
     return float(values.max()) if not values.empty else np.nan
 
 
@@ -167,9 +238,10 @@ def _live_drift(frame: pd.DataFrame, factor_column: str, date_column: str = "tra
         return np.nan
     data[date_column] = pd.to_datetime(data[date_column])
     dates = sorted(data[date_column].drop_duplicates())
-    if len(dates) < 4:
+    if len(dates) < 10:
         return np.nan
-    split = dates[int(len(dates) * 0.7)]
+    split_index = max(1, min(len(dates) - 1, int(len(dates) * 0.7)))
+    split = dates[split_index - 1]
     hist = data.loc[data[date_column] <= split, factor_column]
     live = data.loc[data[date_column] > split, factor_column]
     std = hist.std(ddof=1)

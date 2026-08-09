@@ -30,6 +30,10 @@ dependencies = [
 data = [
   "akshare",
   "tushare",
+  # Real public A-share daily/minute history provider used by the research-only
+  # factor cycle. Production certification remains governed by router integrity;
+  # installing a package is not evidence of PIT/production quality.
+  "baostock>=0.9.3",
 ]
 training = [
   "torch>=2.3",
@@ -59,6 +63,7 @@ test = [
 all = [
   "akshare",
   "tushare",
+  "baostock>=0.9.3",
   "torch>=2.3",
   "transformers>=4.43",
   "scikit-learn>=1.5",
