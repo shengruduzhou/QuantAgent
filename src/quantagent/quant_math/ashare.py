@@ -7,8 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quantagent.backtest import ashare_rules as exchange_rules
-from quantagent.data.ashare.symbols import board_of as exchange_board_of
+from quantagent.market_rules import ashare as exchange_rules
 
 
 @dataclass(frozen=True)
@@ -16,7 +15,7 @@ class ASharePriceLimit:
     """Explicit scenario overrides for price-limit research.
 
     Production/date-faithful paths should leave ``limits=None`` and delegate to
-    :mod:`quantagent.backtest.ashare_rules`.  ``st`` is retained only so old
+    :mod:`quantagent.market_rules.ashare`. ``st`` is retained only so old
     scenario callers can still request one deliberately flat ST assumption; it
     is not the default exchange truth after the 2026-07-06 reform.
     """
@@ -46,7 +45,7 @@ class BoardRule:
 
 @dataclass(frozen=True)
 class AshareRuleEngineConfig:
-    # None = canonical, date-versioned exchange rule.  A numeric value is an
+    # None = canonical, date-versioned exchange rule. A numeric value is an
     # explicit research/scenario override and deliberately flattens all equity
     # risk-warning names to that ratio.
     st_price_limit_ratio: float | None = None
@@ -98,12 +97,8 @@ class AshareRuleEngine:
         prev = float(prev_close)
 
         if rule.instrument_type == "equity" and self.config.st_price_limit_ratio is None:
-            try:
-                exchange_board = exchange_board_of(symbol)
-            except Exception:
-                exchange_board = _exchange_board_from_compat(rule.board)
             limits = exchange_rules.price_limits(
-                board=exchange_board,
+                board=exchange_rules.exchange_board_for_symbol(symbol),
                 previous_close=prev,
                 trade_date=trade_date,
                 is_st=bool(is_st),
@@ -214,16 +209,6 @@ class AshareRuleEngine:
         return True, "ok"
 
 
-def _exchange_board_from_compat(board: str) -> str:
-    mapping = {
-        "main_board": exchange_rules.SH_MAIN,
-        "chinext": exchange_rules.CHINEXT,
-        "star": exchange_rules.STAR,
-        "bse": exchange_rules.BSE,
-    }
-    return mapping.get(board, exchange_rules.SH_MAIN)
-
-
 def board_for_symbol(symbol: str, is_st: bool = False) -> str:
     """Resolve the compatibility board label from ticker prefix.
 
@@ -252,7 +237,7 @@ def daily_price_limit(
 ) -> float:
     """Return the price-limit ratio for one symbol/date.
 
-    Passing ``limits`` opts into the old flat scenario table.  With
+    Passing ``limits`` opts into the old flat scenario table. With
     ``limits=None`` the result is exchange/date-faithful; main-board ST/*ST
     therefore requires a valid ``trade_date`` because its rule changed on
     2026-07-06.
