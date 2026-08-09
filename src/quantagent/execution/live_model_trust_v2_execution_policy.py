@@ -8,8 +8,10 @@ artifact that the historical low-level binder did not know about:
 * canonical trace hashing + structural validation proves the signal-date to
   next-session execution semantics independently of CSV serialization details.
 
-Successful verification still does **not** grant economic-live eligibility.
-That remains a separate promotion gate.
+The historical 12-role governed certificate remains readable as internally
+consistent evidence, but it carries no trace-proven timing assurance. The
+controlled issuer requires all 13 roles, and economic-live authorization also
+requires the trace-proven assurance explicitly.
 """
 
 from __future__ import annotations
@@ -60,14 +62,20 @@ def verify_trace_proven_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> V2VerificationResult:
-    """Verify the original governed bundle plus hash-bound execution trace."""
+    """Verify base governed evidence and, when present, the timing trace.
+
+    Compatibility rule: an intact historical 12-role bundle may remain
+    ``ok=True`` as evidence verification, but it retains the base
+    ``not_certified_by_model_trust_v2`` timing assurance. New issuance is stricter
+    and requires the 13th role; the economic gate additionally requires the
+    positive trace-proven assurance.
+    """
     artifacts_raw = payload.get("artifacts")
     artifacts = dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
-    missing = [role for role in GOVERNED_REQUIRED_ARTIFACT_ROLES if role not in artifacts]
+    missing_base = [role for role in REQUIRED_ARTIFACT_ROLES if role not in artifacts]
+    trace_present = GOVERNED_EXECUTION_TRACE_ROLE in artifacts
     unexpected = sorted(set(artifacts).difference(GOVERNED_REQUIRED_ARTIFACT_ROLES))
 
-    # The historical governed verifier intentionally knows only the original
-    # twelve roles. Feed it a filtered copy, then independently verify the trace.
     base_payload = dict(payload)
     base_payload["artifacts"] = {
         role: artifacts[role]
@@ -83,14 +91,12 @@ def verify_trace_proven_live_model_trust_v2(
         max_spa_p_value=max_spa_p_value,
     )
     reasons = list(base.reasons)
-    if missing:
-        reasons.append("governed_artifacts_missing:" + ",".join(missing))
+    if missing_base:
+        reasons.append("governed_artifacts_missing:" + ",".join(missing_base))
     if unexpected:
         reasons.append("governed_artifacts_unexpected:" + ",".join(unexpected))
 
     evidence = dict(base.evidence)
-    # Trace certification never arms economics. The separate economic promotion
-    # process remains the only path that may establish eligibility.
     evidence["economic_live_eligible"] = False
     resolved = dict(base.resolved_paths)
 
@@ -123,7 +129,7 @@ def verify_trace_proven_live_model_trust_v2(
                 else:
                     trace_binding_sha = expected_sha
                     resolved[GOVERNED_EXECUTION_TRACE_ROLE] = str(trace_path)
-    elif GOVERNED_EXECUTION_TRACE_ROLE in artifacts:
+    elif trace_present:
         reasons.append(f"{GOVERNED_EXECUTION_TRACE_ROLE}:descriptor_not_object")
 
     canonical_trace_sha: str | None = None
@@ -150,6 +156,7 @@ def verify_trace_proven_live_model_trust_v2(
                 {
                     "execution_trace_rows": int(len(trace)),
                     "execution_trace_mapped_signal_days": timing.mapped_signal_days,
+                    "execution_trace_terminal_censored_signal_days": timing.terminal_censored_signal_days,
                     "execution_trace_order_records": timing.order_records,
                     "execution_trace_skip_records": timing.skip_records,
                     "execution_trace_sha256": canonical_trace_sha,
@@ -179,13 +186,12 @@ def verify_trace_proven_live_model_trust_v2(
         if reason.startswith(f"{GOVERNED_EXECUTION_TRACE_ROLE}:")
         or reason.startswith("strict_backtest:execution_trace_")
         or reason == "strict_backtest:execution_timing_semantics_mismatch"
-        or reason.startswith("governed_artifacts_missing:")
-        or reason.startswith("governed_artifacts_unexpected:")
     ]
-    if timing_ok and not timing_reasons and canonical_trace_sha and not trace_reasons:
-        evidence["execution_timing_assurance"] = TRACE_PROVEN_EXECUTION_ASSURANCE
-    else:
-        evidence["execution_timing_assurance"] = "not_trace_proven"
+    if trace_present:
+        if timing_ok and not timing_reasons and canonical_trace_sha and not trace_reasons:
+            evidence["execution_timing_assurance"] = TRACE_PROVEN_EXECUTION_ASSURANCE
+        else:
+            evidence["execution_timing_assurance"] = "not_trace_proven"
 
     unique = tuple(dict.fromkeys(reasons))
     return V2VerificationResult(
@@ -209,7 +215,7 @@ def issue_trace_proven_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> LiveModelTrustV2IssueResult:
-    """Issue the governed v2 evidence certificate with mandatory timing trace."""
+    """Issue governed v2 evidence with mandatory trace-proven timing."""
     if artifact_roots is None:
         raise ValueError("trace-proven v2 issuer requires explicit artifact_roots")
     missing = [role for role in GOVERNED_REQUIRED_ARTIFACT_ROLES if role not in artifact_locations]
@@ -271,6 +277,8 @@ def issue_trace_proven_live_model_trust_v2(
                 "trace-proven governed v2 trust evidence rejected: "
                 + "; ".join(verification.reasons)
             )
+        if verification.evidence.get("execution_timing_assurance") != TRACE_PROVEN_EXECUTION_ASSURANCE:
+            raise ValueError("trace-proven governed v2 issuer did not obtain timing assurance")
 
         with stage.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
