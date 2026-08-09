@@ -12,11 +12,17 @@ The pair prevents a trace from proving only a selectively retained subset of
 signals. New governed issuance requires all fourteen roles. Historical intact
 12-role certificates remain readable as evidence but never receive trace-proven
 timing assurance.
+
+Supplemental artifacts are read exactly once into immutable bytes. The SHA-256
+check and semantic parser consume those same bytes so a filesystem replacement
+cannot make the verifier hash one version and parse another.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -38,7 +44,6 @@ from quantagent.execution.live_model_trust_v2 import (
     LiveModelTrustV2IssueResult,
     REQUIRED_ARTIFACT_ROLES,
     V2VerificationResult,
-    sha256_file,
 )
 from quantagent.execution.live_model_trust_v2_policy import (
     issue_governed_live_model_trust_v2 as _issue_base_governed_v2,
@@ -109,27 +114,35 @@ def verify_trace_proven_live_model_trust_v2(
     evidence["economic_live_eligible"] = False
     resolved = dict(base.resolved_paths)
 
-    target_path, target_file_sha = _verify_descriptor(
-        GOVERNED_TARGET_WEIGHTS_ROLE,
-        artifacts.get(GOVERNED_TARGET_WEIGHTS_ROLE),
-        artifact_roots,
-        reasons,
-        resolved,
-    ) if target_present else (None, None)
-    trace_path, trace_file_sha = _verify_descriptor(
-        GOVERNED_EXECUTION_TRACE_ROLE,
-        artifacts.get(GOVERNED_EXECUTION_TRACE_ROLE),
-        artifact_roots,
-        reasons,
-        resolved,
-    ) if trace_present else (None, None)
+    _, target_bytes, target_file_sha = (
+        _read_bound_artifact(
+            GOVERNED_TARGET_WEIGHTS_ROLE,
+            artifacts.get(GOVERNED_TARGET_WEIGHTS_ROLE),
+            artifact_roots,
+            reasons,
+            resolved,
+        )
+        if target_present
+        else (None, None, None)
+    )
+    _, trace_bytes, trace_file_sha = (
+        _read_bound_artifact(
+            GOVERNED_EXECUTION_TRACE_ROLE,
+            artifacts.get(GOVERNED_EXECUTION_TRACE_ROLE),
+            artifact_roots,
+            reasons,
+            resolved,
+        )
+        if trace_present
+        else (None, None, None)
+    )
 
     target_schedule_sha: str | None = None
     target_signal_dates: tuple[pd.Timestamp, ...] | None = None
-    if target_path is not None:
+    if target_bytes is not None:
         try:
-            target_frame = pd.read_csv(target_path)
-        except Exception as exc:  # noqa: BLE001
+            target_frame = pd.read_csv(BytesIO(target_bytes))
+        except Exception as exc:  # noqa: BLE001 - corrupted evidence is diagnostic data
             reasons.append(
                 f"{GOVERNED_TARGET_WEIGHTS_ROLE}:csv_invalid:{type(exc).__name__}"
             )
@@ -156,10 +169,10 @@ def verify_trace_proven_live_model_trust_v2(
     trace_signal_dates: tuple[pd.Timestamp, ...] | None = None
     timing_ok = False
     timing_reasons: tuple[str, ...] = ()
-    if trace_path is not None:
+    if trace_bytes is not None:
         try:
-            trace = pd.read_csv(trace_path)
-        except Exception as exc:  # noqa: BLE001
+            trace = pd.read_csv(BytesIO(trace_bytes))
+        except Exception as exc:  # noqa: BLE001 - corrupted evidence is diagnostic data
             reasons.append(
                 f"{GOVERNED_EXECUTION_TRACE_ROLE}:csv_invalid:{type(exc).__name__}"
             )
@@ -197,10 +210,18 @@ def verify_trace_proven_live_model_trust_v2(
         elif target_schedule_sha != signal_schedule_sha256(trace_signal_dates):
             reasons.append("strict_execution_trace:signal_schedule_digest_mismatch")
 
-    strict_summary_path = resolved.get("strict_backtest")
-    if strict_summary_path and (canonical_trace_sha is not None or target_schedule_sha is not None):
+    strict_bytes: bytes | None = None
+    if supplemental_present and "strict_backtest" in artifacts:
+        _, strict_bytes, _ = _read_bound_artifact(
+            "strict_backtest",
+            artifacts.get("strict_backtest"),
+            artifact_roots,
+            reasons,
+            resolved,
+        )
+    if strict_bytes is not None and (canonical_trace_sha is not None or target_schedule_sha is not None):
         try:
-            strict = json.loads(Path(strict_summary_path).read_text(encoding="utf-8"))
+            strict = json.loads(strict_bytes.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             reasons.append(f"strict_backtest:json_invalid_for_timing:{type(exc).__name__}")
         else:
@@ -283,10 +304,14 @@ def issue_trace_proven_live_model_trust_v2(
         )
         if path is None:
             raise ValueError(f"{role}: {path_error or 'artifact_unresolvable'}")
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"{role}: read_failed:{type(exc).__name__}") from exc
         supplemental_bindings[role] = ArtifactBinding(
             root=str(root_name),
             path=_normalise_relative_path(str(relative)),
-            sha256=sha256_file(path),
+            sha256=_sha256_bytes(data),
         )
 
     final = Path(manifest_path)
@@ -343,32 +368,41 @@ def issue_trace_proven_live_model_trust_v2(
             pass
 
 
-def _verify_descriptor(
+def _read_bound_artifact(
     role: str,
     descriptor: object,
     artifact_roots: Mapping[str, str | Path],
     reasons: list[str],
-    resolved: dict[str, str],
-) -> tuple[Path | None, str | None]:
+    resolved_paths: dict[str, str],
+) -> tuple[Path | None, bytes | None, str | None]:
     if not isinstance(descriptor, Mapping):
         reasons.append(f"{role}:descriptor_not_object")
-        return None, None
+        return None, None, None
     root_name = str(descriptor.get("root") or "").strip()
     relative = str(descriptor.get("path") or "").strip()
     expected_sha = str(descriptor.get("sha256") or "").strip().lower()
     if not _HEX64.fullmatch(expected_sha):
         reasons.append(f"{role}:sha256_invalid")
-        return None, None
+        return None, None, None
     path, path_error = _resolve_regular_artifact(root_name, relative, artifact_roots)
     if path is None:
         reasons.append(f"{role}:{path_error or 'artifact_unresolvable'}")
-        return None, None
-    actual_sha = sha256_file(path)
+        return None, None, None
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        reasons.append(f"{role}:read_failed:{type(exc).__name__}")
+        return None, None, None
+    actual_sha = _sha256_bytes(data)
     if actual_sha != expected_sha:
         reasons.append(f"{role}:sha256_mismatch:{actual_sha}!={expected_sha}")
-        return None, None
-    resolved[role] = str(path)
-    return path, expected_sha
+        return None, None, None
+    resolved_paths[role] = str(path)
+    return path, data, expected_sha
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return sha256(data).hexdigest()
 
 
 def _resolve_regular_artifact(
