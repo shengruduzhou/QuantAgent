@@ -18,9 +18,10 @@ Concrete responsibilities
   server-side, so true adjusted OHLC is obtained without ex_factors access.
 * ``tradability`` — derived from daily K-line: ``volume == 0`` → suspended,
   ``close ≈ round(prev_close × (1 ± board_ratio), 2)`` → limit-up/down. The
-  board ratio is resolved by ``quant_math.ashare.daily_price_limit`` from the
-  ticker prefix (main 10 % / ChiNext / STAR 20 % / BSE 30 %) with the ST 5 %
-  override, so non-main-board names are not mislabelled by a flat 10 % cap.
+  board ratio is resolved by the canonical date-aware A-share rule source from
+  ticker + ``trade_date``. Ordinary main/ChiNext/STAR/BSE widths are
+  10%/20%/20%/30%; risk-warning rows preserve their board and effective date,
+  including the SH/SZ main-board ST/*ST 5% → 10% change on 2026-07-06.
   Current ST status comes from the instrument name carrying "ST" / "*ST".
 * ``stock_basic`` — union of ``tf.exchanges.get_instruments`` on SH/SZ/BJ
   filtered to ``type == "stock"``, joined with the SW1/SW2 industry map.
@@ -34,7 +35,7 @@ PIT contract: every frame written here is tagged
 window. Symbols use QuantAgent canonical format (``600519.SH``), which is
 already tickflow's native format — no remapping needed.
 
-Network access is gated by ``allow_network=True``.  Historical daily K-lines
+Network access is gated by ``allow_network=True``. Historical daily K-lines
 can use TickFlow's free client when no token is configured; full-service
 endpoints (minute bars, financials, universes, real-time quotes) still require
 a non-empty ``TICKFLOW_API_KEY`` env var (configurable via ``token_env``).
@@ -217,7 +218,6 @@ class TickflowProvider(MarketDataProvider):
                 if not require_token and self.allow_free_daily and hasattr(TickFlow, "free"):
                     self._client = TickFlow.free()
                     return self._client
-                # _require_ready already enforces this for full endpoints; defensive guard.
                 raise ProviderUnavailable(
                     f"TickflowProvider client init blocked: {self.token_env} not set."
                 )
@@ -323,8 +323,6 @@ class TickflowProvider(MarketDataProvider):
         if not symbols:
             return pd.DataFrame()
         tf = self._sdk(require_token=require_token)
-        # tickflow returns the most recent `count` bars. Pull a generous
-        # buffer then filter to the requested window.
         kw: dict[str, Any] = {"period": "1d", "count": _DEFAULT_BAR_BUFFER,
                               "as_dataframe": True}
         if adjust is not None:
@@ -349,7 +347,7 @@ class TickflowProvider(MarketDataProvider):
                 ]
             except ProviderUnavailable:
                 raise
-            except Exception as exc:  # noqa: BLE001 — classify then re-raise non-permission
+            except Exception as exc:  # noqa: BLE001
                 if not _is_permission_error(exc):
                     raise
                 _log.info(
@@ -359,7 +357,7 @@ class TickflowProvider(MarketDataProvider):
                 for sym in symbols:
                     try:
                         one = _get_one(sym)
-                    except Exception as e2:  # noqa: BLE001 — skip the bad symbol, keep the rest
+                    except Exception as e2:  # noqa: BLE001
                         _log.warning("tickflow klines.get(%s) failed: %s", sym, e2)
                         continue
                     if one is not None:
@@ -384,33 +382,31 @@ class TickflowProvider(MarketDataProvider):
         return self._fetch_daily(request, adjust="forward", require_token=True)
 
     def _call_tickflow_tradability(self, request: ProviderRequest) -> pd.DataFrame:
-        """Derive per (date, symbol) tradability flags from K-line + names."""
+        """Derive per-(date, symbol) tradability flags from K-line + names."""
         raw = self._call_tickflow_daily(request)
         if raw.empty:
             return raw
-        # Current ST status from the instrument basic name (snapshot only).
         instruments = self._ensure_all_instruments()
         st_set = {
             str(inst["symbol"]).strip()
             for inst in instruments
             if "ST" in str(inst.get("name", "")).upper()
         }
-        # Board-aware price limits (main 10% / ChiNext 20% / STAR 20% / BSE 30% /
-        # ST 5%) via the canonical AShare rule engine. A flat 10% cap mislabels
-        # every ChiNext/STAR/BSE name: a ChiNext stock at +10% is NOT sealed
-        # (its limit is +20%), so the flat rule both false-flags it as untradable
-        # and misses the real +20% seal. ``daily_price_limit`` resolves the board
-        # from the ticker prefix and applies the ST 5% override.
-        from quantagent.quant_math.ashare import daily_price_limit
+        from quantagent.quant_math.ashare import board_price_limit_vector
 
         out_frames: list[pd.DataFrame] = []
         for sym, group in raw.groupby("symbol", sort=False):
             g = group.sort_values("trade_date").copy()
+            g["trade_date"] = pd.to_datetime(g["trade_date"], errors="coerce")
             g["volume"] = pd.to_numeric(g["volume"], errors="coerce")
             g["close"] = pd.to_numeric(g["close"], errors="coerce")
             g["prev_close"] = g["close"].shift(1)
-            is_st_sym = sym in st_set
-            ratio = float(daily_price_limit(str(sym), is_st_sym))
+            is_st_sym = bool(sym in st_set)
+            ratio = board_price_limit_vector(
+                g["symbol"].astype(str),
+                pd.Series(is_st_sym, index=g.index, dtype=bool),
+                trade_dates=g["trade_date"],
+            )
             cap_up = (g["prev_close"] * (1.0 + ratio)).round(2)
             cap_dn = (g["prev_close"] * (1.0 - ratio)).round(2)
             close_round = g["close"].round(2)
@@ -479,18 +475,12 @@ class TickflowProvider(MarketDataProvider):
 
 
 def _is_permission_error(exc: Exception) -> bool:
-    """True if ``exc`` is a TickFlow tier/permission denial (vs. a real fault).
-
-    Matches the SDK's typed ``PermissionError`` when available, plus the HTTP
-    403 / Chinese ``无...权限`` message shapes the API returns for gated
-    endpoints. Used to decide when a batch call can safely fall back to the
-    per-symbol path rather than propagating as a hard failure.
-    """
+    """True if ``exc`` is a TickFlow tier/permission denial (vs. a real fault)."""
     try:
         from tickflow import PermissionError as TFPermissionError  # type: ignore
         if isinstance(exc, TFPermissionError):
             return True
-    except Exception:  # noqa: BLE001 — SDK missing or no such symbol; fall through to text match
+    except Exception:  # noqa: BLE001
         pass
     msg = str(exc)
     low = msg.lower()
