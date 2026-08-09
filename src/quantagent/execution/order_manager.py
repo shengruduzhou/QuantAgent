@@ -133,10 +133,6 @@ class OrderManagerConfig:
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
     max_participation_rate: float = 0.05
-    #: A target weight at or below this is treated as "no position wanted".
-    #: Rank/softmax weighting leaves a long tail of ~1e-7 weights that can never
-    #: round to a tradable lot; without a floor each one becomes a skipped-order
-    #: record for a symbol the book was never going to touch.
     negligible_weight: float = 1e-6
     strategy_version: str = "v4.0"
 
@@ -188,9 +184,7 @@ class OrderManager:
             if self.order_book is not None
             else (self.canonical.replay_book() if len(self.canonical) else OrderBook())
         )
-        self._venue_is_canonical = callable(
-            getattr(self.broker, "attach_canonical", None)
-        )
+        self._venue_is_canonical = callable(getattr(self.broker, "attach_canonical", None))
         self.claims = IdempotencyStore(self.idempotency_path)
         self._wire: dict[str, OrderRecord] = {}
         self._client_order_ids: dict[str, str] = {}
@@ -213,10 +207,7 @@ class OrderManager:
         )
         orders: list[Order] = []
         for intent in intents:
-            if (
-                self.counts_today.get(intent.symbol, 0)
-                >= self.config.max_orders_per_symbol_per_day
-            ):
+            if self.counts_today.get(intent.symbol, 0) >= self.config.max_orders_per_symbol_per_day:
                 continue
             orders.append(
                 Order(
@@ -255,67 +246,23 @@ class OrderManager:
         for symbol, weight in target_weights.reindex(prices.index).fillna(0.0).items():
             price = float(prices.loc[symbol])
             if pd.isna(price) or price <= 0 or nav <= 0:
-                self._skip(
-                    str(symbol),
-                    OrderSide.BUY,
-                    0,
-                    float(weight),
-                    0.0 if pd.isna(price) else price,
-                    "skipped_invalid_price",
-                    now,
-                    0.0,
-                )
+                self._skip(str(symbol), OrderSide.BUY, 0, float(weight), 0.0 if pd.isna(price) else price, "skipped_invalid_price", now, 0.0)
                 continue
             current = positions.get(str(symbol))
-            current_shares = (
-                int(
-                    getattr(current, "available_shares", 0)
-                    + getattr(current, "frozen_shares", 0)
-                )
-                if current
-                else 0
-            )
+            current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0
             raw_target = float(weight) * nav / price
-            if (
-                current_shares == 0
-                and abs(float(weight)) <= self.config.negligible_weight
-            ):
+            if current_shares == 0 and abs(float(weight)) <= self.config.negligible_weight:
                 continue
             delta_shares = raw_target - current_shares
             delta_value = abs(delta_shares) * price
             if raw_target >= current_shares:
                 side = OrderSide.BUY
-                quantity = _round_delta_quantity(
-                    self.rule_engine,
-                    str(symbol),
-                    "buy",
-                    delta_shares,
-                    order_type="LIMIT",
-                )
+                quantity = _round_delta_quantity(self.rule_engine, str(symbol), "buy", delta_shares, order_type="LIMIT")
                 if quantity <= 0:
-                    self._skip(
-                        str(symbol),
-                        side,
-                        0,
-                        float(weight),
-                        price,
-                        "skipped_below_min_lot",
-                        now,
-                        delta_value,
-                        implied_shares=delta_shares,
-                    )
+                    self._skip(str(symbol), side, 0, float(weight), price, "skipped_below_min_lot", now, delta_value, implied_shares=delta_shares)
                     continue
                 if quantity * price < self.config.min_order_value_yuan:
-                    self._skip(
-                        str(symbol),
-                        side,
-                        quantity,
-                        float(weight),
-                        price,
-                        "skipped_small_order",
-                        now,
-                        quantity * price,
-                    )
+                    self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
                     continue
             else:
                 side = OrderSide.SELL
@@ -326,42 +273,20 @@ class OrderManager:
                     str(symbol),
                     "sell",
                     desired_sell,
-                    is_full_liquidation=(
-                        target_is_zero
-                        and self.config.allow_odd_lot_sell_only_for_full_liquidation
-                    ),
+                    is_full_liquidation=(target_is_zero and self.config.allow_odd_lot_sell_only_for_full_liquidation),
                     order_type="LIMIT",
                 )
                 if quantity <= 0:
                     self._skip(
-                        str(symbol),
-                        side,
-                        0,
-                        float(weight),
-                        price,
-                        "skipped_not_full_odd_lot_liquidation"
-                        if desired_sell > 0 and not target_is_zero
-                        else "skipped_below_min_lot",
-                        now,
-                        delta_value,
-                        implied_shares=-desired_sell,
+                        str(symbol), side, 0, float(weight), price,
+                        "skipped_not_full_odd_lot_liquidation" if desired_sell > 0 and not target_is_zero else "skipped_below_min_lot",
+                        now, delta_value, implied_shares=-desired_sell,
                     )
                     continue
                 if quantity * price < self.config.min_order_value_yuan and not target_is_zero:
-                    self._skip(
-                        str(symbol),
-                        side,
-                        quantity,
-                        float(weight),
-                        price,
-                        "skipped_small_order",
-                        now,
-                        quantity * price,
-                    )
+                    self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
                     continue
-            intent_id = self._make_id(
-                str(symbol), side, signal_id=signal_id, model_version=model_version
-            )
+            intent_id = self._make_id(str(symbol), side, signal_id=signal_id, model_version=model_version)
             intents.append(
                 OrderIntent(
                     intent_id=intent_id,
@@ -400,9 +325,7 @@ class OrderManager:
             "reference_price": float(reference_price),
             "reason": reason,
             "delta_value": float(delta_value),
-            "implied_shares": None
-            if implied_shares is None
-            else float(implied_shares),
+            "implied_shares": None if implied_shares is None else float(implied_shares),
             "timestamp": timestamp,
         }
         self.last_skipped_orders.append(row)
@@ -415,11 +338,7 @@ class OrderManager:
     def cancel_all_open(self) -> list[OrderState]:
         results: list[OrderState] = []
         for record in self.history.values():
-            if record.state.status in {
-                OrderStatus.PENDING,
-                OrderStatus.SUBMITTED,
-                OrderStatus.PARTIAL,
-            }:
+            if record.state.status in {OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.PARTIAL}:
                 state = self.broker.cancel(record.order.client_order_id)
                 self._update(record.order, state)
                 results.append(state)
@@ -430,8 +349,7 @@ class OrderManager:
             order = original_order
             if not self.forensic_replay and not self.lineage.run_id:
                 raise MissingIdempotencyLineage(
-                    f"order {order.client_order_id} has no lineage.run_id; economic "
-                    "submission requires canonical lineage and an idempotency key"
+                    f"order {order.client_order_id} has no lineage.run_id; economic submission requires canonical lineage and an idempotency key"
                 )
             key = order_intent_key(
                 run_id=self.lineage.run_id or "forensic",
@@ -445,18 +363,13 @@ class OrderManager:
             if not self.forensic_replay:
                 claim = self.claims.claim(
                     key,
-                    payload={
-                        "clientOrderId": order.client_order_id,
-                        "fingerprint": fingerprint,
-                    },
+                    payload={"clientOrderId": order.client_order_id, "fingerprint": fingerprint},
                 )
                 if not claim.granted:
                     stored = claim.record.payload.get("fingerprint")
                     if stored is not None and stored != fingerprint:
                         raise IdempotencyConflict(key, str(stored), fingerprint)
-                    existing = self._wire.get(
-                        str(claim.record.payload.get("clientOrderId") or "")
-                    )
+                    existing = self._wire.get(str(claim.record.payload.get("clientOrderId") or ""))
                     if existing is not None:
                         yield existing.state
                     continue
@@ -465,13 +378,9 @@ class OrderManager:
 
             canonical_order = self._open_canonical_pending(order)
             self._client_order_ids[canonical_order.order_id] = order.client_order_id
-            order, risk_decision, risk_intent = self._pretrade_decision(
-                order, canonical_order
-            )
+            order, risk_decision, risk_intent = self._pretrade_decision(order, canonical_order)
             if not risk_decision.approved:
-                self._apply_canonical_risk(
-                    canonical_order, risk_decision, approved=False
-                )
+                self._apply_canonical_risk(canonical_order, risk_decision, approved=False)
                 state = OrderState(
                     client_order_id=order.client_order_id,
                     broker_order_id=None,
@@ -496,15 +405,11 @@ class OrderManager:
                 yield state
                 continue
 
-            canonical_order = self._apply_canonical_risk(
-                canonical_order, risk_decision, approved=True
-            )
+            canonical_order = self._apply_canonical_risk(canonical_order, risk_decision, approved=True)
             if risk_intent is not None:
                 self._risk_intents_today.append(risk_intent)
             if self._venue_is_canonical:
-                self.broker.attach_canonical(
-                    order.client_order_id, canonical_order.order_id
-                )
+                self.broker.attach_canonical(order.client_order_id, canonical_order.order_id)
             state = self.broker.submit(order)
             self._update(order, state)
             if not self._venue_is_canonical:
@@ -520,9 +425,7 @@ class OrderManager:
                         "riskApproved": True,
                     },
                 )
-            self.counts_today[order.symbol] = (
-                self.counts_today.get(order.symbol, 0) + 1
-            )
+            self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
             yield state
 
     def _requires_production_pretrade(self) -> bool:
@@ -535,8 +438,14 @@ class OrderManager:
             and not getattr(broker_config, "dry_run", True)
         )
 
-    def _is_proven_full_residual(self, symbol: str, quantity: int) -> bool:
-        """Prove a sub-minimum sell is the account's entire unfrozen position."""
+    def _is_proven_full_liquidation(self, symbol: str, quantity: int) -> bool:
+        """Prove a sell is the account's entire unfrozen position.
+
+        This is intentionally broker-state based rather than a caller flag.  It
+        covers both a sub-minimum residual (for example 37 shares) and a legal
+        combined round-lot-plus-residual liquidation (for example 250 shares on
+        a 100-share-increment board).  Partial odd-lot splitting remains blocked.
+        """
         try:
             positions = self.broker.query_positions()
         except Exception:
@@ -546,7 +455,7 @@ class OrderManager:
                 continue
             available = int(getattr(position, "available_shares", 0))
             frozen = int(getattr(position, "frozen_shares", 0))
-            return available == int(quantity) and frozen == 0
+            return available > 0 and available == int(quantity) and frozen == 0
         return False
 
     def _exchange_quantity_rejection(self, order: Order) -> str | None:
@@ -556,28 +465,28 @@ class OrderManager:
             return None
         quantity = int(order.quantity)
         minimum, increment = market_rules.LOT_RULES[board]
-        maximum = market_rules.max_order_quantity(
-            board, order.order_type.value.upper()
-        )
+        maximum = market_rules.max_order_quantity(board, order.order_type.value.upper())
         if maximum is not None and quantity > maximum:
             return (
-                f"{board} {order.order_type.value} quantity {quantity} exceeds "
-                f"exchange maximum {maximum}"
+                f"{board} {order.order_type.value} quantity {quantity} exceeds exchange maximum {maximum}"
             )
+        full_liquidation = (
+            order.side is OrderSide.SELL
+            and self._is_proven_full_liquidation(order.symbol, quantity)
+        )
         if quantity < minimum:
-            if (
-                order.side is OrderSide.SELL
-                and self._is_proven_full_residual(order.symbol, quantity)
-            ):
+            if full_liquidation:
                 return None
             return (
                 f"{board} quantity {quantity} is below normal minimum {minimum}; "
-                "sub-minimum sell requires proven full residual"
+                "sub-minimum sell requires proven full liquidation"
             )
         if (quantity - minimum) % increment != 0:
+            if full_liquidation:
+                return None
             return (
                 f"{board} quantity {quantity} violates minimum/increment "
-                f"{minimum}+n*{increment}"
+                f"{minimum}+n*{increment}; non-increment sell requires proven full liquidation"
             )
         return None
 
@@ -587,14 +496,7 @@ class OrderManager:
         canonical_order,
     ) -> tuple[Order, CanonicalRiskDecision, OrderIntentRecord | None]:
         explicit = (order.risk_check_result or "not_checked").strip().lower()
-        if explicit in {
-            "rejected",
-            "reject",
-            "blocked",
-            "failed",
-            "fail",
-            "denied",
-        }:
+        if explicit in {"rejected", "reject", "blocked", "failed", "fail", "denied"}:
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -621,9 +523,7 @@ class OrderManager:
                 ),
                 None,
             )
-        if order.order_type == OrderType.LIMIT and (
-            order.price is None or float(order.price) <= 0
-        ):
+        if order.order_type == OrderType.LIMIT and (order.price is None or float(order.price) <= 0):
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -644,7 +544,7 @@ class OrderManager:
                 CanonicalRiskDecision.create(
                     approved=False,
                     rule="exchange_quantity_admissibility",
-                    threshold="board_minimum_increment_maximum_or_proven_residual",
+                    threshold="board_minimum_increment_maximum_or_proven_full_liquidation",
                     measured={
                         "symbol": order.symbol,
                         "quantity": int(order.quantity),
@@ -661,47 +561,31 @@ class OrderManager:
             decision = CanonicalRiskDecision.create(
                 approved=True,
                 rule="order_manager_basic_admissibility",
-                threshold=(
-                    "positive_quantity+valid_limit_price+exchange_quantity"
-                ),
+                threshold="positive_quantity+valid_limit_price+exchange_quantity",
                 measured={"upstream": explicit, "mode": "non_live_or_research"},
                 reason=(
-                    "basic OMS and exchange-quantity admissibility passed; this "
-                    "is not production risk certification"
+                    "basic OMS and exchange-quantity admissibility passed; this is not production risk certification"
                 ),
                 lineage=canonical_order.lineage,
                 decided_by="order_manager",
             )
             return order, decision, None
 
-        if (
-            order.order_type == OrderType.MARKET
-            or order.price is None
-            or float(order.price) <= 0
-        ):
+        if order.order_type == OrderType.MARKET or order.price is None or float(order.price) <= 0:
             return (
                 order,
                 CanonicalRiskDecision.create(
                     approved=False,
                     rule="execution_constraint_dsl",
                     threshold="bounded_limit_order",
-                    measured={
-                        "order_type": order.order_type.value,
-                        "price": order.price,
-                    },
-                    reason=(
-                        "live A-share order requires a bounded positive "
-                        "reference/limit price"
-                    ),
+                    measured={"order_type": order.order_type.value, "price": order.price},
+                    reason="live A-share order requires a bounded positive reference/limit price",
                     lineage=canonical_order.lineage,
                 ),
                 None,
             )
 
-        timestamp = pd.Timestamp(
-            order.timestamp
-            or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        )
+        timestamp = pd.Timestamp(order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat())
         nav: float | None = None
         try:
             queried_nav = float(self.broker.query_account_value())
@@ -720,9 +604,7 @@ class OrderManager:
             portfolio_nav=nav,
             daily_volume_hint=None,
         )
-        report = self.constraint_evaluator.evaluate(
-            [*self._risk_intents_today, risk_intent]
-        )
+        report = self.constraint_evaluator.evaluate([*self._risk_intents_today, risk_intent])
         decision = CanonicalRiskDecision.create(
             approved=report.passed,
             rule="execution_constraint_dsl",
@@ -731,8 +613,7 @@ class OrderManager:
             reason=(
                 "all production pre-submit execution constraints passed"
                 if report.passed
-                else "blocking execution constraint violation: "
-                + ",".join(sorted(report.by_constraint))
+                else "blocking execution constraint violation: " + ",".join(sorted(report.by_constraint))
             ),
             lineage=canonical_order.lineage,
             decided_by="execution_constraint_dsl",
@@ -767,26 +648,18 @@ class OrderManager:
         approved: bool,
     ):
         session = canonical_order.trade_date
-        risk_event = (
-            CanonicalEventType.RISK_APPROVED
-            if approved
-            else CanonicalEventType.RISK_REJECTED
-        )
+        risk_event = CanonicalEventType.RISK_APPROVED if approved else CanonicalEventType.RISK_REJECTED
         self.book.apply(
             canonical_order.order_id,
             risk_event,
             risk_decision=decision,
             reason=None if approved else decision.reason,
         )
-        self.canonical.append(
-            self.book.history_of(canonical_order.order_id)[-1], trade_date=session
-        )
+        self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
         if not approved:
             return self.book.state_of(canonical_order.order_id)
         self.book.apply(canonical_order.order_id, CanonicalEventType.SUBMITTED)
-        self.canonical.append(
-            self.book.history_of(canonical_order.order_id)[-1], trade_date=session
-        )
+        self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
         return self.book.state_of(canonical_order.order_id)
 
     def _record_canonical_state(self, canonical, state: OrderState) -> None:
@@ -797,16 +670,10 @@ class OrderManager:
         }
         event = mapping.get(state.status, CanonicalEventType.ACCEPTED)
         try:
-            self.book.apply(
-                canonical.order_id,
-                event,
-                reason=getattr(state, "reason", None),
-            )
+            self.book.apply(canonical.order_id, event, reason=getattr(state, "reason", None))
         except Exception:
             return
-        self.canonical.append(
-            self.book.history_of(canonical.order_id)[-1], trade_date=session
-        )
+        self.canonical.append(self.book.history_of(canonical.order_id)[-1], trade_date=session)
 
     def _update(self, order: Order, state: OrderState) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -833,18 +700,13 @@ class OrderManager:
         return projected
 
     def rebuild_history(self) -> dict[str, OrderRecord]:
-        source = (
-            CanonicalLedger(self.canonical.path)
-            if self.canonical.path is not None
-            else self.canonical
-        )
+        source = CanonicalLedger(self.canonical.path) if self.canonical.path is not None else self.canonical
         book = source.replay_book()
         known = {order.order_id for order in book.orders()}
         return {
             client_order_id: record
             for order_id, client_order_id in self._client_order_ids.items()
-            if order_id in known
-            and (record := self._wire.get(client_order_id)) is not None
+            if order_id in known and (record := self._wire.get(client_order_id)) is not None
         }
 
     @staticmethod
@@ -855,9 +717,5 @@ class OrderManager:
         model_version: str = "",
     ) -> str:
         seed = f"{symbol}-{side.value}-{signal_id}-{model_version}"
-        suffix = (
-            uuid4().hex[:10]
-            if not signal_id
-            else sha1(seed.encode("utf-8")).hexdigest()[:10]
-        )
+        suffix = uuid4().hex[:10] if not signal_id else sha1(seed.encode("utf-8")).hexdigest()[:10]
         return f"{symbol}-{side.value}-{suffix}"
