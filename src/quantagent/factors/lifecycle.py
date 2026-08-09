@@ -14,6 +14,7 @@ from quantagent.factors.evaluation import (
 )
 from quantagent.factors.executable_labels import (
     FACTOR_LABEL_SEMANTICS,
+    canonical_market_sessions,
     executable_factor_decay_curve,
     market_session_schedule_sha256,
 )
@@ -24,9 +25,6 @@ UNVERIFIED_RETURN_SEMANTICS = "caller_supplied_return_semantics_unverified"
 
 @dataclass(frozen=True)
 class LifecycleThresholds:
-    # Historical field name retained for API compatibility. Crossing this gate
-    # now means VALIDATED, never economically ACTIVE; ACTIVE is owned by the
-    # state machine after shadow/promotion evidence.
     active_rank_icir: float = 0.10
     degraded_rank_icir: float = 0.0
     positive_ratio: float = 0.50
@@ -77,9 +75,13 @@ def build_factor_lifecycle_report(
 
     ``return_column`` is caller-supplied and may be used for the core diagnostic.
     When ``close`` is available, lifecycle decay is recomputed from raw prices
-    under the governed T-close -> global-next-session contract.  That strict
-    recomputation **requires the same explicit market-session schedule** used by
-    the label builder and binds its digest into the report.
+    under the governed T-close -> global-next-session contract. That strict
+    recomputation requires the same explicit market-session schedule used by the
+    label builder and binds its digest into the report.
+
+    The schedule is canonicalized exactly once. This matters for callers that
+    supply a one-shot iterable/generator: computing a digest must not consume the
+    clock and leave a different/empty schedule for decay.
 
     If prices are absent, decay is unavailable and the report does not pretend
     that the caller-supplied return column has verified execution semantics.
@@ -111,12 +113,13 @@ def build_factor_lifecycle_report(
                 "factor lifecycle with close prices requires explicit market_sessions "
                 "for governed executable decay"
             )
-        calendar_digest = market_session_schedule_sha256(market_sessions)
+        sessions = canonical_market_sessions(market_sessions)
+        calendar_digest = market_session_schedule_sha256(sessions)
         decay = executable_factor_decay_curve(
             data,
             factor_column,
             horizons=(1,),
-            market_sessions=market_sessions,
+            market_sessions=sessions,
         )
         label_semantics = FACTOR_LABEL_SEMANTICS
 
@@ -181,14 +184,11 @@ def recommend_factor_status(
     thresholds: LifecycleThresholds | None = None,
 ) -> str:
     """Recommend a *research* lifecycle status, never direct economic ACTIVE."""
-
     thresholds = thresholds or LifecycleThresholds()
     rank_icir = _finite_or(rank_icir, -np.inf)
     positive_ratio = _finite_or(positive_ratio, 0.0)
     monotonicity = _finite_or(monotonicity, 0.0)
 
-    # Coverage is mandatory. Legacy direct callers that do not provide it are
-    # deliberately held in WATCH rather than treating missing evidence as safe.
     if effective_dates is None or int(effective_dates) < thresholds.min_effective_dates:
         return "watch"
     if (
@@ -202,14 +202,11 @@ def recommend_factor_status(
         or float(newey_west_rank_t_stat) < thresholds.min_newey_west_rank_t_stat
     ):
         return "watch"
-
     if not np.isfinite(live_drift) or abs(float(live_drift)) > thresholds.drift_limit:
         return "watch"
-
     if np.isfinite(max_existing_correlation):
         if abs(float(max_existing_correlation)) > thresholds.max_existing_correlation_for_active:
             return "watch"
-
     if rank_icir <= thresholds.retirement_rank_icir:
         return "retired_candidate"
 
@@ -219,7 +216,6 @@ def recommend_factor_status(
             np.isfinite(capacity_rmb)
             and float(capacity_rmb) >= thresholds.min_capacity_rmb_for_active
         )
-
     if (
         rank_icir >= thresholds.active_rank_icir
         and positive_ratio >= thresholds.positive_ratio
@@ -247,9 +243,6 @@ def _max_existing_corr(
     if not existing:
         return np.nan
     cols = [factor_column, *existing]
-    # Correlation used for redundancy is cross-sectional rank correlation, not
-    # raw pooled scale correlation. Rank each date first so market-level scale
-    # drift cannot manufacture similarity.
     ranked = frame[["trade_date", *cols]].copy()
     ranked[cols] = ranked.groupby("trade_date")[cols].rank(pct=True)
     matrix = factor_correlation_matrix(ranked[cols], factor_columns=cols, method="spearman").abs()
