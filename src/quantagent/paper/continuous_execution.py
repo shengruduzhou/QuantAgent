@@ -122,13 +122,29 @@ def _assert_recovered_account_consistent(
     *,
     tolerance: float = 1e-6,
 ) -> None:
-    # The operational ledger is legitimately empty before the first economic order.
-    if operational_state.events_replayed == 0:
+    # The canonical ledger is the economic record of account. The operational
+    # ledger may already contain telemetry-only events such as mark-to-market or
+    # session-close records while still carrying no independent order/fill/cash/
+    # position economics. Treating those telemetry rows as a second economic
+    # ledger makes the next-session recovery compare canonical post-trade cash
+    # against operational initial cash and falsely fail. Once the operational
+    # replay contains any economic state, however, it must reconcile strictly.
+    operational_positions = _position_quantities(operational_state.portfolio)
+    initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
+    operational_cash = float(operational_state.portfolio.cash)
+    has_operational_economics = bool(
+        operational_state.orders
+        or operational_state.fills
+        or operational_positions
+        or abs(operational_cash - initial_cash) > tolerance
+    )
+    if not has_operational_economics:
         return
+
     if (
         abs(
             float(canonical_state.portfolio.cash)
-            - float(operational_state.portfolio.cash)
+            - operational_cash
         )
         > tolerance
     ):
@@ -136,7 +152,7 @@ def _assert_recovered_account_consistent(
             "canonical/operational paper cash reconciliation failed"
         )
     left = _position_quantities(canonical_state.portfolio)
-    right = _position_quantities(operational_state.portfolio)
+    right = operational_positions
     for symbol in sorted(set(left) | set(right)):
         if abs(left.get(symbol, 0.0) - right.get(symbol, 0.0)) > tolerance:
             raise ContinuousPaperExecutionBlocked(
