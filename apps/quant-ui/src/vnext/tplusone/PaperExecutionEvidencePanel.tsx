@@ -136,6 +136,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
   }
 
   const evidence = query.data.data;
+  const unresolved = evidence.journal.unresolvedCount > 0;
   const critical = evidence.journal.state === "invalid" || evidence.summary.attention === "critical";
   const liveRegionRole = critical ? "alert" : "status";
   const liveCertified = evidence.operatorTruth.productionLiveCertified;
@@ -144,9 +145,14 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
   const latestRecords = evidence.records.slice(0, 6);
   const leadTitle = evidence.journal.state === "invalid"
     ? "执行证据链校验失败"
-    : evidence.journal.state === "unavailable"
-      ? "尚无连续执行 journal"
-      : statusLabel(latestStatus);
+    : unresolved
+      ? "存在未闭合执行尝试"
+      : evidence.journal.state === "unavailable"
+        ? "尚无连续执行 journal"
+        : statusLabel(latestStatus);
+  const leadMessage = unresolved && evidence.journal.state === "valid"
+    ? `${evidence.journal.unresolvedCount} 个 execution_started 尚无 terminal outcome；禁止把最新成功记录解释为账户整体健康。`
+    : evidence.operatorTruth.message;
 
   return (
     <WorkbenchPanel
@@ -161,7 +167,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
           {critical ? <ShieldWarning size={24} weight="duotone" /> : evidence.journal.verified ? <CheckCircle size={24} weight="duotone" /> : <Database size={24} weight="duotone" />}
           <div>
             <strong>{leadTitle}</strong>
-            <span>{evidence.operatorTruth.message}</span>
+            <span>{leadMessage}</span>
           </div>
           <span className={`paper-evidence-status status-${STATUS_TONE[latestStatus ?? ""] ?? "neutral"}`}>{latestStatus ?? evidence.journal.state}</span>
         </div>
@@ -183,7 +189,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
           <strong>{yesNo(calendarCertified)}</strong>
           <small>{evidence.summary.calendarAssurance}</small>
         </article>
-        <article className={evidence.journal.unresolvedCount ? "locked" : ""}>
+        <article className={unresolved ? "locked" : ""}>
           <span>Unresolved attempts</span>
           <strong>{evidence.journal.unresolvedCount}</strong>
           <small>{evidence.journal.recordCount} journal records</small>
