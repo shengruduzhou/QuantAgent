@@ -34,6 +34,8 @@ const SAFE_EVIDENCE_KEYS = new Set([
   "modelId",
   "certificateStatus",
   "trustClass",
+  "evidenceVerificationOk",
+  "economicLiveEligible",
   "requiredMetricSemantics",
   "observedMetricSemantics",
   "manifest",
@@ -57,7 +59,7 @@ const SAFE_EVIDENCE_KEYS = new Set([
 function evidenceText(evidence: Record<string, unknown>): string[] {
   return Object.entries(evidence)
     .filter(([key]) => SAFE_EVIDENCE_KEYS.has(key))
-    .slice(0, 6)
+    .slice(0, 8)
     .map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value ?? "—")}`);
 }
 
@@ -124,7 +126,9 @@ export function ProductionReadinessPanel(): JSX.Element {
               <p className="production-readiness-card-rule">
                 {key === "targetRisk" || key === "orderRisk"
                   ? "WIRED 仅证明强制路径存在，不代表当前组合或订单已经通过。"
-                  : "状态只来自当前机器证据，缺失不会自动提升。"}
+                  : key === "modelTrust"
+                    ? "Evidence verification 与 Economic LIVE qualification 分离；证据一致不等于允许实盘。"
+                    : "状态只来自当前机器证据，缺失不会自动提升。"}
               </p>
               {reasons.length > 0 ? (
                 <ul className="production-readiness-reasons">
