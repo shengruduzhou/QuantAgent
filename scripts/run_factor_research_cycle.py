@@ -278,8 +278,9 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
     else:
         raise ValueError("pass --market-panel or --provider baostock")
 
-    if args.market_calendar:
-        market_sessions, calendar_meta = _load_market_calendar(Path(args.market_calendar))
+    market_calendar = str(getattr(args, "market_calendar", "") or "").strip()
+    if market_calendar:
+        market_sessions, calendar_meta = _load_market_calendar(Path(market_calendar))
     elif args.provider == "baostock" and not args.market_panel:
         market_sessions, calendar_meta = _research_baostock_calendar(
             start_date=args.start_date,
