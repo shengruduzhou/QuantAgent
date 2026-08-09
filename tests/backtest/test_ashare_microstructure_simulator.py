@@ -42,13 +42,40 @@ class TestPriceLimits:
         assert limits.limit_up == pytest.approx(10.0 * (1 + ratio), abs=0.005)
         assert limits.limit_down == pytest.approx(10.0 * (1 - ratio), abs=0.005)
 
-    def test_st_narrows_the_main_board_band(self):
+    @pytest.mark.parametrize("board", [rules.SH_MAIN, rules.SZ_MAIN])
+    def test_main_board_st_band_is_date_versioned_at_2026_07_06(self, board):
+        legacy = rules.price_limits(
+            board=board, previous_close=10.0,
+            trade_date="2026-07-03", is_st=True,
+        )
+        current = rules.price_limits(
+            board=board, previous_close=10.0,
+            trade_date="2026-07-06", is_st=True,
+        )
+        assert legacy.ratio == 0.05
+        assert legacy.limit_up == pytest.approx(10.50)
+        assert legacy.limit_down == pytest.approx(9.50)
+        assert current.ratio == 0.10
+        assert current.limit_up == pytest.approx(11.00)
+        assert current.limit_down == pytest.approx(9.00)
+        assert current.regime == "ST_BAND"
+
+    def test_current_main_board_st_matches_ordinary_ten_percent_band(self):
         limits = rules.price_limits(
             board=rules.SH_MAIN, previous_close=10.0,
             trade_date="2026-07-24", is_st=True,
         )
-        assert limits.ratio == 0.05
+        assert limits.ratio == 0.10
         assert limits.regime == "ST_BAND"
+
+    def test_main_board_st_requires_valid_trade_date(self):
+        with pytest.raises(ValueError, match="valid trade_date"):
+            rules.price_limits(
+                board=rules.SH_MAIN,
+                previous_close=10.0,
+                trade_date=None,
+                is_st=True,
+            )
 
     def test_st_does_not_narrow_chinext(self):
         limits = rules.price_limits(
