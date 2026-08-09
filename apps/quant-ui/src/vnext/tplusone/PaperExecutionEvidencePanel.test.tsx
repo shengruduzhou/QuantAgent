@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { useApi } from "../../hooks/useApi";
 import {
@@ -87,13 +87,13 @@ describe("PaperExecutionEvidencePanel", () => {
     mockEvidence(evidence());
     render(<PaperExecutionEvidencePanel />);
 
-    expect(screen.getByText("Paper 执行已观察")).toBeInTheDocument();
+    const status = screen.getByRole("status");
+    expect(within(status).getByText("Paper 执行已观察")).toBeInTheDocument();
     expect(screen.getByText("Paper execution evidence").parentElement).toHaveTextContent("YES");
     expect(screen.getByText("Production pre-trade certified").parentElement).toHaveTextContent("NO");
     expect(screen.getByText("Authoritative calendar certified").parentElement).toHaveTextContent("NO");
     expect(screen.getByText(/Paper\/shadow 观察结果 ≠ 实盘认证/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toBeInTheDocument();
   });
 
   test("uses an assertive alert for indeterminate execution", () => {
