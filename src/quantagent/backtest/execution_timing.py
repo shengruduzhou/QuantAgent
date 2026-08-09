@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from io import StringIO
+from typing import Iterable
 
 import pandas as pd
 
@@ -38,6 +39,27 @@ class ExecutionTraceValidation:
     order_records: int
     skip_records: int
     terminal_censored_signal_days: int = 0
+
+
+def canonical_signal_dates(values: Iterable[object]) -> tuple[pd.Timestamp, ...]:
+    """Normalize, validate and sort a signal schedule for cross-artifact binding."""
+    parsed = pd.to_datetime(list(values), errors="coerce")
+    if len(parsed) == 0:
+        raise ValueError("signal_schedule_empty")
+    index = pd.DatetimeIndex(parsed)
+    if index.isna().any():
+        raise ValueError("signal_schedule_invalid_date")
+    index = index.normalize()
+    if index.duplicated().any():
+        raise ValueError("signal_schedule_duplicate_date")
+    return tuple(pd.Timestamp(value) for value in index.sort_values())
+
+
+def signal_schedule_sha256(values: Iterable[object]) -> str:
+    """Hash the exact normalized signal-date set used by strict execution."""
+    dates = canonical_signal_dates(values)
+    payload = "".join(f"{value:%Y-%m-%d}\n" for value in dates)
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def validate_execution_trace(trace: pd.DataFrame) -> ExecutionTraceValidation:
@@ -181,6 +203,8 @@ __all__ = [
     "EXECUTION_TIMING_SEMANTICS",
     "TRACE_SCHEMA_VERSION",
     "ExecutionTraceValidation",
+    "canonical_signal_dates",
     "execution_trace_sha256",
+    "signal_schedule_sha256",
     "validate_execution_trace",
 ]
