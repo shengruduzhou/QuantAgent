@@ -4,6 +4,7 @@ import argparse
 import json
 
 import pandas as pd
+import pytest
 
 from scripts.run_factor_research_cycle import run_cycle
 
@@ -29,12 +30,10 @@ def _panel() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_provided_panel_cycle_never_self_certifies_or_activates_factor(tmp_path) -> None:
-    panel = tmp_path / "market.csv"
-    _panel().to_csv(panel, index=False)
-    output = tmp_path / "out"
-    args = argparse.Namespace(
+def _args(panel, output, *, market_calendar: str = "") -> argparse.Namespace:
+    return argparse.Namespace(
         market_panel=str(panel),
+        market_calendar=market_calendar,
         provider="none",
         symbols="",
         start_date="2025-01-01",
@@ -48,12 +47,34 @@ def test_provided_panel_cycle_never_self_certifies_or_activates_factor(tmp_path)
         cluster_correlation=0.85,
         output_dir=str(output),
     )
+
+
+def test_provided_panel_requires_independent_market_calendar(tmp_path) -> None:
+    panel = tmp_path / "market.csv"
+    _panel().to_csv(panel, index=False)
+
+    with pytest.raises(ValueError, match="--market-calendar"):
+        run_cycle(_args(panel, tmp_path / "out"))
+
+
+def test_provided_panel_cycle_never_self_certifies_or_activates_factor(tmp_path) -> None:
+    panel_frame = _panel()
+    panel = tmp_path / "market.csv"
+    panel_frame.to_csv(panel, index=False)
+    calendar = tmp_path / "calendar.csv"
+    pd.DataFrame({"trade_date": sorted(panel_frame["trade_date"].unique())}).to_csv(
+        calendar,
+        index=False,
+    )
+    output = tmp_path / "out"
+    args = _args(panel, output, market_calendar=str(calendar))
     manifest = run_cycle(args)
 
     assert manifest["research_only"] is True
     assert manifest["economic_live_eligible"] is False
     assert manifest["automatic_factor_activation"] is False
     assert manifest["source"]["production_integrity_certified"] is False
+    assert manifest["market_calendar"]["production_integrity_certified"] is False
     assert manifest["materialised_factors"] == ["rsi_14"]
 
     saved = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
