@@ -65,16 +65,25 @@ def test_signal_date_executes_only_on_next_market_session_close(tmp_path) -> Non
     assert len(result.config["execution_trace_sha256"]) == 64
 
 
-def test_last_signal_without_next_session_fails_closed(tmp_path) -> None:
+def test_last_signal_without_next_session_is_explicitly_terminal_censored(tmp_path) -> None:
     market = _market(periods=3)
     last = pd.Timestamp(market["trade_date"].max())
     targets = pd.DataFrame({"600000.SH": [0.10]}, index=[last])
-    with pytest.raises(ExecutionTimingViolation, match="no_next_market_session"):
-        simulate_ashare_target_weights(
-            targets,
-            market,
-            AShareExecutionSimulationConfig(audit_log_dir=str(tmp_path / "audit")),
-        )
+    result = simulate_ashare_target_weights(
+        targets,
+        market,
+        AShareExecutionSimulationConfig(audit_log_dir=str(tmp_path / "audit")),
+    )
+    validation = validate_execution_trace(result.execution_trace)
+    assert validation.ok is True, validation.reasons
+    assert validation.mapped_signal_days == 0
+    assert validation.terminal_censored_signal_days == 1
+    schedule = result.execution_trace.iloc[0]
+    assert schedule["record_type"] == "session_mapping"
+    assert schedule["status"] == "unmapped"
+    assert schedule["reason"] == "no_next_market_session"
+    assert pd.isna(schedule["execution_date"])
+    assert result.order_audit.empty
 
 
 def test_non_session_signal_date_fails_closed(tmp_path) -> None:
@@ -135,6 +144,25 @@ def test_trace_validator_rejects_same_session_tamper(tmp_path) -> None:
     report = validate_execution_trace(tampered)
     assert report.ok is False
     assert "execution_trace_same_or_prior_session_execution" in report.reasons
+
+
+def test_non_terminal_unmapped_signal_still_fails_closed(tmp_path) -> None:
+    market = _market(periods=4)
+    sessions = pd.DatetimeIndex(sorted(market["trade_date"].unique()))
+    targets = pd.DataFrame({"600000.SH": [0.10, 0.10]}, index=sessions[:2])
+    result = simulate_ashare_target_weights(
+        targets,
+        market,
+        AShareExecutionSimulationConfig(audit_log_dir=str(tmp_path / "audit")),
+    )
+    tampered = result.execution_trace.copy()
+    idx = tampered.index[tampered["record_type"] == "session_mapping"][0]
+    tampered.loc[idx, "status"] = "unmapped"
+    tampered.loc[idx, "reason"] = "no_next_market_session"
+    tampered.loc[idx, "execution_date"] = pd.NaT
+    validation = validate_execution_trace(tampered)
+    assert validation.ok is False
+    assert any(reason.startswith("execution_trace_unmapped_signal") for reason in validation.reasons)
 
 
 def test_empty_target_result_keeps_config_out_of_risk_events(tmp_path) -> None:
