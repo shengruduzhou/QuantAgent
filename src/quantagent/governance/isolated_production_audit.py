@@ -5,10 +5,10 @@ Two separate gates are intentionally modelled:
 1. findings are cross-reviewed before the main repair role may change code;
 2. every resulting change head is re-audited before it may be merged.
 
-The second gate includes the AI-quant expert auditor requested as role 10.  That
-reviewer must inspect repository-wide cross-module effects independently from
-the main repair role and from the testing reviewers.  A substantive rejection
-or an evidence request keeps the change blocked.
+The protocol keeps the requested code-debug/optimization expert (role 9) and
+AI-quant expert auditor (role 10) independent from the main repair role and from
+the mandatory testing reviewers. A substantive rejection or evidence request
+keeps the change blocked.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ TESTING_ROLE = "testing_expert"
 QUANT_USER_ROLE = "quant_department_user"
 QUANT_EXPERT_TESTER_ROLE = "quant_expert_tester"
 DESIGN_TESTING_ROLE = "design_testing_expert"
+CODE_DEBUG_ROLE = "code_debug_optimization_expert"
 AI_QUANT_AUDIT_ROLE = "ai_quant_expert_auditor"
 
 AUDITOR_ROLES: frozenset[str] = frozenset(
@@ -38,6 +39,7 @@ AUDITOR_ROLES: frozenset[str] = frozenset(
         QUANT_USER_ROLE,
         QUANT_EXPERT_TESTER_ROLE,
         DESIGN_TESTING_ROLE,
+        CODE_DEBUG_ROLE,
         AI_QUANT_AUDIT_ROLE,
     }
 )
@@ -55,6 +57,7 @@ POST_CHANGE_DOMAIN_ROLES = frozenset(
         STOCK_SELECTION_ROLE,
         QUANT_USER_ROLE,
         DESIGN_TESTING_ROLE,
+        CODE_DEBUG_ROLE,
     }
 )
 
@@ -309,6 +312,7 @@ __all__ = [
     "QUANT_USER_ROLE",
     "QUANT_EXPERT_TESTER_ROLE",
     "DESIGN_TESTING_ROLE",
+    "CODE_DEBUG_ROLE",
     "AI_QUANT_AUDIT_ROLE",
     "AUDITOR_ROLES",
     "ALL_PRODUCTION_AUDIT_ROLES",
