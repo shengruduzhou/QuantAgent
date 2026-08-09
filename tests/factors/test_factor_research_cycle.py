@@ -59,5 +59,6 @@ def test_provided_panel_cycle_never_self_certifies_or_activates_factor(tmp_path)
     saved = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     validity = json.loads((output / "factor_validity.json").read_text(encoding="utf-8"))
     assert saved["research_only"] is True
-    assert validity[0]["promotion_ready"] is False
+    assert validity[0]["promotion_candidate_ready"] is False
+    assert validity[0]["activation_authorized"] is False
     assert "promotion_context_missing" in validity[0]["promotion_blockers"]
