@@ -58,12 +58,15 @@ class PendingPaperSignal:
 def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, float]:
     """Return one deterministic signal-date target vector.
 
-    The daily loop is intentionally one signal per run.  Ambiguous duplicate
+    The daily loop is intentionally one signal per run. Ambiguous duplicate
     rows or multiple signal dates are refused rather than silently selecting one.
+    An empty result is not treated as an all-zero liquidation instruction:
+    "no target was generated" and "target every holding to zero" are different
+    economic states.
     """
 
     if weights is None or weights.empty:
-        return {}
+        raise ValueError("pending paper signal target weights are empty")
     frame = weights.copy()
     if "trade_date" in frame.columns:
         dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date.astype("string")
@@ -99,6 +102,8 @@ def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, fl
         if abs(number) <= 1e-15:
             number = 0.0
         result[str(symbol)] = number
+    if not result:
+        raise ValueError("pending paper signal contains no numeric target weights")
     return result
 
 
@@ -136,6 +141,8 @@ def verify_pending_signal(signal: PendingPaperSignal) -> None:
         raise PendingSignalCorruption(
             "pending signal timing semantics do not match strict execution contract"
         )
+    if not signal.target_weights:
+        raise PendingSignalCorruption("pending target-weight vector is empty")
     if _weights_sha(signal.target_weights) != signal.target_weights_sha256:
         raise PendingSignalCorruption("pending target-weight digest mismatch")
     expected = _payload_digest(payload)
