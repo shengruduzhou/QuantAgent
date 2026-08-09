@@ -1,0 +1,452 @@
+"""Consume pending T-close targets on the next observed paper session.
+
+This is the temporal/account-state counterpart to ``paper.pending_signal``.
+A pending target is consumed only when the current session is exactly the next
+session proven by the supplied session set. The consumer recovers the canonical
+account, reconciles it with the operational paper ledger, routes target deltas
+through the existing ``OrderManager -> PaperBrokerAdapter -> PaperBroker`` path,
+and journals the outcome at most once.
+
+When an authoritative market calendar is not supplied, observed market-panel
+sessions may be used for operational research, but the result explicitly remains
+``observed_panel_only`` and is not eligible as authoritative shadow-calendar
+evidence. Missing/missed sessions are never backfilled with a later price.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Iterable, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from quantagent.backtest.ashare_rules import AshareRuleEngine
+from quantagent.domain.ledger import CanonicalLedger
+from quantagent.domain.lineage import Lineage
+from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
+from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
+from quantagent.execution.paper_adapter import PaperBrokerAdapter
+from quantagent.paper.broker import MarketSnapshot, PaperBroker
+from quantagent.paper.execution_journal import PendingExecutionJournal
+from quantagent.paper.ledger import EventLedger
+from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
+from quantagent.paper.recovery import recover, recover_from_canonical
+
+
+@dataclass(frozen=True)
+class ContinuousPaperExecutionConfig:
+    pending_signal_dir: str
+    execution_journal_path: str
+    canonical_ledger_path: str
+    operational_ledger_path: str
+    idempotency_path: str
+    portfolio_id: str = "v7-paper"
+    initial_cash: float = 1_000_000.0
+    lot_size: int = 100
+    min_order_value_yuan: float = 100.0
+    max_participation_rate: float = 0.05
+    execution_clock: str = "14:59:00+08:00"
+    strategy_version: str = "v7_continuous_paper_v1"
+
+
+@dataclass(frozen=True)
+class ContinuousPaperExecutionResult:
+    signal_date: str
+    execution_date: str
+    status: str
+    pending_payload_sha256: str
+    order_count: int
+    fill_count: int
+    nav_before: float | None
+    nav_after: float | None
+    calendar_assurance: str
+    shadow_acceptance_calendar_eligible: bool
+    reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "signal_date": self.signal_date,
+            "execution_date": self.execution_date,
+            "status": self.status,
+            "pending_payload_sha256": self.pending_payload_sha256,
+            "order_count": self.order_count,
+            "fill_count": self.fill_count,
+            "nav_before": self.nav_before,
+            "nav_after": self.nav_after,
+            "calendar_assurance": self.calendar_assurance,
+            "shadow_acceptance_calendar_eligible": self.shadow_acceptance_calendar_eligible,
+            "reasons": list(self.reasons),
+        }
+
+
+class ContinuousPaperExecutionBlocked(RuntimeError):
+    pass
+
+
+def _normalise_sessions(values: Iterable[object]) -> tuple[str, ...]:
+    parsed = pd.to_datetime(pd.Series(list(values)), errors="coerce").dropna()
+    return tuple(sorted({pd.Timestamp(value).date().isoformat() for value in parsed}))
+
+
+def _next_session(signal_date: str, sessions: Sequence[str]) -> str | None:
+    for session in sessions:
+        if session > signal_date:
+            return session
+    return None
+
+
+def _pending_signals(store: PendingPaperSignalStore) -> list[PendingPaperSignal]:
+    if not store.root.exists():
+        return []
+    signals: list[PendingPaperSignal] = []
+    for path in sorted(store.root.glob("*.json")):
+        signals.append(store.read(path.stem))
+    return [signal for signal in signals if signal is not None]
+
+
+def _position_quantities(portfolio) -> dict[str, float]:
+    return {
+        str(symbol): float(position.total)
+        for symbol, position in portfolio.positions.items()
+        if not position.is_flat
+    }
+
+
+def _assert_recovered_account_consistent(canonical_state, operational_state, *, tolerance: float = 1e-6) -> None:
+    # The operational ledger may legitimately be empty before the first order.
+    if operational_state.events_replayed == 0:
+        return
+    if abs(float(canonical_state.portfolio.cash) - float(operational_state.portfolio.cash)) > tolerance:
+        raise ContinuousPaperExecutionBlocked(
+            "canonical/operational paper cash reconciliation failed"
+        )
+    left = _position_quantities(canonical_state.portfolio)
+    right = _position_quantities(operational_state.portfolio)
+    for symbol in sorted(set(left) | set(right)):
+        if abs(left.get(symbol, 0.0) - right.get(symbol, 0.0)) > tolerance:
+            raise ContinuousPaperExecutionBlocked(
+                f"canonical/operational paper position reconciliation failed for {symbol}"
+            )
+
+
+def _market_state(
+    market_panel: pd.DataFrame,
+    *,
+    execution_date: str,
+    required_symbols: set[str],
+) -> tuple[dict[tuple[str, str], MarketSnapshot], pd.Series]:
+    data = market_panel.copy()
+    required_columns = {"trade_date", "symbol", "close", "volume", "amount"}
+    missing = sorted(required_columns - set(data.columns))
+    if missing:
+        raise ContinuousPaperExecutionBlocked(f"market panel missing columns: {missing}")
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.normalize()
+    data["symbol"] = data["symbol"].astype(str)
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    if data.duplicated(["trade_date", "symbol"]).any():
+        raise ContinuousPaperExecutionBlocked("market panel has duplicate execution bars")
+    day = data[data["trade_date"] == pd.Timestamp(execution_date)].copy()
+    if day.empty:
+        raise ContinuousPaperExecutionBlocked("execution session bar set is empty")
+    available = set(day["symbol"])
+    missing_symbols = sorted(required_symbols - available)
+    if missing_symbols:
+        raise ContinuousPaperExecutionBlocked(
+            f"execution session missing required symbols: {missing_symbols[:10]}"
+        )
+
+    rule_engine = AshareRuleEngine()
+    snapshots: dict[tuple[str, str], MarketSnapshot] = {}
+    prices: dict[str, float] = {}
+    for symbol in sorted(required_symbols):
+        row = day.loc[day["symbol"] == symbol].iloc[0]
+        close = float(pd.to_numeric(row["close"], errors="coerce"))
+        volume = float(pd.to_numeric(row["volume"], errors="coerce"))
+        amount = float(pd.to_numeric(row["amount"], errors="coerce"))
+        if not np.isfinite(close) or close <= 0 or not np.isfinite(volume) or volume < 0 or not np.isfinite(amount) or amount < 0:
+            raise ContinuousPaperExecutionBlocked(f"invalid execution market values for {symbol}")
+        prior = data[(data["symbol"] == symbol) & (data["trade_date"] < pd.Timestamp(execution_date))]
+        if prior.empty:
+            raise ContinuousPaperExecutionBlocked(
+                f"previous close unavailable for execution symbol {symbol}"
+            )
+        previous_close = float(pd.to_numeric(prior.iloc[-1]["close"], errors="coerce"))
+        if not np.isfinite(previous_close) or previous_close <= 0:
+            raise ContinuousPaperExecutionBlocked(f"invalid previous close for {symbol}")
+        sessions_since_listing = None
+        if "sessions_since_listing" in row.index and pd.notna(row["sessions_since_listing"]):
+            sessions_since_listing = int(row["sessions_since_listing"])
+        snapshot = MarketSnapshot(
+            symbol=symbol,
+            last_price=close,
+            prev_close=previous_close,
+            board=rule_engine.infer_board(symbol),
+            clock="14:59:00",
+            suspended=bool(row.get("is_suspended", False)),
+            st=bool(row.get("is_st", False)),
+            volume=volume,
+            amount=amount,
+            spread=0.0,
+            sessions_since_listing=sessions_since_listing,
+        )
+        snapshots[(symbol, execution_date)] = snapshot
+        prices[symbol] = close
+    return snapshots, pd.Series(prices, dtype=float)
+
+
+def _execution_orders(manager: OrderManager, *, target_weights: pd.Series, prices: pd.Series, nav: float, signal_id: str, execution_date: str) -> list[ExecutionOrder]:
+    intents = manager.target_weights_to_order_intents(
+        target_weights,
+        prices,
+        nav,
+        signal_id=signal_id,
+        risk_check_result="not_checked",
+    )
+    timestamp = f"{execution_date}T{manager.config.strategy_version and '14:59:00+08:00'}"
+    orders: list[ExecutionOrder] = []
+    for intent in intents:
+        stamped = replace(intent, timestamp=timestamp)
+        orders.append(
+            ExecutionOrder(
+                client_order_id=stamped.intent_id,
+                symbol=stamped.symbol,
+                side=stamped.side,
+                quantity=stamped.quantity,
+                order_type=OrderType.LIMIT,
+                price=stamped.reference_price,
+                note="continuous_paper_target_reconcile",
+                signal_id=stamped.signal_id,
+                model_version=stamped.model_version,
+                feature_version=stamped.feature_version,
+                strategy_version=stamped.strategy_version,
+                risk_check_result=stamped.risk_check_result,
+                timestamp=stamped.timestamp,
+            )
+        )
+    return orders
+
+
+def execute_pending_for_session(
+    as_of_date: str,
+    market_panel: pd.DataFrame,
+    *,
+    config: ContinuousPaperExecutionConfig,
+    authoritative_sessions: Sequence[object] | None = None,
+) -> list[ContinuousPaperExecutionResult]:
+    """Consume eligible pending signals for one actually observed session."""
+
+    as_of = pd.Timestamp(as_of_date).date().isoformat()
+    observed_sessions = _normalise_sessions(market_panel["trade_date"] if "trade_date" in market_panel.columns else ())
+    if authoritative_sessions is not None:
+        sessions = _normalise_sessions(authoritative_sessions)
+        calendar_assurance = "authoritative_supplied_session_set"
+        acceptance_calendar_eligible = True
+        if as_of not in sessions:
+            raise ContinuousPaperExecutionBlocked(
+                f"as_of date {as_of} is not in the supplied authoritative session set"
+            )
+        if as_of not in observed_sessions:
+            raise ContinuousPaperExecutionBlocked(
+                f"authoritative session {as_of} has no observed market panel"
+            )
+    else:
+        sessions = observed_sessions
+        calendar_assurance = "observed_market_panel_only"
+        acceptance_calendar_eligible = False
+        if as_of not in sessions:
+            return []
+
+    store = PendingPaperSignalStore(config.pending_signal_dir)
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise ContinuousPaperExecutionBlocked("pending execution journal verification failed")
+
+    results: list[ContinuousPaperExecutionResult] = []
+    for pending in _pending_signals(store):
+        terminal = journal.terminal(pending.payload_sha256)
+        if terminal is not None:
+            continue
+        next_date = _next_session(pending.signal_date, sessions)
+        if next_date is None or next_date > as_of:
+            continue
+        if journal.has_unresolved_start(pending.payload_sha256):
+            journal.append(
+                pending_payload_sha256=pending.payload_sha256,
+                signal_date=pending.signal_date,
+                execution_date=next_date,
+                status="execution_indeterminate",
+                details={"reason": "prior execution_started has no terminal outcome; automatic retry prohibited"},
+            )
+            results.append(
+                ContinuousPaperExecutionResult(
+                    signal_date=pending.signal_date,
+                    execution_date=next_date,
+                    status="execution_indeterminate",
+                    pending_payload_sha256=pending.payload_sha256,
+                    order_count=0,
+                    fill_count=0,
+                    nav_before=None,
+                    nav_after=None,
+                    calendar_assurance=calendar_assurance,
+                    shadow_acceptance_calendar_eligible=acceptance_calendar_eligible,
+                    reasons=("unresolved prior execution attempt",),
+                )
+            )
+            continue
+        if next_date < as_of:
+            journal.append(
+                pending_payload_sha256=pending.payload_sha256,
+                signal_date=pending.signal_date,
+                execution_date=next_date,
+                status="missed_execution_session",
+                details={"observed_as_of": as_of, "reason": "consumer did not run on exact next session; retroactive shadow fill prohibited"},
+            )
+            results.append(
+                ContinuousPaperExecutionResult(
+                    signal_date=pending.signal_date,
+                    execution_date=next_date,
+                    status="missed_execution_session",
+                    pending_payload_sha256=pending.payload_sha256,
+                    order_count=0,
+                    fill_count=0,
+                    nav_before=None,
+                    nav_after=None,
+                    calendar_assurance=calendar_assurance,
+                    shadow_acceptance_calendar_eligible=acceptance_calendar_eligible,
+                    reasons=("retroactive execution prohibited",),
+                )
+            )
+            continue
+
+        canonical = CanonicalLedger(config.canonical_ledger_path)
+        if not canonical.verify()["valid"]:
+            raise ContinuousPaperExecutionBlocked("canonical paper ledger verification failed")
+        canonical_state = recover_from_canonical(
+            config.canonical_ledger_path,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+            as_of_session=as_of,
+        )
+        operational_ledger = EventLedger(config.operational_ledger_path)
+        operational_state = recover(
+            operational_ledger,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+        )
+        _assert_recovered_account_consistent(canonical_state, operational_state)
+        if canonical_state.open_orders() or operational_state.open_orders():
+            raise ContinuousPaperExecutionBlocked(
+                "recovered paper account has unresolved open orders; reconciliation required"
+            )
+        if operational_state.killed:
+            raise ContinuousPaperExecutionBlocked(
+                f"paper kill switch is active: {operational_state.kill_reason or 'unknown'}"
+            )
+
+        held_symbols = set(_position_quantities(canonical_state.portfolio))
+        target_symbols = {symbol for symbol, weight in pending.target_weights.items() if abs(float(weight)) > 1e-12}
+        required_symbols = held_symbols | target_symbols
+        snapshots, prices = _market_state(
+            market_panel,
+            execution_date=as_of,
+            required_symbols=required_symbols,
+        )
+        nav_before = canonical_state.portfolio.equity(prices.to_dict())
+        if not np.isfinite(nav_before) or nav_before <= 0:
+            raise ContinuousPaperExecutionBlocked("recovered paper account NAV is invalid")
+
+        book = canonical.replay_book() if len(canonical) else None
+        broker = PaperBroker(
+            event_ledger=operational_ledger,
+            portfolio=canonical_state.portfolio,
+            canonical_ledger=canonical,
+            order_book=book,
+        )
+        market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
+        adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)
+        manager = OrderManager(
+            broker=adapter,
+            lineage=Lineage(
+                run_id=f"continuous-paper:{config.portfolio_id}",
+                strategy_version_id=config.strategy_version,
+            ),
+            idempotency_path=config.idempotency_path,
+            canonical_ledger=canonical,
+            order_book=broker.book,
+            config=OrderManagerConfig(
+                lot_size=config.lot_size,
+                min_order_value_yuan=config.min_order_value_yuan,
+                max_participation_rate=config.max_participation_rate,
+                strategy_version=config.strategy_version,
+            ),
+        )
+        target = pd.Series(pending.target_weights, dtype=float).reindex(prices.index).fillna(0.0)
+        orders = _execution_orders(
+            manager,
+            target_weights=target,
+            prices=prices,
+            nav=nav_before,
+            signal_id=f"pending:{pending.payload_sha256}",
+            execution_date=as_of,
+        )
+
+        journal.append(
+            pending_payload_sha256=pending.payload_sha256,
+            signal_date=pending.signal_date,
+            execution_date=as_of,
+            status="execution_started",
+            details={
+                "order_count": len(orders),
+                "canonical_records_before": len(canonical),
+                "calendar_assurance": calendar_assurance,
+            },
+        )
+        states = manager.submit_orders(orders)
+        manager.cancel_all_open()
+        broker.mark_to_market(prices.to_dict(), trade_date=as_of)
+        nav_after = broker.portfolio.equity(prices.to_dict())
+        fill_count = len(broker.fills) - len(canonical_state.fills)
+        statuses = [state.status.value for state in states]
+        terminal_status = "execution_observed"
+        journal.append(
+            pending_payload_sha256=pending.payload_sha256,
+            signal_date=pending.signal_date,
+            execution_date=as_of,
+            status=terminal_status,
+            details={
+                "order_count": len(orders),
+                "fill_count": fill_count,
+                "order_statuses": statuses,
+                "nav_before": nav_before,
+                "nav_after": nav_after,
+                "calendar_assurance": calendar_assurance,
+                "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
+            },
+        )
+        broker.close_session(as_of)
+        results.append(
+            ContinuousPaperExecutionResult(
+                signal_date=pending.signal_date,
+                execution_date=as_of,
+                status=terminal_status,
+                pending_payload_sha256=pending.payload_sha256,
+                order_count=len(orders),
+                fill_count=fill_count,
+                nav_before=float(nav_before),
+                nav_after=float(nav_after),
+                calendar_assurance=calendar_assurance,
+                shadow_acceptance_calendar_eligible=acceptance_calendar_eligible,
+                reasons=(),
+            )
+        )
+    return results
+
+
+__all__ = [
+    "ContinuousPaperExecutionConfig",
+    "ContinuousPaperExecutionResult",
+    "ContinuousPaperExecutionBlocked",
+    "execute_pending_for_session",
+]
