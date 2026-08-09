@@ -1,7 +1,7 @@
 """Trace-proven execution timing for production-grade A-share backtests.
 
 The executable-label dataset defines a signal at session T and an entry at the
-next market session close.  This module makes that contract machine-verifiable
+next market session close. This module makes that contract machine-verifiable
 instead of relying on a narrative ``t_plus_one=True`` flag.
 """
 
@@ -37,24 +37,26 @@ class ExecutionTraceValidation:
     mapped_signal_days: int
     order_records: int
     skip_records: int
+    terminal_censored_signal_days: int = 0
 
 
 def validate_execution_trace(trace: pd.DataFrame) -> ExecutionTraceValidation:
-    """Validate a simulator trace without trusting summary flags.
+    """Validate signal->execution mapping without trusting summary flags.
 
-    The validator deliberately focuses on facts observable from the trace:
-    every signal-day schedule record must map strictly forward, all order/skip
-    records must use that exact mapping, and the only accepted price source is
-    the next-session close defined by the executable-label contract.
+    Exactly one special non-executed schedule is permitted: the chronologically
+    final signal may be ``unmapped`` with reason ``no_next_market_session``.
+    This is right-censoring, not execution: it cannot contribute an order, PnL
+    or return. All other missing mappings remain hard failures.
     """
     reasons: list[str] = []
     if trace is None or trace.empty:
-        return ExecutionTraceValidation(False, ("execution_trace_empty",), 0, 0, 0)
+        return ExecutionTraceValidation(False, ("execution_trace_empty",), 0, 0, 0, 0)
     missing = [column for column in _REQUIRED_COLUMNS if column not in trace.columns]
     if missing:
         return ExecutionTraceValidation(
             False,
             tuple(f"execution_trace_missing_column:{column}" for column in missing),
+            0,
             0,
             0,
             0,
@@ -69,24 +71,50 @@ def validate_execution_trace(trace: pd.DataFrame) -> ExecutionTraceValidation:
         reasons.append("execution_trace_semantics_mismatch")
 
     schedules = frame[frame["record_type"] == "session_mapping"].copy()
+    terminal_count = 0
     if schedules.empty:
         reasons.append("execution_trace_missing_session_mapping")
     if schedules["signal_date"].duplicated().any():
         reasons.append("execution_trace_duplicate_signal_mapping")
     if not schedules.empty:
-        if not schedules["status"].eq("mapped").all():
-            bad = sorted(set(str(value) for value in schedules.loc[schedules["status"] != "mapped", "reason"]))
+        latest_signal = schedules["signal_date"].max()
+        terminal_mask = (
+            schedules["status"].eq("unmapped")
+            & schedules["reason"].eq("no_next_market_session")
+            & schedules["execution_date"].isna()
+            & schedules["signal_date"].eq(latest_signal)
+        )
+        terminal_count = int(terminal_mask.sum())
+        if terminal_count > 1:
+            reasons.append("execution_trace_multiple_terminal_censored_signals")
+        accepted_schedule = schedules["status"].eq("mapped") | terminal_mask
+        if not accepted_schedule.all():
+            bad = sorted(
+                set(
+                    str(value)
+                    for value in schedules.loc[~accepted_schedule, "reason"]
+                )
+            )
             reasons.extend(f"execution_trace_unmapped_signal:{value}" for value in bad)
-        mapped = schedules.dropna(subset=["signal_date", "execution_date"])
+        mapped = schedules[schedules["status"].eq("mapped")].dropna(
+            subset=["signal_date", "execution_date"]
+        )
         if not mapped.empty and not (mapped["execution_date"] > mapped["signal_date"]).all():
             reasons.append("execution_trace_same_or_prior_session_execution")
+        malformed_mapped = schedules[
+            schedules["status"].eq("mapped") & schedules["execution_date"].isna()
+        ]
+        if not malformed_mapped.empty:
+            reasons.append("execution_trace_mapped_signal_missing_execution_date")
         if not schedules["price_source"].eq("close").all():
             reasons.append("execution_trace_schedule_price_source_not_close")
 
     mapping = {
         pd.Timestamp(row.signal_date): pd.Timestamp(row.execution_date)
         for row in schedules.itertuples(index=False)
-        if pd.notna(row.signal_date) and pd.notna(row.execution_date) and str(row.status) == "mapped"
+        if pd.notna(row.signal_date)
+        and pd.notna(row.execution_date)
+        and str(row.status) == "mapped"
     }
     detail = frame[frame["record_type"].isin(["order", "skip", "execution_error"])].copy()
     if not detail.empty:
@@ -113,6 +141,7 @@ def validate_execution_trace(trace: pd.DataFrame) -> ExecutionTraceValidation:
         mapped_signal_days=int(len(schedules[schedules["status"] == "mapped"])),
         order_records=int((frame["record_type"] == "order").sum()),
         skip_records=int((frame["record_type"] == "skip").sum()),
+        terminal_censored_signal_days=terminal_count,
     )
 
 
@@ -129,7 +158,18 @@ def execution_trace_sha256(trace: pd.DataFrame) -> str:
             parsed = pd.to_datetime(frame[column], errors="coerce")
             frame[column] = parsed.dt.strftime("%Y-%m-%d")
             frame.loc[parsed.isna(), column] = ""
-    sort_columns = [column for column in ("signal_date", "execution_date", "record_type", "symbol", "client_order_id", "reason") if column in frame.columns]
+    sort_columns = [
+        column
+        for column in (
+            "signal_date",
+            "execution_date",
+            "record_type",
+            "symbol",
+            "client_order_id",
+            "reason",
+        )
+        if column in frame.columns
+    ]
     if sort_columns:
         frame = frame.sort_values(sort_columns, kind="mergesort", na_position="last")
     buffer = StringIO()
