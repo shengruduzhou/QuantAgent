@@ -31,8 +31,6 @@ class FactorGateConfig:
     min_dates: int = 120
     min_symbols_per_date: int = 30
     min_mean_rank_ic: float = 0.01
-    # Standard ICIR = mean(IC) / std(IC). It is deliberately not multiplied by
-    # sqrt(n); significance is separately represented by the NW t-stat.
     min_ic_information_ratio: float = 0.20
     min_newey_west_rank_t_stat: float = 2.0
     min_positive_ic_ratio: float = 0.52
@@ -81,8 +79,6 @@ class FactorGovernanceReport:
     passed: bool
     promotion_candidate_ready: bool
     mean_rank_ic: float
-    # Historical public field retained; semantics are now explicitly standard
-    # RankICIR, not mean/std*sqrt(n).
     ic_information_ratio: float
     newey_west_rank_t_stat: float
     positive_ic_ratio: float
@@ -135,15 +131,24 @@ class FactorGovernanceReport:
 
 
 def _rank_ic_by_date(frame: pd.DataFrame, factor_col: str, return_col: str) -> pd.Series:
-    def _one(group: pd.DataFrame) -> float:
-        valid = group[[factor_col, return_col]].replace([np.inf, -np.inf], np.nan).dropna()
-        if len(valid) < 3 or valid[factor_col].nunique() < 2 or valid[return_col].nunique() < 2:
-            return float("nan")
-        return float(valid[factor_col].corr(valid[return_col], method="spearman"))
+    """Return a stable 1-D date-indexed RankIC series, including empty input."""
+    if frame.empty:
+        return pd.Series(dtype=float)
 
-    values = frame.groupby("trade_date", sort=True).apply(_one).dropna()
-    values.index = pd.DatetimeIndex(values.index)
-    return values.sort_index()
+    values: dict[pd.Timestamp, float] = {}
+    for date, group in frame.groupby("trade_date", sort=True):
+        valid = group[[factor_col, return_col]].replace([np.inf, -np.inf], np.nan).dropna()
+        if (
+            len(valid) < 3
+            or valid[factor_col].nunique() < 2
+            or valid[return_col].nunique() < 2
+        ):
+            values[pd.Timestamp(date)] = float("nan")
+        else:
+            values[pd.Timestamp(date)] = float(
+                valid[factor_col].corr(valid[return_col], method="spearman")
+            )
+    return pd.Series(values, dtype=float).dropna().sort_index()
 
 
 def _ic_ir(ic: pd.Series) -> float:
@@ -157,7 +162,7 @@ def _ic_ir(ic: pd.Series) -> float:
     return float(clean.mean() / std)
 
 
-def _period_losing_rate(ic: pd.Series, frequency: str = "QE") -> float:
+def _period_losing_rate(ic: pd.Series, frequency: str = "Q") -> float:
     if ic.empty:
         return 1.0
     period = ic.groupby(ic.index.to_period(frequency)).mean()
