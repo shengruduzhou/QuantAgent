@@ -1,14 +1,17 @@
-"""Factor validity and promotion governance.
+"""Factor validity and pre-promotion governance.
 
-A factor is not admitted because of one attractive full-sample IC.  Core
-validity and production promotion are intentionally separate:
+A factor is not admitted because of one attractive full-sample IC. Core
+validity and preliminary promotion candidacy are intentionally separate:
 
 * validity: executable predictive evidence, coverage, stability, redundancy,
   decay and capacity;
-* promotion: pre-registration/OOS identity, cumulative search evidence,
-  multiple-testing gates, strict long-only economics and shadow evidence.
+* promotion candidacy: pre-registration/OOS identity, cumulative search
+  evidence, multiple-testing gates, strict long-only economics and shadow
+  evidence.
 
-Unknown promotion evidence fails closed.  This module never arms trading.
+A successful ``promotion_candidate_ready`` result is *not* ACTIVE
+authorization. It is deliberately only an input to a future hash-bound
+promotion-certificate verifier. Unknown evidence fails closed.
 """
 
 from __future__ import annotations
@@ -28,8 +31,8 @@ class FactorGateConfig:
     min_dates: int = 120
     min_symbols_per_date: int = 30
     min_mean_rank_ic: float = 0.01
-    # Standard ICIR = mean(IC) / std(IC).  It is deliberately not multiplied
-    # by sqrt(n); significance is separately represented by the NW t-stat.
+    # Standard ICIR = mean(IC) / std(IC). It is deliberately not multiplied by
+    # sqrt(n); significance is separately represented by the NW t-stat.
     min_ic_information_ratio: float = 0.20
     min_newey_west_rank_t_stat: float = 2.0
     min_positive_ic_ratio: float = 0.52
@@ -49,10 +52,12 @@ class FactorGateConfig:
 
 @dataclass(frozen=True)
 class FactorPromotionContext:
-    """Evidence external to a one-factor IC calculation.
+    """Unverified preliminary evidence external to one-factor IC analysis.
 
-    These facts should be produced by the governed selection/backtest/shadow
-    paths.  The factor gate consumes them; it does not fabricate them.
+    These facts should be produced by governed selection/backtest/shadow paths.
+    They are useful for deciding whether a candidate is complete enough to enter
+    promotion-certificate verification, but this ordinary dataclass is *not* a
+    provenance or activation credential.
     """
 
     label_semantics: str
@@ -74,7 +79,7 @@ class FactorPromotionContext:
 class FactorGovernanceReport:
     factor_name: str
     passed: bool
-    promotion_ready: bool
+    promotion_candidate_ready: bool
     mean_rank_ic: float
     # Historical public field retained; semantics are now explicitly standard
     # RankICIR, not mean/std*sqrt(n).
@@ -104,7 +109,9 @@ class FactorGovernanceReport:
         return {
             "factor_name": self.factor_name,
             "passed": self.passed,
-            "promotion_ready": self.promotion_ready,
+            "promotion_candidate_ready": self.promotion_candidate_ready,
+            "activation_authorized": False,
+            "activation_authority": "hash_bound_factor_promotion_certificate_required",
             "mean_rank_ic": self.mean_rank_ic,
             "rank_icir": self.rank_icir,
             "ic_information_ratio": self.ic_information_ratio,
@@ -333,8 +340,6 @@ def evaluate_factor_candidate(
         reasons.append(f"positive_ic_ratio={positive_ratio:.4f} below {cfg.min_positive_ic_ratio:.4f}")
     if losing_rate > cfg.max_losing_period_rate:
         reasons.append(f"losing_period_rate={losing_rate:.4f} exceeds {cfg.max_losing_period_rate:.4f}")
-    # We care specifically about recent deterioration. Positive drift is not a
-    # reason to reject; sufficiently negative standardized change is.
     if np.isfinite(predictive_drift) and predictive_drift < -abs(cfg.max_recent_predictive_drift_z):
         reasons.append(
             f"recent_predictive_drift_z={predictive_drift:.4f} below {-abs(cfg.max_recent_predictive_drift_z):.4f}"
@@ -357,11 +362,11 @@ def evaluate_factor_candidate(
             f"evaluated_label_semantics={label_semantics!r} does not match governed executable semantics"
         )
     passed = not reasons
-    promotion_ready = bool(passed and not blockers)
+    promotion_candidate_ready = bool(passed and not blockers)
     return FactorGovernanceReport(
         factor_name=factor_name,
         passed=passed,
-        promotion_ready=promotion_ready,
+        promotion_candidate_ready=promotion_candidate_ready,
         mean_rank_ic=mean_ic,
         ic_information_ratio=icir,
         newey_west_rank_t_stat=rank_t_stat,
