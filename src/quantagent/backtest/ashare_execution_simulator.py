@@ -1,14 +1,12 @@
 """Strict A-share cash-account execution simulator facade.
 
-The historical implementation is retained in
-``ashare_execution_simulator_impl.py``.  This facade makes one broker capability
-explicit: the simulator models a long-only cash stock account and therefore
-cannot establish a negative stock position.
+This facade owns two non-negotiable production contracts:
 
-Research code may still construct hypothetical long-short weights, but those
-weights must not silently pass through a cash-account simulator where the short
-orders are rejected one-by-one and the remaining long leg is then mistaken for
-the intended market-neutral strategy.
+* a cash stock account cannot establish naked negative stock weights;
+* signal-dated target weights cannot execute until the next market session.
+
+The historical implementation lives in ``ashare_execution_simulator_impl.py``;
+all public callers pass through the validators here.
 """
 
 from __future__ import annotations
@@ -19,6 +17,11 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest import ashare_execution_simulator_impl as _impl
+from quantagent.backtest.execution_timing import (
+    EXECUTION_TIMING_SEMANTICS,
+    execution_trace_sha256,
+    validate_execution_trace,
+)
 
 
 STRICT_CASH_ACCOUNT_SEMANTICS = "ashare_cash_long_only_v1_no_naked_stock_short"
@@ -31,19 +34,16 @@ class UnsupportedStockShortError(ValueError):
     """Raised when cash-account target weights require a negative stock position."""
 
 
+class ExecutionTimingViolation(ValueError):
+    """Raised when the trace cannot prove next-session execution semantics."""
+
+
 def validate_cash_account_target_weights(
     target_weight_history: pd.DataFrame | None,
     *,
     tolerance: float = 1e-12,
 ) -> None:
-    """Fail closed if final stock targets require naked short positions.
-
-    Zero targets remain valid and may liquidate an existing long position in an
-    execution engine that carries holdings.  A negative *final* stock weight is
-    different: it requires an explicit securities-lending/margin capability,
-    borrow inventory and financing/recall economics that this simulator does not
-    model.
-    """
+    """Fail closed if final stock targets require naked short positions."""
     if target_weight_history is None or target_weight_history.empty:
         return
     numeric = target_weight_history.apply(pd.to_numeric, errors="coerce")
@@ -71,6 +71,7 @@ def simulate_ashare_target_weights(
     market_panel: pd.DataFrame,
     config: AShareExecutionSimulationConfig | None = None,
 ) -> AShareExecutionSimulationResult:
+    """Run the public production-grade simulator and verify its timing trace."""
     validate_cash_account_target_weights(target_weight_history)
     result = _impl.simulate_ashare_target_weights(
         target_weight_history,
@@ -80,18 +81,41 @@ def simulate_ashare_target_weights(
     metadata = dict(result.config or {})
     metadata["stock_shorting_capability"] = "cash_long_only"
     metadata["execution_semantics_version"] = STRICT_CASH_ACCOUNT_SEMANTICS
+    metadata["execution_timing_semantics"] = EXECUTION_TIMING_SEMANTICS
+
+    if target_weight_history is not None and not target_weight_history.empty:
+        timing = validate_execution_trace(result.execution_trace)
+        metadata["execution_trace_ok"] = timing.ok
+        metadata["execution_trace_reasons"] = list(timing.reasons)
+        metadata["execution_trace_mapped_signal_days"] = timing.mapped_signal_days
+        metadata["execution_trace_order_records"] = timing.order_records
+        metadata["execution_trace_skip_records"] = timing.skip_records
+        metadata["execution_trace_sha256"] = execution_trace_sha256(result.execution_trace)
+        if not timing.ok:
+            raise ExecutionTimingViolation(
+                "production A-share execution timing could not be proven: "
+                + "; ".join(timing.reasons)
+            )
+    else:
+        metadata["execution_trace_ok"] = True
+        metadata["execution_trace_reasons"] = []
+        metadata["execution_trace_mapped_signal_days"] = 0
+        metadata["execution_trace_order_records"] = 0
+        metadata["execution_trace_skip_records"] = 0
+        metadata["execution_trace_sha256"] = None
+
     return replace(result, config=metadata)
 
 
 def __getattr__(name: str):
-    # Preserve compatibility for private forensic helpers while keeping the
-    # public simulator boundary governed above.
     return getattr(_impl, name)
 
 
 __all__ = [
     "STRICT_CASH_ACCOUNT_SEMANTICS",
+    "EXECUTION_TIMING_SEMANTICS",
     "UnsupportedStockShortError",
+    "ExecutionTimingViolation",
     "AShareExecutionSimulationConfig",
     "AShareExecutionSimulationResult",
     "validate_cash_account_target_weights",
