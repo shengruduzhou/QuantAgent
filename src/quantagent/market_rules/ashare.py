@@ -25,6 +25,10 @@ Quantity authorities used by the execution layer:
   orders 200..50,000 shares; a residual below 200 is sold in one order.
 * SSE investor education clarifies that quantities above 200 may increase by
   one share for both buys and sells.
+* SSE/SZSE sell-quantity guidance allows a non-round-lot residual to be sold
+  once on its own or combined with the round-lot portion in one sell order.
+  Therefore a broker-proven full liquidation such as 250 shares is legal even
+  though an ordinary partial main-board sell still uses 100-share increments.
 * BSE 2026 Trading Rules §§3.3.8-3.3.9: competitive stock orders are at least
   100 shares, residuals below 100 are sold once, and one order is at most
   1,000,000 shares. The absence of an integer-lot requirement above the minimum
@@ -293,24 +297,32 @@ def round_to_lot(
     side: str,
     is_full_liquidation: bool = False,
 ) -> int:
-    """Round to a legal board quantity without inventing an odd-lot exception.
+    """Round a target delta to a legal board quantity.
 
-    A normal sell must satisfy the same board minimum as a normal buy.  The only
-    sub-minimum exception is a *complete* residual sell.  For main-board and
-    ChiNext, quantities at/above the minimum still round to the 100-share
-    increment; therefore 250 shares becomes a normal 200-share order rather than
-    an invalid 250-share full-liquidation order.  STAR/BSE preserve their
-    one-share increments above their minimums.
+    Normal buys and partial sells obey the board minimum/increment.  A caller
+    that has independently proved full liquidation may sell the exact whole-share
+    position, including a round-lot portion plus its one residual odd-lot part.
+    This matches the SSE/SZSE examples for non-round holdings and does not permit
+    arbitrary partial odd-lot splitting.
+
+    Floating target-weight arithmetic can produce values such as
+    ``100.99999999999999`` for an intended 101-share delta.  Snap only values
+    already within numerical tolerance of a whole share before applying the
+    exchange increment; materially fractional share targets still round down.
     """
     minimum, increment = LOT_RULES.get(board, (100, 100))
-    shares = float(shares)
-    if shares <= 0:
+    raw = float(shares)
+    if raw <= 0:
         return 0
-    if shares < minimum:
-        if side.upper() == "SELL" and is_full_liquidation:
-            return int(shares)
+    nearest = round(raw)
+    whole_shares = int(nearest if abs(raw - nearest) <= 1e-9 else raw)
+    if whole_shares <= 0:
         return 0
-    return int(minimum + ((shares - minimum) // increment) * increment)
+    if side.upper() == "SELL" and is_full_liquidation:
+        return whole_shares
+    if whole_shares < minimum:
+        return 0
+    return int(minimum + ((whole_shares - minimum) // increment) * increment)
 
 
 def execution_price(
