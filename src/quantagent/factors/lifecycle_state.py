@@ -3,10 +3,15 @@
 A one-window diagnostic is not a capital-allocation state.  This module keeps
 factor promotion deliberately slower than factor discovery:
 
-candidate -> validated -> shadow -> active -> degraded -> retired
+candidate -> validated -> shadow
 
-PIT/leakage/execution-semantic violations can quarantine immediately.  ACTIVE
-cannot be reached without an explicit promotion-ready evidence bundle.
+Existing ACTIVE factors can be monitored and move through
+``active -> degraded -> retired``.  New ``shadow -> active`` activation is
+intentionally *not* issued here: it requires a separately verified, hash-bound
+factor-promotion certificate.  A plain diagnostic dataclass or a caller-supplied
+boolean must never allocate capital.
+
+PIT/leakage/execution-semantic violations can quarantine immediately.
 """
 
 from __future__ import annotations
@@ -30,13 +35,16 @@ FACTOR_STAGES = (
     "quarantined",
 )
 TERMINAL_STAGES = frozenset({"retired", "quarantined"})
-LIFECYCLE_SCHEMA_VERSION = "factor_lifecycle_state_v1"
+LIFECYCLE_SCHEMA_VERSION = "factor_lifecycle_state_v2_shadow_activation_blocked"
 
 
 @dataclass(frozen=True)
 class LifecycleEvidence:
     core_validity_passed: bool
-    promotion_ready: bool = False
+    # Preliminary evidence may say the factor is a promotion *candidate*, but
+    # this field is deliberately non-authoritative for ACTIVE.  A future
+    # promotion-certificate verifier owns the activation boundary.
+    promotion_candidate_ready: bool = False
     shadow_days: int = 0
     severe_semantic_violation: bool = False
     evidence_digest: str = ""
@@ -97,7 +105,13 @@ def decide_lifecycle_transition(
     *,
     retire_after_consecutive_degradations: int = 3,
 ) -> FactorLifecycleSnapshot:
-    """Pure transition function used by both runtime code and tests."""
+    """Pure diagnostic/state transition function.
+
+    This function can move a new factor as far as SHADOW, never to ACTIVE.
+    ACTIVE is preserved only for already-active factors whose validity remains
+    healthy.  Re-activation of a degraded factor also returns to SHADOW until a
+    separate promotion certificate is verified.
+    """
 
     if retire_after_consecutive_degradations < 2:
         raise ValueError("retirement requires at least two consecutive degradation observations")
@@ -124,10 +138,10 @@ def decide_lifecycle_transition(
         if not evidence.core_validity_passed:
             next_stage = "degraded"
             degraded_count = 1
-        elif evidence.promotion_ready:
-            next_stage = "active"
-            degraded_count = 0
         else:
+            # Even a complete preliminary promotion context cannot activate the
+            # factor. The separately governed promotion-certificate layer owns
+            # SHADOW -> ACTIVE.
             next_stage = "shadow"
             degraded_count = 0
     elif stage == "active":
@@ -138,12 +152,9 @@ def decide_lifecycle_transition(
             next_stage = "degraded"
             degraded_count = 1
     elif stage == "degraded":
-        if evidence.core_validity_passed and evidence.promotion_ready:
-            next_stage = "active"
-            degraded_count = 0
-        elif evidence.core_validity_passed:
-            # Recovery without a still-valid promotion bundle returns to shadow;
-            # it does not silently regain capital.
+        if evidence.core_validity_passed:
+            # Recovery never silently regains capital. It must re-enter SHADOW
+            # and obtain a fresh promotion certificate.
             next_stage = "shadow"
             degraded_count = 0
         else:
@@ -169,7 +180,8 @@ class FactorLifecycleLedger:
     """Append-only hash-chained lifecycle record.
 
     The ledger does not autonomously run research or change portfolio weights.
-    It records a decision produced from already-governed evidence.
+    It records diagnostic transitions only. New ACTIVE enrollment is absent
+    from this class by design until promotion-certificate verification exists.
     """
 
     def __init__(self, path: str | Path = "runtime/state/factor_lifecycle.jsonl") -> None:
