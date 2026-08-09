@@ -120,6 +120,27 @@ describe("PaperExecutionEvidencePanel", () => {
     expect(screen.getByRole("alert")).toHaveAttribute("aria-live", "assertive");
   });
 
+  test("prioritizes an unresolved incident over a newer observed record", () => {
+    mockEvidence(evidence({
+      journal: {
+        ...evidence().journal,
+        recordCount: 4,
+        terminalCount: 1,
+        unresolvedCount: 1,
+      },
+      summary: {
+        ...evidence().summary,
+        attention: "critical",
+        latestStatus: "execution_observed",
+      },
+    }));
+    render(<PaperExecutionEvidencePanel />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("存在未闭合执行尝试");
+    expect(alert).toHaveTextContent("禁止把最新成功记录解释为账户整体健康");
+  });
+
   test("fails closed when the journal is invalid", () => {
     mockEvidence(evidence({
       journal: {
