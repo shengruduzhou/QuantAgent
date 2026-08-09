@@ -1,11 +1,11 @@
 """GitHub-facing exact-head adapter for :mod:`isolated_production_audit`.
 
-The core audit board is repository-owned policy.  This adapter is deliberately
-small: it parses a strict machine-readable marker from trusted PR comments,
-binds every review to one exact PR head SHA, and feeds the resulting
-``PostChangeReview`` objects into :class:`IsolatedAuditBoard`.
+The core audit board is repository-owned policy. This adapter parses a strict
+machine-readable marker from trusted maintainer PR comments, binds every review
+to one exact PR head SHA, and feeds the resulting ``PostChangeReview`` objects
+into :class:`IsolatedAuditBoard`.
 
-A human sentence containing words such as "APPROVE" is not evidence.  Only the
+A human sentence containing words such as "APPROVE" is not evidence. Only the
 versioned JSON marker below is accepted::
 
     <!-- quantagent-post-change-audit:v1
@@ -14,10 +14,11 @@ versioned JSON marker below is accepted::
      "evidence_checked":["CI run #123"],"notes":"..."}
     -->
 
-GitHub identity and logical auditor role are different concepts.  This parser
-requires a maintainer-associated comment so random public commenters cannot
-manufacture role records, but it does not claim cryptographic separation of the
-logical roles when one repository owner operates several agents.
+GitHub identity and logical auditor role are different concepts. A marker from
+a non-maintainer is ignored as untrusted input so a random public commenter
+cannot manufacture evidence *or* denial-of-service the gate. Once a marker is
+posted by a trusted OWNER/MEMBER/COLLABORATOR, malformed structured evidence
+fails closed.
 """
 
 from __future__ import annotations
@@ -64,11 +65,10 @@ class AuditGateEvaluation:
 
     @property
     def passed(self) -> bool:
-        return (
-            self.disposition.ready_for_merge
-            and not self.malformed_comment_ids
-            and not self.unauthorized_comment_ids
-        )
+        # Untrusted audit-looking comments are diagnostics only. Letting them
+        # veto would allow any public commenter to DoS every PR. Trusted malformed
+        # records still fail closed.
+        return self.disposition.ready_for_merge and not self.malformed_comment_ids
 
     def summary(self) -> str:
         lines = [
@@ -81,9 +81,9 @@ class AuditGateEvaluation:
             f"stale_records_ignored: {self.stale_record_count}",
         ]
         if self.malformed_comment_ids:
-            lines.append("malformed_audit_comments: " + ",".join(self.malformed_comment_ids))
+            lines.append("malformed_trusted_audit_comments: " + ",".join(self.malformed_comment_ids))
         if self.unauthorized_comment_ids:
-            lines.append("unauthorized_audit_comments: " + ",".join(self.unauthorized_comment_ids))
+            lines.append("untrusted_audit_comments_ignored: " + ",".join(self.unauthorized_comment_ids))
         lines.extend(f"reason: {reason}" for reason in self.disposition.reasons)
         return "\n".join(lines)
 
@@ -128,22 +128,27 @@ def parse_audit_comment(
     expected_head_sha: str,
     allowed_author_associations: frozenset[str] = ALLOWED_AUTHOR_ASSOCIATIONS,
 ) -> ParsedAuditRecord | None:
-    """Parse one comment; stale SHA is represented in the returned record.
+    """Parse one trusted audit comment.
 
-    Authorization is checked before accepting a marker.  A non-audit comment is
-    ignored.  An audit-looking but malformed/unauthorized comment raises so the
-    gate can fail closed instead of silently discarding suspicious evidence.
+    A non-audit comment returns ``None``. An audit-looking comment from an
+    untrusted GitHub author raises ``PermissionError`` *before JSON parsing* so
+    malformed public input cannot veto the gate. Trusted malformed evidence
+    raises :class:`AuditCommentError` and fails closed at the evaluation layer.
     """
 
+    if not _SHA_RE.fullmatch(str(expected_head_sha).lower()):
+        raise ValueError("expected_head_sha must be an exact 40-character lowercase hex SHA")
     body = str(comment.get("body", "") or "")
-    payload = _extract_payload(body)
-    if payload is None:
+    if AUDIT_MARKER not in body:
         return None
     association = _association(comment)
     if association not in allowed_author_associations:
         raise PermissionError(
             f"audit comment {_comment_id(comment)} has untrusted author_association={association!r}"
         )
+    payload = _extract_payload(body)
+    if payload is None:  # pragma: no cover - marker check above makes this defensive
+        return None
 
     required = {
         "head_sha",
@@ -222,8 +227,6 @@ def evaluate_audit_comments(
             continue
         accepted.append(record)
 
-    # The board itself rejects duplicate logical roles, unknown roles/verdicts,
-    # missing mandatory reviewers, role10 without repo_wide, and any veto/gap.
     try:
         disposition = board.post_change_disposition(
             head_sha,
