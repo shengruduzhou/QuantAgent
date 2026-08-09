@@ -125,7 +125,15 @@ def test_neutral_rule_rejects_subminimum_normal_sell_but_allows_full_residual() 
     ) == 199
     assert market_rules.round_to_lot(
         250, board=market_rules.SH_MAIN, side="SELL", is_full_liquidation=True
-    ) == 200
+    ) == 250
+
+
+def test_whole_share_float_noise_preserves_bse_one_share_increment() -> None:
+    assert market_rules.round_to_lot(
+        100.99999999999999,
+        board=market_rules.BSE,
+        side="SELL",
+    ) == 101
 
 
 def test_star_and_bse_limit_order_maxima_are_encoded() -> None:
@@ -217,7 +225,7 @@ def test_main_board_partial_sell_still_uses_100_share_increment() -> None:
     assert intents[0].quantity == 100
 
 
-def test_main_board_full_target_does_not_submit_invalid_250_share_order() -> None:
+def test_main_board_full_target_preserves_combined_round_and_odd_lot_sell() -> None:
     manager = _manager()
     intents = manager.target_weights_to_order_intents(
         target_weights=pd.Series({"600000.SH": 0.0}),
@@ -226,7 +234,7 @@ def test_main_board_full_target_does_not_submit_invalid_250_share_order() -> Non
         positions={"600000.SH": _position(250)},
     )
     assert len(intents) == 1
-    assert intents[0].quantity == 200
+    assert intents[0].quantity == 250
 
 
 def test_sub_minimum_residual_can_be_sold_once_when_target_is_zero() -> None:
