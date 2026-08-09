@@ -18,6 +18,17 @@ Primary exchange sources for the 2026 risk-warning change:
 * SZSE 2026 technical preparation notice carries the adjustment into the 2026
   revised trading rules, effective 2026-07-06:
   https://www.szse.cn/marketServices/technicalservice/notice/t20260424_620199.html
+
+Quantity authorities used by the execution layer:
+
+* SSE 2026 Trading Rules §6.7: STAR limit orders 200..100,000 shares, market
+  orders 200..50,000 shares; a residual below 200 is sold in one order.
+* SSE investor education clarifies that quantities above 200 may increase by
+  one share for both buys and sells.
+* BSE 2026 Trading Rules §§3.3.8-3.3.9: competitive stock orders are at least
+  100 shares, residuals below 100 are sold once, and one order is at most
+  1,000,000 shares. The absence of an integer-lot requirement above the minimum
+  means whole-share increments are valid.
 """
 
 from __future__ import annotations
@@ -90,14 +101,23 @@ DEFAULT_COMMISSION_RATE = 0.00025
 COMMISSION_MINIMUM_CNY = 5.0
 
 # ---------------------------------------------------------------------------
-# Lot sizes
+# Order quantities
 # ---------------------------------------------------------------------------
+#: (minimum normal order, whole-share increment above the minimum).
 LOT_RULES: dict[str, tuple[int, int]] = {
     SH_MAIN: (100, 100),
     SZ_MAIN: (100, 100),
     CHINEXT: (100, 100),
     STAR: (200, 1),
     BSE: (100, 1),
+}
+
+#: Exchange-defined maximum quantity for boards with a rule required by the
+#: current execution contract.  Missing entries are deliberately ``None`` at
+#: the API boundary rather than guessed from another venue/board.
+MAX_ORDER_QUANTITY: dict[str, dict[str, int]] = {
+    STAR: {"LIMIT": 100_000, "MARKET": 50_000},
+    BSE: {"LIMIT": 1_000_000, "MARKET": 1_000_000},
 }
 
 
@@ -152,6 +172,15 @@ def exchange_board_for_symbol(symbol: str) -> str:
     if text.endswith(".SZ") or code.startswith(("000", "001", "002", "003")):
         return SZ_MAIN
     return SH_MAIN
+
+
+def max_order_quantity(board: str, order_type: str = "LIMIT") -> int | None:
+    """Return the exchange maximum for a known board/order type.
+
+    ``None`` means this neutral module has no authoritative bound encoded for
+    that combination; callers must not invent one.
+    """
+    return MAX_ORDER_QUANTITY.get(board, {}).get(str(order_type).upper())
 
 
 def _st_limit_ratio(board: str, when: date | None) -> float | None:
@@ -264,16 +293,22 @@ def round_to_lot(
     side: str,
     is_full_liquidation: bool = False,
 ) -> int:
+    """Round to a legal board quantity without inventing an odd-lot exception.
+
+    A normal sell must satisfy the same board minimum as a normal buy.  The only
+    sub-minimum exception is a *complete* residual sell.  For main-board and
+    ChiNext, quantities at/above the minimum still round to the 100-share
+    increment; therefore 250 shares becomes a normal 200-share order rather than
+    an invalid 250-share full-liquidation order.  STAR/BSE preserve their
+    one-share increments above their minimums.
+    """
     minimum, increment = LOT_RULES.get(board, (100, 100))
     shares = float(shares)
     if shares <= 0:
         return 0
-    if side.upper() == "SELL":
-        if is_full_liquidation:
-            return int(shares)
-        rounded = int(shares // increment) * increment
-        return rounded if rounded >= 0 else 0
     if shares < minimum:
+        if side.upper() == "SELL" and is_full_liquidation:
+            return int(shares)
         return 0
     return int(minimum + ((shares - minimum) // increment) * increment)
 
@@ -354,7 +389,8 @@ __all__ = [
     "IPO_HALT_THRESHOLDS", "IPO_HALT_MINUTES", "STAMP_DUTY_CURRENT",
     "STAMP_DUTY_LEGACY", "STAMP_DUTY_HALVED_FROM", "TRANSFER_FEE",
     "DEFAULT_COMMISSION_RATE", "COMMISSION_MINIMUM_CNY", "LOT_RULES",
-    "PriceLimits", "TradingCosts", "TradabilityVerdict",
-    "exchange_board_for_symbol", "price_limits", "stamp_duty_rate",
-    "trading_costs", "round_to_lot", "execution_price", "tradability",
+    "MAX_ORDER_QUANTITY", "PriceLimits", "TradingCosts", "TradabilityVerdict",
+    "exchange_board_for_symbol", "max_order_quantity", "price_limits",
+    "stamp_duty_rate", "trading_costs", "round_to_lot", "execution_price",
+    "tradability",
 ]
