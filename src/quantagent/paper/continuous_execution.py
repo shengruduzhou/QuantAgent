@@ -1,17 +1,16 @@
 """Consume pending T-close targets on the next observed paper session.
 
-This is the temporal/account-state counterpart to ``paper.pending_signal``.
-A pending target is consumed only when the current session is exactly the next
-session proven by the supplied session set. The consumer recovers the canonical
-account, reconciles it with the operational paper ledger, routes target deltas
-through the existing ``OrderManager -> PaperBrokerAdapter -> PaperBroker`` path,
-and journals the outcome at most once.
+The consumer is deliberately conservative:
 
-A caller supplied session set may control *shadow execution timing*, but it is
-not an authoritative exchange calendar merely because the caller supplied it.
-Until a source/digest-backed acceptance calendar exists, both caller-supplied
-and observed-panel calendars remain non-certifying evidence. Missing/missed
-sessions are never backfilled with a later price.
+* a signal is executable only on the exact next proven session;
+* canonical and operational account state must reconcile before an order is sent;
+* one economic order flows through the existing OrderManager -> PaperBrokerAdapter
+  -> PaperBroker chain and the shared canonical ledger;
+* an execution-start record is durable before broker interaction, so a crash is
+  resolved as indeterminate rather than retried blindly;
+* caller-supplied or observed-panel session sets may drive research timing but
+  are never promoted to authoritative shadow-calendar evidence without a
+  provenance-backed exchange calendar artifact.
 """
 
 from __future__ import annotations
@@ -22,17 +21,18 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from quantagent.quant_math.ashare import AshareRuleEngine
+from quantagent.backtest import ashare_rules as market_rules
 from quantagent.domain.ledger import CanonicalLedger
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
-from quantagent.paper.broker import MarketSnapshot, PaperBroker
+from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
 from quantagent.paper.execution_journal import PendingExecutionJournal
 from quantagent.paper.ledger import EventLedger
 from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
 from quantagent.paper.recovery import recover, recover_from_canonical
+from quantagent.quant_math.ashare import AshareRuleEngine
 
 
 @dataclass(frozen=True)
@@ -102,8 +102,10 @@ def _pending_signals(store: PendingPaperSignalStore) -> list[PendingPaperSignal]
         return []
     signals: list[PendingPaperSignal] = []
     for path in sorted(store.root.glob("*.json")):
-        signals.append(store.read(path.stem))
-    return [signal for signal in signals if signal is not None]
+        signal = store.read(path.stem)
+        if signal is not None:
+            signals.append(signal)
+    return signals
 
 
 def _position_quantities(portfolio) -> dict[str, float]:
@@ -120,11 +122,14 @@ def _assert_recovered_account_consistent(
     *,
     tolerance: float = 1e-6,
 ) -> None:
-    # The operational ledger may legitimately be empty before the first order.
+    # The operational ledger is legitimately empty before the first economic order.
     if operational_state.events_replayed == 0:
         return
     if (
-        abs(float(canonical_state.portfolio.cash) - float(operational_state.portfolio.cash))
+        abs(
+            float(canonical_state.portfolio.cash)
+            - float(operational_state.portfolio.cash)
+        )
         > tolerance
     ):
         raise ContinuousPaperExecutionBlocked(
@@ -157,6 +162,45 @@ def _execution_timestamp(execution_date: str, execution_clock: str) -> str:
     return f"{execution_date}T{clock}"
 
 
+def _paper_board(symbol: str, rule_engine: AshareRuleEngine) -> str:
+    """Translate portfolio-rule board names to paper microstructure board names.
+
+    The portfolio rule engine and paper fill model deliberately use different
+    vocabularies. Passing ``main_board`` or ``star`` straight into
+    ``backtest.ashare_rules`` silently yields UNKNOWN_BOARD and disables the
+    intended price-limit semantics, so the translation is explicit and
+    unsupported non-equity instruments fail closed.
+    """
+
+    text = str(symbol).upper()
+    board = rule_engine.infer_board(text)
+    if board == "star":
+        return market_rules.STAR
+    if board == "chinext":
+        return market_rules.CHINEXT
+    if board == "bse":
+        return market_rules.BSE
+    if board == "main_board":
+        if text.endswith(".SH"):
+            return market_rules.SH_MAIN
+        if text.endswith(".SZ"):
+            return market_rules.SZ_MAIN
+        raise ContinuousPaperExecutionBlocked(
+            f"main-board symbol lacks an explicit SH/SZ exchange suffix: {symbol}"
+        )
+    raise ContinuousPaperExecutionBlocked(
+        f"continuous A-share paper execution does not support instrument class "
+        f"{board!r} for {symbol}"
+    )
+
+
+def _optional_finite(row: pd.Series, name: str) -> float | None:
+    if name not in row.index or pd.isna(row[name]):
+        return None
+    value = float(pd.to_numeric(row[name], errors="coerce"))
+    return value if np.isfinite(value) else None
+
+
 def _market_state(
     market_panel: pd.DataFrame,
     *,
@@ -169,13 +213,17 @@ def _market_state(
     missing = sorted(required_columns - set(data.columns))
     if missing:
         raise ContinuousPaperExecutionBlocked(f"market panel missing columns: {missing}")
-    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.normalize()
+
+    data["trade_date"] = pd.to_datetime(
+        data["trade_date"], errors="coerce"
+    ).dt.normalize()
     data["symbol"] = data["symbol"].astype(str)
     data = data.dropna(subset=["trade_date", "symbol"]).sort_values(
         ["symbol", "trade_date"]
     )
     if data.duplicated(["trade_date", "symbol"]).any():
         raise ContinuousPaperExecutionBlocked("market panel has duplicate execution bars")
+
     day = data[data["trade_date"] == pd.Timestamp(execution_date)].copy()
     if day.empty:
         raise ContinuousPaperExecutionBlocked("execution session bar set is empty")
@@ -189,6 +237,8 @@ def _market_state(
     rule_engine = AshareRuleEngine()
     snapshots: dict[tuple[str, str], MarketSnapshot] = {}
     prices: dict[str, float] = {}
+    clock = _snapshot_clock(execution_clock)
+
     for symbol in sorted(required_symbols):
         row = day.loc[day["symbol"] == symbol].iloc[0]
         close = float(pd.to_numeric(row["close"], errors="coerce"))
@@ -205,6 +255,7 @@ def _market_state(
             raise ContinuousPaperExecutionBlocked(
                 f"invalid execution market values for {symbol}"
             )
+
         prior = data[
             (data["symbol"] == symbol)
             & (data["trade_date"] < pd.Timestamp(execution_date))
@@ -213,29 +264,38 @@ def _market_state(
             raise ContinuousPaperExecutionBlocked(
                 f"previous close unavailable for execution symbol {symbol}"
             )
-        previous_close = float(pd.to_numeric(prior.iloc[-1]["close"], errors="coerce"))
+        previous_close = float(
+            pd.to_numeric(prior.iloc[-1]["close"], errors="coerce")
+        )
         if not np.isfinite(previous_close) or previous_close <= 0:
-            raise ContinuousPaperExecutionBlocked(f"invalid previous close for {symbol}")
+            raise ContinuousPaperExecutionBlocked(
+                f"invalid previous close for {symbol}"
+            )
+
         sessions_since_listing = None
-        if "sessions_since_listing" in row.index and pd.notna(
-            row["sessions_since_listing"]
+        if (
+            "sessions_since_listing" in row.index
+            and pd.notna(row["sessions_since_listing"])
         ):
             sessions_since_listing = int(row["sessions_since_listing"])
+
         snapshot = MarketSnapshot(
             symbol=symbol,
+            trade_date=execution_date,
             last_price=close,
-            prev_close=previous_close,
-            board=rule_engine.infer_board(symbol),
-            clock=_snapshot_clock(execution_clock),
-            suspended=bool(row.get("is_suspended", False)),
-            st=bool(row.get("is_st", False)),
-            volume=volume,
-            amount=amount,
-            spread=0.0,
+            previous_close=previous_close,
+            session_volume=volume,
+            board=_paper_board(symbol, rule_engine),
+            clock=clock,
+            is_suspended=bool(row.get("is_suspended", False)),
+            is_st=bool(row.get("is_st", False)),
             sessions_since_listing=sessions_since_listing,
+            high=_optional_finite(row, "high"),
+            low=_optional_finite(row, "low"),
         )
         snapshots[(symbol, execution_date)] = snapshot
         prices[symbol] = close
+
     return snapshots, pd.Series(prices, dtype=float)
 
 
@@ -249,6 +309,8 @@ def _execution_orders(
     execution_date: str,
     execution_clock: str,
 ) -> list[ExecutionOrder]:
+    # target_weights_to_order_intents queries the adapter's recovered positions,
+    # so these are true target deltas, not repeated gross target purchases.
     intents = manager.target_weights_to_order_intents(
         target_weights,
         prices,
@@ -289,8 +351,8 @@ def execute_pending_for_session(
 ) -> list[ContinuousPaperExecutionResult]:
     """Consume eligible pending signals for one actually observed session.
 
-    ``authoritative_sessions`` is retained for API compatibility. It can define
-    the candidate shadow session, but it is deliberately non-certifying until a
+    ``authoritative_sessions`` is retained for API compatibility. It may define
+    candidate shadow timing, but it is deliberately non-certifying until a
     versioned exchange-calendar artifact with provenance is wired into this path.
     """
 
@@ -298,6 +360,7 @@ def execute_pending_for_session(
     observed_sessions = _normalise_sessions(
         market_panel["trade_date"] if "trade_date" in market_panel.columns else ()
     )
+
     if authoritative_sessions is not None:
         sessions = _normalise_sessions(authoritative_sessions)
         calendar_assurance = "caller_supplied_session_set_unverified"
@@ -329,9 +392,11 @@ def execute_pending_for_session(
         terminal = journal.terminal(pending.payload_sha256)
         if terminal is not None:
             continue
+
         next_date = _next_session(pending.signal_date, sessions)
         if next_date is None or next_date > as_of:
             continue
+
         if journal.has_unresolved_start(pending.payload_sha256):
             journal.append(
                 pending_payload_sha256=pending.payload_sha256,
@@ -361,6 +426,7 @@ def execute_pending_for_session(
                 )
             )
             continue
+
         if next_date < as_of:
             journal.append(
                 pending_payload_sha256=pending.payload_sha256,
@@ -410,13 +476,15 @@ def execute_pending_for_session(
             initial_cash=config.initial_cash,
         )
         _assert_recovered_account_consistent(canonical_state, operational_state)
+
         if canonical_state.open_orders() or operational_state.open_orders():
             raise ContinuousPaperExecutionBlocked(
                 "recovered paper account has unresolved open orders; reconciliation required"
             )
         if operational_state.killed:
             raise ContinuousPaperExecutionBlocked(
-                f"paper kill switch is active: {operational_state.kill_reason or 'unknown'}"
+                f"paper kill switch is active: "
+                f"{operational_state.kill_reason or 'unknown'}"
             )
 
         held_symbols = set(_position_quantities(canonical_state.portfolio))
@@ -439,22 +507,32 @@ def execute_pending_for_session(
             )
 
         book = canonical.replay_book() if len(canonical) else None
+        run_id = f"continuous-paper:{config.portfolio_id}"
+        lineage = Lineage(
+            run_id=run_id,
+            strategy_version_id=config.strategy_version,
+        )
         broker = PaperBroker(
             event_ledger=operational_ledger,
             portfolio=canonical_state.portfolio,
+            run_id=run_id,
             canonical_ledger=canonical,
-            order_book=book,
+            book=book,
+            lineage=lineage,
+            config=BrokerConfig(
+                participation_cap=config.max_participation_rate,
+            ),
         )
         market_source = lambda symbol, trade_date: snapshots.get(
             (str(symbol), str(trade_date))
         )
-        adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)
+        adapter = PaperBrokerAdapter(
+            broker=broker,
+            market_source=market_source,
+        )
         manager = OrderManager(
             broker=adapter,
-            lineage=Lineage(
-                run_id=f"continuous-paper:{config.portfolio_id}",
-                strategy_version_id=config.strategy_version,
-            ),
+            lineage=lineage,
             idempotency_path=config.idempotency_path,
             canonical_ledger=canonical,
             order_book=broker.book,
@@ -465,6 +543,7 @@ def execute_pending_for_session(
                 strategy_version=config.strategy_version,
             ),
         )
+
         target = (
             pd.Series(pending.target_weights, dtype=float)
             .reindex(prices.index)
@@ -495,22 +574,24 @@ def execute_pending_for_session(
                 "risk_scope": "paper_simulator_admissibility_only",
             },
         )
+
+        fills_before = len(broker.fills)
         states = manager.submit_orders(orders)
         manager.cancel_all_open()
-        broker.mark_to_market(prices.to_dict(), trade_date=as_of)
+        broker.mark_to_market(prices.to_dict(), market_time=as_of)
         nav_after = broker.portfolio.equity(prices.to_dict())
-        fill_count = len(broker.fills) - len(canonical_state.fills)
+        fill_count = len(broker.fills) - fills_before
         statuses = [state.status.value for state in states]
 
-        # The session boundary is economic state: closing it can advance
-        # settlement/T+1 availability. Never publish a terminal outcome before
-        # this succeeds. A crash/error here leaves execution_started unresolved,
-        # which the next run turns into execution_indeterminate instead of retrying.
+        # Session settlement is part of the economic outcome. It must happen
+        # before the terminal journal record; otherwise a crash after "observed"
+        # but before close_session would make the retry guard skip an unsettled
+        # account forever.
         broker.close_session(as_of)
 
         terminal_status = "execution_observed"
         if orders and fill_count == 0 and statuses and all(
-            status in {"rejected", "cancelled"} for status in statuses
+            status.lower() in {"rejected", "cancelled"} for status in statuses
         ):
             terminal_status = "execution_blocked"
 
@@ -548,6 +629,7 @@ def execute_pending_for_session(
                 reasons=(),
             )
         )
+
     return results
 
 
