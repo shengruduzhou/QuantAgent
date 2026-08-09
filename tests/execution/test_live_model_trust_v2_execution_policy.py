@@ -25,7 +25,10 @@ def _targets(path: Path, dates: tuple[str, ...] = ("2026-01-05",)) -> pd.DataFra
     return frame
 
 
-def _trace(path: Path, dates: tuple[tuple[str, str], ...] = (("2026-01-05", "2026-01-06"),)) -> pd.DataFrame:
+def _trace(
+    path: Path,
+    dates: tuple[tuple[str, str], ...] = (("2026-01-05", "2026-01-06"),),
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for idx, (signal, execution) in enumerate(dates):
         rows.append(
@@ -80,10 +83,20 @@ def _summary(path: Path, targets: pd.DataFrame, trace: pd.DataFrame) -> None:
     )
 
 
-def _payload(root: Path, target_path: Path, trace_path: Path) -> dict:
+def _payload(
+    root: Path,
+    target_path: Path,
+    trace_path: Path,
+    summary_path: Path,
+) -> dict:
     artifacts = {
         role: {"root": "bundle", "path": f"unused/{role}", "sha256": "0" * 64}
         for role in policy.GOVERNED_REQUIRED_ARTIFACT_ROLES
+    }
+    artifacts["strict_backtest"] = {
+        "root": "bundle",
+        "path": summary_path.relative_to(root).as_posix(),
+        "sha256": sha256_file(summary_path),
     }
     artifacts[policy.GOVERNED_TARGET_WEIGHTS_ROLE] = {
         "root": "bundle",
@@ -133,12 +146,12 @@ def test_trace_layer_requires_target_schedule_byte_hash_semantics_and_cross_bind
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    root, target_path, trace_path, targets, trace, _ = _valid_fixture(tmp_path, monkeypatch)
+    root, target_path, trace_path, targets, trace, summary = _valid_fixture(tmp_path, monkeypatch)
     canonical = execution_trace_sha256(trace)
     schedule_sha = signal_schedule_sha256(targets["signal_date"])
 
     result = policy.verify_trace_proven_live_model_trust_v2(
-        _payload(root, target_path, trace_path),
+        _payload(root, target_path, trace_path, summary),
         artifact_roots={"bundle": root},
     )
     assert result.ok is True, result.reasons
@@ -149,8 +162,8 @@ def test_trace_layer_requires_target_schedule_byte_hash_semantics_and_cross_bind
 
 
 def test_trace_byte_tamper_fails_even_before_semantic_validation(tmp_path: Path, monkeypatch) -> None:
-    root, target_path, trace_path, _, _, _ = _valid_fixture(tmp_path, monkeypatch)
-    payload = _payload(root, target_path, trace_path)
+    root, target_path, trace_path, _, _, summary = _valid_fixture(tmp_path, monkeypatch)
+    payload = _payload(root, target_path, trace_path, summary)
     trace_path.write_text(trace_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
     result = policy.verify_trace_proven_live_model_trust_v2(
@@ -162,8 +175,8 @@ def test_trace_byte_tamper_fails_even_before_semantic_validation(tmp_path: Path,
 
 
 def test_target_schedule_byte_tamper_fails(tmp_path: Path, monkeypatch) -> None:
-    root, target_path, trace_path, _, _, _ = _valid_fixture(tmp_path, monkeypatch)
-    payload = _payload(root, target_path, trace_path)
+    root, target_path, trace_path, _, _, summary = _valid_fixture(tmp_path, monkeypatch)
+    payload = _payload(root, target_path, trace_path, summary)
     target_path.write_text(
         target_path.read_text(encoding="utf-8").replace("0.1", "0.2"),
         encoding="utf-8",
@@ -183,7 +196,7 @@ def test_rehashed_same_session_trace_still_fails_semantic_validation(tmp_path: P
     _summary(summary, targets, trace)
 
     result = policy.verify_trace_proven_live_model_trust_v2(
-        _payload(root, target_path, trace_path),
+        _payload(root, target_path, trace_path, summary),
         artifact_roots={"bundle": root},
     )
     assert result.ok is False
@@ -204,7 +217,7 @@ def test_rehashed_trace_cannot_delete_a_strict_signal_mapping(tmp_path: Path, mo
     _stub_base(monkeypatch, summary)
 
     result = policy.verify_trace_proven_live_model_trust_v2(
-        _payload(root, target_path, trace_path),
+        _payload(root, target_path, trace_path, summary),
         artifact_roots={"bundle": root},
     )
     assert result.ok is False
@@ -225,9 +238,49 @@ def test_strict_summary_must_match_trace_and_target_schedule_digests(tmp_path: P
         encoding="utf-8",
     )
     result = policy.verify_trace_proven_live_model_trust_v2(
-        _payload(root, target_path, trace_path),
+        _payload(root, target_path, trace_path, summary),
         artifact_roots={"bundle": root},
     )
     assert result.ok is False
     assert "strict_backtest:execution_trace_sha256_mismatch" in result.reasons
     assert "strict_backtest:target_signal_schedule_sha256_mismatch" in result.reasons
+
+
+def test_hash_and_semantic_parse_use_the_same_trace_bytes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, target_path, trace_path, _, original_trace, summary = _valid_fixture(tmp_path, monkeypatch)
+    payload = _payload(root, target_path, trace_path, summary)
+    original_read_bytes = Path.read_bytes
+    swapped = False
+
+    def read_then_swap(path: Path) -> bytes:
+        nonlocal swapped
+        data = original_read_bytes(path)
+        if path == trace_path and not swapped:
+            swapped = True
+            malicious = original_trace.copy()
+            malicious["execution_date"] = malicious["signal_date"]
+            malicious.to_csv(trace_path, index=False)
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_swap)
+    first = policy.verify_trace_proven_live_model_trust_v2(
+        payload,
+        artifact_roots={"bundle": root},
+    )
+    # The current verification parses exactly the immutable bytes it already
+    # hashed, so the post-read filesystem swap cannot change its semantics.
+    assert first.ok is True, first.reasons
+    assert swapped is True
+
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+    second = policy.verify_trace_proven_live_model_trust_v2(
+        payload,
+        artifact_roots={"bundle": root},
+    )
+    # A subsequent verification observes the replacement and rejects the byte
+    # digest before accepting any semantic claim from it.
+    assert second.ok is False
+    assert any("strict_execution_trace:sha256_mismatch" in reason for reason in second.reasons)
