@@ -1,13 +1,9 @@
-"""Production policy layer for schema-v2 model trust.
+"""Governed policy layer for schema-v2 model-trust evidence.
 
 The low-level binder verifies roots, digests and structured identity. This layer
-recomputes facts that must not be trusted from summaries:
-
-- FRESH coverage from the bound prediction artifact;
-- frozen strict-backtest return/benchmark outcome from its own return artifact;
-- PBO, DSR and SPA from the complete early-OOS candidate return matrix.
-
-Only this governed verifier/issuer is used by the live trust boundary.
+recomputes facts that must not be trusted from summaries and deliberately
+publishes an evidence certificate whose status is distinct from economic-live
+eligibility.
 """
 
 from __future__ import annotations
@@ -35,6 +31,10 @@ from quantagent.execution.live_model_trust_v2 import (
 
 
 DEFAULT_MINIMUM_STATISTICAL_OOS_DAYS = 80
+GOVERNED_EVIDENCE_STATUS = "governed_evidence_accepted"
+GOVERNED_EVIDENCE_TRUST_CLASS = "fresh_oos_evidence"
+_INTERNAL_BINDER_STATUS = "production_accepted"
+_INTERNAL_BINDER_TRUST_CLASS = "fresh_oos"
 
 
 def verify_governed_live_model_trust_v2(
@@ -46,9 +46,21 @@ def verify_governed_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> V2VerificationResult:
-    """Verify provenance, then independently derive FRESH/strict/statistical facts."""
+    """Verify bound evidence and recompute FRESH/strict/statistical facts."""
+    # The low-level binder predates the explicit economic/evidence split and
+    # validates its historical internal status/trust values. Keep those values
+    # private to binder verification while requiring the published governed
+    # manifest to use non-economic semantics.
+    digest_payload = dict(payload)
+    governed_status_ok = str(payload.get("status") or "") == GOVERNED_EVIDENCE_STATUS
+    governed_trust_ok = str(payload.get("trust_class") or "") == GOVERNED_EVIDENCE_TRUST_CLASS
+    if governed_status_ok:
+        digest_payload["status"] = _INTERNAL_BINDER_STATUS
+    if governed_trust_ok:
+        digest_payload["trust_class"] = _INTERNAL_BINDER_TRUST_CLASS
+
     base = _verify_digest_bound_v2(
-        payload,
+        digest_payload,
         artifact_roots=artifact_roots,
         min_fresh_oos_days=min_fresh_oos_days,
         max_pbo=max_pbo,
@@ -56,7 +68,15 @@ def verify_governed_live_model_trust_v2(
         max_spa_p_value=max_spa_p_value,
     )
     reasons = list(base.reasons)
+    if not governed_status_ok:
+        reasons.append("v2_governed_status_mismatch")
+    if not governed_trust_ok:
+        reasons.append("v2_governed_trust_class_mismatch")
+
     evidence = dict(base.evidence)
+    # Evidence verification is intentionally not an economic-live certificate.
+    # A separate future promotion process must explicitly prove and write True.
+    evidence["economic_live_eligible"] = False
     resolved = dict(base.resolved_paths)
     fresh_start_date: str | None = None
 
@@ -218,7 +238,7 @@ def issue_governed_live_model_trust_v2(
     min_dsr_probability: float = 0.95,
     max_spa_p_value: float = 0.05,
 ) -> LiveModelTrustV2IssueResult:
-    """Stage a digest-bound cert, apply governed verification, then atomically publish."""
+    """Stage digest evidence, govern it, then atomically publish non-economic evidence."""
     if artifact_roots is None:
         raise ValueError("governed v2 issuer requires explicit artifact_roots")
     final = Path(manifest_path)
@@ -237,8 +257,11 @@ def issue_governed_live_model_trust_v2(
             min_dsr_probability=min_dsr_probability,
             max_spa_p_value=max_spa_p_value,
         )
+        governed_payload = dict(staged.payload)
+        governed_payload["status"] = GOVERNED_EVIDENCE_STATUS
+        governed_payload["trust_class"] = GOVERNED_EVIDENCE_TRUST_CLASS
         verification = verify_governed_live_model_trust_v2(
-            staged.payload,
+            governed_payload,
             artifact_roots=artifact_roots,
             min_fresh_oos_days=min_fresh_oos_days,
             max_pbo=max_pbo,
@@ -249,8 +272,17 @@ def issue_governed_live_model_trust_v2(
             raise ValueError(
                 "governed v2 trust evidence rejected: " + "; ".join(verification.reasons)
             )
+
+        # Replace the low-level binder's historical internal labels before the
+        # certificate is published. The disk artifact must never self-describe
+        # evidence verification as economic production acceptance.
+        with stage.open("w", encoding="utf-8") as handle:
+            json.dump(governed_payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(stage, final)
-        return LiveModelTrustV2IssueResult(str(final), staged.payload, verification)
+        return LiveModelTrustV2IssueResult(str(final), governed_payload, verification)
     finally:
         try:
             if stage.exists() or stage.is_symlink():
@@ -301,6 +333,8 @@ def _probability(value: object) -> float | None:
 
 __all__ = [
     "DEFAULT_MINIMUM_STATISTICAL_OOS_DAYS",
+    "GOVERNED_EVIDENCE_STATUS",
+    "GOVERNED_EVIDENCE_TRUST_CLASS",
     "issue_governed_live_model_trust_v2",
     "verify_governed_live_model_trust_v2",
 ]
