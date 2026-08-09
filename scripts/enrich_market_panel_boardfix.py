@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Recompute board-aware limit-up/down flags for the silver market panel.
+"""Recompute board/date-aware limit-up/down flags for the silver market panel.
 
-The silver ``market_panel.parquet`` flags were materialised with a flat 10%
-price-limit approximation (verified: ChiNext ``is_limit_up`` rows fire at a
-median move of exactly +10.0%). ChiNext/STAR limits are 20% and BSE is 30%, so
-the flat rule both false-flags non-main-board names at +10% (treating buyable
-names as sealed) and misses real +20%/+30% seals (phantom tradability).
+The silver ``market_panel.parquet`` flags were historically materialised with a
+flat 10% approximation. This script recomputes ``is_limit_up`` /
+``is_limit_down`` from the canonical dated A-share rule source and writes a
+non-destructive sidecar plus flip statistics.
 
-This script recomputes ``is_limit_up`` / ``is_limit_down`` with the canonical
-board-aware engine (``quant_math.ashare``), **non-destructively**: it writes a
-sidecar ``market_panel_boardfix.parquet`` + a manifest and prints the exact
-flip statistics. The original panel is never overwritten.
+The rule lookup preserves board identity and each row's ``trade_date``. That is
+required for risk-warning names because SH/SZ main-board ST/*ST used 5% before
+2026-07-06 and 10% from that date, while ChiNext/STAR remain 20% and BSE 30%.
 
-Residual caveat: limits are nominal but the panel close is qfq-adjusted, so the
-adjusted close/prev_close ratio differs from the raw ratio on ex-dividend days.
-Board width is the first-order fix; an ex-div-exact recompute needs raw close
-(a network re-fetch). The flag here is strictly more correct than flat-10%.
+Residual caveat: limits are nominal but the panel close may be qfq-adjusted, so
+the adjusted close/prev_close ratio can differ from raw exchange prices on
+ex-dividend days. An ex-div-exact recompute needs raw close.
 
 Usage:
   AI_quant_venv/bin/python3 scripts/enrich_market_panel_boardfix.py \
@@ -37,10 +34,15 @@ DEFAULT_PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
 
 
 def recompute_flags(panel: pd.DataFrame, tolerance: float = 0.005) -> pd.DataFrame:
-    """Return panel with board-aware is_limit_up / is_limit_down recomputed."""
+    """Return panel with board/date-aware is_limit_up / is_limit_down recomputed."""
     df = panel.sort_values(["symbol", "trade_date"]).copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     is_st = df["is_st"] if "is_st" in df.columns else False
-    ratio = board_price_limit_vector(df["symbol"], is_st)
+    ratio = board_price_limit_vector(
+        df["symbol"],
+        is_st,
+        trade_dates=df["trade_date"],
+    )
     prev_close = df.groupby("symbol", sort=False)["close"].shift(1)
     close_r = df["close"].round(2)
     cap_up = (prev_close * (1.0 + ratio)).round(2)
@@ -91,17 +93,21 @@ def main() -> int:
         "limit_down_changed": int((old_dn != new_dn).sum()),
     }
 
-    # Write corrected sidecar (board-aware flags become the canonical columns).
     out_df = fixed[["symbol", "trade_date", "board", "is_limit_up_boardfix", "is_limit_down_boardfix"]].rename(
         columns={"is_limit_up_boardfix": "is_limit_up", "is_limit_down_boardfix": "is_limit_down"}
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_parquet(out_path, index=False)
     manifest = {
-        "source_panel": str(panel_path), "generated_from": "enrich_market_panel_boardfix.py",
-        "rows": int(len(out_df)), "boards": sorted(out_df["board"].unique().tolist()),
-        "method": f"board-aware AshareRuleEngine ratios; ST 5% override; tolerance {args.tolerance:.4f}",
-        "caveat": "limits nominal but close is qfq-adjusted; ex-dividend days approximate. Strictly more correct than flat-10%.",
+        "source_panel": str(panel_path),
+        "generated_from": "enrich_market_panel_boardfix.py",
+        "rows": int(len(out_df)),
+        "boards": sorted(out_df["board"].unique().tolist()),
+        "method": (
+            "canonical board/date-aware A-share price limits; main-board ST/*ST "
+            f"5% before 2026-07-06 and 10% from 2026-07-06; tolerance {args.tolerance:.4f}"
+        ),
+        "caveat": "limits nominal but close may be qfq-adjusted; ex-dividend days approximate.",
         "flip_stats": stats,
     }
     out_path.with_suffix(".manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

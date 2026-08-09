@@ -17,19 +17,12 @@ Implements the user's "至少 90% 不能买 ST / 停牌, 但不绝对" requireme
 * **Limit-down at close (跌停)** — note in audit; selling decisions are
   the execution simulator's problem.
 
-Data availability gaps (May 2026):
-
-* ``market_panel.parquet`` carries OHLCV only — no ST / suspended
-  columns. We **derive** is_suspended from ``volume == 0`` on days
-  where the benchmark traded, and is_limit_up/down from a ±9.9% close
-  change threshold (a board-conservative proxy — main board is ±10%,
-  ChiNext / STAR are ±20%, ST is ±5%, so 9.9% slightly under-counts
-  ChiNext / STAR limit-ups but never falsely flags them).
-* ST flag is **not derivable** from OHLCV. We backfill from the stale
-  ``market_features.parquet`` (covers 2020-02 → 2020-09 only) where
-  available, and tag the rest of the window as "unknown ST" — those
-  days the soft-filter only applies to suspended / limit-up checks.
-  Stage 2 will fetch a fresh ST list from akshare to close this gap.
+Market-rule derivation is date-bound. ``is_limit_up/down`` uses the same
+canonical exchange rule source as execution rather than one flat threshold:
+main-board ordinary stocks use 10%, ChiNext/STAR 20%, BSE 30%, and risk-warning
+limits preserve their underlying board plus effective date (including the
+SH/SZ main-board ST/*ST 5% -> 10% change on 2026-07-06). Missing ST metadata is
+not guessed from OHLCV.
 """
 
 from __future__ import annotations
@@ -211,10 +204,10 @@ def derive_market_flags(
       suspended would be misleading).
     * **is_limit_up**: ``close / prev_close - 1 >= board_limit - tolerance``,
       excluding the first day per symbol (no prev_close). The board limit
-      is **board-aware** via :func:`quant_math.ashare.board_price_limit_vector`
-      (main 10% / ChiNext·STAR 20% / BSE 30% / ST 5%) — a flat 10% rule
-      mislabels every ChiNext/STAR/BSE name and is no longer used. When an
-      ``is_st`` column is present it drives the ST 5% override.
+      is **board/date-aware** via
+      :func:`quant_math.ashare.board_price_limit_vector`: ordinary main
+      10%, ChiNext/STAR 20%, BSE 30%, while risk-warning rows preserve
+      the underlying board and the rule effective on that ``trade_date``.
     * **is_limit_down**: same with the down threshold.
     """
 
@@ -258,11 +251,16 @@ def derive_market_flags(
     mp["is_suspended"] = has_no_trade & mp["trade_date"].isin(active_days)
 
     # Board-aware limit-up / limit-down via close % change vs previous day per
-    # symbol. The per-row limit ratio is resolved by the canonical A-share rule
-    # engine (board prefix + optional ST 5% override) — single source of truth
-    # shared with the provider/backtest/execution layers.
+    # symbol. Risk-warning rows carry their own trade_date into the canonical
+    # exchange-rule resolver so a historical panel cannot be rewritten by a
+    # later rule change.
     is_st = mp[is_st_column] if is_st_column in mp.columns else False
-    ratio = board_price_limit_vector(mp["symbol"], is_st, limits)
+    ratio = board_price_limit_vector(
+        mp["symbol"],
+        is_st,
+        limits,
+        trade_dates=mp["trade_date"],
+    )
     up_threshold = ratio - float(tolerance)
     down_threshold = -(ratio - float(tolerance))
     mp["_prev_close"] = mp.groupby("symbol")["close"].shift(1)
