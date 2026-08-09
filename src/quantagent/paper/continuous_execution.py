@@ -7,22 +7,22 @@ account, reconciles it with the operational paper ledger, routes target deltas
 through the existing ``OrderManager -> PaperBrokerAdapter -> PaperBroker`` path,
 and journals the outcome at most once.
 
-When an authoritative market calendar is not supplied, observed market-panel
-sessions may be used for operational research, but the result explicitly remains
-``observed_panel_only`` and is not eligible as authoritative shadow-calendar
-evidence. Missing/missed sessions are never backfilled with a later price.
+A caller supplied session set may control *shadow execution timing*, but it is
+not an authoritative exchange calendar merely because the caller supplied it.
+Until a source/digest-backed acceptance calendar exists, both caller-supplied
+and observed-panel calendars remain non-certifying evidence. Missing/missed
+sessions are never backfilled with a later price.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
 
-from quantagent.backtest.ashare_rules import AshareRuleEngine
+from quantagent.quant_math.ashare import AshareRuleEngine
 from quantagent.domain.ledger import CanonicalLedger
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
@@ -114,11 +114,19 @@ def _position_quantities(portfolio) -> dict[str, float]:
     }
 
 
-def _assert_recovered_account_consistent(canonical_state, operational_state, *, tolerance: float = 1e-6) -> None:
+def _assert_recovered_account_consistent(
+    canonical_state,
+    operational_state,
+    *,
+    tolerance: float = 1e-6,
+) -> None:
     # The operational ledger may legitimately be empty before the first order.
     if operational_state.events_replayed == 0:
         return
-    if abs(float(canonical_state.portfolio.cash) - float(operational_state.portfolio.cash)) > tolerance:
+    if (
+        abs(float(canonical_state.portfolio.cash) - float(operational_state.portfolio.cash))
+        > tolerance
+    ):
         raise ContinuousPaperExecutionBlocked(
             "canonical/operational paper cash reconciliation failed"
         )
@@ -131,10 +139,29 @@ def _assert_recovered_account_consistent(canonical_state, operational_state, *, 
             )
 
 
+def _snapshot_clock(execution_clock: str) -> str:
+    clock = str(execution_clock).strip()
+    if not clock:
+        raise ContinuousPaperExecutionBlocked("execution clock is empty")
+    local_clock = clock.split("+", 1)[0]
+    if len(local_clock) != 8 or local_clock[2] != ":" or local_clock[5] != ":":
+        raise ContinuousPaperExecutionBlocked(
+            f"invalid execution clock {execution_clock!r}; expected HH:MM:SS[+offset]"
+        )
+    return local_clock
+
+
+def _execution_timestamp(execution_date: str, execution_clock: str) -> str:
+    clock = str(execution_clock).strip()
+    _snapshot_clock(clock)
+    return f"{execution_date}T{clock}"
+
+
 def _market_state(
     market_panel: pd.DataFrame,
     *,
     execution_date: str,
+    execution_clock: str,
     required_symbols: set[str],
 ) -> tuple[dict[tuple[str, str], MarketSnapshot], pd.Series]:
     data = market_panel.copy()
@@ -144,7 +171,9 @@ def _market_state(
         raise ContinuousPaperExecutionBlocked(f"market panel missing columns: {missing}")
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.normalize()
     data["symbol"] = data["symbol"].astype(str)
-    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
+    data = data.dropna(subset=["trade_date", "symbol"]).sort_values(
+        ["symbol", "trade_date"]
+    )
     if data.duplicated(["trade_date", "symbol"]).any():
         raise ContinuousPaperExecutionBlocked("market panel has duplicate execution bars")
     day = data[data["trade_date"] == pd.Timestamp(execution_date)].copy()
@@ -165,9 +194,21 @@ def _market_state(
         close = float(pd.to_numeric(row["close"], errors="coerce"))
         volume = float(pd.to_numeric(row["volume"], errors="coerce"))
         amount = float(pd.to_numeric(row["amount"], errors="coerce"))
-        if not np.isfinite(close) or close <= 0 or not np.isfinite(volume) or volume < 0 or not np.isfinite(amount) or amount < 0:
-            raise ContinuousPaperExecutionBlocked(f"invalid execution market values for {symbol}")
-        prior = data[(data["symbol"] == symbol) & (data["trade_date"] < pd.Timestamp(execution_date))]
+        if (
+            not np.isfinite(close)
+            or close <= 0
+            or not np.isfinite(volume)
+            or volume < 0
+            or not np.isfinite(amount)
+            or amount < 0
+        ):
+            raise ContinuousPaperExecutionBlocked(
+                f"invalid execution market values for {symbol}"
+            )
+        prior = data[
+            (data["symbol"] == symbol)
+            & (data["trade_date"] < pd.Timestamp(execution_date))
+        ]
         if prior.empty:
             raise ContinuousPaperExecutionBlocked(
                 f"previous close unavailable for execution symbol {symbol}"
@@ -176,14 +217,16 @@ def _market_state(
         if not np.isfinite(previous_close) or previous_close <= 0:
             raise ContinuousPaperExecutionBlocked(f"invalid previous close for {symbol}")
         sessions_since_listing = None
-        if "sessions_since_listing" in row.index and pd.notna(row["sessions_since_listing"]):
+        if "sessions_since_listing" in row.index and pd.notna(
+            row["sessions_since_listing"]
+        ):
             sessions_since_listing = int(row["sessions_since_listing"])
         snapshot = MarketSnapshot(
             symbol=symbol,
             last_price=close,
             prev_close=previous_close,
             board=rule_engine.infer_board(symbol),
-            clock="14:59:00",
+            clock=_snapshot_clock(execution_clock),
             suspended=bool(row.get("is_suspended", False)),
             st=bool(row.get("is_st", False)),
             volume=volume,
@@ -196,15 +239,24 @@ def _market_state(
     return snapshots, pd.Series(prices, dtype=float)
 
 
-def _execution_orders(manager: OrderManager, *, target_weights: pd.Series, prices: pd.Series, nav: float, signal_id: str, execution_date: str) -> list[ExecutionOrder]:
+def _execution_orders(
+    manager: OrderManager,
+    *,
+    target_weights: pd.Series,
+    prices: pd.Series,
+    nav: float,
+    signal_id: str,
+    execution_date: str,
+    execution_clock: str,
+) -> list[ExecutionOrder]:
     intents = manager.target_weights_to_order_intents(
         target_weights,
         prices,
         nav,
         signal_id=signal_id,
-        risk_check_result="not_checked",
+        risk_check_result="paper_simulator_admissibility_only",
     )
-    timestamp = f"{execution_date}T{manager.config.strategy_version and '14:59:00+08:00'}"
+    timestamp = _execution_timestamp(execution_date, execution_clock)
     orders: list[ExecutionOrder] = []
     for intent in intents:
         stamped = replace(intent, timestamp=timestamp)
@@ -235,21 +287,28 @@ def execute_pending_for_session(
     config: ContinuousPaperExecutionConfig,
     authoritative_sessions: Sequence[object] | None = None,
 ) -> list[ContinuousPaperExecutionResult]:
-    """Consume eligible pending signals for one actually observed session."""
+    """Consume eligible pending signals for one actually observed session.
+
+    ``authoritative_sessions`` is retained for API compatibility. It can define
+    the candidate shadow session, but it is deliberately non-certifying until a
+    versioned exchange-calendar artifact with provenance is wired into this path.
+    """
 
     as_of = pd.Timestamp(as_of_date).date().isoformat()
-    observed_sessions = _normalise_sessions(market_panel["trade_date"] if "trade_date" in market_panel.columns else ())
+    observed_sessions = _normalise_sessions(
+        market_panel["trade_date"] if "trade_date" in market_panel.columns else ()
+    )
     if authoritative_sessions is not None:
         sessions = _normalise_sessions(authoritative_sessions)
-        calendar_assurance = "authoritative_supplied_session_set"
-        acceptance_calendar_eligible = True
+        calendar_assurance = "caller_supplied_session_set_unverified"
+        acceptance_calendar_eligible = False
         if as_of not in sessions:
             raise ContinuousPaperExecutionBlocked(
-                f"as_of date {as_of} is not in the supplied authoritative session set"
+                f"as_of date {as_of} is not in the supplied session set"
             )
         if as_of not in observed_sessions:
             raise ContinuousPaperExecutionBlocked(
-                f"authoritative session {as_of} has no observed market panel"
+                f"supplied session {as_of} has no observed market panel"
             )
     else:
         sessions = observed_sessions
@@ -261,7 +320,9 @@ def execute_pending_for_session(
     store = PendingPaperSignalStore(config.pending_signal_dir)
     journal = PendingExecutionJournal(config.execution_journal_path)
     if not journal.verify():
-        raise ContinuousPaperExecutionBlocked("pending execution journal verification failed")
+        raise ContinuousPaperExecutionBlocked(
+            "pending execution journal verification failed"
+        )
 
     results: list[ContinuousPaperExecutionResult] = []
     for pending in _pending_signals(store):
@@ -277,7 +338,12 @@ def execute_pending_for_session(
                 signal_date=pending.signal_date,
                 execution_date=next_date,
                 status="execution_indeterminate",
-                details={"reason": "prior execution_started has no terminal outcome; automatic retry prohibited"},
+                details={
+                    "reason": (
+                        "prior execution_started has no terminal outcome; "
+                        "automatic retry prohibited"
+                    )
+                },
             )
             results.append(
                 ContinuousPaperExecutionResult(
@@ -301,7 +367,13 @@ def execute_pending_for_session(
                 signal_date=pending.signal_date,
                 execution_date=next_date,
                 status="missed_execution_session",
-                details={"observed_as_of": as_of, "reason": "consumer did not run on exact next session; retroactive shadow fill prohibited"},
+                details={
+                    "observed_as_of": as_of,
+                    "reason": (
+                        "consumer did not run on exact next session; "
+                        "retroactive shadow fill prohibited"
+                    ),
+                },
             )
             results.append(
                 ContinuousPaperExecutionResult(
@@ -322,7 +394,9 @@ def execute_pending_for_session(
 
         canonical = CanonicalLedger(config.canonical_ledger_path)
         if not canonical.verify()["valid"]:
-            raise ContinuousPaperExecutionBlocked("canonical paper ledger verification failed")
+            raise ContinuousPaperExecutionBlocked(
+                "canonical paper ledger verification failed"
+            )
         canonical_state = recover_from_canonical(
             config.canonical_ledger_path,
             portfolio_id=config.portfolio_id,
@@ -346,16 +420,23 @@ def execute_pending_for_session(
             )
 
         held_symbols = set(_position_quantities(canonical_state.portfolio))
-        target_symbols = {symbol for symbol, weight in pending.target_weights.items() if abs(float(weight)) > 1e-12}
+        target_symbols = {
+            symbol
+            for symbol, weight in pending.target_weights.items()
+            if abs(float(weight)) > 1e-12
+        }
         required_symbols = held_symbols | target_symbols
         snapshots, prices = _market_state(
             market_panel,
             execution_date=as_of,
+            execution_clock=config.execution_clock,
             required_symbols=required_symbols,
         )
         nav_before = canonical_state.portfolio.equity(prices.to_dict())
         if not np.isfinite(nav_before) or nav_before <= 0:
-            raise ContinuousPaperExecutionBlocked("recovered paper account NAV is invalid")
+            raise ContinuousPaperExecutionBlocked(
+                "recovered paper account NAV is invalid"
+            )
 
         book = canonical.replay_book() if len(canonical) else None
         broker = PaperBroker(
@@ -364,7 +445,9 @@ def execute_pending_for_session(
             canonical_ledger=canonical,
             order_book=book,
         )
-        market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
+        market_source = lambda symbol, trade_date: snapshots.get(
+            (str(symbol), str(trade_date))
+        )
         adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)
         manager = OrderManager(
             broker=adapter,
@@ -382,7 +465,11 @@ def execute_pending_for_session(
                 strategy_version=config.strategy_version,
             ),
         )
-        target = pd.Series(pending.target_weights, dtype=float).reindex(prices.index).fillna(0.0)
+        target = (
+            pd.Series(pending.target_weights, dtype=float)
+            .reindex(prices.index)
+            .fillna(0.0)
+        )
         orders = _execution_orders(
             manager,
             target_weights=target,
@@ -390,6 +477,7 @@ def execute_pending_for_session(
             nav=nav_before,
             signal_id=f"pending:{pending.payload_sha256}",
             execution_date=as_of,
+            execution_clock=config.execution_clock,
         )
 
         journal.append(
@@ -401,6 +489,10 @@ def execute_pending_for_session(
                 "order_count": len(orders),
                 "canonical_records_before": len(canonical),
                 "calendar_assurance": calendar_assurance,
+                "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
+                "execution_clock": config.execution_clock,
+                "production_pretrade_risk_certified": False,
+                "risk_scope": "paper_simulator_admissibility_only",
             },
         )
         states = manager.submit_orders(orders)
@@ -409,7 +501,19 @@ def execute_pending_for_session(
         nav_after = broker.portfolio.equity(prices.to_dict())
         fill_count = len(broker.fills) - len(canonical_state.fills)
         statuses = [state.status.value for state in states]
+
+        # The session boundary is economic state: closing it can advance
+        # settlement/T+1 availability. Never publish a terminal outcome before
+        # this succeeds. A crash/error here leaves execution_started unresolved,
+        # which the next run turns into execution_indeterminate instead of retrying.
+        broker.close_session(as_of)
+
         terminal_status = "execution_observed"
+        if orders and fill_count == 0 and statuses and all(
+            status in {"rejected", "cancelled"} for status in statuses
+        ):
+            terminal_status = "execution_blocked"
+
         journal.append(
             pending_payload_sha256=pending.payload_sha256,
             signal_date=pending.signal_date,
@@ -423,9 +527,12 @@ def execute_pending_for_session(
                 "nav_after": nav_after,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
+                "session_closed": True,
+                "execution_clock": config.execution_clock,
+                "production_pretrade_risk_certified": False,
+                "risk_scope": "paper_simulator_admissibility_only",
             },
         )
-        broker.close_session(as_of)
         results.append(
             ContinuousPaperExecutionResult(
                 signal_date=pending.signal_date,
