@@ -11,6 +11,7 @@ from quantagent.cli import governance as governance_cli
 from quantagent.execution.live_model_trust_v2_execution_policy import (
     GOVERNED_EXECUTION_TRACE_ROLE,
     GOVERNED_REQUIRED_ARTIFACT_ROLES,
+    GOVERNED_TARGET_WEIGHTS_ROLE,
 )
 
 
@@ -97,25 +98,29 @@ def test_evidence_map_cannot_introduce_an_untrusted_root(tmp_path: Path, monkeyp
     assert ".root must be one of" in result.output
 
 
-def test_execution_trace_is_a_mandatory_governed_evidence_role(tmp_path: Path, monkeypatch) -> None:
+def test_strict_target_and_trace_are_both_mandatory_governed_evidence_roles(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     evidence_map, manifest = _prepare_paths(tmp_path, monkeypatch)
-    payload = _map_payload()
-    payload.pop(GOVERNED_EXECUTION_TRACE_ROLE)
-    evidence_map.write_text(json.dumps(payload), encoding="utf-8")
-    result = RUNNER.invoke(
-        app,
-        [
-            "issue-live-model-trust-v2",
-            "--evidence-map",
-            str(evidence_map),
-            "--manifest",
-            str(manifest),
-            "--model-id",
-            "model-v2",
-        ],
-    )
-    assert result.exit_code != 0
-    assert f"evidence map missing object for role {GOVERNED_EXECUTION_TRACE_ROLE}" in result.output
+    for role in (GOVERNED_TARGET_WEIGHTS_ROLE, GOVERNED_EXECUTION_TRACE_ROLE):
+        payload = _map_payload()
+        payload.pop(role)
+        evidence_map.write_text(json.dumps(payload), encoding="utf-8")
+        result = RUNNER.invoke(
+            app,
+            [
+                "issue-live-model-trust-v2",
+                "--evidence-map",
+                str(evidence_map),
+                "--manifest",
+                str(manifest),
+                "--model-id",
+                "model-v2",
+            ],
+        )
+        assert result.exit_code != 0
+        assert f"evidence map missing object for role {role}" in result.output
 
 
 def test_cli_only_binds_evidence_and_never_arms_live(tmp_path: Path, monkeypatch) -> None:
