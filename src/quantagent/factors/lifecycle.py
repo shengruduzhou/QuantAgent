@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,11 @@ from quantagent.factors.evaluation import (
 from quantagent.factors.executable_labels import (
     FACTOR_LABEL_SEMANTICS,
     executable_factor_decay_curve,
+    market_session_schedule_sha256,
 )
+
+
+UNVERIFIED_RETURN_SEMANTICS = "caller_supplied_return_semantics_unverified"
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,7 @@ class FactorLifecycleReport:
     effective_dates: int
     median_symbols_per_date: float
     label_semantics: str
+    market_session_schedule_sha256: str | None
     recommended_status: str
 
 
@@ -64,13 +70,19 @@ def build_factor_lifecycle_report(
     existing_factor_columns: list[str] | None = None,
     amount_column: str = "amount",
     thresholds: LifecycleThresholds | None = None,
+    *,
+    market_sessions: Iterable[object] | None = None,
 ) -> FactorLifecycleReport:
-    """Build a research lifecycle diagnostic using executable decay semantics.
+    """Build a research lifecycle diagnostic with auditable label semantics.
 
-    ``return_column`` is caller-supplied and may be used for research analysis;
-    the decay evidence is always recomputed with the governed T-close -> next
-    session entry convention when prices are available.  A strong report can
-    recommend ``validated`` but can never directly declare a factor ``active``.
+    ``return_column`` is caller-supplied and may be used for the core diagnostic.
+    When ``close`` is available, lifecycle decay is recomputed from raw prices
+    under the governed T-close -> global-next-session contract.  That strict
+    recomputation **requires the same explicit market-session schedule** used by
+    the label builder and binds its digest into the report.
+
+    If prices are absent, decay is unavailable and the report does not pretend
+    that the caller-supplied return column has verified execution semantics.
     """
 
     thresholds = thresholds or LifecycleThresholds()
@@ -89,11 +101,25 @@ def build_factor_lifecycle_report(
     median_symbols = float(counts.median()) if not counts.empty else 0.0
     ic = information_coefficient(data, factor_column, return_column)
     groups = quantile_group_backtest(data, factor_column, return_column)
-    decay = (
-        executable_factor_decay_curve(data, factor_column, horizons=(1,))
-        if "close" in data.columns
-        else None
-    )
+
+    decay = None
+    calendar_digest: str | None = None
+    label_semantics = UNVERIFIED_RETURN_SEMANTICS
+    if "close" in data.columns:
+        if market_sessions is None:
+            raise ValueError(
+                "factor lifecycle with close prices requires explicit market_sessions "
+                "for governed executable decay"
+            )
+        calendar_digest = market_session_schedule_sha256(market_sessions)
+        decay = executable_factor_decay_curve(
+            data,
+            factor_column,
+            horizons=(1,),
+            market_sessions=market_sessions,
+        )
+        label_semantics = FACTOR_LABEL_SEMANTICS
+
     capacity = (
         capacity_proxy(data, factor_column, amount_column=amount_column)
         if amount_column in data.columns
@@ -136,7 +162,8 @@ def build_factor_lifecycle_report(
         live_drift=float(live_drift),
         effective_dates=effective_dates,
         median_symbols_per_date=median_symbols,
-        label_semantics=FACTOR_LABEL_SEMANTICS,
+        label_semantics=label_semantics,
+        market_session_schedule_sha256=calendar_digest,
         recommended_status=status,
     )
 
