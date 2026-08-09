@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from quantagent.execution.broker_base import OrderIntent
+from quantagent.execution.economic_model_gate import evaluate_economic_model_gate
 from quantagent.execution.live_model_trust import LiveModelTrustReport, evaluate_live_model_trust
 from quantagent.risk.portfolio_risk import PortfolioRiskSnapshot
 from quantagent.risk.risk_gate import RiskGate, RiskGateResult
@@ -84,8 +85,9 @@ class LiveTradingSession:
     def readiness(self) -> LiveSessionReadiness:
         reasons: list[str] = []
         model: LiveModelTrustReport = evaluate_live_model_trust(self.model_trust_manifest)
-        if not model.ok:
-            reasons.extend(f"model:{reason}" for reason in model.reasons)
+        model_economic_ok, model_gate_reasons = evaluate_economic_model_gate(model)
+        if not model_economic_ok:
+            reasons.extend(f"model:{reason}" for reason in model_gate_reasons)
 
         kill_clear = not self.risk_gate.kill_switch.triggered
         if not kill_clear:
@@ -121,11 +123,11 @@ class LiveTradingSession:
         # the controlled broker/account state can be read and reconciled while
         # operational risk is not already killed.
         query_only_ready = bool(kill_clear and preflight_ok and health_ok)
-        economic_allowed = bool(query_only_ready and model.ok and policy_armed)
+        economic_allowed = bool(query_only_ready and model_economic_ok and policy_armed)
         return LiveSessionReadiness(
             query_only_ready=query_only_ready,
             economic_submit_allowed=economic_allowed,
-            model_trust_ok=model.ok,
+            model_trust_ok=model_economic_ok,
             kill_switch_clear=kill_clear,
             broker_preflight_ok=preflight_ok,
             broker_health_ok=health_ok,
