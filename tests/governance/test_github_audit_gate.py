@@ -114,7 +114,7 @@ def test_free_text_approve_is_not_machine_audit_evidence() -> None:
     assert len(evaluation.accepted_records) == 0
 
 
-def test_malformed_marker_fails_instead_of_being_ignored() -> None:
+def test_malformed_trusted_marker_fails_instead_of_being_ignored() -> None:
     comments = _accepted_set()
     comments.append(
         {
@@ -129,14 +129,29 @@ def test_malformed_marker_fails_instead_of_being_ignored() -> None:
     assert "100" in evaluation.malformed_comment_ids
 
 
-def test_random_public_commenter_cannot_manufacture_a_role_record() -> None:
+def test_random_public_commenter_cannot_manufacture_or_veto_role_records() -> None:
+    comments = _accepted_set()
+    comments.append(_comment(RISK_ROLE, comment_id=101, association="NONE"))
+    evaluation = evaluate_audit_comments(comments, head_sha=HEAD)
+    assert evaluation.passed is True
+    assert "101" in evaluation.unauthorized_comment_ids
+    assert len(evaluation.accepted_records) == 4
+
+
+def test_malformed_public_marker_is_ignored_before_json_parsing() -> None:
     comments = _accepted_set()
     comments.append(
-        _comment(RISK_ROLE, comment_id=101, association="NONE")
+        {
+            "id": 103,
+            "body": f"<!-- {AUDIT_MARKER}\nthis is maliciously malformed\n-->",
+            "author_association": "NONE",
+            "user": {"login": "random-user"},
+        }
     )
     evaluation = evaluate_audit_comments(comments, head_sha=HEAD)
-    assert evaluation.passed is False
-    assert "101" in evaluation.unauthorized_comment_ids
+    assert evaluation.passed is True
+    assert "103" in evaluation.unauthorized_comment_ids
+    assert "103" not in evaluation.malformed_comment_ids
 
 
 def test_unknown_fields_are_rejected_to_keep_schema_closed() -> None:
