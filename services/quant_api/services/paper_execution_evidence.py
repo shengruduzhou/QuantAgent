@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from pathlib import Path
 from typing import Any
 
 from quantagent.paper.execution_journal import (
@@ -59,14 +58,12 @@ class PaperExecutionEvidenceService:
         ]
         terminal_records = [row for row in records if row.status in TERMINAL_OUTCOMES]
         latest = records[-1]
-        latest_terminal = terminal_records[-1] if terminal_records else None
         counts = Counter(row.status for row in records)
 
+        # Summary fields are attempt-local.  Never borrow fill/NAV/session data
+        # from a previous terminal record when a newer payload has only reached
+        # execution_started; that would make stale economics look current.
         latest_details = dict(latest.details or {})
-        latest_terminal_details = (
-            dict(latest_terminal.details or {}) if latest_terminal is not None else {}
-        )
-        effective_details = latest_terminal_details or latest_details
         latest_status = latest.status
         attention = "ok"
         if unresolved or latest_status in _CRITICAL_STATUSES:
@@ -79,13 +76,13 @@ class PaperExecutionEvidenceService:
         # These values are evidence, not derived promotion.  Absence is false /
         # unavailable rather than an optimistic default.
         production_certified = bool(
-            effective_details.get("production_pretrade_risk_certified", False)
+            latest_details.get("production_pretrade_risk_certified", False)
         )
         calendar_eligible = bool(
-            effective_details.get("shadow_acceptance_calendar_eligible", False)
+            latest_details.get("shadow_acceptance_calendar_eligible", False)
         )
         assurance = str(
-            effective_details.get("calendar_assurance") or "unavailable"
+            latest_details.get("calendar_assurance") or "unavailable"
         )
 
         visible = [self._record(row) for row in reversed(records[-limit:])]
@@ -108,12 +105,12 @@ class PaperExecutionEvidenceService:
                 "calendarAssurance": assurance,
                 "shadowAcceptanceCalendarEligible": calendar_eligible,
                 "productionPretradeRiskCertified": production_certified,
-                "riskScope": effective_details.get("risk_scope"),
-                "sessionClosed": effective_details.get("session_closed"),
-                "orderCount": effective_details.get("order_count"),
-                "fillCount": effective_details.get("fill_count"),
-                "navBefore": effective_details.get("nav_before"),
-                "navAfter": effective_details.get("nav_after"),
+                "riskScope": latest_details.get("risk_scope"),
+                "sessionClosed": latest_details.get("session_closed"),
+                "orderCount": latest_details.get("order_count"),
+                "fillCount": latest_details.get("fill_count"),
+                "navBefore": latest_details.get("nav_before"),
+                "navAfter": latest_details.get("nav_after"),
                 "statusCounts": dict(sorted(counts.items())),
             },
             "records": visible,
