@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 from quantagent.factors.lifecycle_state import (
     FactorLifecycleLedger,
     FactorLifecycleSnapshot,
@@ -13,7 +11,7 @@ from quantagent.factors.lifecycle_state import (
 def _evidence(**kwargs) -> LifecycleEvidence:
     defaults = {
         "core_validity_passed": True,
-        "promotion_ready": False,
+        "promotion_candidate_ready": False,
         "shadow_days": 0,
         "severe_semantic_violation": False,
         "evidence_digest": "abc123",
@@ -23,16 +21,16 @@ def _evidence(**kwargs) -> LifecycleEvidence:
     return LifecycleEvidence(**defaults)
 
 
-def test_candidate_cannot_jump_directly_to_active_even_with_promotion_ready() -> None:
+def test_candidate_cannot_jump_directly_to_active_even_with_promotion_candidate_evidence() -> None:
     candidate = FactorLifecycleSnapshot("factor_x", "v1")
     updated = decide_lifecycle_transition(
         candidate,
-        _evidence(promotion_ready=True, shadow_days=30),
+        _evidence(promotion_candidate_ready=True, shadow_days=30),
     )
     assert updated.stage == "validated"
 
 
-def test_validated_requires_shadow_before_active() -> None:
+def test_validated_can_enter_shadow_but_preliminary_evidence_cannot_activate() -> None:
     snapshot = FactorLifecycleSnapshot("factor_x", "v1")
     snapshot = decide_lifecycle_transition(snapshot, _evidence())
     assert snapshot.stage == "validated"
@@ -40,9 +38,18 @@ def test_validated_requires_shadow_before_active() -> None:
     assert snapshot.stage == "shadow"
     snapshot = decide_lifecycle_transition(
         snapshot,
-        _evidence(shadow_days=30, promotion_ready=True),
+        _evidence(shadow_days=30, promotion_candidate_ready=True),
     )
-    assert snapshot.stage == "active"
+    assert snapshot.stage == "shadow"
+
+
+def test_existing_active_factor_can_remain_active_when_validity_is_healthy() -> None:
+    active = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
+    observed = decide_lifecycle_transition(
+        active,
+        _evidence(core_validity_passed=True, promotion_candidate_ready=False),
+    )
+    assert observed.stage == "active"
 
 
 def test_degradation_requires_repeated_observations_before_retirement() -> None:
@@ -78,14 +85,17 @@ def test_semantic_violation_quarantines_immediately() -> None:
     assert quarantined.stage == "quarantined"
 
 
-def test_recovery_from_degraded_without_promotion_proof_returns_to_shadow() -> None:
+def test_recovery_from_degraded_even_with_preliminary_promotion_evidence_returns_to_shadow() -> None:
     degraded = FactorLifecycleSnapshot(
         "factor_x",
         "v1",
         stage="degraded",
         consecutive_degradations=2,
     )
-    recovered = decide_lifecycle_transition(degraded, _evidence(core_validity_passed=True))
+    recovered = decide_lifecycle_transition(
+        degraded,
+        _evidence(core_validity_passed=True, promotion_candidate_ready=True),
+    )
     assert recovered.stage == "shadow"
     assert recovered.consecutive_degradations == 0
 
