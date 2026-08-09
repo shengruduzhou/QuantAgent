@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date
+from hashlib import sha256
 import json
 from pathlib import Path
 
@@ -77,10 +78,10 @@ class DailyPaperLoopResult:
 def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     """Generate one T-close target and persist it as pending execution evidence.
 
-    This function intentionally performs **zero economic fills**.  That is the
-    correct result when the next session has not yet been observed.  The
+    This function intentionally performs **zero economic fills**. That is the
+    correct result when the next session has not yet been observed. The
     historical same-call strict simulation was not a shadow execution: it either
-    right-censored the signal or required future data.  Pending intent and
+    right-censored the signal or required future data. Pending intent and
     executed paper evidence are now distinct states.
     """
 
@@ -188,6 +189,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             warnings=warnings,
         )
 
+    predictions_file = Path(predictions_path)
+    target_weights_file = Path(weights_path)
     pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
         signal_date=as_of,
         target_weights=weights.target_weights,
@@ -195,8 +198,10 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "model_dir": config.model_dir,
             "feature_dataset_path": str(feature_path),
             "market_panel_path": str(market_path),
-            "predictions_path": str(predictions_path),
-            "target_weights_path": str(weights_path),
+            "predictions_path": str(predictions_file),
+            "predictions_file_sha256": _file_sha256(predictions_file),
+            "target_weights_path": str(target_weights_file),
+            "target_weights_file_sha256": _file_sha256(target_weights_file),
             "primary_horizon": str(config.primary_horizon),
         },
     )
@@ -218,6 +223,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "pending_signal_path": str(pending_path),
             "pending_payload_sha256": pending.payload_sha256,
             "target_weights_sha256": pending.target_weights_sha256,
+            "predictions_file_sha256": pending.source_lineage["predictions_file_sha256"],
+            "target_weights_file_sha256": pending.source_lineage["target_weights_file_sha256"],
             "executed_fill_count": 0,
             "paper_report_written": False,
             "paper_book_appended": False,
@@ -234,8 +241,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         status="signal_recorded_pending_execution",
         as_of_date=as_of,
         evidence_rows=int(len(evidence.frame)),
-        predictions_path=str(predictions_path),
-        target_weights_path=str(weights_path),
+        predictions_path=str(predictions_file),
+        target_weights_path=str(target_weights_file),
         paper_report_dir=str(day_dir),
         paper_book_path=str(config.paper_book_path),
         pending_signal_path=str(pending_path),
@@ -243,6 +250,12 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         executed_fill_count=0,
         warnings=warnings,
     )
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"cannot bind generated artifact bytes: {path}")
+    return sha256(path.read_bytes()).hexdigest()
 
 
 def _write_daily_summary(day_dir: Path, summary: dict[str, object]) -> None:
