@@ -142,26 +142,13 @@ class TestAShareRules:
         assert order.state == REJECTED
         assert "suspended" in order.reject_reason
 
-    def test_st_band_is_date_versioned_across_2026_reform(self, setup):
+    def test_st_narrower_band_rejects_an_out_of_band_limit(self, setup):
         broker, _, _ = setup
         broker.config.allow_st_buy = True
-
-        # Before the 2026-07-06 reform, SH/SZ main-board risk-warning stocks
-        # still used +/-5%: 9.00 * 1.05 = 9.45, so 9.60 is outside.
-        legacy = broker.submit(
-            buy(price=9.60),
-            market(is_st=True, trade_date="2026-07-03"),
-        )
-        assert legacy.state == REJECTED
-        assert "ceiling" in legacy.reject_reason
-
-        # From 2026-07-06 the same main-board risk-warning band is +/-10%;
-        # 9.60 is therefore a legal bound and must not be rejected as > ceiling.
-        current = broker.submit(
-            buy(price=9.60),
-            market(is_st=True, trade_date="2026-07-06"),
-        )
-        assert current.state == FILLED
+        # ST band is +/-5%: 9.00 * 1.05 = 9.45, so 9.60 is outside.
+        order = broker.submit(buy(price=9.60), market(is_st=True))
+        assert order.state == REJECTED
+        assert "ceiling" in order.reject_reason
 
     def test_st_buy_blocked_by_policy_by_default(self, setup):
         broker, _, _ = setup

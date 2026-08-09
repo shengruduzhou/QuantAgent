@@ -1,7 +1,7 @@
 """Reconstruct paper state by replaying the event ledger.
 
 There is no snapshot. Cash, positions, open orders, fills, realised and
-unrealised P&L, and the kill-switch state are all rebuilt from events, which is
+unrealised P&L, and the kill-switch state are rebuilt from events, which is
 the only way a recovery can be *verified*: if state were stored separately, a
 successful recovery would only prove the snapshot was readable, not that it
 agreed with what actually happened.
@@ -68,12 +68,7 @@ def recover(
     initial_cash: float,
     require_valid_chain: bool = True,
 ) -> RecoveredState:
-    """Rebuild full paper state from the ledger.
-
-    ``initial_cash`` seeds the replay; every subsequent change comes from
-    events, so a mismatch between the replayed cash and the last CASH_CHANGED
-    event is detectable rather than papered over.
-    """
+    """Rebuild full paper state from the legacy operational ledger."""
     verification = event_ledger.verify()
     if require_valid_chain and not verification["valid"]:
         raise RecoveryRefused(
@@ -139,7 +134,7 @@ def recover(
             portfolio.apply_corporate_action(
                 payload["symbol"],
                 share_ratio=float(payload.get("share_ratio", 1.0)),
-                cash_per_share=0.0,  # cash already recorded in the payload
+                cash_per_share=0.0,
             )
             portfolio.cash += float(payload.get("cash_received", 0.0))
 
@@ -200,12 +195,7 @@ def _fill_from_payload(payload: Mapping[str, Any]) -> Fill | None:
 
 def reconcile(live: Any, recovered: RecoveredState, *,
               tolerance: float = 1e-6) -> dict[str, Any]:
-    """Compare a running broker's state against a fresh ledger replay.
-
-    This is the check that makes the ledger meaningful: if the two disagree,
-    either an action bypassed the ledger or the replay is wrong, and both are
-    incidents rather than rounding.
-    """
+    """Compare a running broker's state against a fresh ledger replay."""
     problems: list[str] = []
 
     if abs(live.portfolio.cash - recovered.portfolio.cash) > tolerance:
@@ -245,16 +235,18 @@ def recover_from_canonical(
     *,
     portfolio_id: str,
     initial_cash: float,
+    as_of_trade_date: str | None = None,
 ) -> RecoveredState:
-    """Rebuild paper state from the canonical ledger — the only record of account.
+    """Rebuild paper state from the canonical ledger — the record of account.
 
-    `recover()` above reads paper's legacy `EventLedger`. That ledger no longer
-    receives economic events, so this is the path that reconstructs money.
-    Keeping both readers would recreate the divergence the migration removed:
-    two histories that agree until a crash lands between them.
+    ``as_of_trade_date`` is the market session for which the mutable paper view
+    will be used. Sellability must be evaluated against that session, not against
+    the latest date already present in the ledger: after a restart, Monday's buy
+    is sellable on Tuesday even when no Tuesday economic event has been appended
+    yet. The canonical lots keep their acquisition dates, so this is derived
+    state rather than a settlement snapshot.
     """
     from quantagent.domain.ledger import CanonicalLedger
-    from quantagent.domain.orders import OrderStatus as CanonicalStatus
 
     ledger = CanonicalLedger(canonical_ledger_path)
     verification = ledger.verify()
@@ -272,16 +264,24 @@ def recover_from_canonical(
     state = RecoveredState(portfolio=portfolio, chain_valid=True)
     state.events_replayed = len(ledger)
 
-    # Inventory comes from the canonical lots. Sellability is a function of the
-    # session, so the latest session the ledger knows about is used as "today":
-    # anything acquired earlier has settled, anything acquired on it has not.
     sessions = [r.trade_date for r in ledger.read() if r.trade_date]
     latest_session = max(sessions) if sessions else ""
+    valuation_session = str(as_of_trade_date or latest_session)
+    if latest_session and valuation_session and valuation_session < latest_session:
+        raise RecoveryRefused(
+            f"cannot recover canonical account as of {valuation_session}: "
+            f"ledger already contains later session {latest_session}"
+        )
+
     for symbol, lots in account.lots.items():
         total = float(sum(lot.quantity for lot in lots))
         if total <= 0:
             continue
-        sellable = float(account.sellable(symbol, latest_session)) if latest_session else 0.0
+        sellable = (
+            float(account.sellable(symbol, valuation_session))
+            if valuation_session
+            else 0.0
+        )
         cost = account.cost_basis.get(symbol, 0.0)
         portfolio.positions[symbol] = Position(
             symbol=symbol,
