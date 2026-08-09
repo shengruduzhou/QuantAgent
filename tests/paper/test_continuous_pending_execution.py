@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import pandas as pd
+from dataclasses import replace
 
+import pandas as pd
+import pytest
+
+from quantagent.paper.broker import PaperBroker
 from quantagent.paper.continuous_execution import (
     ContinuousPaperExecutionConfig,
     execute_pending_for_session,
@@ -88,7 +92,10 @@ def test_friday_signal_executes_monday_once_on_persistent_account(tmp_path) -> N
     assert result.status == "execution_observed"
     assert result.order_count == 1
     assert result.fill_count == 1
-    assert result.shadow_acceptance_calendar_eligible is True
+    # A caller-supplied list can schedule shadow execution but cannot certify
+    # exchange-calendar correctness without source/version/digest provenance.
+    assert result.calendar_assurance == "caller_supplied_session_set_unverified"
+    assert result.shadow_acceptance_calendar_eligible is False
 
     repeated = execute_pending_for_session(
         MONDAY,
@@ -102,6 +109,8 @@ def test_friday_signal_executes_monday_once_on_persistent_account(tmp_path) -> N
     )
     assert terminal is not None
     assert terminal.status == "execution_observed"
+    assert terminal.details["session_closed"] is True
+    assert terminal.details["production_pretrade_risk_certified"] is False
 
 
 def test_next_day_liquidation_uses_recovered_position_and_t_plus_one_sellability(tmp_path) -> None:
@@ -202,3 +211,42 @@ def test_observed_panel_calendar_can_execute_operationally_but_not_certify_shado
     assert result[0].status == "execution_observed"
     assert result[0].calendar_assurance == "observed_market_panel_only"
     assert result[0].shadow_acceptance_calendar_eligible is False
+
+
+def test_configured_execution_clock_is_recorded_in_terminal_evidence(tmp_path) -> None:
+    config = replace(_config(tmp_path), execution_clock="14:58:30+08:00")
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    result = execute_pending_for_session(
+        MONDAY,
+        _market(),
+        config=config,
+        authoritative_sessions=SESSIONS,
+    )
+    assert result[0].status == "execution_observed"
+    terminal = PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    )
+    assert terminal is not None
+    assert terminal.details["execution_clock"] == "14:58:30+08:00"
+
+
+def test_close_session_failure_never_publishes_false_terminal(tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+
+    def fail_close(self, trade_date):
+        del self, trade_date
+        raise RuntimeError("simulated close-session crash")
+
+    monkeypatch.setattr(PaperBroker, "close_session", fail_close)
+    with pytest.raises(RuntimeError, match="simulated close-session crash"):
+        execute_pending_for_session(
+            MONDAY,
+            _market(),
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    assert journal.terminal(pending.payload_sha256) is None
+    assert journal.has_unresolved_start(pending.payload_sha256)
