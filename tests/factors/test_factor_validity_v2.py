@@ -20,8 +20,6 @@ def _frame(days: int = 60, symbols: int = 20, *, deteriorate_recent: bool = Fals
         recent = deteriorate_recent and day_idx >= int(days * 0.75)
         for symbol_idx in range(symbols):
             factor = float(symbol_idx)
-            # Deterministic cross-sectional perturbation avoids a zero-variance
-            # IC series while preserving a strong economic ordering in history.
             noise = np.sin(symbol_idx * 1.7 + day_idx * 0.31) * 3.0
             target = (-factor if recent else factor) + noise
             rows.append(
@@ -86,7 +84,7 @@ def test_icir_is_mean_over_std_not_t_statistic_in_disguise() -> None:
     assert _ic_ir(ic) != pytest.approx(expected * np.sqrt(len(ic)))
 
 
-def test_valid_factor_still_cannot_promote_without_search_and_shadow_context() -> None:
+def test_valid_factor_still_cannot_be_promotion_candidate_without_context() -> None:
     report = evaluate_factor_candidate(
         _frame(),
         factor_name="factor",
@@ -97,11 +95,12 @@ def test_valid_factor_still_cannot_promote_without_search_and_shadow_context() -
         config=_relaxed_config(),
     )
     assert report.passed is True
-    assert report.promotion_ready is False
+    assert report.promotion_candidate_ready is False
     assert "promotion_context_missing" in report.promotion_blockers
+    assert report.to_dict()["activation_authorized"] is False
 
 
-def test_complete_governed_context_can_make_core_valid_factor_promotion_ready() -> None:
+def test_complete_context_can_only_make_core_valid_factor_a_promotion_candidate() -> None:
     report = evaluate_factor_candidate(
         _frame(),
         factor_name="factor",
@@ -113,11 +112,14 @@ def test_complete_governed_context_can_make_core_valid_factor_promotion_ready() 
         config=_relaxed_config(),
     )
     assert report.passed is True, report.rejection_reasons
-    assert report.promotion_ready is True, report.promotion_blockers
+    assert report.promotion_candidate_ready is True, report.promotion_blockers
+    payload = report.to_dict()
+    assert payload["activation_authorized"] is False
+    assert payload["activation_authority"] == "hash_bound_factor_promotion_certificate_required"
     assert report.cumulative_trials == 100
 
 
-def test_wrong_execution_label_semantics_blocks_promotion_even_if_metrics_are_good() -> None:
+def test_wrong_execution_label_semantics_blocks_promotion_candidacy_even_if_metrics_are_good() -> None:
     report = evaluate_factor_candidate(
         _frame(),
         factor_name="factor",
@@ -128,11 +130,11 @@ def test_wrong_execution_label_semantics_blocks_promotion_even_if_metrics_are_go
         promotion_context=_promotion(label_semantics="same_close_t_to_t_plus_h"),
         config=_relaxed_config(),
     )
-    assert report.promotion_ready is False
+    assert report.promotion_candidate_ready is False
     assert any("label_semantics" in reason for reason in report.promotion_blockers)
 
 
-def test_multiple_testing_failure_blocks_promotion() -> None:
+def test_multiple_testing_failure_blocks_promotion_candidacy() -> None:
     report = evaluate_factor_candidate(
         _frame(),
         factor_name="factor",
@@ -148,7 +150,7 @@ def test_multiple_testing_failure_blocks_promotion() -> None:
         ),
         config=_relaxed_config(),
     )
-    assert report.promotion_ready is False
+    assert report.promotion_candidate_ready is False
     joined = "|".join(report.promotion_blockers)
     assert "multiple_testing_gate_not_passed" in joined
     assert "pbo=" in joined
@@ -176,4 +178,4 @@ def test_recent_predictive_collapse_is_a_core_validity_failure() -> None:
     )
     assert report.recent_predictive_drift_z < -2.0
     assert any("recent_predictive_drift_z" in reason for reason in report.rejection_reasons)
-    assert report.promotion_ready is False
+    assert report.promotion_candidate_ready is False
