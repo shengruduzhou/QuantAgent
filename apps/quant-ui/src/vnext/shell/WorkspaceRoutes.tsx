@@ -14,7 +14,7 @@ const FuyaoBestPractices = lazy(() => import("../market/FuyaoBestPracticesPage")
 const MarketPlaybooks = lazy(() => import("../market/MarketPlaybooksPage").then((module) => ({ default: module.MarketPlaybooksPage })));
 const FundResearch = lazy(() => import("../market/FundResearchPage").then((module) => ({ default: module.FundResearchPage })));
 const Backtests = lazy(() => import("../../pages/BacktestLabPage").then((module) => ({ default: module.BacktestLabPage })));
-const TPlusOne = lazy(() => import("../../pages/TPlusOnePage").then((module) => ({ default: module.TPlusOnePage })));
+const TPlusOne = lazy(() => import("../tplusone/TPlusOneExecutionWorkspace").then((module) => ({ default: module.TPlusOneExecutionWorkspace })));
 const Factors = lazy(() => import("../../pages/FactorCenterPage").then((module) => ({ default: module.FactorCenterPage })));
 const Selection = lazy(() => import("../../pages/SelectionLogicPage").then((module) => ({ default: module.SelectionLogicPage })));
 const Models = lazy(() => import("../../pages/ModelLabPage").then((module) => ({ default: module.ModelLabPage })));
