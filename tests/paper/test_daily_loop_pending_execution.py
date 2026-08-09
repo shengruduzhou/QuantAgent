@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from types import SimpleNamespace
 import json
 
@@ -121,6 +122,18 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert execution["paper_report_written"] is False
     assert execution["paper_book_appended"] is False
     assert payload["paper_report"] is None
+
+    pending = json.loads((tmp_path / "pending" / f"{as_of}.json").read_text(encoding="utf-8"))
+    predictions_path = tmp_path / "written_predictions.csv"
+    weights_path = tmp_path / "written_target_weights.csv"
+    assert pending["source_lineage"]["predictions_file_sha256"] == sha256(
+        predictions_path.read_bytes()
+    ).hexdigest()
+    assert pending["source_lineage"]["target_weights_file_sha256"] == sha256(
+        weights_path.read_bytes()
+    ).hexdigest()
+    assert execution["predictions_file_sha256"] == pending["source_lineage"]["predictions_file_sha256"]
+    assert execution["target_weights_file_sha256"] == pending["source_lineage"]["target_weights_file_sha256"]
 
 
 def test_daily_loop_no_target_is_not_pending_liquidation_or_paper_evidence(tmp_path, monkeypatch) -> None:
