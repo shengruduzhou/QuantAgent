@@ -102,6 +102,53 @@ def test_unresolved_execution_start_is_critical(tmp_path: Path) -> None:
     assert result["operatorTruth"]["productionLiveCertified"] is False
 
 
+def test_new_started_attempt_does_not_borrow_previous_terminal_fill_or_nav(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    journal = PendingExecutionJournal(
+        paper_runtime_paths(settings.runtime_root).execution_journal
+    )
+    journal.append(
+        pending_payload_sha256="payload-old",
+        signal_date="2026-08-06",
+        execution_date="2026-08-07",
+        status="execution_started",
+        details={"order_count": 1},
+    )
+    journal.append(
+        pending_payload_sha256="payload-old",
+        signal_date="2026-08-06",
+        execution_date="2026-08-07",
+        status="execution_observed",
+        details={
+            "order_count": 1,
+            "fill_count": 1,
+            "nav_before": 1_000_000.0,
+            "nav_after": 1_002_000.0,
+            "calendar_assurance": "observed_market_panel_only",
+        },
+    )
+    journal.append(
+        pending_payload_sha256="payload-new",
+        signal_date="2026-08-07",
+        execution_date="2026-08-10",
+        status="execution_started",
+        details={
+            "order_count": 2,
+            "calendar_assurance": "caller_supplied_session_set_unverified",
+            "production_pretrade_risk_certified": False,
+        },
+    )
+
+    result = PaperExecutionEvidenceService(settings).status()
+    assert result["summary"]["latestStatus"] == "execution_started"
+    assert result["summary"]["orderCount"] == 2
+    assert result["summary"]["fillCount"] is None
+    assert result["summary"]["navBefore"] is None
+    assert result["summary"]["navAfter"] is None
+    assert result["summary"]["calendarAssurance"] == "caller_supplied_session_set_unverified"
+    assert result["summary"]["attention"] == "critical"
+
+
 def test_tampered_hash_chain_fails_closed_without_returning_records(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     path = paper_runtime_paths(settings.runtime_root).execution_journal
