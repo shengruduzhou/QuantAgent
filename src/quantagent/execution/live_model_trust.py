@@ -2,9 +2,9 @@
 
 Schema v1 remains readable for forensic and explicitly BLOCKED manifests, but
 it is not a production trust root: all of its acceptance fields live in one
-editable JSON object. Production acceptance therefore requires schema v2,
-whose claims are verified through the governed policy layer that recomputes
-FRESH coverage and statistical gates from SHA-256-bound artifacts.
+editable JSON object. Production evidence therefore requires schema v2 plus a
+trace-proven execution artifact whose claims are verified through the governed
+policy layer.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from quantagent.execution.live_model_trust_v2 import (
     REQUIRED_METRIC_SEMANTICS,
     default_artifact_roots,
 )
-from quantagent.execution.live_model_trust_v2_policy import (
-    verify_governed_live_model_trust_v2,
+from quantagent.execution.live_model_trust_v2_execution_policy import (
+    verify_trace_proven_live_model_trust_v2,
 )
 
 
@@ -107,7 +107,7 @@ def evaluate_live_model_trust(
 
     if schema_version == CERTIFICATE_SCHEMA_VERSION:
         roots = artifact_roots or default_artifact_roots(path)
-        verification = verify_governed_live_model_trust_v2(
+        verification = verify_trace_proven_live_model_trust_v2(
             payload,
             artifact_roots=roots,
             min_fresh_oos_days=min_fresh_oos_days,
