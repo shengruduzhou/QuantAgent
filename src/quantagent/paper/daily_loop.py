@@ -148,6 +148,46 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         day_dir / "target_weights.parquet",
     )
 
+    if weights.target_weights is None or weights.target_weights.empty:
+        warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
+        summary = {
+            "config": asdict(config),
+            "status": "no_target_generated",
+            "evidence_rows": int(len(evidence.frame)),
+            "evidence_warnings": list(evidence.warnings),
+            "blend_diagnostics": blend_result.diagnostics,
+            "target_weight_diagnostics": weights.diagnostics,
+            "execution": {
+                "status": "no_target_generated",
+                "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+                "signal_date": as_of,
+                "pending_signal_path": "",
+                "executed_fill_count": 0,
+                "paper_report_written": False,
+                "paper_book_appended": False,
+                "reason": (
+                    "portfolio construction produced no target; absence of a target "
+                    "is not reinterpreted as an all-zero liquidation instruction"
+                ),
+            },
+            "paper_report": None,
+            "paper_book_path": str(config.paper_book_path),
+        }
+        _write_daily_summary(day_dir, summary)
+        return DailyPaperLoopResult(
+            status="no_target_generated",
+            as_of_date=as_of,
+            evidence_rows=int(len(evidence.frame)),
+            predictions_path=str(predictions_path),
+            target_weights_path=str(weights_path),
+            paper_report_dir=str(day_dir),
+            paper_book_path=str(config.paper_book_path),
+            pending_signal_path="",
+            execution_timing_semantics=EXECUTION_TIMING_SEMANTICS,
+            executed_fill_count=0,
+            warnings=warnings,
+        )
+
     pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
         signal_date=as_of,
         target_weights=weights.target_weights,
@@ -189,11 +229,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         "paper_report": None,
         "paper_book_path": str(config.paper_book_path),
     }
-    day_dir.mkdir(parents=True, exist_ok=True)
-    (day_dir / "daily_loop_summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
-    )
+    _write_daily_summary(day_dir, summary)
     return DailyPaperLoopResult(
         status="signal_recorded_pending_execution",
         as_of_date=as_of,
@@ -206,6 +242,14 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         execution_timing_semantics=EXECUTION_TIMING_SEMANTICS,
         executed_fill_count=0,
         warnings=warnings,
+    )
+
+
+def _write_daily_summary(day_dir: Path, summary: dict[str, object]) -> None:
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / "daily_loop_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
     )
 
 
