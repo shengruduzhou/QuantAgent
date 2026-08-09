@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from quantagent.execution.economic_model_gate import evaluate_economic_model_gate
 from quantagent.execution.live_model_trust import (
     REQUIRED_METRIC_SEMANTICS,
     evaluate_live_model_trust,
@@ -84,16 +85,19 @@ class ProductionReadinessService:
     def _model_trust(self) -> ReadinessDimension:
         manifest = self.project_root / "configs/live_model_trust.json"
         report = evaluate_live_model_trust(manifest)
+        economic_ok, economic_reasons = evaluate_economic_model_gate(report)
         return ReadinessDimension(
             key="modelTrust",
             label="Model Trust",
-            state="PASS" if report.ok else "BLOCKED",
-            severity="ok" if report.ok else "blocked",
-            reasons=tuple(report.reasons),
+            state="PASS" if economic_ok else "BLOCKED",
+            severity="ok" if economic_ok else "blocked",
+            reasons=economic_reasons,
             evidence={
                 "modelId": report.model_id,
                 "certificateStatus": report.status,
                 "trustClass": report.trust_class,
+                "evidenceVerificationOk": report.ok,
+                "economicLiveEligible": economic_ok,
                 "requiredMetricSemantics": REQUIRED_METRIC_SEMANTICS,
                 "observedMetricSemantics": report.evidence.get("strict_backtest_metric_semantics"),
                 "manifest": self._display_path(manifest),
