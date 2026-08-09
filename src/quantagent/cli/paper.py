@@ -1,4 +1,4 @@
-"""Daily paper-loop CLI commands."""
+"""Daily and continuous paper-loop CLI commands."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import time
 
 import typer
 
-from quantagent.cli._utils import app, json_dump
+from quantagent.cli._utils import app, json_dump, read_frame
 
 paper_app = typer.Typer(help="Daily V7 paper trading loop commands.")
+
 
 @paper_app.command("run-once")
 @app.command("paper-run-once")
@@ -29,16 +30,17 @@ def paper_run_once(
     selection_top_k_max: int = typer.Option(100, "--selection-top-k-max"),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
 ) -> None:
-    """Run one safe daily paper iteration and write target weights + HTML report."""
+    """Run one safe daily paper iteration and freeze target weights."""
     from quantagent.paper.daily_loop import DailyPaperLoopConfig, run_once
 
+    defaults = DailyPaperLoopConfig(as_of_date=date)
     cfg = DailyPaperLoopConfig(
         as_of_date=date,
-        model_dir=str(model_dir) if model_dir else DailyPaperLoopConfig(as_of_date=date).model_dir,
-        feature_dataset_path=str(feature_dataset) if feature_dataset else DailyPaperLoopConfig(as_of_date=date).feature_dataset_path,
-        market_panel_path=str(market_panel) if market_panel else DailyPaperLoopConfig(as_of_date=date).market_panel_path,
+        model_dir=str(model_dir) if model_dir else defaults.model_dir,
+        feature_dataset_path=str(feature_dataset) if feature_dataset else defaults.feature_dataset_path,
+        market_panel_path=str(market_panel) if market_panel else defaults.market_panel_path,
         sector_map_path=str(sector_map) if sector_map else None,
-        output_root=str(output_root) if output_root else DailyPaperLoopConfig(as_of_date=date).output_root,
+        output_root=str(output_root) if output_root else defaults.output_root,
         primary_horizon=primary_horizon,
         top_k=top_k,
         selection_mode=selection_mode,
@@ -51,16 +53,81 @@ def paper_run_once(
     typer.echo(json_dump(run_once(cfg).to_dict()))
 
 
+@paper_app.command("execute-session")
+@app.command("paper-execute-session")
+def paper_execute_session(
+    date: str = typer.Option("today", "--date"),
+    market_panel: Path | None = typer.Option(None, "--market-panel"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash", min=0.01),
+    portfolio_id: str = typer.Option("v7-paper", "--portfolio-id"),
+    execution_clock: str = typer.Option("14:59:00+08:00", "--execution-clock"),
+    max_participation_rate: float = typer.Option(0.05, "--max-participation-rate", min=0.0, max=1.0),
+    min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan", min=0.0),
+) -> None:
+    """Consume frozen targets on one observed session using the canonical paper account.
+
+    This command intentionally does **not** accept a hand-written session list as
+    authoritative evidence.  It consumes only sessions actually present in the
+    supplied market panel and writes every account/journal/idempotency artifact
+    under ``QUANTAGENT_HOME/paper`` so the execution worker, API and UI share the
+    same source of truth.  An observed panel remains non-certifying calendar
+    evidence until the authoritative-calendar gate is implemented.
+    """
+    from quantagent.paper.continuous_execution import (
+        ContinuousPaperExecutionConfig,
+        execute_pending_for_session,
+    )
+    from quantagent.paper.daily_loop import DailyPaperLoopConfig
+    from quantagent.paper.runtime_paths import paper_runtime_paths
+
+    defaults = DailyPaperLoopConfig(as_of_date=date)
+    market_path = Path(market_panel) if market_panel else Path(defaults.market_panel_path)
+    frame = read_frame(market_path)
+    paths = paper_runtime_paths().ensure()
+    config = ContinuousPaperExecutionConfig(
+        pending_signal_dir=str(paths.pending_signals),
+        execution_journal_path=str(paths.execution_journal),
+        canonical_ledger_path=str(paths.canonical_ledger),
+        operational_ledger_path=str(paths.operational_ledger),
+        idempotency_path=str(paths.idempotency),
+        portfolio_id=portfolio_id,
+        initial_cash=initial_cash,
+        min_order_value_yuan=min_order_value_yuan,
+        max_participation_rate=max_participation_rate,
+        execution_clock=execution_clock,
+    )
+    results = execute_pending_for_session(
+        date,
+        frame,
+        config=config,
+        authoritative_sessions=None,
+    )
+    typer.echo(
+        json_dump(
+            {
+                "date": date,
+                "marketPanel": str(market_path),
+                "runtime": paths.as_dict(),
+                "calendarAssurance": "observed_market_panel_only",
+                "shadowAcceptanceCalendarEligible": False,
+                "results": [result.to_dict() for result in results],
+            }
+        )
+    )
+
+
 @paper_app.command("run-loop")
 @app.command("paper-run-loop")
 def paper_run_loop(
     interval_seconds: int = typer.Option(86_400, "--interval-seconds"),
     date: str = typer.Option("today", "--date"),
 ) -> None:
-    """Minimal restartable paper loop.
+    """Minimal restartable target-generation loop.
 
     Use an external scheduler/systemd for exact market-time execution on
-    production servers; this command keeps all state in repo runtime.
+    production servers.  This command freezes targets; ``execute-session`` is
+    the separate next-session consumer so target construction can never be
+    mistaken for a completed paper fill.
     """
     from quantagent.paper.daily_loop import DailyPaperLoopConfig, run_once
 

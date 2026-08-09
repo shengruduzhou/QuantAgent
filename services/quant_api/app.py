@@ -12,6 +12,7 @@ from services.quant_api.events.routes import router as events_router
 from services.quant_api.routes import router
 from services.quant_api.routes.fuyao_playbooks import router as fuyao_playbooks_router
 from services.quant_api.routes.market import router as market_router
+from services.quant_api.routes.paper_execution import router as paper_execution_router
 from services.quant_api.routes.parity import router as parity_router
 from services.quant_api.routes.production_readiness import router as production_readiness_router
 from services.quant_api.services import ServiceContainer
@@ -47,6 +48,7 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     app.include_router(fuyao_playbooks_router)
     app.include_router(parity_router)
     app.include_router(production_readiness_router)
+    app.include_router(paper_execution_router)
     app.include_router(events_router)
 
     @app.get("/health")
