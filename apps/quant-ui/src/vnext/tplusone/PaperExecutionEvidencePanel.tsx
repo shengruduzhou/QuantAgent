@@ -142,6 +142,11 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
   const calendarCertified = evidence.operatorTruth.authoritativeCalendarCertified;
   const latestStatus = evidence.summary.latestStatus;
   const latestRecords = evidence.records.slice(0, 6);
+  const leadTitle = evidence.journal.state === "invalid"
+    ? "执行证据链校验失败"
+    : evidence.journal.state === "unavailable"
+      ? "尚无连续执行 journal"
+      : statusLabel(latestStatus);
 
   return (
     <WorkbenchPanel
@@ -155,7 +160,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
         <div className="paper-evidence-lead">
           {critical ? <ShieldWarning size={24} weight="duotone" /> : evidence.journal.verified ? <CheckCircle size={24} weight="duotone" /> : <Database size={24} weight="duotone" />}
           <div>
-            <strong>{statusLabel(latestStatus)}</strong>
+            <strong>{leadTitle}</strong>
             <span>{evidence.operatorTruth.message}</span>
           </div>
           <span className={`paper-evidence-status status-${STATUS_TONE[latestStatus ?? ""] ?? "neutral"}`}>{latestStatus ?? evidence.journal.state}</span>
