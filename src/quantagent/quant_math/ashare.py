@@ -7,9 +7,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantagent.backtest import ashare_rules as exchange_rules
+from quantagent.data.ashare.symbols import board_of as exchange_board_of
+
 
 @dataclass(frozen=True)
 class ASharePriceLimit:
+    """Explicit scenario overrides for price-limit research.
+
+    Production/date-faithful paths should leave ``limits=None`` and delegate to
+    :mod:`quantagent.backtest.ashare_rules`.  ``st`` is retained only so old
+    scenario callers can still request one deliberately flat ST assumption; it
+    is not the default exchange truth after the 2026-07-06 reform.
+    """
+
     main_board: float = 0.10
     chinext: float = 0.20
     star_board: float = 0.20
@@ -35,7 +46,10 @@ class BoardRule:
 
 @dataclass(frozen=True)
 class AshareRuleEngineConfig:
-    st_price_limit_ratio: float = 0.05
+    # None = canonical, date-versioned exchange rule.  A numeric value is an
+    # explicit research/scenario override and deliberately flattens all equity
+    # risk-warning names to that ratio.
+    st_price_limit_ratio: float | None = None
     star_minimum_buy_quantity: int = 200
     no_buy_limit_up: bool = True
     no_sell_limit_down: bool = True
@@ -58,15 +72,18 @@ class AshareRuleEngine:
             return "etf"
         if code.startswith(("110", "113", "118", "123", "127", "128")):
             return "convertible_bond"
-        if text.endswith(".BJ") or code.startswith(("8", "4")):
+        if text.endswith(".BJ") or code.startswith(("8", "4", "920")):
             return "bse"
         if code.startswith(("688", "689")):
             return "star"
-        if code.startswith(("300", "301")):
+        if code.startswith(("300", "301", "302")):
             return "chinext"
         return "main_board"
 
     def get_rule(self, symbol: str, trade_date: Any | None = None) -> BoardRule:
+        # Lot/T+1 metadata in this compatibility adapter is not currently
+        # date-versioned. Price limits are resolved separately below from the
+        # canonical exchange-rule module and must not discard ``trade_date``.
         del trade_date
         return self._rules[self.infer_board(symbol)]
 
@@ -78,8 +95,39 @@ class AshareRuleEngine:
         is_st: bool = False,
     ) -> dict[str, float | str]:
         rule = self.get_rule(symbol, trade_date)
-        ratio = self.config.st_price_limit_ratio if is_st and rule.instrument_type == "equity" else rule.price_limit_ratio
         prev = float(prev_close)
+
+        if rule.instrument_type == "equity" and self.config.st_price_limit_ratio is None:
+            try:
+                exchange_board = exchange_board_of(symbol)
+            except Exception:
+                exchange_board = _exchange_board_from_compat(rule.board)
+            limits = exchange_rules.price_limits(
+                board=exchange_board,
+                previous_close=prev,
+                trade_date=trade_date,
+                is_st=bool(is_st),
+            )
+            ratio = limits.ratio
+            if ratio is None:
+                return {
+                    "board": rule.board,
+                    "ratio": np.nan,
+                    "limit_up": np.nan,
+                    "limit_down": np.nan,
+                }
+            return {
+                "board": rule.board,
+                "ratio": float(ratio),
+                "limit_up": float(limits.limit_up) if limits.limit_up is not None else np.nan,
+                "limit_down": float(limits.limit_down) if limits.limit_down is not None else np.nan,
+            }
+
+        ratio = (
+            float(self.config.st_price_limit_ratio)
+            if is_st and rule.instrument_type == "equity" and self.config.st_price_limit_ratio is not None
+            else rule.price_limit_ratio
+        )
         if prev <= 0 or not np.isfinite(prev):
             return {"board": rule.board, "ratio": ratio, "limit_up": np.nan, "limit_down": np.nan}
         return {
@@ -166,8 +214,23 @@ class AshareRuleEngine:
         return True, "ok"
 
 
+def _exchange_board_from_compat(board: str) -> str:
+    mapping = {
+        "main_board": exchange_rules.SH_MAIN,
+        "chinext": exchange_rules.CHINEXT,
+        "star": exchange_rules.STAR,
+        "bse": exchange_rules.BSE,
+    }
+    return mapping.get(board, exchange_rules.SH_MAIN)
+
+
 def board_for_symbol(symbol: str, is_st: bool = False) -> str:
-    """Resolve A-share board label from ticker prefix."""
+    """Resolve the compatibility board label from ticker prefix.
+
+    ``is_st=True`` retains the historical ``"st"`` scenario label for callers
+    that explicitly use :class:`ASharePriceLimit`. Canonical exchange logic must
+    preserve the underlying board and therefore never uses this shortcut.
+    """
     if is_st:
         return "st"
     board = AshareRuleEngine().infer_board(symbol)
@@ -180,38 +243,93 @@ def board_for_symbol(symbol: str, is_st: bool = False) -> str:
     return "main_board"
 
 
-def daily_price_limit(symbol: str, is_st: bool = False, limits: ASharePriceLimit | None = None) -> float:
-    limits = limits or ASharePriceLimit()
-    board = board_for_symbol(symbol, is_st)
-    return getattr(limits, board)
+def daily_price_limit(
+    symbol: str,
+    is_st: bool = False,
+    limits: ASharePriceLimit | None = None,
+    *,
+    trade_date: Any | None = None,
+) -> float:
+    """Return the price-limit ratio for one symbol/date.
+
+    Passing ``limits`` opts into the old flat scenario table.  With
+    ``limits=None`` the result is exchange/date-faithful; main-board ST/*ST
+    therefore requires a valid ``trade_date`` because its rule changed on
+    2026-07-06.
+    """
+    if limits is not None:
+        board = board_for_symbol(symbol, is_st)
+        return float(getattr(limits, board))
+    result = AshareRuleEngine().price_limit_rule(
+        symbol,
+        prev_close=1.0,
+        trade_date=trade_date,
+        is_st=is_st,
+    )
+    ratio = float(result["ratio"])
+    if not np.isfinite(ratio):
+        raise ValueError(f"price-limit ratio unavailable for {symbol!r}")
+    return ratio
 
 
 def board_price_limit_vector(
     symbols: pd.Series,
     is_st: pd.Series | bool = False,
     limits: ASharePriceLimit | None = None,
+    *,
+    trade_dates: pd.Series | Any | None = None,
 ) -> pd.Series:
-    """Vectorised board-aware price-limit ratio per row.
+    """Vectorised board/date-aware price-limit ratio per row.
 
-    Resolves the board once per *distinct* symbol (cheap) then maps it back,
-    applying the ST 5% override per row. Equivalent to calling
-    :func:`daily_price_limit` row-by-row but fast enough for 10M+ row panels,
-    where ``DataFrame.apply(axis=1)`` would be prohibitively slow.
+    For the canonical path (``limits=None``), the underlying board is resolved
+    once per distinct symbol. Non-ST ratios are constant by board; only ST rows
+    need the date-versioned exchange lookup. Main-board ST rows with missing
+    dates fail closed instead of being assigned either 5% or 10% arbitrarily.
+
+    Supplying ``limits`` retains the explicit flat-scenario behaviour used by
+    legacy research experiments.
     """
-    limits = limits or ASharePriceLimit()
     symbols = symbols.astype(str)
+    if limits is not None:
+        uniq = pd.Index(symbols.unique())
+        ratio_by_symbol = {
+            s: getattr(limits, board_for_symbol(s, False)) for s in uniq
+        }
+        base = symbols.map(ratio_by_symbol).astype(float)
+        if isinstance(is_st, pd.Series):
+            st_mask = is_st.reindex(symbols.index).fillna(False).astype(bool)
+            return base.mask(st_mask, float(limits.st))
+        if bool(is_st):
+            return pd.Series(float(limits.st), index=symbols.index, dtype=float)
+        return base
+
+    engine = AshareRuleEngine()
     uniq = pd.Index(symbols.unique())
-    # Board ratio for the non-ST case, resolved once per distinct symbol.
-    ratio_by_symbol = {
-        s: getattr(limits, board_for_symbol(s, False)) for s in uniq
+    ordinary_by_symbol = {
+        s: float(engine.price_limit_rule(s, 1.0, trade_date=None, is_st=False)["ratio"])
+        for s in uniq
     }
-    base = symbols.map(ratio_by_symbol).astype(float)
+    result = symbols.map(ordinary_by_symbol).astype(float)
+
     if isinstance(is_st, pd.Series):
         st_mask = is_st.reindex(symbols.index).fillna(False).astype(bool)
-        return base.mask(st_mask, float(limits.st))
-    if bool(is_st):
-        return pd.Series(float(limits.st), index=symbols.index)
-    return base
+    else:
+        st_mask = pd.Series(bool(is_st), index=symbols.index, dtype=bool)
+    if not bool(st_mask.any()):
+        return result
+
+    if isinstance(trade_dates, pd.Series):
+        dates = trade_dates.reindex(symbols.index)
+    else:
+        dates = pd.Series(trade_dates, index=symbols.index)
+
+    for idx in symbols.index[st_mask]:
+        result.loc[idx] = daily_price_limit(
+            symbols.loc[idx],
+            True,
+            trade_date=dates.loc[idx],
+        )
+    return result
 
 
 def limit_up_mask(
@@ -221,13 +339,15 @@ def limit_up_mask(
     tolerance: float = 1e-3,
     limits: ASharePriceLimit | None = None,
 ) -> pd.Series:
-    """True when close >= prev_close * (1 + board_limit) within tolerance bps."""
-    limits = limits or ASharePriceLimit()
+    """True when close >= prev_close * (1 + dated board limit) within tolerance."""
     prev_close = frame.groupby(symbol_column)["close"].shift(1)
     is_st = frame[is_st_column] if is_st_column and is_st_column in frame.columns else False
-    pct_limit = frame.apply(
-        lambda r: daily_price_limit(r[symbol_column], bool(is_st.loc[r.name]) if isinstance(is_st, pd.Series) else False, limits),
-        axis=1,
+    trade_dates = frame["trade_date"] if "trade_date" in frame.columns else None
+    pct_limit = board_price_limit_vector(
+        frame[symbol_column],
+        is_st,
+        limits,
+        trade_dates=trade_dates,
     )
     target = prev_close * (1.0 + pct_limit)
     return (frame["close"] >= target * (1.0 - tolerance)) & (prev_close > 0)
@@ -240,12 +360,14 @@ def limit_down_mask(
     tolerance: float = 1e-3,
     limits: ASharePriceLimit | None = None,
 ) -> pd.Series:
-    limits = limits or ASharePriceLimit()
     prev_close = frame.groupby(symbol_column)["close"].shift(1)
     is_st = frame[is_st_column] if is_st_column and is_st_column in frame.columns else False
-    pct_limit = frame.apply(
-        lambda r: daily_price_limit(r[symbol_column], bool(is_st.loc[r.name]) if isinstance(is_st, pd.Series) else False, limits),
-        axis=1,
+    trade_dates = frame["trade_date"] if "trade_date" in frame.columns else None
+    pct_limit = board_price_limit_vector(
+        frame[symbol_column],
+        is_st,
+        limits,
+        trade_dates=trade_dates,
     )
     target = prev_close * (1.0 - pct_limit)
     return (frame["close"] <= target * (1.0 + tolerance)) & (prev_close > 0)
