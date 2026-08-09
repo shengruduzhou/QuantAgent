@@ -14,10 +14,10 @@ stamp duty.
 Primary exchange sources for the 2026 risk-warning change:
 
 * SSE trading-rule revision, published 2026-04-24 and effective 2026-07-06:
-  https://www.sse.com.cn/lawandrules/sselawsrules2025/repeal/rules/c/c_20260424_10816475.shtml
+  https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml
 * SSE explanation of the revision: main-board risk-warning stocks change from
   5% to 10%, effective 2026-07-06:
-  https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20260424_10816488.shtml
+  https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20260424_10816474.shtml
 * SZSE technical notice 2025-06-27: main-board ST/*ST ``LimitUpRate`` and
   ``LimitDownRate`` move from 0.050 to 0.100:
   https://www.szse.cn/marketServices/technicalservice/notice/t20250627_614645.html
