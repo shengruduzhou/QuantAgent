@@ -84,7 +84,10 @@ def issue_live_model_trust_v2_command(
     evidence_map: Path = typer.Option(
         ...,
         "--evidence-map",
-        help="JSON mapping every governed artifact role, including strict_execution_trace, to {root, path}.",
+        help=(
+            "JSON mapping every governed artifact role, including "
+            "strict_target_weights and strict_execution_trace, to {root, path}."
+        ),
     ),
     model_id: str = typer.Option(..., "--model-id"),
     manifest: Path = typer.Option(_DEFAULT_LIVE_TRUST_MANIFEST, "--manifest"),
@@ -94,13 +97,14 @@ def issue_live_model_trust_v2_command(
         help="Must equal current git HEAD; omitted means use current HEAD.",
     ),
 ) -> None:
-    """Issue governed schema-v2 evidence with a mandatory execution trace.
+    """Issue governed schema-v2 evidence with complete strict timing inputs.
 
     This command performs no training, data fetching, backtest, broker access or
     gate override. It binds evidence that already exists. The governed verifier
-    re-derives FRESH/statistical/strict facts and validates the hash-bound
-    signal-date -> next-session execution trace before publishing. Successful
-    issuance still does not arm economic live trading.
+    re-derives FRESH/statistical/strict facts, verifies the strict target signal
+    schedule, and proves that the execution trace covers that exact schedule at
+    next-session timing. Successful issuance still does not arm economic live
+    trading.
     """
     runtime_root = quant_paths().home.resolve(strict=False)
     roots = {"repo": _REPO_ROOT.resolve(strict=False), "runtime": runtime_root}
