@@ -11,9 +11,9 @@ import typer
 
 from quantagent.cli._utils import app, json_dump
 from quantagent.config.paths import quant_paths
-from quantagent.execution.live_model_trust_v2 import REQUIRED_ARTIFACT_ROLES
-from quantagent.execution.live_model_trust_v2_policy import (
-    issue_governed_live_model_trust_v2 as issue_v2_certificate,
+from quantagent.execution.live_model_trust_v2_execution_policy import (
+    GOVERNED_REQUIRED_ARTIFACT_ROLES,
+    issue_trace_proven_live_model_trust_v2 as issue_v2_certificate,
 )
 from quantagent.training.feature_contract import PRODUCTION_CONTRACT, RESEARCH_CONTRACT
 
@@ -84,7 +84,10 @@ def issue_live_model_trust_v2_command(
     evidence_map: Path = typer.Option(
         ...,
         "--evidence-map",
-        help="JSON mapping each required artifact role to {root: repo|runtime, path: relative/path}.",
+        help=(
+            "JSON mapping every governed artifact role, including "
+            "strict_target_weights and strict_execution_trace, to {root, path}."
+        ),
     ),
     model_id: str = typer.Option(..., "--model-id"),
     manifest: Path = typer.Option(_DEFAULT_LIVE_TRUST_MANIFEST, "--manifest"),
@@ -94,12 +97,14 @@ def issue_live_model_trust_v2_command(
         help="Must equal current git HEAD; omitted means use current HEAD.",
     ),
 ) -> None:
-    """Issue governed schema-v2 live trust from a complete evidence map.
+    """Issue governed schema-v2 evidence with complete strict timing inputs.
 
     This command performs no training, data fetching, backtest, broker access or
-    gate override. It only binds and verifies evidence that already exists. The
-    governed policy re-derives FRESH coverage and PBO/DSR/SPA from the bound data
-    before atomically publishing a certificate.
+    gate override. It binds evidence that already exists. The governed verifier
+    re-derives FRESH/statistical/strict facts, verifies the strict target signal
+    schedule, and proves that the execution trace covers that exact schedule at
+    next-session timing. Successful issuance still does not arm economic live
+    trading.
     """
     runtime_root = quant_paths().home.resolve(strict=False)
     roots = {"repo": _REPO_ROOT.resolve(strict=False), "runtime": runtime_root}
@@ -117,7 +122,7 @@ def issue_live_model_trust_v2_command(
         )
 
     locations: dict[str, tuple[str, str]] = {}
-    for role in REQUIRED_ARTIFACT_ROLES:
+    for role in GOVERNED_REQUIRED_ARTIFACT_ROLES:
         descriptor = payload.get(role)
         if not isinstance(descriptor, dict):
             raise typer.BadParameter(f"evidence map missing object for role {role}")
@@ -128,7 +133,7 @@ def issue_live_model_trust_v2_command(
         if not relative:
             raise typer.BadParameter(f"{role}.path is required")
         locations[role] = (root_name, relative)
-    unexpected = sorted(set(payload).difference(REQUIRED_ARTIFACT_ROLES))
+    unexpected = sorted(set(payload).difference(GOVERNED_REQUIRED_ARTIFACT_ROLES))
     if unexpected:
         raise typer.BadParameter(f"unexpected evidence roles: {unexpected}")
 
@@ -148,7 +153,8 @@ def issue_live_model_trust_v2_command(
                 "source_commit": actual_head,
                 "verification_ok": result.verification.ok,
                 "provenance_assurance": result.verification.evidence.get("provenance_assurance"),
-                "artifact_roles": list(REQUIRED_ARTIFACT_ROLES),
+                "execution_timing_assurance": result.verification.evidence.get("execution_timing_assurance"),
+                "artifact_roles": list(GOVERNED_REQUIRED_ARTIFACT_ROLES),
                 "live_trading_armed_by_command": False,
             }
         )

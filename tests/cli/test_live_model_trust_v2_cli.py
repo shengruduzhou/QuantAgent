@@ -8,7 +8,11 @@ from typer.testing import CliRunner
 
 from quantagent.cli import app
 from quantagent.cli import governance as governance_cli
-from quantagent.execution.live_model_trust_v2 import REQUIRED_ARTIFACT_ROLES
+from quantagent.execution.live_model_trust_v2_execution_policy import (
+    GOVERNED_EXECUTION_TRACE_ROLE,
+    GOVERNED_REQUIRED_ARTIFACT_ROLES,
+    GOVERNED_TARGET_WEIGHTS_ROLE,
+)
 
 
 RUNNER = CliRunner()
@@ -22,7 +26,7 @@ def _registered_names() -> set[str]:
 def _map_payload(*, root: str = "repo") -> dict[str, dict[str, str]]:
     return {
         role: {"root": root, "path": f"evidence/{role}.json"}
-        for role in REQUIRED_ARTIFACT_ROLES
+        for role in GOVERNED_REQUIRED_ARTIFACT_ROLES
     }
 
 
@@ -94,6 +98,31 @@ def test_evidence_map_cannot_introduce_an_untrusted_root(tmp_path: Path, monkeyp
     assert ".root must be one of" in result.output
 
 
+def test_strict_target_and_trace_are_both_mandatory_governed_evidence_roles(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence_map, manifest = _prepare_paths(tmp_path, monkeypatch)
+    for role in (GOVERNED_TARGET_WEIGHTS_ROLE, GOVERNED_EXECUTION_TRACE_ROLE):
+        payload = _map_payload()
+        payload.pop(role)
+        evidence_map.write_text(json.dumps(payload), encoding="utf-8")
+        result = RUNNER.invoke(
+            app,
+            [
+                "issue-live-model-trust-v2",
+                "--evidence-map",
+                str(evidence_map),
+                "--manifest",
+                str(manifest),
+                "--model-id",
+                "model-v2",
+            ],
+        )
+        assert result.exit_code != 0
+        assert f"evidence map missing object for role {role}" in result.output
+
+
 def test_cli_only_binds_evidence_and_never_arms_live(tmp_path: Path, monkeypatch) -> None:
     evidence_map, manifest = _prepare_paths(tmp_path, monkeypatch)
     evidence_map.write_text(json.dumps(_map_payload()), encoding="utf-8")
@@ -106,7 +135,10 @@ def test_cli_only_binds_evidence_and_never_arms_live(tmp_path: Path, monkeypatch
             manifest_path=str(path),
             verification=SimpleNamespace(
                 ok=True,
-                evidence={"provenance_assurance": "hash_bound_unsigned_v1"},
+                evidence={
+                    "provenance_assurance": "hash_bound_unsigned_v1",
+                    "execution_timing_assurance": "trace_proven:signal_t_close_next_session_close_v1",
+                },
             ),
         )
 
@@ -128,5 +160,6 @@ def test_cli_only_binds_evidence_and_never_arms_live(tmp_path: Path, monkeypatch
     assert output["verification_ok"] is True
     assert output["live_trading_armed_by_command"] is False
     assert output["source_commit"] == HEAD
+    assert output["execution_timing_assurance"].startswith("trace_proven:")
     assert captured["source_commit"] == HEAD
-    assert set(captured["artifact_locations"]) == set(REQUIRED_ARTIFACT_ROLES)
+    assert set(captured["artifact_locations"]) == set(GOVERNED_REQUIRED_ARTIFACT_ROLES)

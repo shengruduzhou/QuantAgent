@@ -27,13 +27,14 @@ def test_compute_metrics_default_helper_semantics_remain_backward_compatible() -
     assert metrics.total_return == pytest.approx(0.10)
 
 
-def test_run_strict_backtest_first_day_cost_is_not_normalized_away() -> None:
-    date = pd.Timestamp("2026-01-05")
-    targets = pd.DataFrame({"600000.SH": [0.50]}, index=[date])
+def test_run_strict_backtest_first_execution_day_cost_is_not_normalized_away() -> None:
+    signal_date = pd.Timestamp("2026-01-05")
+    execution_date = pd.Timestamp("2026-01-06")
+    targets = pd.DataFrame({"600000.SH": [0.50]}, index=[signal_date])
     market = pd.DataFrame(
         [
             {
-                "trade_date": date,
+                "trade_date": signal_date,
                 "symbol": "600000.SH",
                 "open": 10.0,
                 "high": 10.0,
@@ -45,7 +46,21 @@ def test_run_strict_backtest_first_day_cost_is_not_normalized_away() -> None:
                 "is_st": False,
                 "is_limit_up": False,
                 "is_limit_down": False,
-            }
+            },
+            {
+                "trade_date": execution_date,
+                "symbol": "600000.SH",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 10_000_000.0,
+                "amount": 100_000_000.0,
+                "is_suspended": False,
+                "is_st": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            },
         ]
     )
     result = run_strict_backtest_v8(
@@ -58,6 +73,7 @@ def test_run_strict_backtest_first_day_cost_is_not_normalized_away() -> None:
     )
     assert result.metrics.total_return < 0.0
     assert result.daily_pnl.loc[0, "daily_return"] < 0.0
+    assert result.daily_pnl.loc[0, "trade_date"] == execution_date
     assert result.config["metric_semantics_version"] == METRIC_SEMANTICS_VERSION
     payload = result.metrics.to_dict()
     assert payload["metric_semantics_version"] == METRIC_SEMANTICS_VERSION

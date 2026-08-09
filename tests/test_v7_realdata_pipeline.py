@@ -47,9 +47,6 @@ def test_dataset_builder_shifts_close_features_and_builds_labels():
     assert not result.dataset.empty
     assert "momentum_5d" in result.feature_schema["feature_columns"]
     assert "forward_return_5d" in result.label_schema["label_columns"]
-    # `available_at` must never fall after the row's own trade_date: the label
-    # window opens at close(trade_date), so a later stamp credits the model with a
-    # move it could not have traded (DEF-026). This assertion used to be `>`.
     features = build_market_features(market)
     available = pd.to_datetime(features["available_at"])
     assert (available == pd.to_datetime(features["trade_date"])).all()
@@ -63,11 +60,6 @@ def test_label_builder_keeps_multi_horizon_schema():
 
 
 def test_v7_training_experiment_writes_validation_artifacts(tmp_path):
-    # 50 days used to be enough only because the first fold's training window
-    # was silently cut down to whatever survived the embargo+purge gap. With the
-    # gap reserved on top of min_train_days, a fold needs
-    # min_train_days + embargo + purge + valid_size_days usable dates — and
-    # feature warm-up plus the label tail eat roughly 20 of the raw dates.
     dataset = build_v7_training_dataset(
         _market_panel(days=120),
         config=V7DatasetBuildConfig(horizons=(1, 5), min_rows=40, min_symbols=2, min_dates=20),
@@ -110,12 +102,19 @@ def test_acceptance_gate_requires_paper_report_for_live_readiness(tmp_path):
 
 def test_ashare_execution_simulator_uses_order_manager_and_blocks_limit_up_buy():
     market = _market_panel(days=3, symbols=("600001.SH",))
-    market.loc[market["trade_date"] == market["trade_date"].min(), "is_limit_up"] = True
-    weights = pd.DataFrame({"600001.SH": [0.5, 0.5, 0.0]}, index=pd.to_datetime(sorted(market["trade_date"].unique())))
+    dates = pd.to_datetime(sorted(market["trade_date"].unique()))
+    # Signal produced on d1 can only execute on d2, so the tradability constraint
+    # belongs to the mapped execution session rather than the signal session.
+    market.loc[pd.to_datetime(market["trade_date"]) == dates[1], "is_limit_up"] = True
+    weights = pd.DataFrame({"600001.SH": [0.5, 0.5, 0.0]}, index=dates)
     result = simulate_ashare_target_weights(weights, market)
 
     assert not result.order_audit.empty
     assert "limit_up_no_buy" in set(result.failed_order_audit["last_message"])
+    rejected = result.failed_order_audit[result.failed_order_audit["last_message"] == "limit_up_no_buy"]
+    assert not rejected.empty
+    assert pd.Timestamp(rejected.iloc[0]["signal_date"]) == dates[0]
+    assert pd.Timestamp(rejected.iloc[0]["execution_date"]) == dates[1]
 
 
 def test_new_v7_cli_commands_smoke(tmp_path):
