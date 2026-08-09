@@ -92,3 +92,14 @@ def test_negative_cash_account_target_is_rejected_before_persistence(tmp_path) -
             source_lineage={"model": "v1"},
         )
     assert not store.path_for("2026-08-07").exists()
+
+
+def test_empty_target_is_not_reinterpreted_as_all_zero_liquidation(tmp_path) -> None:
+    store = PendingPaperSignalStore(tmp_path / "pending")
+    with pytest.raises(ValueError, match="target weights are empty"):
+        store.record(
+            signal_date="2026-08-07",
+            target_weights=pd.DataFrame(),
+            source_lineage={"model": "v1"},
+        )
+    assert not store.path_for("2026-08-07").exists()
