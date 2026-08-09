@@ -1,28 +1,46 @@
 """Durable pending-signal evidence for the daily paper/shadow loop.
 
 A target produced from session-T close information is *not* an executed paper
-trade.  Under the canonical A-share contract it may only be attempted on the
-next observed market session.  This module records that pending economic intent
+trade. Under the canonical A-share contract it may only be attempted on the
+next observed market session. This module records that pending economic intent
 without inventing a future bar or mutating portfolio state.
 
 The artifact is immutable-by-identity: re-running the same signal with identical
 weights is idempotent; the same signal date with different economics is a hard
-conflict.  A stored SHA-256 covers the canonical payload so an edited artifact is
+conflict. A stored SHA-256 covers the canonical payload so an edited artifact is
 refused before it can be consumed by a later execution stage.
+
+Creation is serialized with a sibling lock file on POSIX and Windows. The lock
+covers the entire read-existing -> compare identity -> durable temp write ->
+atomic replace decision, preventing concurrent writers from turning an economic
+conflict into last-writer-wins history.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from threading import RLock
 from typing import Mapping
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+
+try:  # POSIX research/CI hosts
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None
+
+try:  # QMT/MiniQMT Windows hosts
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - Unix
+    _msvcrt = None
 
 from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 
@@ -55,6 +73,15 @@ class PendingPaperSignal:
         return asdict(self)
 
 
+def _strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise PendingSignalCorruption(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, float]:
     """Return one deterministic signal-date target vector.
 
@@ -69,7 +96,9 @@ def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, fl
         raise ValueError("pending paper signal target weights are empty")
     frame = weights.copy()
     if "trade_date" in frame.columns:
-        dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date.astype("string")
+        dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date.astype(
+            "string"
+        )
         valid_dates = sorted(set(str(value) for value in dates.dropna()))
         if valid_dates != [signal_date]:
             raise ValueError(
@@ -84,7 +113,9 @@ def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, fl
                 f"target index signal date {observed} does not match {signal_date}"
             )
     if len(frame) != 1:
-        raise ValueError(f"pending paper signal requires one target row; got {len(frame)}")
+        raise ValueError(
+            f"pending paper signal requires one target row; got {len(frame)}"
+        )
 
     row = frame.iloc[0]
     result: dict[str, float] = {}
@@ -97,7 +128,8 @@ def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, fl
             raise ValueError(f"non-finite target weight for {symbol}: {number}")
         if number < -1e-12:
             raise ValueError(
-                f"cash-account pending target cannot contain negative stock weight: {symbol}={number}"
+                "cash-account pending target cannot contain negative stock weight: "
+                f"{symbol}={number}"
             )
         if abs(number) <= 1e-15:
             number = 0.0
@@ -109,7 +141,10 @@ def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, fl
 
 def _weights_sha(weights: Mapping[str, float]) -> str:
     payload = json.dumps(
-        {str(key): round(float(value), 15) for key, value in sorted(weights.items())},
+        {
+            str(key): round(float(value), 15)
+            for key, value in sorted(weights.items())
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -155,6 +190,7 @@ class PendingPaperSignalStore:
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        self._thread_lock = RLock()
 
     def path_for(self, signal_date: str) -> Path:
         safe = pd.Timestamp(signal_date).date().isoformat()
@@ -165,14 +201,84 @@ class PendingPaperSignalStore:
         if not path.exists():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(
+                path.read_text(encoding="utf-8"), object_pairs_hook=_strict_object
+            )
             signal = PendingPaperSignal(**payload)
+        except PendingSignalCorruption as exc:
+            raise PendingSignalCorruption(
+                f"cannot parse pending paper signal {path}: {exc}"
+            ) from exc
         except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
             raise PendingSignalCorruption(
                 f"cannot parse pending paper signal {path}: {exc}"
             ) from exc
         verify_pending_signal(signal)
         return signal
+
+    @contextmanager
+    def _exclusive_signal_lock(self, signal_date: str):
+        """Cross-process exclusion for one signal-date economic identity."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        target = self.path_for(signal_date)
+        lock_path = target.with_suffix(target.suffix + ".lock")
+        with lock_path.open("a+b") as handle:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                return
+
+            if _msvcrt is not None:  # pragma: no cover - Windows host/CI
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+                return
+
+            raise RuntimeError("no supported cross-process file locking primitive")
+
+    def _persist_new(self, path: Path, candidate: PendingPaperSignal) -> None:
+        temp = path.with_name(
+            f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        data = (
+            json.dumps(
+                candidate.to_dict(), ensure_ascii=False, indent=2, sort_keys=True
+            )
+            + "\n"
+        )
+        try:
+            with temp.open("x", encoding="utf-8") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            # Persist the directory entry where supported. Failure to open/fsync
+            # a directory on Windows is not evidence that the file write failed;
+            # the file itself was already flushed before the atomic replace.
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def record(
         self,
@@ -185,8 +291,12 @@ class PendingPaperSignalStore:
         signal_date = pd.Timestamp(signal_date).date().isoformat()
         canonical_weights = _normalised_weights(target_weights, signal_date)
         weights_digest = _weights_sha(canonical_weights)
-        lineage = {str(key): str(value) for key, value in sorted(source_lineage.items())}
-        timestamp = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lineage = {
+            str(key): str(value) for key, value in sorted(source_lineage.items())
+        }
+        timestamp = created_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         base: dict[str, object] = {
             "schema_version": PENDING_SIGNAL_SCHEMA_VERSION,
             "status": PENDING_SIGNAL_STATUS,
@@ -204,29 +314,36 @@ class PendingPaperSignalStore:
 
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(signal_date)
-        existing = self.read(signal_date)
-        if existing is not None:
-            # created_at is not economic identity. A deterministic re-run with
-            # the same target and lineage returns the original artifact rather
-            # than rewriting history; different economics/lineage is a conflict.
-            if (
-                existing.target_weights_sha256 == candidate.target_weights_sha256
-                and existing.source_lineage == candidate.source_lineage
-                and existing.execution_timing_semantics == candidate.execution_timing_semantics
-            ):
-                return existing, path
-            raise PendingSignalConflict(
-                f"pending signal already exists for {signal_date} with different economics or lineage"
-            )
+        with self._thread_lock, self._exclusive_signal_lock(signal_date):
+            existing = self.read(signal_date)
+            if existing is not None:
+                # created_at is not economic identity. A deterministic re-run
+                # with the same target and lineage returns the original artifact
+                # rather than rewriting history; different economics/lineage is
+                # an explicit conflict.
+                if (
+                    existing.target_weights_sha256
+                    == candidate.target_weights_sha256
+                    and existing.source_lineage == candidate.source_lineage
+                    and existing.execution_timing_semantics
+                    == candidate.execution_timing_semantics
+                ):
+                    return existing, path
+                raise PendingSignalConflict(
+                    f"pending signal already exists for {signal_date} with "
+                    "different economics or lineage"
+                )
 
-        temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        data = json.dumps(candidate.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        with temp.open("x", encoding="utf-8") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        return candidate, path
+            self._persist_new(path, candidate)
+            # Read through the verification path before returning evidence. This
+            # also ensures a storage/filesystem anomaly cannot be mistaken for a
+            # successfully recorded economic intent.
+            persisted = self.read(signal_date)
+            if persisted is None:
+                raise PendingSignalCorruption(
+                    f"pending signal disappeared after persistence: {path}"
+                )
+            return persisted, path
 
 
 __all__ = [

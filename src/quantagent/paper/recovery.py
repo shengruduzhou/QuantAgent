@@ -1,14 +1,11 @@
-"""Reconstruct paper state by replaying the event ledger.
+"""Reconstruct paper state by replaying durable event ledgers.
 
-There is no snapshot. Cash, positions, open orders, fills, realised and
-unrealised P&L, and the kill-switch state are all rebuilt from events, which is
-the only way a recovery can be *verified*: if state were stored separately, a
-successful recovery would only prove the snapshot was readable, not that it
-agreed with what actually happened.
+Operational state is rebuilt from the paper event ledger. Economic state can
+also be rebuilt from the canonical ledger; that path is used by continuous paper
+execution so cash, positions, fills and T+1 sellability survive process restarts.
 
-Recovery refuses to proceed on a broken chain. A ledger that fails verification
-describes a history that was edited or truncated, and rebuilding a portfolio
-from it would produce confident numbers with no provenance.
+Both paths fail closed on an unverifiable chain. A readable but edited history
+is not evidence of account state.
 """
 
 from __future__ import annotations
@@ -18,7 +15,6 @@ from typing import Any, Mapping
 
 from quantagent.paper import ledger as lg
 from quantagent.paper.orders import (
-    TERMINAL_STATES,
     CANCELLED,
     FILLED,
     PARTIALLY_FILLED,
@@ -30,7 +26,7 @@ from quantagent.paper.portfolio import Portfolio, Position
 
 
 class RecoveryRefused(RuntimeError):
-    """Raised when the ledger cannot be trusted enough to rebuild from."""
+    """Raised when durable evidence is not trustworthy enough to rebuild state."""
 
 
 @dataclass
@@ -45,12 +41,12 @@ class RecoveredState:
     chain_valid: bool = True
 
     def open_orders(self) -> list[Order]:
-        return [o for o in self.orders.values() if o.is_open]
+        return [order for order in self.orders.values() if order.is_open]
 
     def to_dict(self, prices: Mapping[str, float] | None = None) -> dict[str, Any]:
         return {
             "portfolio": self.portfolio.to_dict(prices or {}),
-            "open_orders": [o.to_dict() for o in self.open_orders()],
+            "open_orders": [order.to_dict() for order in self.open_orders()],
             "orders_total": len(self.orders),
             "fills": len(self.fills),
             "killed": self.killed,
@@ -68,12 +64,8 @@ def recover(
     initial_cash: float,
     require_valid_chain: bool = True,
 ) -> RecoveredState:
-    """Rebuild full paper state from the ledger.
+    """Rebuild full paper state from the operational event ledger."""
 
-    ``initial_cash`` seeds the replay; every subsequent change comes from
-    events, so a mismatch between the replayed cash and the last CASH_CHANGED
-    event is detectable rather than papered over.
-    """
     verification = event_ledger.verify()
     if require_valid_chain and not verification["valid"]:
         raise RecoveryRefused(
@@ -83,9 +75,14 @@ def recover(
         )
 
     portfolio = Portfolio(
-        portfolio_id=portfolio_id, cash=initial_cash, initial_cash=initial_cash
+        portfolio_id=portfolio_id,
+        cash=initial_cash,
+        initial_cash=initial_cash,
     )
-    state = RecoveredState(portfolio=portfolio, chain_valid=verification["valid"])
+    state = RecoveredState(
+        portfolio=portfolio,
+        chain_valid=verification["valid"],
+    )
 
     for event in event_ledger.read():
         state.events_replayed += 1
@@ -123,7 +120,11 @@ def recover(
                 order.filled_quantity += fill.quantity
                 order.filled_notional += fill.notional
                 order.fees_paid += fill.fees
-                target = FILLED if event.event_type == lg.ORDER_FILLED else PARTIALLY_FILLED
+                target = (
+                    FILLED
+                    if event.event_type == lg.ORDER_FILLED
+                    else PARTIALLY_FILLED
+                )
                 if target in _allowed_from(order.state):
                     order.transition(target)
 
@@ -135,11 +136,14 @@ def recover(
                 if CANCELLED in _allowed_from(order.state):
                     order.transition(CANCELLED)
 
-        elif event.event_type == lg.CORPORATE_ACTION_APPLIED and payload.get("applied"):
+        elif (
+            event.event_type == lg.CORPORATE_ACTION_APPLIED
+            and payload.get("applied")
+        ):
             portfolio.apply_corporate_action(
                 payload["symbol"],
                 share_ratio=float(payload.get("share_ratio", 1.0)),
-                cash_per_share=0.0,  # cash already recorded in the payload
+                cash_per_share=0.0,
             )
             portfolio.cash += float(payload.get("cash_received", 0.0))
 
@@ -165,7 +169,8 @@ def _order_from_payload(payload: Mapping[str, Any]) -> Order | None:
         return None
     try:
         return Order(
-            symbol=payload["symbol"], side=payload["side"],
+            symbol=payload["symbol"],
+            side=payload["side"],
             quantity=float(payload["quantity"]),
             order_type=payload.get("order_type", "LIMIT"),
             limit_price=payload.get("limit_price"),
@@ -173,7 +178,9 @@ def _order_from_payload(payload: Mapping[str, Any]) -> Order | None:
             order_id=payload["order_id"],
             parent_id=payload.get("parent_id"),
             strategy_id=payload.get("strategy_id"),
-            is_full_liquidation=bool(payload.get("is_full_liquidation", False)),
+            is_full_liquidation=bool(
+                payload.get("is_full_liquidation", False)
+            ),
         )
     except (KeyError, ValueError):
         return None
@@ -184,9 +191,12 @@ def _fill_from_payload(payload: Mapping[str, Any]) -> Fill | None:
         return None
     try:
         return Fill(
-            order_id=payload["order_id"], symbol=payload["symbol"],
-            side=payload["side"], quantity=float(payload["quantity"]),
-            price=float(payload["price"]), notional=float(payload["notional"]),
+            order_id=payload["order_id"],
+            symbol=payload["symbol"],
+            side=payload["side"],
+            quantity=float(payload["quantity"]),
+            price=float(payload["price"]),
+            notional=float(payload["notional"]),
             commission=float(payload.get("commission", 0.0)),
             stamp_duty=float(payload.get("stamp_duty", 0.0)),
             transfer_fee=float(payload.get("transfer_fee", 0.0)),
@@ -198,14 +208,14 @@ def _fill_from_payload(payload: Mapping[str, Any]) -> Fill | None:
         return None
 
 
-def reconcile(live: Any, recovered: RecoveredState, *,
-              tolerance: float = 1e-6) -> dict[str, Any]:
-    """Compare a running broker's state against a fresh ledger replay.
+def reconcile(
+    live: Any,
+    recovered: RecoveredState,
+    *,
+    tolerance: float = 1e-6,
+) -> dict[str, Any]:
+    """Compare a running broker state against a fresh operational replay."""
 
-    This is the check that makes the ledger meaningful: if the two disagree,
-    either an action bypassed the ledger or the replay is wrong, and both are
-    incidents rather than rounding.
-    """
     problems: list[str] = []
 
     if abs(live.portfolio.cash - recovered.portfolio.cash) > tolerance:
@@ -214,14 +224,23 @@ def reconcile(live: Any, recovered: RecoveredState, *,
             f"{recovered.portfolio.cash:.6f}"
         )
 
-    live_positions = {s: p.total for s, p in live.portfolio.positions.items()
-                      if not p.is_flat}
-    replay_positions = {s: p.total for s, p in recovered.portfolio.positions.items()
-                        if not p.is_flat}
+    live_positions = {
+        symbol: position.total
+        for symbol, position in live.portfolio.positions.items()
+        if not position.is_flat
+    }
+    replay_positions = {
+        symbol: position.total
+        for symbol, position in recovered.portfolio.positions.items()
+        if not position.is_flat
+    }
     for symbol in set(live_positions) | set(replay_positions):
-        a, b = live_positions.get(symbol, 0.0), replay_positions.get(symbol, 0.0)
-        if abs(a - b) > tolerance:
-            problems.append(f"position mismatch {symbol}: live {a} vs replay {b}")
+        left = live_positions.get(symbol, 0.0)
+        right = replay_positions.get(symbol, 0.0)
+        if abs(left - right) > tolerance:
+            problems.append(
+                f"position mismatch {symbol}: live {left} vs replay {right}"
+            )
 
     if len(live.fills) != len(recovered.fills):
         problems.append(
@@ -245,43 +264,60 @@ def recover_from_canonical(
     *,
     portfolio_id: str,
     initial_cash: float,
+    as_of_session: str | None = None,
 ) -> RecoveredState:
-    """Rebuild paper state from the canonical ledger — the only record of account.
+    """Rebuild paper account state from the canonical economic ledger.
 
-    `recover()` above reads paper's legacy `EventLedger`. That ledger no longer
-    receives economic events, so this is the path that reconstructs money.
-    Keeping both readers would recreate the divergence the migration removed:
-    two histories that agree until a crash lands between them.
+    ``as_of_session`` may be the latest economic session (same-session crash
+    recovery) or a later session (for example the next market day). It may not
+    precede the newest event in the full ledger because that would pretend a full
+    event history were a historical snapshot.
     """
+
     from quantagent.domain.ledger import CanonicalLedger
-    from quantagent.domain.orders import OrderStatus as CanonicalStatus
 
     ledger = CanonicalLedger(canonical_ledger_path)
     verification = ledger.verify()
     if not verification["valid"]:
         raise RecoveryRefused(
-            f"canonical chain verification failed at record {verification.get('brokenAt')}. "
-            "Rebuilding from an edited or truncated history would produce "
-            "confident numbers with no provenance."
+            f"canonical chain verification failed at record "
+            f"{verification.get('brokenAt')}. Rebuilding from an edited or "
+            "truncated history would produce confident numbers with no provenance."
         )
 
     book, account = ledger.replay(initial_cash=initial_cash)
     portfolio = Portfolio(
-        portfolio_id=portfolio_id, cash=account.cash, initial_cash=initial_cash
+        portfolio_id=portfolio_id,
+        cash=account.cash,
+        initial_cash=initial_cash,
     )
     state = RecoveredState(portfolio=portfolio, chain_valid=True)
     state.events_replayed = len(ledger)
 
-    # Inventory comes from the canonical lots. Sellability is a function of the
-    # session, so the latest session the ledger knows about is used as "today":
-    # anything acquired earlier has settled, anything acquired on it has not.
-    sessions = [r.trade_date for r in ledger.read() if r.trade_date]
-    latest_session = max(sessions) if sessions else ""
+    sessions = sorted(
+        {record.trade_date for record in ledger.read() if record.trade_date}
+    )
+    latest_session = sessions[-1] if sessions else ""
+    effective_session = str(as_of_session or latest_session)
+    if (
+        latest_session
+        and effective_session
+        and effective_session < latest_session
+    ):
+        raise RecoveryRefused(
+            f"as_of_session {effective_session} precedes latest canonical "
+            f"economic session {latest_session}"
+        )
+
     for symbol, lots in account.lots.items():
         total = float(sum(lot.quantity for lot in lots))
         if total <= 0:
             continue
-        sellable = float(account.sellable(symbol, latest_session)) if latest_session else 0.0
+        sellable = (
+            float(account.sellable(symbol, effective_session))
+            if effective_session
+            else 0.0
+        )
         cost = account.cost_basis.get(symbol, 0.0)
         portfolio.positions[symbol] = Position(
             symbol=symbol,
@@ -291,6 +327,7 @@ def recover_from_canonical(
             average_cost=float(cost),
             realised_pnl=0.0,
         )
+
     portfolio.realised_pnl = float(account.realised_pnl)
     portfolio.fees_paid = float(account.total_fees)
 
@@ -303,33 +340,54 @@ def recover_from_canonical(
             order_id=canonical.order_id,
         )
         order.state = _PAPER_STATE_OF[canonical.status]
-        order.filled_quantity = float(canonical.cumulative_quantity)
-        order.filled_notional = sum(f.quantity * f.price for f in canonical.fills)
+        # Canonical Order exposes filled_quantity. "cumulative_quantity" was
+        # never part of the domain API and made restart recovery fail when the
+        # first real fill existed.
+        order.filled_quantity = float(canonical.filled_quantity)
+        order.filled_notional = sum(
+            fill.quantity * fill.price for fill in canonical.fills
+        )
         order.fees_paid = canonical.total_fees
         order.reject_reason = canonical.reason
         state.orders[order.order_id] = order
 
     state.fills = [
         Fill(
-            order_id=fill.order_id, symbol=fill.symbol, side=fill.side.value,
-            quantity=float(fill.quantity), price=float(fill.price),
-            notional=float(fill.gross), commission=float(fill.commission),
-            stamp_duty=float(fill.stamp_duty), transfer_fee=float(fill.transfer_fee),
-            market_time=fill.filled_at, fill_id=fill.execution_id,
+            order_id=fill.order_id,
+            symbol=fill.symbol,
+            side=fill.side.value,
+            quantity=float(fill.quantity),
+            price=float(fill.price),
+            notional=float(fill.gross),
+            commission=float(fill.commission),
+            stamp_duty=float(fill.stamp_duty),
+            transfer_fee=float(fill.transfer_fee),
+            market_time=fill.filled_at,
+            fill_id=fill.execution_id,
         )
         for fill in book.fills()
     ]
     return state
 
 
-#: Canonical status -> paper's vocabulary, the inverse of paper.orders._TO_CANONICAL.
 _PAPER_STATE_OF: dict[Any, str] = {}
 
 
 def _build_state_map() -> None:
     from quantagent.paper.orders import _TO_CANONICAL
 
-    _PAPER_STATE_OF.update({status: name for name, status in _TO_CANONICAL.items()})
+    _PAPER_STATE_OF.update(
+        {status: name for name, status in _TO_CANONICAL.items()}
+    )
 
 
 _build_state_map()
+
+
+__all__ = [
+    "RecoveryRefused",
+    "RecoveredState",
+    "recover",
+    "recover_from_canonical",
+    "reconcile",
+]

@@ -29,7 +29,10 @@ jobs:
       - name: Declared-dependency audit
         run: python -m pytest tests/test_declared_dependencies.py -q
       - name: Verify collection in the installed environment
-        run: python -m pytest tests/ -q --collect-only > /dev/null
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --collect-only 2>&1 | tee pytest-collect.log
       - name: Test
         shell: bash
         run: |
@@ -41,9 +44,10 @@ jobs:
         with:
           name: pytest-diagnostics
           path: |
+            pytest-collect.log
             pytest-results.xml
             pytest.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   # QMT/MiniQMT is a Windows-only client requiring a funded broker account, so
