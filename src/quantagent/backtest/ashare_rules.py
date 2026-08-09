@@ -1,28 +1,32 @@
-"""Mainland A-share trading rules, encoded once with their sources.
+"""Mainland A-share trading rules, encoded once with dated authorities.
 
 Every constant here is a *market rule*, not a modelling choice, so each carries
-the authority and effective date it comes from. Rules change: the stamp duty
-halved on 2023-08-28, main-board IPOs stopped having a first-day limit on
-2023-04-10 under the full registration system. A simulator that hard-codes the
-old value silently backtests a market that no longer exists, so the date-aware
-lookups below take the trade date rather than assuming "today's rules".
+an authority/effective-date boundary. A simulator that hard-codes the rule in
+force when the code was written silently backtests a market that no longer
+existed on the simulated date; every changing rule therefore keys off
+``trade_date`` rather than the wall clock.
 
 Nothing in this module is an FX or futures convention. A-share cash equities
-settle T+1 with no intraday round trip, price limits are per-board, and the
-sell side alone pays stamp duty.
+settle T+1 unless an exchange rule explicitly permits same-day round trips,
+price limits are per-board and date-versioned, and the sell side alone pays
+stamp duty.
 
-Sources (accessed 2026-07-27):
+Primary exchange sources for the 2026 risk-warning change:
 
-* 全面注册制主板新股前 5 日不设涨跌幅 — 中国新闻网 2023-04-10
-  https://www.chinanews.com.cn/cj/2023/04-10/9986979.shtml
-* 主板交易规则变化（含盘中临时停牌 30%/60%）— 武汉市地方金融管理局 2023-04-11
-  https://jrj.wuhan.gov.cn/ztzl_57/xyrd/dcczbsc/202304/t20230411_2184063.shtml
-* 新股上市前 5 日规则汇总（各板对比）— 新浪新闻
-  https://www.sina.cn/news/detail/5322735332887589.html
-* 印花税自 2023-08-28 减半至 0.05%、单边卖出 — 21 经济网 2023-08-27
-  https://www.21jingji.com/article/20230827/herald/ac10f7d4d2834c760d7f8b798bcc6d0c.html
-* 过户费 0.001% 双边、佣金约万 2.5-万 3 — A 股交易费用一览
-  https://zhuanlan.zhihu.com/p/653909009
+* SSE trading-rule revision, published 2026-04-24 and effective 2026-07-06:
+  https://www.sse.com.cn/lawandrules/sselawsrules2025/repeal/rules/c/c_20260424_10816475.shtml
+* SSE explanation of the revision: main-board risk-warning stocks change from
+  5% to 10%, effective 2026-07-06:
+  https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20260424_10816488.shtml
+* SZSE technical notice 2025-06-27: main-board ST/*ST ``LimitUpRate`` and
+  ``LimitDownRate`` move from 0.050 to 0.100:
+  https://www.szse.cn/marketServices/technicalservice/notice/t20250627_614645.html
+* SZSE 2026 technical preparation notice carries the adjustment into the 2026
+  revised trading rules, effective 2026-07-06:
+  https://www.szse.cn/marketServices/technicalservice/notice/t20260424_620199.html
+
+Other dated conventions retained here include the 2023-04-10 main-board
+registration-system IPO regime and the 2023-08-28 stamp-duty reduction.
 """
 
 from __future__ import annotations
@@ -52,11 +56,18 @@ ORDINARY_LIMIT: dict[str, float] = {
     SH_MAIN: 0.10, SZ_MAIN: 0.10, CHINEXT: 0.20, STAR: 0.20, BSE: 0.30,
 }
 
-#: ST / *ST names trade inside a narrower band on the main boards. ChiNext and
-#: STAR ST names keep the board's ±20%; BSE has no separate ST band.
-ST_LIMIT: dict[str, float] = {
+#: SSE/SZSE unified main-board risk-warning stocks with ordinary main-board
+#: ±10% limits from 2026-07-06. Before that date main-board ST/*ST used ±5%.
+MAIN_BOARD_ST_LIMIT_REFORM = date(2026, 7, 6)
+ST_LIMIT_LEGACY: dict[str, float] = {
     SH_MAIN: 0.05, SZ_MAIN: 0.05, CHINEXT: 0.20, STAR: 0.20, BSE: 0.30,
 }
+ST_LIMIT_CURRENT: dict[str, float] = {
+    SH_MAIN: 0.10, SZ_MAIN: 0.10, CHINEXT: 0.20, STAR: 0.20, BSE: 0.30,
+}
+#: Backwards-compatible name for callers that only need the *current* table.
+#: Historical execution must call :func:`price_limits`, never index this mapping.
+ST_LIMIT: dict[str, float] = ST_LIMIT_CURRENT
 
 #: Trading days after listing during which no price limit applies.
 #: Main boards gained this on 2023-04-10 with the full registration system;
@@ -142,6 +153,30 @@ def _round_tick(value: float) -> float:
     return round(value + 1e-12, 2)
 
 
+def _st_limit_ratio(board: str, when: date | None) -> float | None:
+    """Return the risk-warning limit ratio in force on ``when``.
+
+    Main-board ST/*ST changed from 5% to 10% on 2026-07-06 at both SSE and
+    SZSE. A missing/invalid date is therefore not safely defaultable for those
+    boards: doing so would silently select one of two incompatible exchange
+    regimes. Boards whose risk-warning band did not change here remain
+    unambiguous.
+    """
+    if board in (SH_MAIN, SZ_MAIN):
+        if when is None:
+            raise ValueError(
+                "valid trade_date is required for main-board risk-warning price "
+                "limits because the 5%->10% rule changed on 2026-07-06"
+            )
+        table = (
+            ST_LIMIT_CURRENT
+            if when >= MAIN_BOARD_ST_LIMIT_REFORM
+            else ST_LIMIT_LEGACY
+        )
+        return table.get(board)
+    return ST_LIMIT_CURRENT.get(board)
+
+
 def price_limits(
     *,
     board: str,
@@ -157,6 +192,9 @@ def price_limits(
     it is not guessed from calendar days -- the caller either knows the session
     count or the IPO window is treated as inapplicable, because a calendar-day
     approximation would silently mis-band names around holidays.
+
+    Risk-warning limits are also date-versioned. In particular, SH/SZ main-board
+    ST/*ST securities use 5% before 2026-07-06 and 10% on/after that date.
     """
     when = _as_date(trade_date)
     listed = _as_date(listing_date)
@@ -180,8 +218,7 @@ def price_limits(
             regime="IPO_NO_LIMIT_WINDOW", reference_close=previous_close,
         )
 
-    table = ST_LIMIT if is_st else ORDINARY_LIMIT
-    ratio = table.get(board)
+    ratio = _st_limit_ratio(board, when) if is_st else ORDINARY_LIMIT.get(board)
     if ratio is None:
         return PriceLimits(None, None, None, "UNKNOWN_BOARD", previous_close)
     return PriceLimits(
