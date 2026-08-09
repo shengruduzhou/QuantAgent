@@ -114,13 +114,28 @@ def test_friday_signal_executes_once_on_monday_observation(tmp_path: Path) -> No
     assert receipt.positions_after.get("600000.SH", 0) > 0
 
 
+def test_pending_execution_uses_oms_risk_and_not_paper_self_open(tmp_path: Path) -> None:
+    p = _paths(tmp_path)
+    _signal(PendingPaperSignalStore(p["pending"]), "2026-07-31", 0.50)
+    _execute(tmp_path, "2026-08-03", _market("2026-07-31", "2026-08-03"))
+
+    rules = []
+    for record in CanonicalLedger(p["canonical"]).read():
+        event = record.event
+        decision = getattr(event, "risk_decision", None) if event is not None else None
+        if decision is not None:
+            rules.append(decision.rule)
+
+    assert "order_manager_basic_admissibility" in rules
+    assert "paper_pretrade" not in rules
+
+
 def test_restart_recovery_makes_monday_buy_sellable_on_tuesday(tmp_path: Path) -> None:
     p = _paths(tmp_path)
     store = PendingPaperSignalStore(p["pending"])
     _signal(store, "2026-07-31", 0.50)
     _execute(tmp_path, "2026-08-03", _market("2026-07-31", "2026-08-03"))
 
-    # New process/day: Monday close generates a zero target, Tuesday observes it.
     _signal(store, "2026-08-03", 0.0)
     result = _execute(
         tmp_path,
@@ -198,8 +213,8 @@ def test_suspended_next_session_consumes_signal_as_blocked_once(tmp_path: Path) 
     assert result.executed_receipts == ("2026-07-31",)
     assert receipt is not None
     assert receipt.outcome == "execution_blocked"
-    assert receipt.order_results[0]["state"] == "REJECTED"
-    assert "suspended" in str(receipt.order_results[0]["reject_reason"])
+    assert receipt.order_results[0]["state"] == "rejected"
+    assert "suspended" in str(receipt.order_results[0]["message"])
 
 
 def test_st_new_buy_is_blocked_until_pit_and_daily_cap_governance_exist(tmp_path: Path) -> None:
@@ -215,7 +230,7 @@ def test_st_new_buy_is_blocked_until_pit_and_daily_cap_governance_exist(tmp_path
 
     assert receipt is not None
     assert receipt.outcome == "execution_blocked"
-    assert "ST buy blocked" in str(receipt.order_results[0]["reject_reason"])
+    assert "ST buy blocked" in str(receipt.order_results[0]["message"])
 
 
 def test_tampered_receipt_fails_verification(tmp_path: Path) -> None:
