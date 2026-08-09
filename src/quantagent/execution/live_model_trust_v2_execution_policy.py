@@ -2,7 +2,7 @@
 
 This layer extends the schema-v2 governed evidence certificate with one extra
 artifact that the historical low-level binder did not know about:
-``strict_execution_trace``.  The trace is verified twice:
+``strict_execution_trace``. The trace is verified twice:
 
 * byte-level SHA-256 binding protects the exact file named by the certificate;
 * canonical trace hashing + structural validation proves the signal-date to
@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Mapping
 from uuid import uuid4
-import os
 
 import pandas as pd
 
@@ -47,9 +47,7 @@ GOVERNED_REQUIRED_ARTIFACT_ROLES: tuple[str, ...] = (
     *REQUIRED_ARTIFACT_ROLES,
     GOVERNED_EXECUTION_TRACE_ROLE,
 )
-TRACE_PROVEN_EXECUTION_ASSURANCE = (
-    "trace_proven:" + EXECUTION_TIMING_SEMANTICS
-)
+TRACE_PROVEN_EXECUTION_ASSURANCE = "trace_proven:" + EXECUTION_TIMING_SEMANTICS
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -91,8 +89,8 @@ def verify_trace_proven_live_model_trust_v2(
         reasons.append("governed_artifacts_unexpected:" + ",".join(unexpected))
 
     evidence = dict(base.evidence)
-    # Never allow trace certification to arm economics. The separate economic
-    # promotion process remains the only writer allowed to prove eligibility.
+    # Trace certification never arms economics. The separate economic promotion
+    # process remains the only path that may establish eligibility.
     evidence["economic_live_eligible"] = False
     resolved = dict(base.resolved_paths)
 
@@ -125,11 +123,8 @@ def verify_trace_proven_live_model_trust_v2(
                 else:
                     trace_binding_sha = expected_sha
                     resolved[GOVERNED_EXECUTION_TRACE_ROLE] = str(trace_path)
-    elif GOVERVERNED_EXECUTION_TRACE_ROLE_PRESENT := (GOVERNED_EXECUTION_TRACE_ROLE in artifacts):
-        # Keep a distinct diagnostic when the role exists but is not an object.
-        # The assignment expression is intentionally local and deterministic.
-        if GOVERVERNED_EXECUTION_TRACE_ROLE_PRESENT:
-            reasons.append(f"{GOVERNED_EXECUTION_TRACE_ROLE}:descriptor_not_object")
+    elif GOVERNED_EXECUTION_TRACE_ROLE in artifacts:
+        reasons.append(f"{GOVERNED_EXECUTION_TRACE_ROLE}:descriptor_not_object")
 
     canonical_trace_sha: str | None = None
     timing_ok = False
