@@ -8,6 +8,7 @@ import pandas as pd
 from quantagent.backtest.execution_timing import (
     EXECUTION_TIMING_SEMANTICS,
     execution_trace_sha256,
+    signal_schedule_sha256,
     validate_execution_trace,
 )
 from quantagent.backtest.trace_proven_strict_v8 import (
@@ -35,7 +36,7 @@ def _market() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_trace_proven_strict_bundle_writes_hash_bound_execution_trace(tmp_path: Path) -> None:
+def test_trace_proven_strict_bundle_writes_target_schedule_and_execution_trace(tmp_path: Path) -> None:
     market = _market()
     sessions = pd.DatetimeIndex(sorted(market["trade_date"].unique()))
     targets = pd.DataFrame({"600000.SH": [0.10, 0.10, 0.0]}, index=sessions[:3])
@@ -43,21 +44,29 @@ def test_trace_proven_strict_bundle_writes_hash_bound_execution_trace(tmp_path: 
     artifact = run_trace_proven_strict_backtest_v8(targets, market)
     paths = artifact.write(tmp_path / "strict")
 
+    assert paths["target_weights"].exists()
     assert paths["execution_trace"].exists()
+    written_targets = pd.read_csv(paths["target_weights"])
     trace = pd.read_csv(paths["execution_trace"])
     validation = validate_execution_trace(trace)
     assert validation.ok, validation.reasons
 
-    digest = execution_trace_sha256(trace)
+    trace_digest = execution_trace_sha256(trace)
+    target_schedule_digest = signal_schedule_sha256(written_targets["signal_date"])
     metrics = json.loads(paths["metrics"].read_text(encoding="utf-8"))
-    assert metrics["execution_trace_sha256"] == digest
+    assert metrics["execution_trace_sha256"] == trace_digest
+    assert metrics["strict_target_signal_schedule_sha256"] == target_schedule_digest
+    assert metrics["strict_target_weights_artifact"] == "target_weights.csv"
     assert metrics["execution_timing_semantics"] == EXECUTION_TIMING_SEMANTICS
     assert metrics["strict_evidence_semantics"] == TRACE_PROVEN_STRICT_SEMANTICS
-    assert artifact.config["execution_trace_sha256"] == digest
+    assert artifact.config["execution_trace_sha256"] == trace_digest
+    assert artifact.config["strict_target_signal_schedule_sha256"] == target_schedule_digest
     assert artifact.config["execution_timing_semantics"] == EXECUTION_TIMING_SEMANTICS
 
     schedules = trace[trace["record_type"] == "session_mapping"].copy()
-    assert not schedules.empty
+    assert tuple(pd.to_datetime(written_targets["signal_date"])) == tuple(
+        pd.to_datetime(schedules["signal_date"])
+    )
     assert (
         pd.to_datetime(schedules["execution_date"])
         > pd.to_datetime(schedules["signal_date"])
