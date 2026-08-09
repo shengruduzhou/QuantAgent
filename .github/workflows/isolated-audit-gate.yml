@@ -1,0 +1,46 @@
+name: Isolated Audit Gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  checks: write
+
+concurrency:
+  group: isolated-audit-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  exact-head-isolated-audit:
+    # issue_comment also fires on ordinary issues; only PR conversations matter.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      github.event.issue.pull_request != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted base/default branch
+        uses: actions/checkout@v6
+        with:
+          # Never checkout the PR head. The verifier and audit-board policy must
+          # come from trusted main/base code, otherwise a PR could edit its own
+          # merge gate to approve itself.
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Evaluate exact-head structured audit and publish Check Run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: src
+        run: python scripts/verify_pr_isolated_audit.py --event-path "$GITHUB_EVENT_PATH"
