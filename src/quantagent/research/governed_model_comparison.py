@@ -65,7 +65,8 @@ class GovernedModelComparison:
     @property
     def production_eligible(self) -> bool:
         holdout_ok = self.holdout is None or self.holdout.accepted
-        return bool(self.promotion.accepted and holdout_ok)
+        economic_ok = bool(self.governance.get("economicBacktestCertified", True))
+        return bool(self.promotion.accepted and holdout_ok and economic_ok)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,8 +77,8 @@ class GovernedModelComparison:
             "governance": dict(self.governance),
             "note": (
                 "Raw model-comparison verdicts are research evidence only. "
-                "Production eligibility requires promotion gates and, on the Stage-4 path, "
-                "a one-shot final-holdout qualification."
+                "Production eligibility requires promotion gates, final-holdout qualification "
+                "on the Stage-4 path, and a certified economic backtest implementation."
             ),
         }
 
@@ -123,6 +124,13 @@ def run_stage4_governed_model_comparison(
     here because expanding walk-forward would allow an earlier holdout fold to enter the
     training set of a later holdout fold, so the union would not be an untouched block.
     Increase ``valid_size_days`` when a longer final block is required.
+
+    This path is deliberately still fail-closed for production while the underlying
+    ``model_comparison`` economic evaluator has known truth-boundary defects: transaction
+    cost is not yet charged proportional to realised turnover, and untradable Top-K names
+    are currently measured but not excluded before economic return calculation. The
+    research evidence remains useful; it cannot grant live eligibility until those defects
+    are repaired and the blocker below is removed in a separately audited change.
     """
 
     cfg = comparison_config or ComparisonConfig(holdout_folds=1)
@@ -171,6 +179,11 @@ def run_stage4_governed_model_comparison(
         "uniqueFamilyFingerprints": experiment_ledger.unique_fingerprint_count(
             family=experiment.family
         ),
+        "economicBacktestCertified": False,
+        "economicBacktestBlockers": [
+            "model_comparison costs are not yet proportional to realised turnover",
+            "model_comparison reports untradable Top-K selections without excluding them from economic returns",
+        ],
     }
     return GovernedModelComparison(
         comparison=comparison,
