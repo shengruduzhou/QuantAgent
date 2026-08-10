@@ -12,8 +12,11 @@ Layout (``provider_uri`` root)::
     instruments/all.txt               # SYMBOL\tstart\tend  (qlib SH/SZ prefix)
     features/<sh600000>/<field>.1min.bin
 
-Prices are raw; multiply OHLC by ``factor`` for forward-adjusted (qfq)
-series. ``volume`` is shares; per-minute amount ≈ ``volume * close``.
+Prices are raw on disk. ``adjust=True`` multiplies OHLC by ``factor`` to create a
+forward-adjusted (qfq) *research* series; such rows are explicitly marked
+``execution_eligible=False``. ``amount`` is always derived from raw close before
+any adjustment, so turnover/capacity units are never rewritten by a price
+transformation.
 
 Note on coverage: the qlib *community free* 1-min release covers only
 ~2020-09 → 2021-06. Production intraday strategies need a recent 1-min feed
@@ -31,6 +34,7 @@ import pandas as pd
 from quantagent.data.v7_auto_range import from_qlib_instrument, to_qlib_instrument
 
 _DEFAULT_FIELDS = ("open", "high", "low", "close", "volume", "factor")
+_EXCHANGE_TIMEZONE = "Asia/Shanghai"
 
 
 @lru_cache(maxsize=8)
@@ -73,10 +77,11 @@ def read_instrument_minutes(
 ) -> pd.DataFrame:
     """Decode one instrument's minute bars into a tidy frame.
 
-    Returns columns ``[symbol, datetime, trade_date, <fields...>, amount]``
-    with NaN (auction / halt) rows dropped. OHLC are forward-adjusted when
-    ``adjust`` and a ``factor`` field is present.
+    Returns ``symbol/datetime/trade_date/OHLCV`` plus explicit adjustment
+    provenance. ``amount`` uses the raw close even when the returned OHLC is qfq.
+    Execution consumers must request ``adjust=False``.
     """
+
     root = Path(root)
     cal = calendar if calendar is not None else load_calendar(root)
     qsym = to_qlib_instrument(symbol).lower()
@@ -99,19 +104,29 @@ def read_instrument_minutes(
 
     df = pd.DataFrame(series)
     df = df.dropna(subset=["close"])
+
+    # Economic turnover/capacity must stay tied to raw traded prices. Calculate
+    # it before any research adjustment and never overwrite it afterwards.
+    if "volume" in df.columns:
+        df["amount"] = df["volume"] * df["close"]
+
     if adjust and "factor" in df.columns:
-        for c in ("open", "high", "low", "close"):
-            if c in df.columns:
-                df[c] = df[c] * df["factor"]
+        for column in ("open", "high", "low", "close"):
+            if column in df.columns:
+                df[column] = df[column] * df["factor"]
+
     df.index.name = "datetime"
     df = df.reset_index()
     df["symbol"] = symbol
     df["trade_date"] = df["datetime"].dt.normalize()
-    if "volume" in df.columns and "close" in df.columns:
-        df["amount"] = df["volume"] * df["close"]
-    cols = ["symbol", "datetime", "trade_date", *[f for f in fields if f in df.columns]]
+    df["price_adjustment"] = "qfq" if adjust else "raw"
+    df["execution_eligible"] = not adjust
+    df["timezone"] = _EXCHANGE_TIMEZONE
+
+    cols = ["symbol", "datetime", "trade_date", *[field for field in fields if field in df.columns]]
     if "amount" in df.columns:
         cols.append("amount")
+    cols.extend(["price_adjustment", "execution_eligible", "timezone"])
     return df[cols]
 
 
@@ -128,9 +143,15 @@ def build_intraday_panel(
     cal = load_calendar(root)
     frames = []
     for sym in symbols:
-        f = read_instrument_minutes(root, sym, fields=fields, calendar=cal, adjust=adjust)
-        if not f.empty:
-            frames.append(f)
+        frame = read_instrument_minutes(
+            root,
+            sym,
+            fields=fields,
+            calendar=cal,
+            adjust=adjust,
+        )
+        if not frame.empty:
+            frames.append(frame)
     if not frames:
         return pd.DataFrame(columns=["symbol", "datetime", "trade_date", *fields])
     panel = pd.concat(frames, ignore_index=True)

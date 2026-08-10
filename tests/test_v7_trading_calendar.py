@@ -33,7 +33,15 @@ def test_resolver_handles_series_input():
     assert pd.isna(resolved.iloc[3])
 
 
-def test_calendar_day_resolver_falls_back_when_no_calendar():
+def test_empty_trading_calendar_fails_closed():
+    calendar = TradingCalendar.from_dates([])
+    series = pd.Series(["2026-05-09", "2026-05-12"], dtype=object)
+
+    assert pd.isna(calendar.next_trading_day("2026-05-09", lag_days=1))
+    assert calendar.resolve_available_at(series, lag_days=1).isna().all()
+
+
+def test_calendar_day_resolver_is_explicit_legacy_fallback():
     series = pd.Series(["2026-05-09", "2026-05-12"], dtype=object)
     resolved = calendar_day_resolver(series, lag_days=1)
     assert resolved.iloc[0] == pd.Timestamp("2026-05-10")

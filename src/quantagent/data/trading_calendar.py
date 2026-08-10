@@ -16,9 +16,10 @@ or after the chosen lag, with two construction paths:
 * ``TradingCalendar.from_dates`` accepts an explicit list of trading days,
   for tests or when an external calendar is provided.
 
-The resolver never invents trading days. If the input is later than the
-last known trading day in the calendar it returns ``NaT`` so downstream
-PIT checks can flag the row instead of silently leaking a future entry.
+The resolver never invents trading days. If the calendar is empty, or the input
+is later than the last known trading day, it returns ``NaT`` so downstream PIT
+checks can fail closed. Callers that intentionally need legacy calendar-day
+arithmetic must opt into :func:`calendar_day_resolver` explicitly.
 """
 
 from __future__ import annotations
@@ -52,13 +53,16 @@ class TradingCalendar:
         return not self.trading_days
 
     def next_trading_day(self, date: str | pd.Timestamp, lag_days: int = 0) -> pd.Timestamp:
-        """Return the earliest trading day strictly on or after ``date + lag_days``.
+        """Return the earliest trading day on/after ``date + lag_days``.
 
         ``lag_days`` is measured in calendar days; the function then snaps
-        forward to the next trading session. ``NaT`` propagates.
+        forward to the next known trading session. ``NaT`` propagates. An empty
+        calendar also returns ``NaT`` — silently inventing a weekday would break
+        the PIT contract around exchange holidays.
         """
+
         if self.empty:
-            return pd.to_datetime(date, errors="coerce") + pd.Timedelta(days=int(lag_days))
+            return pd.NaT
         target = pd.to_datetime(date, errors="coerce")
         if pd.isna(target):
             return pd.NaT
@@ -74,10 +78,10 @@ class TradingCalendar:
         lag_days: int = 1,
     ) -> pd.Series:
         """Vectorised resolver for a Series of announcement dates."""
-        if self.empty:
-            parsed = pd.to_datetime(ann_dates, errors="coerce") + pd.Timedelta(days=int(lag_days))
-            return parsed
+
         values = pd.to_datetime(ann_dates, errors="coerce")
+        if self.empty:
+            return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
         return pd.Series(
             [self.next_trading_day(value, lag_days) if not pd.isna(value) else pd.NaT for value in values],
             index=values.index,

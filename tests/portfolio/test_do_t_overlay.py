@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
+from quantagent.data.intraday_sessions import ExecutionPriceProvenanceError
 from quantagent.portfolio.do_t_overlay import DoTOverlayConfig, simulate_do_t_overlay
 
 
-def _minute_rows(prices):
+def _minute_rows(prices, *, price_adjustment: str = "raw"):
     start = pd.Timestamp("2024-01-02 09:30")
     return pd.DataFrame([
         {
@@ -13,6 +15,8 @@ def _minute_rows(prices):
             "symbol": "000001.SZ",
             "datetime": start + pd.Timedelta(minutes=i),
             "close": price,
+            "price_adjustment": price_adjustment,
+            "execution_eligible": price_adjustment == "raw",
         }
         for i, price in enumerate(prices)
     ])
@@ -69,3 +73,28 @@ def test_do_t_overlay_can_buy_low_then_sell_old_shares_high():
     assert bool(row["t1_legal"]) is True
     assert row["sell_time"] > row["buy_time"]
     assert row["net_pnl"] > 0
+
+
+def test_do_t_overlay_rejects_adjusted_execution_prices():
+    minutes = _minute_rows(
+        [10.0, 10.8, 10.9, 10.2, 9.8, 9.9, 10.0],
+        price_adjustment="qfq",
+    )
+    inventory = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2024-01-02"), "symbol": "000001.SZ", "available_shares": 1000}
+    ])
+
+    with pytest.raises(ExecutionPriceProvenanceError, match="raw/unadjusted"):
+        simulate_do_t_overlay(minutes, inventory)
+
+
+def test_do_t_overlay_rejects_missing_execution_price_provenance():
+    minutes = _minute_rows([10.0, 10.8, 10.9, 10.2, 9.8, 9.9, 10.0]).drop(
+        columns=["price_adjustment", "execution_eligible"]
+    )
+    inventory = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2024-01-02"), "symbol": "000001.SZ", "available_shares": 1000}
+    ])
+
+    with pytest.raises(ExecutionPriceProvenanceError, match="observed price_adjustment"):
+        simulate_do_t_overlay(minutes, inventory)

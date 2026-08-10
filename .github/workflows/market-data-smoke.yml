@@ -18,8 +18,14 @@ on:
     paths:
       - ".github/workflows/market-data-smoke.yml"
       - "scripts/run_market_data_smoke.py"
+      - "scripts/run_intraday_session_smoke.py"
       - "tests/data/test_market_data_smoke.py"
+      - "tests/data/test_intraday_sessions.py"
+      - "src/quantagent/data/intraday_sessions.py"
       - "src/quantagent/data/providers/baostock_provider.py"
+      - "src/quantagent/data/providers/qlib_intraday_reader.py"
+      - "src/quantagent/cli/v8_intraday.py"
+      - "src/quantagent/portfolio/do_t_overlay.py"
   schedule:
     # 17:40 Asia/Shanghai on weekdays: after the A-share close. This is a
     # connectivity/schema smoke, not a factor-performance research run.
@@ -51,11 +57,30 @@ jobs:
           python -m pip install -e . "baostock>=0.9.3"
 
       - name: Pull raw daily, 5m, 60m and independent market calendar
+        shell: bash
         run: |
-          python scripts/run_market_data_smoke.py \
-            --symbols "$SMOKE_SYMBOLS" \
-            --lookback-days "$SMOKE_LOOKBACK_DAYS" \
-            --end-date "$(date -u +%F)" \
+          set -o pipefail
+          for attempt in 1 2 3; do
+            rm -rf runtime/research/market_data_smoke
+            if python scripts/run_market_data_smoke.py \
+              --symbols "$SMOKE_SYMBOLS" \
+              --lookback-days "$SMOKE_LOOKBACK_DAYS" \
+              --end-date "$(date -u +%F)" \
+              --output-dir runtime/research/market_data_smoke; then
+              echo "BaoStock smoke succeeded on attempt ${attempt}."
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "BaoStock smoke failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+      - name: Exercise 10m and 60m exchange-session aggregation on real 5m data
+        run: |
+          python scripts/run_intraday_session_smoke.py \
+            --input-csv runtime/research/market_data_smoke/minute_5m_raw_sample.csv \
             --output-dir runtime/research/market_data_smoke
 
       - name: Assert smoke cannot masquerade as performance evidence
@@ -80,13 +105,37 @@ jobs:
           assert payload["daily"]["rows"] > 0
           assert payload["minute"]["5"]["rows"] > 0
           assert payload["minute"]["60"]["rows"] > 0
+
+          session = json.loads(
+              Path("runtime/research/market_data_smoke/session_manifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          assert session["research_smoke_only"] is True
+          assert session["performance_evidence"] is False
+          assert session["factor_promotion"] is False
+          assert session["model_promotion"] is False
+          assert session["economic_live_eligible"] is False
+          assert session["source_adjustment"] == "raw"
+          assert session["timezone"] == "Asia/Shanghai"
+          assert session["session_windows"] == [["09:30", "11:30"], ["13:00", "15:00"]]
+          for frequency in ("10", "60"):
+              evidence = session["aggregation"][frequency]
+              assert evidence["rows"] > 0
+              assert evidence["raw_execution_prices"] is True
+              assert evidence["right_labelled"] is True
+              assert evidence["right_closed"] is True
+              assert evidence["emit_partial"] is False
+              assert evidence["lunch_break_isolated"] is True
           PY
 
-      - name: Upload market-data smoke manifest
+      - name: Upload market-data smoke manifests
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: market-data-smoke-${{ github.run_id }}
-          path: runtime/research/market_data_smoke/manifest.json
+          path: |
+            runtime/research/market_data_smoke/manifest.json
+            runtime/research/market_data_smoke/session_manifest.json
           if-no-files-found: warn
           retention-days: 30
