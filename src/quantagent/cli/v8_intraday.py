@@ -64,9 +64,55 @@ def _normalise_minute_panel(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _business_available_at(trade_date: pd.Series) -> pd.Series:
-    """Same-day intraday factors become usable after the close / next session."""
-    return pd.to_datetime(trade_date, errors="coerce") + pd.tseries.offsets.BDay(1)
+def _read_market_sessions(path: Path) -> pd.DatetimeIndex:
+    """Read an explicit exchange-session schedule; never infer weekdays."""
+    from quantagent.factors.executable_labels import canonical_market_sessions
+
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        frame = pd.read_parquet(path)
+    elif suffix in {".csv", ".txt"}:
+        frame = pd.read_csv(path)
+    else:
+        raise typer.BadParameter(f"unsupported market calendar format: {path}")
+    if frame.empty:
+        raise typer.BadParameter("market calendar is empty")
+    for column in ("trade_date", "calendar_date", "date"):
+        if column in frame.columns:
+            values = frame[column]
+            break
+    else:
+        if len(frame.columns) != 1:
+            raise typer.BadParameter(
+                "market calendar requires trade_date/calendar_date/date or one date column"
+            )
+        values = frame.iloc[:, 0]
+    return canonical_market_sessions(values)
+
+
+def _next_market_session_available_at(
+    trade_date: pd.Series,
+    market_sessions: pd.DatetimeIndex,
+) -> pd.Series:
+    """Map T intraday factors to the next explicit exchange trading session."""
+    from quantagent.data.trading_calendar import TradingCalendar
+
+    calendar = TradingCalendar.from_dates(market_sessions)
+    resolved = calendar.resolve_available_at(trade_date, lag_days=1)
+    if resolved.isna().any():
+        examples = (
+            pd.to_datetime(trade_date[resolved.isna()], errors="coerce")
+            .dropna()
+            .dt.strftime("%Y-%m-%d")
+            .drop_duplicates()
+            .head(5)
+            .tolist()
+        )
+        raise typer.BadParameter(
+            "market calendar does not contain a next trading session for factor dates "
+            f"{examples}; extend the explicit calendar rather than using weekday arithmetic"
+        )
+    return resolved
 
 
 @app.command("build-intraday-factors-v8")
@@ -76,6 +122,15 @@ def build_intraday_factors_v8(
     ),
     provider_uri: Optional[Path] = typer.Option(
         None, help="qlib 1min provider root; requires --symbols or --symbols-file",
+    ),
+    market_calendar_path: Optional[Path] = typer.Option(
+        None,
+        exists=True,
+        dir_okay=False,
+        help=(
+            "explicit exchange trading calendar for external minute panels; "
+            "qlib mode uses its global 1min calendar"
+        ),
     ),
     symbols: Optional[str] = typer.Option(None, help="comma-separated canonical symbols for qlib root"),
     symbols_file: Optional[Path] = typer.Option(None, exists=True, dir_okay=False),
@@ -103,7 +158,8 @@ def build_intraday_factors_v8(
 ):
     """Collapse 1-minute bars into PIT day-level 分时量价 factors."""
     from quantagent.data.manifest import build_manifest_for_frame
-    from quantagent.data.providers.qlib_intraday_reader import build_intraday_panel
+    from quantagent.data.providers.qlib_intraday_reader import build_intraday_panel, load_calendar
+    from quantagent.factors.executable_labels import canonical_market_sessions
     from quantagent.factors.intraday_volume_price import FACTOR_COLUMNS, compute_intraday_factors
 
     if minute_panel_path is None and provider_uri is None:
@@ -113,11 +169,18 @@ def build_intraday_factors_v8(
 
     raw_paths: list[str] = []
     vendor = "minute_panel"
+    market_sessions: pd.DatetimeIndex
     if minute_panel_path is not None:
         if not minute_panel_path.exists():
             raise typer.BadParameter(f"minute panel missing: {minute_panel_path}")
+        if market_calendar_path is None:
+            raise typer.BadParameter(
+                "external minute panels require --market-calendar-path; "
+                "do not infer exchange sessions from per-symbol bars or weekdays"
+            )
+        market_sessions = _read_market_sessions(market_calendar_path)
         minute = _normalise_minute_panel(_read_minute_panel(minute_panel_path))
-        raw_paths.append(str(minute_panel_path))
+        raw_paths.extend([str(minute_panel_path), str(market_calendar_path)])
         vendor = "tickflow_or_external_1min"
         if start_date is not None:
             minute = minute[minute["datetime"] >= pd.Timestamp(start_date)]
@@ -136,6 +199,7 @@ def build_intraday_factors_v8(
         vendor = "qlib_1min"
         if symbol_batch_size <= 0:
             raise typer.BadParameter("--symbol-batch-size must be positive")
+        market_sessions = canonical_market_sessions(load_calendar(provider_uri).normalize().unique())
         factor_parts = []
         minute_rows = 0
         batches = 0
@@ -161,7 +225,10 @@ def build_intraday_factors_v8(
         factors = pd.concat(factor_parts, ignore_index=True)
 
     factors["trade_date"] = pd.to_datetime(factors["trade_date"], errors="coerce").dt.normalize()
-    factors["intraday_available_at"] = _business_available_at(factors["trade_date"])
+    factors["intraday_available_at"] = _next_market_session_available_at(
+        factors["trade_date"],
+        market_sessions,
+    )
     factors["source"] = vendor
     factors["point_in_time_valid"] = True
 
@@ -178,8 +245,8 @@ def build_intraday_factors_v8(
         merge_cols = ["symbol", "trade_date", *FACTOR_COLUMNS, "intraday_available_at"]
         merged = ds.merge(factors[merge_cols], on=["symbol", "trade_date"], how="left")
         # Guard against accidentally using same-day intraday data for pre-close
-        # signals: when a dataset has available_at, the intraday feature must
-        # not be considered available earlier than next business day.
+        # signals: the feature cannot be considered available before the next
+        # explicit exchange session.
         if "available_at" in merged.columns:
             merged["available_at"] = pd.to_datetime(merged["available_at"], errors="coerce")
             merged["available_at"] = merged[["available_at", "intraday_available_at"]].max(axis=1)
@@ -204,7 +271,11 @@ def build_intraday_factors_v8(
             "symbol_batches": int(batches),
             "factor_columns": list(FACTOR_COLUMNS),
             "merged_training_rows": merged_rows,
-            "pit_rule": "intraday factors are available at next business day after trade_date",
+            "pit_rule": (
+                "T intraday factors become available on the next explicit exchange "
+                "trading session; weekday arithmetic and per-symbol row inference are forbidden"
+            ),
+            "market_session_count": int(len(market_sessions)),
         },
     )
     manifest.write(manifest_path)
@@ -243,8 +314,9 @@ def run_do_t_overlay_v8(
 ):
     """Run a legal T+1 Do-T overlay on existing target weights.
 
-    The overlay never emits live orders.  It simulates same-day round trips
-    only when yesterday-settled inventory exists.
+    The overlay never emits live orders. It simulates same-day round trips only
+    when yesterday-settled inventory exists, and it refuses adjusted execution
+    prices.
     """
     from quantagent.data.providers.qlib_intraday_reader import build_intraday_panel
     from quantagent.portfolio.do_t_overlay import DoTOverlayConfig, simulate_do_t_overlay
@@ -308,7 +380,15 @@ def run_do_t_overlay_v8(
     else:
         for i in range(0, len(symbols), symbol_batch_size):
             batch_symbols = symbols[i:i + symbol_batch_size]
-            minute = build_intraday_panel(provider_uri, batch_symbols, start=start, end=end, adjust=True)
+            # Execution must use raw traded prices. The qfq path remains available
+            # only to research feature generation above.
+            minute = build_intraday_panel(
+                provider_uri,
+                batch_symbols,
+                start=start,
+                end=end,
+                adjust=False,
+            )
             minute = _normalise_minute_panel(minute)
             if minute.empty:
                 continue
@@ -353,7 +433,11 @@ def run_do_t_overlay_v8(
     return output_dir
 
 
-def _read_or_make_base_nav(base_nav_path: Optional[Path], dates: pd.DatetimeIndex, initial_cash: float) -> pd.Series:
+def _read_or_make_base_nav(
+    base_nav_path: Optional[Path],
+    dates: pd.DatetimeIndex,
+    initial_cash: float,
+) -> pd.Series:
     if base_nav_path is None:
         return pd.Series(float(initial_cash), index=dates, name="base_nav")
     nav = pd.read_csv(base_nav_path)
@@ -375,7 +459,9 @@ def _target_weights_to_available_inventory(
     previous_close = close.shift(1).reindex(previous_weights.index).ffill()
     previous_nav = nav.shift(1).reindex(previous_weights.index).ffill().fillna(float(nav.iloc[0]))
     value = previous_weights.mul(previous_nav, axis=0)
-    shares = (value / previous_close.replace(0.0, pd.NA)).replace([float("inf"), float("-inf")], pd.NA)
+    shares = (value / previous_close.replace(0.0, pd.NA)).replace(
+        [float("inf"), float("-inf")], pd.NA
+    )
     shares = (shares.fillna(0.0) // lot * lot).astype("int64")
     long = shares.stack().rename("available_shares").reset_index()
     long.columns = ["trade_date", "symbol", "available_shares"]
@@ -400,17 +486,28 @@ def _combine_do_t_nav(
     out["combined_nav"] = out["base_nav"] + out["do_t_cum_pnl"]
     metrics = _nav_metrics(out["base_nav"], out["combined_nav"], initial_cash=initial_cash)
     metrics["do_t_total_net_pnl"] = float(out["do_t_net_pnl"].sum())
-    metrics["do_t_return_on_initial_cash"] = float(out["do_t_net_pnl"].sum() / max(1.0, initial_cash))
+    metrics["do_t_return_on_initial_cash"] = float(
+        out["do_t_net_pnl"].sum() / max(1.0, initial_cash)
+    )
     return out, metrics
 
 
-def _nav_metrics(base_nav: pd.Series, combined_nav: pd.Series, *, initial_cash: float) -> dict[str, float]:
+def _nav_metrics(
+    base_nav: pd.Series,
+    combined_nav: pd.Series,
+    *,
+    initial_cash: float,
+) -> dict[str, float]:
     base = pd.Series(base_nav, dtype=float).reset_index(drop=True)
     combined = pd.Series(combined_nav, dtype=float).reset_index(drop=True)
     n = max(1, len(combined))
     base_total = float(base.iloc[-1] / initial_cash - 1.0) if len(base) else 0.0
     combined_total = float(combined.iloc[-1] / initial_cash - 1.0) if len(combined) else 0.0
-    combined_ann = float((1.0 + combined_total) ** (252.0 / n) - 1.0) if combined_total > -1.0 else -1.0
+    combined_ann = (
+        float((1.0 + combined_total) ** (252.0 / n) - 1.0)
+        if combined_total > -1.0
+        else -1.0
+    )
     peak = combined.cummax()
     dd = (combined / peak.replace(0.0, pd.NA) - 1.0).fillna(0.0)
     return {
