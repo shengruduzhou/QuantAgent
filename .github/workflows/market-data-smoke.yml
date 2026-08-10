@@ -75,11 +75,11 @@ jobs:
           assert payload["minute"]["60"]["rows"] > 0
           PY
 
-      - name: Upload market-data smoke evidence
+      - name: Upload market-data smoke manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: market-data-smoke-${{ github.run_id }}
-          path: runtime/research/market_data_smoke/
+          path: runtime/research/market_data_smoke/manifest.json
           if-no-files-found: warn
           retention-days: 30
