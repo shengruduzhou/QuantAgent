@@ -2,13 +2,13 @@
 """Network/schema smoke for the public BaoStock market-data research path.
 
 This command is deliberately *not* a factor backtest and its fixed symbols are
-not a research universe.  It answers a narrower operational question: can the
+not a research universe. It answers a narrower operational question: can the
 scheduled runtime log in, pull raw A-share daily/intraday bars, retrieve an
 independent exchange calendar, and satisfy the repository's minimum schema and
 sanity contracts?
 
 The evidence emitted here must never be used to promote a factor, model, or
-strategy.  Public-provider timestamps/adjustments remain research inputs until
+strategy. Public-provider timestamps/adjustments remain research inputs until
 separately certified by the production PIT/integrity pipeline.
 """
 
@@ -71,6 +71,28 @@ def _fetch_calendar(
     return calendar.sort_values("calendar_date").reset_index(drop=True)
 
 
+def _validate_ohlcva(work: pd.DataFrame, *, label: str) -> pd.DataFrame:
+    """Validate numeric/market invariants without self-referential comparisons."""
+    out = work.copy()
+    numeric = ["open", "high", "low", "close", "volume", "amount"]
+    for column in numeric:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    if out[numeric].isna().any().any():
+        raise RuntimeError(f"{label} smoke has non-numeric OHLCVA values")
+    if (out[["open", "high", "low", "close"]].min(axis=1) <= 0).any():
+        raise RuntimeError(f"{label} smoke has non-positive OHLC values")
+    if (out[["volume", "amount"]].min(axis=1) < 0).any():
+        raise RuntimeError(f"{label} smoke has negative volume/amount")
+
+    reference_high = out[["open", "close"]].max(axis=1)
+    reference_low = out[["open", "close"]].min(axis=1)
+    if (out["high"] < reference_high).any() or (out["high"] < out["low"]).any():
+        raise RuntimeError(f"{label} smoke violates OHLC high invariant")
+    if (out["low"] > reference_low).any():
+        raise RuntimeError(f"{label} smoke violates OHLC low invariant")
+    return out
+
+
 def validate_daily_smoke(
     frame: pd.DataFrame,
     *,
@@ -106,19 +128,7 @@ def validate_daily_smoke(
         raise RuntimeError("daily smoke has duplicate symbol/trade_date rows")
     if (work["available_at"] < work["trade_date"]).any():
         raise RuntimeError("daily smoke has available_at before trade_date")
-
-    for column in ("open", "high", "low", "close", "volume", "amount"):
-        work[column] = pd.to_numeric(work[column], errors="coerce")
-    if work[["open", "high", "low", "close", "volume", "amount"]].isna().any().any():
-        raise RuntimeError("daily smoke has non-numeric OHLCVA values")
-    if (work[["open", "high", "low", "close"]].min(axis=1) <= 0).any():
-        raise RuntimeError("daily smoke has non-positive OHLC values")
-    if (work[["volume", "amount"]].min(axis=1) < 0).any():
-        raise RuntimeError("daily smoke has negative volume/amount")
-    if (work["high"] < work[["open", "close", "low"]].max(axis=1)).any():
-        raise RuntimeError("daily smoke violates OHLC high invariant")
-    if (work["low"] > work[["open", "close", "high"]].min(axis=1)).any():
-        raise RuntimeError("daily smoke violates OHLC low invariant")
+    work = _validate_ohlcva(work, label="daily")
 
     flags = set(work["adjustflag"].astype(str).str.strip().dropna().unique())
     if flags != {str(expected_adjust_flag)}:
@@ -177,6 +187,7 @@ def validate_minute_smoke(
         raise RuntimeError(f"{frequency}m smoke has duplicate symbol/timestamp rows")
     if (work["available_at"] < work["timestamp"]).any():
         raise RuntimeError(f"{frequency}m smoke has available_at before bar timestamp")
+    work = _validate_ohlcva(work, label=f"{frequency}m")
     flags = set(work["adjustflag"].astype(str).str.strip().dropna().unique())
     if flags != {str(expected_adjust_flag)}:
         raise RuntimeError(
@@ -235,9 +246,8 @@ def run_smoke(
         expected_adjust_flag="3",
     )
 
-    # Minute smoke is intentionally only one symbol and two native frequencies:
-    # this validates provider/network shape.  Cross-frequency 10m/session alignment
-    # belongs to the separate exchange-session aggregation audit in issue #100.
+    # Native 5m/60m validates the provider/network shape only. The 10m and
+    # session-aligned aggregation contract is a separate issue #100 change.
     minute_request = ProviderRequest(
         start_date=start_date,
         end_date=end_date,
