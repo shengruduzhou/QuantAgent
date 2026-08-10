@@ -15,7 +15,12 @@ class PITConfig:
 
 
 class PITJoiner:
-    """Point-in-time joins for fundamentals, events, and universe snapshots."""
+    """Point-in-time joins for fundamentals, events, and dated feature snapshots.
+
+    The left panel represents a decision frontier at ``event_cutoff`` on each
+    ``trade_date``. Every external feature must be joined by the timestamp at
+    which it first became knowable, never merely by its observation/report date.
+    """
 
     def __init__(self, config: PITConfig | None = None) -> None:
         self.config = config or PITConfig()
@@ -37,22 +42,14 @@ class PITJoiner:
         value_columns: Iterable[str] | None = None,
     ) -> pd.DataFrame:
         del report_period_column
-        if fundamentals.empty:
-            return panel.copy()
-        values = list(value_columns) if value_columns is not None else [
-            c for c in fundamentals.columns if c not in {self.config.symbol_column, announcement_column}
-        ]
-        left = self._left_frame(panel)
-        right = fundamentals[[self.config.symbol_column, announcement_column, *values]].copy()
-        right[announcement_column] = pd.to_datetime(right[announcement_column])
-        right = right.sort_values([self.config.symbol_column, announcement_column])
-        return _merge_asof_by_symbol(
-            left,
-            right,
-            left_on="_pit_timestamp",
-            right_on=announcement_column,
-            symbol_column=self.config.symbol_column,
-        ).drop(columns=["_pit_timestamp"])
+        return self.join_available_features(
+            panel,
+            fundamentals,
+            available_column=announcement_column,
+            value_columns=value_columns,
+            exclude_columns=(),
+            keep_available_column=True,
+        )
 
     def join_events(
         self,
@@ -61,22 +58,68 @@ class PITJoiner:
         event_time_column: str = "event_time",
         value_columns: Iterable[str] | None = None,
     ) -> pd.DataFrame:
-        if events.empty:
+        return self.join_available_features(
+            panel,
+            events,
+            available_column=event_time_column,
+            value_columns=value_columns,
+            exclude_columns=(),
+            keep_available_column=True,
+        )
+
+    def join_available_features(
+        self,
+        panel: pd.DataFrame,
+        features: pd.DataFrame,
+        *,
+        available_column: str = "available_at",
+        value_columns: Iterable[str] | None = None,
+        exclude_columns: Iterable[str] = (),
+        keep_available_column: bool = False,
+    ) -> pd.DataFrame:
+        """As-of join feature snapshots using their first-knowable timestamp.
+
+        This is the generic PIT primitive for flows, alternative data, analyst
+        updates and any other feature whose observation date can differ from its
+        economic availability. Missing availability is refused rather than
+        falling back to an exact-date merge, because that fallback is a silent
+        future-function when T-day data is published after the decision frontier.
+        """
+        if features.empty:
             return panel.copy()
+        symbol_column = self.config.symbol_column
+        if symbol_column not in features.columns:
+            raise ValueError(f"PIT feature frame missing symbol column: {symbol_column}")
+        if available_column not in features.columns:
+            raise ValueError(
+                f"PIT feature frame missing availability column: {available_column}; "
+                "observation/report date is not a substitute for first-knowable time"
+            )
+
+        excluded = {symbol_column, available_column, self.config.date_column, *exclude_columns}
         values = list(value_columns) if value_columns is not None else [
-            c for c in events.columns if c not in {self.config.symbol_column, event_time_column}
+            column for column in features.columns if column not in excluded
         ]
+        missing_values = sorted(set(values) - set(features.columns))
+        if missing_values:
+            raise ValueError(f"PIT feature frame missing value columns: {missing_values}")
+
         left = self._left_frame(panel)
-        right = events[[self.config.symbol_column, event_time_column, *values]].copy()
-        right[event_time_column] = pd.to_datetime(right[event_time_column])
-        right = right.sort_values([self.config.symbol_column, event_time_column])
-        return _merge_asof_by_symbol(
+        right = features[[symbol_column, available_column, *values]].copy()
+        right[available_column] = pd.to_datetime(right[available_column], errors="coerce")
+        if right[available_column].isna().any():
+            raise ValueError(f"PIT feature frame has invalid/null {available_column}")
+        right = right.sort_values([symbol_column, available_column])
+        merged = _merge_asof_by_symbol(
             left,
             right,
             left_on="_pit_timestamp",
-            right_on=event_time_column,
-            symbol_column=self.config.symbol_column,
+            right_on=available_column,
+            symbol_column=symbol_column,
         ).drop(columns=["_pit_timestamp"])
+        if not keep_available_column and available_column in merged.columns:
+            merged = merged.drop(columns=[available_column])
+        return merged
 
     def apply_universe_snapshot(
         self,

@@ -9,7 +9,7 @@ import pandas as pd
 from quantagent.data.event_store import EventStore
 from quantagent.data.features import add_benchmark_features, add_technical_features
 from quantagent.data.labels import add_forward_return_labels
-from quantagent.data.point_in_time import PITJoiner
+from quantagent.data.point_in_time import PITConfig, PITJoiner
 from quantagent.data.universe import UniverseBuilder
 
 
@@ -18,6 +18,7 @@ class FeatureStoreConfig:
     cache_dir: str | Path = "data/cache"
     feature_version: str = "v4.0"
     event_cutoff: str = "15:00:00"
+    fund_flow_available_column: str = "available_at"
     enable_alpha101: bool = True
     enable_cicc_high_freq: bool = True
     enable_sector_rotation: bool = True
@@ -43,7 +44,9 @@ class FeatureStore:
     ) -> None:
         self.config = config or FeatureStoreConfig()
         self.cache_dir = Path(self.config.cache_dir)
-        self.pit_joiner = pit_joiner or PITJoiner()
+        self.pit_joiner = pit_joiner or PITJoiner(
+            PITConfig(event_cutoff=self.config.event_cutoff)
+        )
         self.universe_builder = universe_builder or UniverseBuilder()
 
     def build_view(
@@ -86,6 +89,8 @@ class FeatureStore:
             "feature_version": self.config.feature_version,
             "point_in_time": True,
             "event_cutoff": self.config.event_cutoff,
+            "fund_flow_available_column": self.config.fund_flow_available_column,
+            "fund_flow_point_in_time_required": True,
         }
         return FeatureStoreResult(frame=frame, feature_version=self.config.feature_version, data_source_metadata=metadata)
 
@@ -152,10 +157,25 @@ class FeatureStore:
         return frame.merge(wide, on=["trade_date", "symbol"], how="left")
 
     def _join_fund_flow(self, frame: pd.DataFrame, fund_flow: pd.DataFrame) -> pd.DataFrame:
-        data = fund_flow.copy()
-        data["trade_date"] = pd.to_datetime(data["trade_date"])
-        flow_columns = [c for c in data.columns if c not in {"trade_date", "symbol"}]
-        return frame.merge(data[["trade_date", "symbol", *flow_columns]], on=["trade_date", "symbol"], how="left")
+        """Join flow features by first-knowable time, never by observation date.
+
+        Several flow providers report T-day values only after the close.  An exact
+        ``trade_date`` merge therefore lets a T-day decision consume a value that
+        did not exist yet.  ``available_at`` (or the configured equivalent) is a
+        required part of the data contract and the generic PIT joiner enforces it.
+        """
+        available_column = self.config.fund_flow_available_column
+        flow_columns = [
+            column
+            for column in fund_flow.columns
+            if column not in {"trade_date", "symbol", available_column}
+        ]
+        return self.pit_joiner.join_available_features(
+            frame,
+            fund_flow,
+            available_column=available_column,
+            value_columns=flow_columns,
+        )
 
     def _finalize(self, frame: pd.DataFrame) -> pd.DataFrame:
         out = frame.copy()
