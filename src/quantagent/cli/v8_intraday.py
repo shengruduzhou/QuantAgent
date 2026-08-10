@@ -64,6 +64,21 @@ def _normalise_minute_panel(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _calendar_open_mask(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Parse a vendor trading-day flag and reject unknown values."""
+
+    values = frame[column].astype("string").str.strip().str.lower()
+    true_values = {"1", "true", "yes", "y"}
+    false_values = {"0", "false", "no", "n"}
+    observed = {str(value) for value in values.dropna().unique()}
+    unknown = sorted(observed - true_values - false_values)
+    if unknown:
+        raise typer.BadParameter(f"market calendar has unknown {column} values: {unknown}")
+    if values.isna().any():
+        raise typer.BadParameter(f"market calendar has missing {column} values")
+    return values.isin(true_values)
+
+
 def _read_market_sessions(path: Path) -> pd.DatetimeIndex:
     """Read an explicit exchange-session schedule; never infer weekdays."""
     from quantagent.factors.executable_labels import canonical_market_sessions
@@ -77,16 +92,29 @@ def _read_market_sessions(path: Path) -> pd.DatetimeIndex:
         raise typer.BadParameter(f"unsupported market calendar format: {path}")
     if frame.empty:
         raise typer.BadParameter("market calendar is empty")
+
+    date_column: str | None = None
     for column in ("trade_date", "calendar_date", "date"):
         if column in frame.columns:
-            values = frame[column]
+            date_column = column
             break
-    else:
+    if date_column is None:
         if len(frame.columns) != 1:
             raise typer.BadParameter(
                 "market calendar requires trade_date/calendar_date/date or one date column"
             )
-        values = frame.iloc[:, 0]
+        date_column = str(frame.columns[0])
+
+    flag_column = next(
+        (column for column in ("is_trading_day", "is_open") if column in frame.columns),
+        None,
+    )
+    if flag_column is not None:
+        values = frame.loc[_calendar_open_mask(frame, flag_column), date_column]
+    else:
+        values = frame[date_column]
+    if values.empty:
+        raise typer.BadParameter("market calendar contains no trading sessions")
     return canonical_market_sessions(values)
 
 
