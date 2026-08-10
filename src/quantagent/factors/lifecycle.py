@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ from quantagent.factors.executable_labels import (
 
 
 UNVERIFIED_RETURN_SEMANTICS = "caller_supplied_return_semantics_unverified"
+FactorDirection = Literal["positive", "negative"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class LifecycleThresholds:
 @dataclass(frozen=True)
 class FactorLifecycleReport:
     factor_name: str
+    expected_direction: FactorDirection
     rolling_ic: float
     rolling_rank_ic: float
     icir: float
@@ -70,24 +72,29 @@ def build_factor_lifecycle_report(
     thresholds: LifecycleThresholds | None = None,
     *,
     market_sessions: Iterable[object] | None = None,
+    expected_direction: FactorDirection = "positive",
 ) -> FactorLifecycleReport:
-    """Build a research lifecycle diagnostic with auditable label semantics.
+    """Build a direction-aware research lifecycle diagnostic.
 
-    ``return_column`` is caller-supplied and may be used for the core diagnostic.
-    When ``close`` is available, lifecycle decay is recomputed from raw prices
-    under the governed T-close -> global-next-session contract. That strict
-    recomputation requires the same explicit market-session schedule used by the
-    label builder and binds its digest into the report.
+    ``expected_direction`` is part of the factor contract, not a result chosen after
+    seeing outcomes. ``positive`` means larger raw factor values should predict larger
+    future returns; ``negative`` means smaller raw factor values should predict larger
+    future returns.
 
-    The schedule is canonicalized exactly once. This matters for callers that
-    supply a one-shot iterable/generator: computing a digest must not consume the
-    clock and leave a different/empty schedule for decay.
+    Direction is applied before every sign-sensitive diagnostic: IC/RankIC, Newey-West
+    rank t-statistic, quantile monotonicity, turnover of the economically long tail,
+    capacity of that tail and executable decay. Correlation/crowding and live drift use
+    the raw factor because their gates are sign-invariant (absolute correlation/drift).
 
-    If prices are absent, decay is unavailable and the report does not pretend
-    that the caller-supplied return column has verified execution semantics.
+    ``return_column`` is caller-supplied and may be used for the core diagnostic. When
+    ``close`` is available, lifecycle decay is recomputed from raw prices under the
+    governed T-close -> global-next-session contract. That strict recomputation requires
+    the same explicit market-session schedule used by the label builder and binds its
+    digest into the report.
     """
 
     thresholds = thresholds or LifecycleThresholds()
+    direction = _direction_multiplier(expected_direction)
     required = {"trade_date", "symbol", factor_column, return_column}
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -98,11 +105,15 @@ def build_factor_lifecycle_report(
     if data.duplicated(["trade_date", "symbol"]).any():
         raise ValueError("factor lifecycle requires unique trade_date/symbol rows")
 
+    directed_column = _temporary_direction_column(data.columns)
+    raw_factor = pd.to_numeric(data[factor_column], errors="coerce")
+    data[directed_column] = raw_factor * direction
+
     counts = data.groupby("trade_date")["symbol"].nunique()
     effective_dates = int(len(counts))
     median_symbols = float(counts.median()) if not counts.empty else 0.0
-    ic = information_coefficient(data, factor_column, return_column)
-    groups = quantile_group_backtest(data, factor_column, return_column)
+    ic = information_coefficient(data, directed_column, return_column)
+    groups = quantile_group_backtest(data, directed_column, return_column)
 
     decay = None
     calendar_digest: str | None = None
@@ -117,14 +128,14 @@ def build_factor_lifecycle_report(
         calendar_digest = market_session_schedule_sha256(sessions)
         decay = executable_factor_decay_curve(
             data,
-            factor_column,
+            directed_column,
             horizons=(1,),
             market_sessions=sessions,
         )
         label_semantics = FACTOR_LABEL_SEMANTICS
 
     capacity = (
-        capacity_proxy(data, factor_column, amount_column=amount_column)
+        capacity_proxy(data, directed_column, amount_column=amount_column)
         if amount_column in data.columns
         else None
     )
@@ -146,6 +157,7 @@ def build_factor_lifecycle_report(
     )
     return FactorLifecycleReport(
         factor_name=factor_column,
+        expected_direction=expected_direction,
         rolling_ic=ic.summary.mean_ic,
         rolling_rank_ic=ic.summary.mean_rank_ic,
         icir=ic.summary.icir,
@@ -183,7 +195,12 @@ def recommend_factor_status(
     newey_west_rank_t_stat: float = np.nan,
     thresholds: LifecycleThresholds | None = None,
 ) -> str:
-    """Recommend a *research* lifecycle status, never direct economic ACTIVE."""
+    """Recommend a research lifecycle status from direction-aligned diagnostics.
+
+    Callers providing metrics directly must align them so positive IC/ICIR/t-stat and
+    positive monotonicity represent the factor's pre-declared profitable direction.
+    ``build_factor_lifecycle_report`` performs that alignment automatically.
+    """
     thresholds = thresholds or LifecycleThresholds()
     rank_icir = _finite_or(rank_icir, -np.inf)
     positive_ratio = _finite_or(positive_ratio, 0.0)
@@ -268,6 +285,24 @@ def _live_drift(frame: pd.DataFrame, factor_column: str, date_column: str = "tra
     if not np.isfinite(std) or std <= 1e-12 or live.empty:
         return np.nan
     return float((live.mean() - hist.mean()) / std)
+
+
+def _direction_multiplier(expected_direction: FactorDirection) -> float:
+    if expected_direction == "positive":
+        return 1.0
+    if expected_direction == "negative":
+        return -1.0
+    raise ValueError(
+        "expected_direction must be 'positive' or 'negative'; direction cannot be inferred after observing returns"
+    )
+
+
+def _temporary_direction_column(columns: Iterable[object]) -> str:
+    existing = {str(column) for column in columns}
+    name = "__quantagent_direction_aligned_factor__"
+    while name in existing:
+        name += "_"
+    return name
 
 
 def _finite_or(value: float, fallback: float) -> float:
