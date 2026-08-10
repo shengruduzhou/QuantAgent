@@ -1,0 +1,92 @@
+name: Market Data Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Infrastructure-smoke symbols only; never a research universe"
+        required: false
+        default: "600000.SH,000001.SZ,300750.SZ"
+        type: string
+      lookback_days:
+        description: "Short network/schema smoke lookback"
+        required: false
+        default: "21"
+        type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/market-data-smoke.yml"
+      - "scripts/run_market_data_smoke.py"
+      - "tests/data/test_market_data_smoke.py"
+      - "src/quantagent/data/providers/baostock_provider.py"
+  schedule:
+    # 17:40 Asia/Shanghai on weekdays: after the A-share close. This is a
+    # connectivity/schema smoke, not a factor-performance research run.
+    - cron: "40 9 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  baostock-raw-pipeline-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SMOKE_SYMBOLS: ${{ github.event.inputs.symbols || '600000.SH,000001.SZ,300750.SZ' }}
+      SMOKE_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '21' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install public-data smoke runtime
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -e . "baostock>=0.9.3"
+
+      - name: Pull raw daily, 5m, 60m and independent market calendar
+        run: |
+          python scripts/run_market_data_smoke.py \
+            --symbols "$SMOKE_SYMBOLS" \
+            --lookback-days "$SMOKE_LOOKBACK_DAYS" \
+            --end-date "$(date -u +%F)" \
+            --output-dir runtime/research/market_data_smoke
+
+      - name: Assert smoke cannot masquerade as performance evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("runtime/research/market_data_smoke/manifest.json").read_text(encoding="utf-8")
+          )
+          assert payload["research_smoke_only"] is True
+          assert payload["performance_evidence"] is False
+          assert payload["factor_promotion"] is False
+          assert payload["model_promotion"] is False
+          assert payload["economic_live_eligible"] is False
+          assert payload["automatic_factor_activation"] is False
+          assert payload["fixed_symbols_are_research_universe"] is False
+          assert payload["source"]["adjustment"] == "raw"
+          assert payload["source"]["production_integrity_certified"] is False
+          assert payload["calendar"]["independent_of_symbol_bars"] is True
+          assert payload["daily"]["rows"] > 0
+          assert payload["minute"]["5"]["rows"] > 0
+          assert payload["minute"]["60"]["rows"] > 0
+          PY
+
+      - name: Upload market-data smoke manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-data-smoke-${{ github.run_id }}
+          path: runtime/research/market_data_smoke/manifest.json
+          if-no-files-found: warn
+          retention-days: 30
