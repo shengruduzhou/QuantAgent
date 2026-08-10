@@ -104,6 +104,13 @@ def test_partial_window_is_not_emitted_by_default() -> None:
     ]
 
 
+def test_adjusted_bars_without_raw_amount_fail_closed() -> None:
+    frame = _five_minute_day(adjustflag="1").drop(columns=["amount"])
+
+    with pytest.raises(IntradaySessionError, match="provider-supplied raw amount"):
+        aggregate_ashare_bars(frame, minutes=10)
+
+
 def test_mixed_naive_and_aware_timestamps_are_rejected() -> None:
     frame = _five_minute_day().iloc[:2].copy()
     frame["timestamp"] = [
