@@ -54,7 +54,45 @@ def test_daily_smoke_accepts_raw_schema_and_reports_non_research_fields() -> Non
     )
     assert evidence["adjustment"] == "raw"
     assert evidence["rows"] == 2
+    assert evidence["active_rows"] == 2
     assert evidence["suspended_rows"] == 0
+
+
+def test_daily_smoke_treats_suspension_as_market_state_not_provider_failure() -> None:
+    frame = _daily()
+    frame.loc[1, "tradestatus"] = "0"
+    frame.loc[1, ["open", "high", "low", "close"]] = ""
+    frame.loc[1, ["volume", "amount"]] = 0
+
+    evidence = validate_daily_smoke(
+        frame,
+        requested_symbols=("600000.SH", "000001.SZ"),
+    )
+    assert evidence["active_rows"] == 1
+    assert evidence["suspended_rows"] == 1
+
+
+def test_daily_smoke_rejects_unknown_trade_status_or_no_active_rows() -> None:
+    unknown = _daily()
+    unknown.loc[0, "tradestatus"] = "9"
+    with pytest.raises(RuntimeError, match="unknown tradestatus"):
+        validate_daily_smoke(unknown, requested_symbols=("600000.SH", "000001.SZ"))
+
+    all_suspended = _daily()
+    all_suspended["tradestatus"] = "0"
+    with pytest.raises(RuntimeError, match="no actively traded rows"):
+        validate_daily_smoke(
+            all_suspended,
+            requested_symbols=("600000.SH", "000001.SZ"),
+        )
+
+
+def test_daily_smoke_rejects_negative_suspended_turnover_fields() -> None:
+    frame = _daily()
+    frame.loc[1, "tradestatus"] = "0"
+    frame.loc[1, "volume"] = -1
+    with pytest.raises(RuntimeError, match="negative volume"):
+        validate_daily_smoke(frame, requested_symbols=("600000.SH", "000001.SZ"))
 
 
 def test_daily_smoke_rejects_adjusted_history() -> None:
