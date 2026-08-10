@@ -32,6 +32,7 @@ from quantagent.domain.orders import (
     Side as CanonicalSide,
     Signal,
 )
+from quantagent.market_rules import ashare as market_rules
 from quantagent.quant_math.ashare import AshareRuleEngine
 
 
@@ -65,26 +66,62 @@ def _request_fingerprint(order: Order) -> str:
     return sha1(
         "|".join(
             str(part) for part in (
-                order.symbol, order.side.value, int(order.quantity),
-                order.order_type.value, order.price, order.strategy_version,
+                order.symbol,
+                order.side.value,
+                int(order.quantity),
+                order.order_type.value,
+                order.price,
+                order.strategy_version,
             )
         ).encode("utf-8")
     ).hexdigest()[:16]
 
 
 def assert_forensic_isolation(broker: object) -> None:
-    """Refuse a forensic harness wired to anything that can really trade.
-
-    Reproducing a historical bug means deliberately disabling the duplicate
-    guard. That is only safe against an in-memory double; against paper, shadow
-    or a broker it would reintroduce the very duplicates the guard prevents.
-    """
+    """Refuse a forensic harness wired to anything that can really trade."""
     name = type(broker).__module__ + "." + type(broker).__qualname__
     forbidden = ("paper", "shadow", "live", "qmt", "broker_gateway")
     if any(token in name.lower() for token in forbidden):
         raise ForensicHarnessLeak(
             f"forensic_replay=True cannot be used with {name}: it can reach economic execution"
         )
+
+
+def _cash_equity_board(rule_engine: AshareRuleEngine, symbol: str) -> str | None:
+    """Map a cash-equity symbol to the neutral exchange-rule board.
+
+    ETFs, convertible bonds and futures deliberately stay on their specialised
+    adapter path instead of inheriting stock quantity rules from a ticker prefix.
+    """
+    asset_board = rule_engine.infer_board(symbol)
+    if asset_board not in {"main_board", "chinext", "star", "bse"}:
+        return None
+    return market_rules.exchange_board_for_symbol(symbol)
+
+
+def _round_delta_quantity(
+    rule_engine: AshareRuleEngine,
+    symbol: str,
+    side: str,
+    quantity: float,
+    *,
+    is_full_liquidation: bool = False,
+    order_type: str = "LIMIT",
+) -> int:
+    """Round one target delta and cap it at an encoded exchange order maximum."""
+    board = _cash_equity_board(rule_engine, symbol)
+    if board is None:
+        return rule_engine.round_order_quantity(symbol, side, quantity)
+    rounded = market_rules.round_to_lot(
+        quantity,
+        board=board,
+        side=side,
+        is_full_liquidation=is_full_liquidation,
+    )
+    maximum = market_rules.max_order_quantity(board, order_type)
+    if maximum is not None:
+        rounded = min(rounded, maximum)
+    return int(rounded)
 
 
 @dataclass(frozen=True)
@@ -96,10 +133,6 @@ class OrderManagerConfig:
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
     max_participation_rate: float = 0.05
-    #: A target weight at or below this is treated as "no position wanted".
-    #: Rank/softmax weighting leaves a long tail of ~1e-7 weights that can never
-    #: round to a tradable lot; without a floor each one becomes a skipped-order
-    #: record for a symbol the book was never going to touch.
     negligible_weight: float = 1e-6
     strategy_version: str = "v4.0"
 
@@ -114,20 +147,7 @@ class OrderRecord:
 
 @dataclass
 class OrderManager:
-    """Idempotent order router. Generates per-symbol delta orders from target weights.
-
-    The canonical ``RISK_APPROVED`` event is a fact, not a routing convenience.
-    A QMT live gateway advertises that it requires explicit risk approval; in
-    that case the OMS runs :class:`ExecutionConstraintEvaluator` before opening
-    the broker side of the lifecycle and replaces ``risk_check_result`` with the
-    literal ``approved`` only when the evaluator passes.  A rejected order is
-    recorded canonically as ``RISK_REJECTED`` and never reaches ``broker.submit``.
-
-    Non-live/research brokers retain their existing economic path, but their
-    canonical decision is now named ``order_manager_basic_admissibility`` so it
-    no longer falsely claims that cash/T+1/band/portfolio production risk was
-    checked when it was not.
-    """
+    """Idempotent order router and canonical pre-trade gate."""
 
     broker: BrokerBase
     config: OrderManagerConfig = field(default_factory=OrderManagerConfig)
@@ -135,31 +155,15 @@ class OrderManager:
     counts_today: dict[str, int] = field(default_factory=dict)
     last_skipped_orders: list[dict[str, object]] = field(default_factory=list)
     skipped_orders: list[dict[str, object]] = field(default_factory=list)
-    #: Canonical record of account. `history` above is an in-memory projection
-    #: for the broker wire protocol; economic truth lives here and survives a
-    #: restart. Pass `ledger_path` to make it durable.
     ledger_path: str | None = None
     lineage: Lineage = field(default_factory=Lineage)
-    #: Durable claim-once guard. `history` alone could not protect a restart:
-    #: a worker killed between broker.submit() and _update() lost the record and
-    #: resubmitted the same intent on recovery.
     idempotency_path: str | None = None
-    #: Isolated harness for reproducing historical (pre-INC-E1) behaviour.
-    #: Bypasses the durable guard so a shipped bug stays reproducible, and
-    #: is refused by any broker that can reach real, paper or shadow
-    #: execution — see `assert_forensic_isolation`.
     forensic_replay: bool = False
-    #: Injected when a canonical-aware venue (the paper broker) must append its
-    #: own lifecycle events to *this* chain. Sharing one ledger and one book is
-    #: what keeps a single economic order to a single record of account; letting
-    #: each side build its own would double-count every order that crosses them.
     canonical_ledger: CanonicalLedger | None = None
     order_book: OrderBook | None = None
-    #: Production constraint evaluator.  It is only promoted to an authoritative
-    #: live gate when the broker declares ``require_risk_approval`` in live mode;
-    #: this avoids silently changing historical backtest economics while still
-    #: making the real broker path fail closed.
-    constraint_evaluator: ExecutionConstraintEvaluator = field(default_factory=ExecutionConstraintEvaluator)
+    constraint_evaluator: ExecutionConstraintEvaluator = field(
+        default_factory=ExecutionConstraintEvaluator
+    )
 
     def __post_init__(self) -> None:
         if self.forensic_replay:
@@ -170,49 +174,37 @@ class OrderManager:
                 "for one order manager is the duplicate record of account this "
                 "argument exists to prevent"
             )
-        # `is not None`, not `or`: CanonicalLedger defines __len__, so an empty
-        # injected ledger is falsy and `or` would silently swap it for a fresh
-        # in-memory one — every event would be written to a chain nobody reads.
         self.canonical = (
             self.canonical_ledger
             if self.canonical_ledger is not None
             else CanonicalLedger(self.ledger_path)
         )
-        # As in PaperBroker: a chain that already holds events determines the
-        # starting state. Beginning empty against a populated ledger lets the
-        # manager re-open an order the file says is terminal, which appends events
-        # that make the chain unreplayable (DEF-014).
         self.book = (
-            self.order_book if self.order_book is not None
+            self.order_book
+            if self.order_book is not None
             else (self.canonical.replay_book() if len(self.canonical) else OrderBook())
         )
-        #: True when the venue writes its own ACCEPTED/FILL/REJECTED events to the
-        #: shared chain. The OMS then stops at SUBMITTED rather than folding the
-        #: broker reply a second time.
         self._venue_is_canonical = callable(getattr(self.broker, "attach_canonical", None))
         self.claims = IdempotencyStore(self.idempotency_path)
-        #: Broker wire request/reply cache, keyed by client_order_id. Not
-        #: economic truth — see the `history` property.
         self._wire: dict[str, OrderRecord] = {}
-        #: canonical order_id -> broker client_order_id, the one-way link
-        #: that lets the wire cache be projected from the ledger.
         self._client_order_ids: dict[str, str] = {}
-        #: Intraday live-submit history used by the stateful constraint DSL.
-        #: It counts orders that actually passed local risk and were attempted
-        #: at the venue.  Runtime-state persistence across process restart is a
-        #: separate production gate; broker preflight remains authoritative for
-        #: open orders/trades/positions after restart.
         self._risk_intents_today: list[OrderIntentRecord] = []
 
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
         self._risk_intents_today.clear()
 
-    def reconcile(self, target_weights: pd.Series, prices: pd.Series, nav: float,
-                  signal_id: str = "manual") -> list[OrderState]:
+    def reconcile(
+        self,
+        target_weights: pd.Series,
+        prices: pd.Series,
+        nav: float,
+        signal_id: str = "manual",
+    ) -> list[OrderState]:
         positions = {p.symbol: p for p in self.broker.query_positions()}
         intents = self.target_weights_to_order_intents(
-            target_weights, prices, nav, positions=positions, signal_id=signal_id)
+            target_weights, prices, nav, positions=positions, signal_id=signal_id
+        )
         orders: list[Order] = []
         for intent in intents:
             if self.counts_today.get(intent.symbol, 0) >= self.config.max_orders_per_symbol_per_day:
@@ -259,27 +251,15 @@ class OrderManager:
             current = positions.get(str(symbol))
             current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0
             raw_target = float(weight) * nav / price
-            # Nothing held and nothing wanted is not an order that was skipped —
-            # it is an absence of intent. Auditing it as a skip buried the real
-            # skips: a 400-name universe produced 1,971 of these against 320
-            # genuine ones, and the backtest read as though execution friction
-            # had blocked 93% of its trading.
             if current_shares == 0 and abs(float(weight)) <= self.config.negligible_weight:
                 continue
             delta_shares = raw_target - current_shares
             delta_value = abs(delta_shares) * price
             if raw_target >= current_shares:
                 side = OrderSide.BUY
-                quantity = self.rule_engine.round_order_quantity(str(symbol), "buy", delta_shares)
+                quantity = _round_delta_quantity(self.rule_engine, str(symbol), "buy", delta_shares, order_type="LIMIT")
                 if quantity <= 0:
-                    # Real intent that cannot be expressed in whole lots. The
-                    # implied size is what makes it drillable: "wanted 0.0025
-                    # shares" is a portfolio-weight problem, not a venue rule.
-                    self._skip(
-                        str(symbol), side, 0, float(weight), price,
-                        "skipped_below_min_lot", now, delta_value,
-                        implied_shares=delta_shares,
-                    )
+                    self._skip(str(symbol), side, 0, float(weight), price, "skipped_below_min_lot", now, delta_value, implied_shares=delta_shares)
                     continue
                 if quantity * price < self.config.min_order_value_yuan:
                     self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
@@ -287,27 +267,25 @@ class OrderManager:
             else:
                 side = OrderSide.SELL
                 desired_sell = current_shares - raw_target
-                full_liquidation = current_shares < self.config.lot_size and float(weight) <= 1e-6
-                if full_liquidation and self.config.allow_odd_lot_sell_only_for_full_liquidation:
-                    quantity = current_shares
-                else:
-                    quantity = int(desired_sell // self.config.lot_size * self.config.lot_size)
+                target_is_zero = float(weight) <= self.config.negligible_weight
+                quantity = _round_delta_quantity(
+                    self.rule_engine,
+                    str(symbol),
+                    "sell",
+                    desired_sell,
+                    is_full_liquidation=(target_is_zero and self.config.allow_odd_lot_sell_only_for_full_liquidation),
+                    order_type="LIMIT",
+                )
                 if quantity <= 0:
-                    reason = (
-                        "skipped_not_full_odd_lot_liquidation"
-                        if current_shares < self.config.lot_size and not full_liquidation
-                        else "skipped_below_min_lot"
-                    )
                     self._skip(
-                        str(symbol), side, 0, float(weight), price, reason, now, delta_value,
-                        implied_shares=-desired_sell,
+                        str(symbol), side, 0, float(weight), price,
+                        "skipped_not_full_odd_lot_liquidation" if desired_sell > 0 and not target_is_zero else "skipped_below_min_lot",
+                        now, delta_value, implied_shares=-desired_sell,
                     )
                     continue
-                if quantity * price < self.config.min_order_value_yuan and not full_liquidation:
+                if quantity * price < self.config.min_order_value_yuan and not target_is_zero:
                     self._skip(str(symbol), side, quantity, float(weight), price, "skipped_small_order", now, quantity * price)
                     continue
-            if quantity <= 0:
-                continue
             intent_id = self._make_id(str(symbol), side, signal_id=signal_id, model_version=model_version)
             intents.append(
                 OrderIntent(
@@ -347,8 +325,6 @@ class OrderManager:
             "reference_price": float(reference_price),
             "reason": reason,
             "delta_value": float(delta_value),
-            # The fractional share count the weight asked for. Without it a
-            # sub-lot skip is indistinguishable from a venue rejection.
             "implied_shares": None if implied_shares is None else float(implied_shares),
             "timestamp": timestamp,
         }
@@ -356,14 +332,7 @@ class OrderManager:
         self.skipped_orders.append(row)
 
     def submit_orders(self, orders: Iterable[Order]) -> list[OrderState]:
-        """Route explicit orders through the full guarded path.
-
-        `reconcile` covers the weight-driven case, but an OMS must also accept an
-        order somebody stated directly — a manual instruction from the web app, a
-        replay of a recorded intent, a reconciliation fix-up. Routing those through
-        the same `_submit_all` is what stops a second, unguarded submission path
-        from appearing next to the protected one.
-        """
+        """Route explicit orders through the same guarded path as reconciliation."""
         return list(self._submit_all(orders))
 
     def cancel_all_open(self) -> list[OrderState]:
@@ -378,14 +347,9 @@ class OrderManager:
     def _submit_all(self, orders: Iterable[Order]) -> Iterable[OrderState]:
         for original_order in orders:
             order = original_order
-            # Durable claim before the broker is touched. The in-memory
-            # `history` check that used to guard this was lost on restart, so a
-            # worker killed after submit but before _update resubmitted the same
-            # intent on recovery — a second economic order.
             if not self.forensic_replay and not self.lineage.run_id:
                 raise MissingIdempotencyLineage(
-                    f"order {order.client_order_id} has no lineage.run_id; economic "
-                    "submission requires canonical lineage and an idempotency key"
+                    f"order {order.client_order_id} has no lineage.run_id; economic submission requires canonical lineage and an idempotency key"
                 )
             key = order_intent_key(
                 run_id=self.lineage.run_id or "forensic",
@@ -412,9 +376,6 @@ class OrderManager:
             if self.forensic_replay and order.client_order_id in self.history:
                 continue
 
-            # Open the canonical intent/order in PENDING_RISK first.  Risk is
-            # applied next and therefore cannot be retrospectively invented
-            # after the venue has already seen the order.
             canonical_order = self._open_canonical_pending(order)
             self._client_order_ids[canonical_order.order_id] = order.client_order_id
             order, risk_decision, risk_intent = self._pretrade_decision(order, canonical_order)
@@ -446,9 +407,6 @@ class OrderManager:
 
             canonical_order = self._apply_canonical_risk(canonical_order, risk_decision, approved=True)
             if risk_intent is not None:
-                # Count the local approved attempt before touching the venue so
-                # a broker-level rejection still counts toward order-rate and
-                # turnover constraints for the current process/session.
                 self._risk_intents_today.append(risk_intent)
             if self._venue_is_canonical:
                 self.broker.attach_canonical(order.client_order_id, canonical_order.order_id)
@@ -458,7 +416,8 @@ class OrderManager:
                 self._record_canonical_state(canonical_order, state)
             if not self.forensic_replay:
                 self.claims.resolve(
-                    key, outcome=order.client_order_id,
+                    key,
+                    outcome=order.client_order_id,
                     payload={
                         "clientOrderId": order.client_order_id,
                         "orderId": canonical_order.order_id,
@@ -470,7 +429,6 @@ class OrderManager:
             yield state
 
     def _requires_production_pretrade(self) -> bool:
-        """Whether the attached broker declares a fail-closed live risk contract."""
         broker_config = getattr(self.broker, "config", None)
         if broker_config is None:
             return False
@@ -480,12 +438,63 @@ class OrderManager:
             and not getattr(broker_config, "dry_run", True)
         )
 
+    def _is_proven_full_liquidation(self, symbol: str, quantity: int) -> bool:
+        """Prove a sell is the account's entire unfrozen position.
+
+        This is intentionally broker-state based rather than a caller flag.  It
+        covers both a sub-minimum residual (for example 37 shares) and a legal
+        combined round-lot-plus-residual liquidation (for example 250 shares on
+        a 100-share-increment board).  Partial odd-lot splitting remains blocked.
+        """
+        try:
+            positions = self.broker.query_positions()
+        except Exception:
+            return False
+        for position in positions:
+            if str(position.symbol) != str(symbol):
+                continue
+            available = int(getattr(position, "available_shares", 0))
+            frozen = int(getattr(position, "frozen_shares", 0))
+            return available > 0 and available == int(quantity) and frozen == 0
+        return False
+
+    def _exchange_quantity_rejection(self, order: Order) -> str | None:
+        """Return a fail-closed cash-equity quantity violation, if any."""
+        board = _cash_equity_board(self.rule_engine, order.symbol)
+        if board is None:
+            return None
+        quantity = int(order.quantity)
+        minimum, increment = market_rules.LOT_RULES[board]
+        maximum = market_rules.max_order_quantity(board, order.order_type.value.upper())
+        if maximum is not None and quantity > maximum:
+            return (
+                f"{board} {order.order_type.value} quantity {quantity} exceeds exchange maximum {maximum}"
+            )
+        full_liquidation = (
+            order.side is OrderSide.SELL
+            and self._is_proven_full_liquidation(order.symbol, quantity)
+        )
+        if quantity < minimum:
+            if full_liquidation:
+                return None
+            return (
+                f"{board} quantity {quantity} is below normal minimum {minimum}; "
+                "sub-minimum sell requires proven full liquidation"
+            )
+        if (quantity - minimum) % increment != 0:
+            if full_liquidation:
+                return None
+            return (
+                f"{board} quantity {quantity} violates minimum/increment "
+                f"{minimum}+n*{increment}; non-increment sell requires proven full liquidation"
+            )
+        return None
+
     def _pretrade_decision(
         self,
         order: Order,
         canonical_order,
     ) -> tuple[Order, CanonicalRiskDecision, OrderIntentRecord | None]:
-        """Evaluate pre-submit risk and return a canonical first-class decision."""
         explicit = (order.risk_check_result or "not_checked").strip().lower()
         if explicit in {"rejected", "reject", "blocked", "failed", "fail", "denied"}:
             return (
@@ -501,8 +510,6 @@ class OrderManager:
                 None,
             )
 
-        # Basic order-shape admissibility is always real and auditable.  It does
-        # not pretend to be portfolio/live risk.
         if int(order.quantity) <= 0:
             return (
                 order,
@@ -530,22 +537,40 @@ class OrderManager:
                 None,
             )
 
+        quantity_rejection = self._exchange_quantity_rejection(order)
+        if quantity_rejection is not None:
+            return (
+                order,
+                CanonicalRiskDecision.create(
+                    approved=False,
+                    rule="exchange_quantity_admissibility",
+                    threshold="board_minimum_increment_maximum_or_proven_full_liquidation",
+                    measured={
+                        "symbol": order.symbol,
+                        "quantity": int(order.quantity),
+                        "order_type": order.order_type.value,
+                    },
+                    reason=quantity_rejection,
+                    lineage=canonical_order.lineage,
+                    decided_by="order_manager",
+                ),
+                None,
+            )
+
         if not self._requires_production_pretrade():
             decision = CanonicalRiskDecision.create(
                 approved=True,
                 rule="order_manager_basic_admissibility",
-                threshold="positive_quantity+valid_limit_price",
+                threshold="positive_quantity+valid_limit_price+exchange_quantity",
                 measured={"upstream": explicit, "mode": "non_live_or_research"},
-                reason="basic OMS admissibility passed; this is not production risk certification",
+                reason=(
+                    "basic OMS and exchange-quantity admissibility passed; this is not production risk certification"
+                ),
                 lineage=canonical_order.lineage,
                 decided_by="order_manager",
             )
             return order, decision, None
 
-        # Live QMT: an unbounded market order has no price with which to enforce
-        # order-value/deviation/board protection.  The production path therefore
-        # fails closed even though the low-level broker adapter knows how to send
-        # a QMT market-price type.
         if order.order_type == OrderType.MARKET or order.price is None or float(order.price) <= 0:
             return (
                 order,
@@ -560,18 +585,13 @@ class OrderManager:
                 None,
             )
 
-        timestamp = pd.Timestamp(
-            order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        )
+        timestamp = pd.Timestamp(order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat())
         nav: float | None = None
         try:
             queried_nav = float(self.broker.query_account_value())
             if pd.notna(queried_nav) and queried_nav > 0:
                 nav = queried_nav
         except Exception:
-            # Missing account state must not be converted into an invented NAV.
-            # The DSL will skip NAV-dependent checks; QMT preflight is separately
-            # required to make a live submit reachable at all.
             nav = None
         risk_intent = OrderIntentRecord(
             intent_id=order.client_order_id,
@@ -593,8 +613,7 @@ class OrderManager:
             reason=(
                 "all production pre-submit execution constraints passed"
                 if report.passed
-                else "blocking execution constraint violation: "
-                + ",".join(sorted(report.by_constraint))
+                else "blocking execution constraint violation: " + ",".join(sorted(report.by_constraint))
             ),
             lineage=canonical_order.lineage,
             decided_by="execution_constraint_dsl",
@@ -603,13 +622,13 @@ class OrderManager:
             return order, decision, None
         return replace(order, risk_check_result="approved"), decision, risk_intent
 
-    # -- canonical emission --------------------------------------------------
     def _open_canonical_pending(self, order: Order):
-        """Signal -> OrderIntent -> PENDING_RISK order on the canonical ledger."""
         session = str(order.timestamp)[:10]
         signal = Signal.create(
-            symbol=order.symbol, trade_date=f"{session}-{order.signal_id or 'manual'}",
-            score=0.0, lineage=self.lineage,
+            symbol=order.symbol,
+            trade_date=f"{session}-{order.signal_id or 'manual'}",
+            score=0.0,
+            lineage=self.lineage,
         )
         intent = CanonicalIntent.create(
             symbol=order.symbol,
@@ -621,7 +640,13 @@ class OrderManager:
         )
         return mirror_open(self.book, self.canonical, intent, trade_date=session)
 
-    def _apply_canonical_risk(self, canonical_order, decision: CanonicalRiskDecision, *, approved: bool):
+    def _apply_canonical_risk(
+        self,
+        canonical_order,
+        decision: CanonicalRiskDecision,
+        *,
+        approved: bool,
+    ):
         session = canonical_order.trade_date
         risk_event = CanonicalEventType.RISK_APPROVED if approved else CanonicalEventType.RISK_REJECTED
         self.book.apply(
@@ -638,11 +663,6 @@ class OrderManager:
         return self.book.state_of(canonical_order.order_id)
 
     def _record_canonical_state(self, canonical, state: OrderState) -> None:
-        """Fold the broker's reply into the canonical order.
-
-        The broker's own status enum stays at the wire boundary; only the
-        canonical state machine decides what the order *is*.
-        """
         session = str(getattr(state, "timestamp", "") or "")[:10] or None
         mapping = {
             OrderStatus.REJECTED: CanonicalEventType.REJECTED,
@@ -652,37 +672,22 @@ class OrderManager:
         try:
             self.book.apply(canonical.order_id, event, reason=getattr(state, "reason", None))
         except Exception:
-            # An unexpected broker status must not corrupt the canonical chain;
-            # the order simply stays in its last legal state and the divergence
-            # is visible because the ledger has no matching event.
             return
         self.canonical.append(self.book.history_of(canonical.order_id)[-1], trade_date=session)
 
     def _update(self, order: Order, state: OrderState) -> None:
-        """Refresh the wire-protocol cache for one order.
-
-        `_wire` is a cache of broker request/reply pairs, not economic truth:
-        `history` rebuilds from the canonical ledger and `rebuild_history`
-        proves the two agree. Cash, position and quantity are never read from
-        here.
-        """
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         record = self._wire.get(order.client_order_id)
         submitted_at = record.submitted_at if record is not None else now
         self._wire[order.client_order_id] = OrderRecord(
-            order=order, state=state, submitted_at=submitted_at, last_updated_at=now,
+            order=order,
+            state=state,
+            submitted_at=submitted_at,
+            last_updated_at=now,
         )
 
     @property
     def history(self) -> dict[str, OrderRecord]:
-        """Broker-wire view of every order the canonical ledger knows about.
-
-        Derived, not maintained: an order absent from the ledger cannot appear
-        here, so the projection cannot drift into claiming an order the record
-        of account does not have. Previously this dict was appended to
-        independently and was the second copy of economic truth Module One
-        exists to remove.
-        """
         projected: dict[str, OrderRecord] = {}
         for canonical in self.book.orders():
             client_order_id = self._client_order_ids.get(canonical.order_id)
@@ -695,23 +700,7 @@ class OrderManager:
         return projected
 
     def rebuild_history(self) -> dict[str, OrderRecord]:
-        """Rebuild the projection from the ledger alone.
-
-        Used by recovery and by the audit: if this disagrees with `history`,
-        the cache had state the ledger did not, which is the defect class this
-        design forbids.
-
-        Reads the chain this manager actually writes to, re-opened from disk when
-        it is durable. It used to construct `CanonicalLedger(self.ledger_path)`,
-        which returned an *empty* ledger whenever the chain was injected or
-        in-memory — so the audit compared `history` against nothing and passed
-        (DEF-010).
-        """
-        source = (
-            CanonicalLedger(self.canonical.path)
-            if self.canonical.path is not None
-            else self.canonical
-        )
+        source = CanonicalLedger(self.canonical.path) if self.canonical.path is not None else self.canonical
         book = source.replay_book()
         known = {order.order_id for order in book.orders()}
         return {
@@ -721,7 +710,12 @@ class OrderManager:
         }
 
     @staticmethod
-    def _make_id(symbol: str, side: OrderSide, signal_id: str = "", model_version: str = "") -> str:
+    def _make_id(
+        symbol: str,
+        side: OrderSide,
+        signal_id: str = "",
+        model_version: str = "",
+    ) -> str:
         seed = f"{symbol}-{side.value}-{signal_id}-{model_version}"
         suffix = uuid4().hex[:10] if not signal_id else sha1(seed.encode("utf-8")).hexdigest()[:10]
         return f"{symbol}-{side.value}-{suffix}"
