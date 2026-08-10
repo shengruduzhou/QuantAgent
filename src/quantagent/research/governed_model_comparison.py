@@ -29,12 +29,7 @@ from quantagent.research.nonlinear_promotion import (
 
 @dataclass(frozen=True)
 class HoldoutQualification:
-    """One-shot final-holdout veto for an already frozen nonlinear champion.
-
-    The holdout never chooses among challengers.  It only asks whether the champion
-    frozen on selection folds generalises in the same direction versus the linear
-    control on both prediction quality and after-cost economic value.
-    """
+    """One-shot final-holdout veto for an already frozen nonlinear champion."""
 
     accepted: bool
     champion: str
@@ -60,12 +55,7 @@ class HoldoutQualification:
 
 @dataclass(frozen=True)
 class GovernedModelComparison:
-    """Raw model comparison plus authoritative promotion/holdout eligibility.
-
-    ``comparison.verdict`` is research evidence. ``promotion.final_verdict`` applies
-    PBO/DSR/SPA.  When ``holdout`` is present, production eligibility additionally
-    requires the one-shot final holdout to confirm the already-frozen champion.
-    """
+    """Raw model comparison plus authoritative promotion/holdout eligibility."""
 
     comparison: ComparisonReport
     promotion: NonlinearPromotionReport
@@ -101,11 +91,7 @@ def run_governed_model_comparison(
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> GovernedModelComparison:
-    """Legacy-compatible governed path: measure challengers, then apply PBO/DSR/SPA.
-
-    New production research should use :func:`run_stage4_governed_model_comparison`,
-    which additionally binds cumulative trial history and an atomic one-shot holdout.
-    """
+    """Legacy-compatible research path; not the Stage-4 production research path."""
     comparison = run_model_comparison(
         panel,
         factor_columns,
@@ -113,10 +99,7 @@ def run_governed_model_comparison(
         regime_by_date=regime_by_date,
         progress=progress,
     )
-    promotion = evaluate_nonlinear_promotion(
-        comparison,
-        config=promotion_config,
-    )
+    promotion = evaluate_nonlinear_promotion(comparison, config=promotion_config)
     return GovernedModelComparison(comparison=comparison, promotion=promotion)
 
 
@@ -134,23 +117,16 @@ def run_stage4_governed_model_comparison(
     progress: Callable[[str, int, int], None] | None = None,
     run_id: str = "",
 ) -> GovernedModelComparison:
-    """Stage-4 path with deterministic lineage, cumulative trials and one-shot holdout.
+    """Strict Stage-4 comparison with lineage, multiplicity and one-shot holdout.
 
-    Policy order is deliberate:
-
-    1. validate that search and final-holdout identities cannot overlap;
-    2. atomically burn the final holdout before any code capable of observing it runs;
-    3. append the research attempt to the experiment ledger;
-    4. run the existing fold-purged comparison;
-    5. raise ``n_trials`` to the cumulative family attempt count before DSR;
-    6. apply PBO/DSR/SPA to the frozen champion;
-    7. use the final holdout only as a veto, never as a selector.
-
-    A crash after step 2 intentionally leaves the holdout consumed.  Once final data may
-    have been observed, silently reusing it as a fresh final test would be false evidence.
+    The final block is one trailing fold. Multiple trailing "holdout" folds are forbidden
+    here because expanding walk-forward would allow an earlier holdout fold to enter the
+    training set of a later holdout fold, so the union would not be an untouched block.
+    Increase ``valid_size_days`` when a longer final block is required.
     """
 
-    _validate_stage4_contract(experiment, final_holdout)
+    cfg = comparison_config or ComparisonConfig(holdout_folds=1)
+    _validate_stage4_contract(experiment, final_holdout, cfg)
     seal = final_holdout_ledger.consume(
         final_holdout,
         candidate_fingerprint=experiment.fingerprint,
@@ -168,11 +144,20 @@ def run_stage4_governed_model_comparison(
     comparison = run_model_comparison(
         panel,
         factor_columns,
-        config=comparison_config,
+        config=cfg,
         regime_by_date=regime_by_date,
         progress=progress,
     )
-    cumulative_trials = experiment_ledger.attempt_count(family=experiment.family)
+    if experiment.declared_trial_count < comparison.n_trials:
+        raise RuntimeError(
+            "declared_trial_count undercounts the model arms actually evaluated: "
+            f"declared={experiment.declared_trial_count}, measured_arms={comparison.n_trials}; "
+            "final holdout remains consumed"
+        )
+
+    cumulative_trials = experiment_ledger.multiple_testing_trial_count(
+        family=experiment.family
+    )
     comparison = with_cumulative_trial_count(comparison, cumulative_trials)
     promotion = evaluate_nonlinear_promotion(comparison, config=promotion_config)
     holdout = _qualify_final_holdout(comparison, expected=final_holdout)
@@ -181,7 +166,8 @@ def run_stage4_governed_model_comparison(
         "eventHash": event["event_hash"],
         "holdoutKey": final_holdout.holdout_key,
         "holdoutSealHash": seal["seal_hash"],
-        "cumulativeFamilyTrials": cumulative_trials,
+        "familyAttempts": experiment_ledger.attempt_count(family=experiment.family),
+        "cumulativeMultipleTestingTrials": cumulative_trials,
         "uniqueFamilyFingerprints": experiment_ledger.unique_fingerprint_count(
             family=experiment.family
         ),
@@ -194,13 +180,28 @@ def run_stage4_governed_model_comparison(
     )
 
 
-def _validate_stage4_contract(experiment: ExperimentSpec, holdout: FinalHoldoutSpec) -> None:
+def _validate_stage4_contract(
+    experiment: ExperimentSpec,
+    holdout: FinalHoldoutSpec,
+    config: ComparisonConfig,
+) -> None:
     if experiment.family != holdout.family:
         raise ValueError("experiment and final holdout must belong to the same family")
     if experiment.dataset_hash != holdout.dataset_hash:
         raise ValueError("experiment and final holdout dataset_hash must match")
-    search_end = pd.Timestamp(experiment.search_window[1])
-    holdout_start = pd.Timestamp(holdout.holdout_window[0])
+    if config.holdout_folds != 1:
+        raise ValueError(
+            "Stage-4 requires exactly one contiguous final holdout fold; "
+            "multiple expanding holdout folds are not an untouched block"
+        )
+
+    train_start, train_end = map(pd.Timestamp, experiment.train_window)
+    search_start, search_end = map(pd.Timestamp, experiment.search_window)
+    holdout_start, holdout_end = map(pd.Timestamp, holdout.holdout_window)
+    if train_start > train_end or search_start > search_end or holdout_start > holdout_end:
+        raise ValueError("train/search/holdout windows must each be ordered start <= end")
+    if train_end >= search_start:
+        raise ValueError("train_window must end strictly before search_window starts")
     if search_end >= holdout_start:
         raise ValueError(
             "search_window must end strictly before final holdout starts; "
@@ -213,13 +214,16 @@ def _qualify_final_holdout(
     *,
     expected: FinalHoldoutSpec,
 ) -> HoldoutQualification:
+    """Use final holdout only to veto the frozen champion, never to re-select."""
     champion = str(comparison.champion or "")
     reasons: list[str] = []
     holdout_windows = [w for w in comparison.fold_windows if w.get("role") == "holdout"]
     actual_start = min((str(w["validStart"]) for w in holdout_windows), default="")
     actual_end = max((str(w["validEnd"]) for w in holdout_windows), default="")
-    if not holdout_windows:
-        reasons.append("comparison produced no final holdout folds")
+    if len(holdout_windows) != 1:
+        reasons.append(
+            f"Stage-4 final qualification requires exactly one holdout fold, found {len(holdout_windows)}"
+        )
     else:
         expected_start = str(pd.Timestamp(expected.holdout_window[0]).date())
         expected_end = str(pd.Timestamp(expected.holdout_window[1]).date())
