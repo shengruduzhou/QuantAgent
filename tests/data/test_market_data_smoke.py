@@ -83,6 +83,18 @@ def test_daily_smoke_rejects_impossible_availability() -> None:
         validate_daily_smoke(frame, requested_symbols=("600000.SH", "000001.SZ"))
 
 
+def test_daily_smoke_rejects_malformed_high_and_low() -> None:
+    bad_high = _daily()
+    bad_high.loc[0, "high"] = 10.05  # below close=10.2
+    with pytest.raises(RuntimeError, match="high invariant"):
+        validate_daily_smoke(bad_high, requested_symbols=("600000.SH", "000001.SZ"))
+
+    bad_low = _daily()
+    bad_low.loc[0, "low"] = 10.1  # above open=10.0
+    with pytest.raises(RuntimeError, match="low invariant"):
+        validate_daily_smoke(bad_low, requested_symbols=("600000.SH", "000001.SZ"))
+
+
 def test_minute_smoke_requires_raw_unique_timestamped_bars() -> None:
     evidence = validate_minute_smoke(_minute(), frequency="5")
     assert evidence["frequency_minutes"] == 5
@@ -96,6 +108,18 @@ def test_minute_smoke_requires_raw_unique_timestamped_bars() -> None:
     duplicate = pd.concat([_minute(), _minute().iloc[[0]]], ignore_index=True)
     with pytest.raises(RuntimeError, match="duplicate symbol/timestamp"):
         validate_minute_smoke(duplicate, frequency="5")
+
+
+def test_minute_smoke_rejects_non_numeric_and_bad_ohlc() -> None:
+    non_numeric = _minute()
+    non_numeric.loc[0, "amount"] = "bad"
+    with pytest.raises(RuntimeError, match="non-numeric OHLCVA"):
+        validate_minute_smoke(non_numeric, frequency="5")
+
+    bad_high = _minute()
+    bad_high.loc[0, "high"] = 10.05
+    with pytest.raises(RuntimeError, match="high invariant"):
+        validate_minute_smoke(bad_high, frequency="5")
 
 
 def test_calendar_smoke_requires_real_trading_sessions() -> None:
