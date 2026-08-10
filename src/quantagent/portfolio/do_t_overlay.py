@@ -11,6 +11,10 @@ A-share T+1 legality:
 * A buy leg executed today cannot be sold as today's sell source.
 * Therefore both sequences are legal when a base position exists:
   ``sell high -> buy back low`` and ``buy low -> sell old shares high``.
+
+Execution prices are a separate truth boundary from research features. Adjusted
+(qfq/hfq) histories are rejected: simulated fills must use raw traded prices with
+explicit provenance.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from quantagent.data.intraday_sessions import assert_raw_execution_prices
 from quantagent.execution.broker_base import OrderSide
 from quantagent.execution.cost_model import AShareCostModel
 
@@ -42,23 +47,31 @@ def simulate_do_t_overlay(
     config: DoTOverlayConfig | None = None,
     cost_model: AShareCostModel | None = None,
 ) -> pd.DataFrame:
-    """Find legal Do-T round trips from minute bars and available shares.
+    """Find legal Do-T round trips from raw minute bars and available shares.
 
     Parameters
     ----------
     minute_panel
-        Long frame with ``symbol, trade_date, datetime, close``. ``high``/``low``
-        are optional; ``close`` is used as the executable proxy.
+        Long frame with ``symbol, trade_date, datetime, close`` and explicit raw
+        price provenance (``price_adjustment='raw'`` or BaoStock
+        ``adjustflag='3'``). ``high``/``low`` are optional; ``close`` is used as
+        the executable proxy.
     available_inventory
         Long frame with ``trade_date, symbol, available_shares``. These shares
         must be yesterday-settled inventory available for today's sell leg.
     """
+
     cfg = config or DoTOverlayConfig()
     cm = cost_model or AShareCostModel()
     if minute_panel is None or minute_panel.empty:
         return _empty_result()
     if available_inventory is None or available_inventory.empty:
         return _empty_result()
+
+    # A backtest with adjusted fills can look internally consistent while
+    # fabricating both PnL and transaction-cost economics. Refuse it at the
+    # execution boundary rather than relying on every caller to remember.
+    assert_raw_execution_prices(minute_panel)
 
     inv = available_inventory[["trade_date", "symbol", "available_shares"]].copy()
     inv["trade_date"] = pd.to_datetime(inv["trade_date"], errors="coerce")
