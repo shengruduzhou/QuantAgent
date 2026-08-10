@@ -18,7 +18,7 @@ class PITJoiner:
     """Point-in-time joins for fundamentals, events, and dated feature snapshots.
 
     The left panel represents a decision frontier at ``event_cutoff`` on each
-    ``trade_date``.  Every external feature must be joined by the timestamp at
+    ``trade_date``. Every external feature must be joined by the timestamp at
     which it first became knowable, never merely by its observation/report date.
     """
 
@@ -48,6 +48,7 @@ class PITJoiner:
             available_column=announcement_column,
             value_columns=value_columns,
             exclude_columns=(),
+            keep_available_column=True,
         )
 
     def join_events(
@@ -63,6 +64,7 @@ class PITJoiner:
             available_column=event_time_column,
             value_columns=value_columns,
             exclude_columns=(),
+            keep_available_column=True,
         )
 
     def join_available_features(
@@ -79,7 +81,7 @@ class PITJoiner:
 
         This is the generic PIT primitive for flows, alternative data, analyst
         updates and any other feature whose observation date can differ from its
-        economic availability.  Missing availability is refused rather than
+        economic availability. Missing availability is refused rather than
         falling back to an exact-date merge, because that fallback is a silent
         future-function when T-day data is published after the decision frontier.
         """
