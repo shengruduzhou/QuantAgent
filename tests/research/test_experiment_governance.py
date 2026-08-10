@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from quantagent.research.experiment_governance import (
@@ -36,6 +35,7 @@ def _experiment(**overrides) -> ExperimentSpec:
         search_window=("2024-01-01", "2025-12-31"),
         metric="rank_ic_then_net_return",
         git_hash="abc123",
+        declared_trial_count=12,
         recipe_hash="recipe-sha",
         split_id="wf-v4",
     )
@@ -54,6 +54,12 @@ def _holdout(**overrides) -> FinalHoldoutSpec:
     return FinalHoldoutSpec(**values)
 
 
+def _stage4_config(**overrides) -> ComparisonConfig:
+    values = dict(n_folds=4, holdout_folds=1)
+    values.update(overrides)
+    return ComparisonConfig(**values)
+
+
 def test_fingerprint_is_stable_across_event_time_and_status():
     spec = _experiment()
     first = ExperimentEvent(spec, status="registered", created_at="2026-01-01T00:00:00+00:00")
@@ -70,6 +76,12 @@ def test_fingerprint_is_mapping_order_independent():
     assert left.fingerprint == right.fingerprint
 
 
+def test_search_breadth_is_part_of_experiment_identity():
+    assert _experiment(declared_trial_count=12).fingerprint != _experiment(
+        declared_trial_count=13
+    ).fingerprint
+
+
 def test_fingerprint_rejects_unstable_object_repr():
     class BadParameter:
         pass
@@ -78,16 +90,26 @@ def test_fingerprint_rejects_unstable_object_repr():
         _experiment(parameters={"bad": BadParameter()})
 
 
-def test_ledger_counts_attempts_separately_from_unique_recipes(tmp_path):
+def test_fingerprint_rejects_non_finite_parameters():
+    with pytest.raises(ValueError, match="non-finite"):
+        _experiment(parameters={"alpha": float("nan")})
+
+
+def test_ledger_counts_attempts_and_declared_search_multiplicity(tmp_path):
     ledger = ExperimentLedger(tmp_path / "trials.jsonl")
-    same = _experiment()
-    other = _experiment(candidate_id="pair_only", parameters={"pairs": 8})
+    same = _experiment(declared_trial_count=12)
+    other = _experiment(
+        candidate_id="pair_only",
+        parameters={"pairs": 8},
+        declared_trial_count=7,
+    )
 
     ledger.append(ExperimentEvent(same, created_at="2026-01-01T00:00:00+00:00"))
     ledger.append(ExperimentEvent(same, created_at="2026-01-02T00:00:00+00:00"))
     ledger.append(ExperimentEvent(other, created_at="2026-01-03T00:00:00+00:00"))
 
     assert ledger.attempt_count("nonlinear_factor_v1") == 3
+    assert ledger.multiple_testing_trial_count("nonlinear_factor_v1") == 31
     assert ledger.unique_fingerprint_count("nonlinear_factor_v1") == 2
     ledger.verify()
 
@@ -129,16 +151,38 @@ def test_final_holdout_cannot_be_reused_by_a_different_candidate(tmp_path):
 def test_stage4_contract_rejects_search_overlapping_final_holdout():
     experiment = _experiment(search_window=("2024-01-01", "2026-01-15"))
     with pytest.raises(ValueError, match="strictly before"):
-        _validate_stage4_contract(experiment, _holdout())
+        _validate_stage4_contract(experiment, _holdout(), _stage4_config())
 
 
 def test_stage4_contract_rejects_dataset_mismatch():
     with pytest.raises(ValueError, match="dataset_hash"):
-        _validate_stage4_contract(_experiment(), _holdout(dataset_hash="other-data"))
+        _validate_stage4_contract(
+            _experiment(),
+            _holdout(dataset_hash="other-data"),
+            _stage4_config(),
+        )
+
+
+def test_stage4_contract_rejects_multiple_expanding_holdout_folds():
+    with pytest.raises(ValueError, match="exactly one contiguous"):
+        _validate_stage4_contract(
+            _experiment(),
+            _holdout(),
+            ComparisonConfig(n_folds=5, holdout_folds=2),
+        )
+
+
+def test_stage4_contract_rejects_train_search_overlap():
+    with pytest.raises(ValueError, match="train_window"):
+        _validate_stage4_contract(
+            _experiment(train_window=("2018-01-01", "2024-02-01")),
+            _holdout(),
+            _stage4_config(),
+        )
 
 
 def test_cumulative_trial_count_never_reduces_existing_count():
-    config = ComparisonConfig(n_folds=4, holdout_folds=1)
+    config = _stage4_config()
     report = ComparisonReport(
         config=config,
         arms=[],
@@ -157,8 +201,14 @@ def test_cumulative_trial_count_never_reduces_existing_count():
     assert with_cumulative_trial_count(report, 19).n_trials == 19
 
 
-def _comparison_for_holdout(*, winner_ic=0.04, base_ic=0.02, winner_net=0.18, base_net=0.10):
-    config = ComparisonConfig(n_folds=4, holdout_folds=1)
+def _comparison_for_holdout(
+    *,
+    winner_ic=0.04,
+    base_ic=0.02,
+    winner_net=0.18,
+    base_net=0.10,
+):
+    config = _stage4_config()
     baseline = ArmResult(
         name=LINEAR_BASELINE,
         model_class="rank_weighted_additive",
