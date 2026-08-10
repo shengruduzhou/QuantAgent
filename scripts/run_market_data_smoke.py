@@ -29,6 +29,7 @@ from quantagent.factors.executable_labels import canonical_market_sessions
 
 SMOKE_SCHEMA = "market_data_smoke_v1"
 DEFAULT_SYMBOLS = ("600000.SH", "000001.SZ", "300750.SZ")
+_NUMERIC_BAR_COLUMNS = ("open", "high", "low", "close", "volume", "amount")
 
 
 def _parse_symbols(value: str | None) -> tuple[str, ...]:
@@ -72,12 +73,11 @@ def _fetch_calendar(
 
 
 def _validate_ohlcva(work: pd.DataFrame, *, label: str) -> pd.DataFrame:
-    """Validate numeric/market invariants without self-referential comparisons."""
+    """Strict OHLCVA invariants for rows that represent an actual traded bar."""
     out = work.copy()
-    numeric = ["open", "high", "low", "close", "volume", "amount"]
-    for column in numeric:
+    for column in _NUMERIC_BAR_COLUMNS:
         out[column] = pd.to_numeric(out[column], errors="coerce")
-    if out[numeric].isna().any().any():
+    if out[list(_NUMERIC_BAR_COLUMNS)].isna().any().any():
         raise RuntimeError(f"{label} smoke has non-numeric OHLCVA values")
     if (out[["open", "high", "low", "close"]].min(axis=1) <= 0).any():
         raise RuntimeError(f"{label} smoke has non-positive OHLC values")
@@ -91,6 +91,22 @@ def _validate_ohlcva(work: pd.DataFrame, *, label: str) -> pd.DataFrame:
     if (out["low"] > reference_low).any():
         raise RuntimeError(f"{label} smoke violates OHLC low invariant")
     return out
+
+
+def _validate_suspended_rows(work: pd.DataFrame) -> None:
+    """A suspension is a legitimate market state, not a provider outage.
+
+    BaoStock exposes ``tradestatus=0`` explicitly. Providers may encode the
+    corresponding no-trade OHLCVA cells as zero/blank/stale values, so smoke
+    validation must not apply normal-bar positivity constraints to those rows.
+    If numeric volume/amount values are present they still cannot be negative.
+    """
+    if work.empty:
+        return
+    for column in _NUMERIC_BAR_COLUMNS:
+        numeric = pd.to_numeric(work[column], errors="coerce")
+        if column in {"volume", "amount"} and (numeric.dropna() < 0).any():
+            raise RuntimeError(f"daily suspended row has negative {column}")
 
 
 def validate_daily_smoke(
@@ -128,7 +144,17 @@ def validate_daily_smoke(
         raise RuntimeError("daily smoke has duplicate symbol/trade_date rows")
     if (work["available_at"] < work["trade_date"]).any():
         raise RuntimeError("daily smoke has available_at before trade_date")
-    work = _validate_ohlcva(work, label="daily")
+
+    trade_status = work["tradestatus"].astype(str).str.strip()
+    observed_status = set(trade_status.unique())
+    unknown_status = sorted(observed_status - {"0", "1"})
+    if unknown_status:
+        raise RuntimeError(f"daily smoke has unknown tradestatus values: {unknown_status}")
+    active_mask = trade_status == "1"
+    if not bool(active_mask.any()):
+        raise RuntimeError("daily smoke has no actively traded rows")
+    _validate_ohlcva(work.loc[active_mask], label="daily active")
+    _validate_suspended_rows(work.loc[~active_mask])
 
     flags = set(work["adjustflag"].astype(str).str.strip().dropna().unique())
     if flags != {str(expected_adjust_flag)}:
@@ -149,8 +175,9 @@ def validate_daily_smoke(
         "trade_date_max": work["trade_date"].max().date().isoformat(),
         "adjustment": "raw",
         "adjust_flag": str(expected_adjust_flag),
-        "suspended_rows": int((work["tradestatus"].astype(str) == "0").sum()),
-        "st_rows": int((work["isST"].astype(str) == "1").sum()),
+        "active_rows": int(active_mask.sum()),
+        "suspended_rows": int((trade_status == "0").sum()),
+        "st_rows": int((work["isST"].astype(str).str.strip() == "1").sum()),
     }
 
 
@@ -187,7 +214,7 @@ def validate_minute_smoke(
         raise RuntimeError(f"{frequency}m smoke has duplicate symbol/timestamp rows")
     if (work["available_at"] < work["timestamp"]).any():
         raise RuntimeError(f"{frequency}m smoke has available_at before bar timestamp")
-    work = _validate_ohlcva(work, label=f"{frequency}m")
+    _validate_ohlcva(work, label=f"{frequency}m")
     flags = set(work["adjustflag"].astype(str).str.strip().dropna().unique())
     if flags != {str(expected_adjust_flag)}:
         raise RuntimeError(
@@ -246,8 +273,8 @@ def run_smoke(
         expected_adjust_flag="3",
     )
 
-    # Native 5m/60m validates the provider/network shape only. The 10m and
-    # session-aligned aggregation contract is a separate issue #100 change.
+    # Native 5m/60m validates provider/network shape only. The 10m and
+    # exchange-session-aligned aggregation contract is a separate issue #100 PR.
     minute_request = ProviderRequest(
         start_date=start_date,
         end_date=end_date,
