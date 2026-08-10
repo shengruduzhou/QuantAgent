@@ -232,11 +232,15 @@ def validate_minute_smoke(
 
 def validate_calendar_smoke(calendar: pd.DataFrame) -> dict[str, object]:
     flag = calendar["is_trading_day"].astype(str).str.strip().str.lower()
-    sessions = canonical_market_sessions(
-        calendar.loc[flag.isin({"1", "true", "yes"}), "calendar_date"].tolist()
-    )
-    if len(sessions) == 0:
+    raw_sessions = calendar.loc[
+        flag.isin({"1", "true", "yes"}), "calendar_date"
+    ].tolist()
+    if not raw_sessions:
         raise RuntimeError("market-data smoke found no trading sessions")
+    try:
+        sessions = canonical_market_sessions(raw_sessions)
+    except ValueError as exc:
+        raise RuntimeError(f"market-data smoke has invalid trading sessions: {exc}") from exc
     return {
         "calendar_rows": int(len(calendar)),
         "trading_sessions": int(len(sessions)),
