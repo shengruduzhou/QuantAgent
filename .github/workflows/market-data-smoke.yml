@@ -13,8 +13,15 @@ on:
         required: false
         default: "21"
         type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/market-data-smoke.yml"
+      - "scripts/run_market_data_smoke.py"
+      - "tests/data/test_market_data_smoke.py"
+      - "src/quantagent/data/providers/baostock_provider.py"
   schedule:
-    # 17:40 Asia/Shanghai on weekdays: after the A-share close.  This is a
+    # 17:40 Asia/Shanghai on weekdays: after the A-share close. This is a
     # connectivity/schema smoke, not a factor-performance research run.
     - cron: "40 9 * * 1-5"
 
