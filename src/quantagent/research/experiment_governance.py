@@ -1,27 +1,22 @@
 """Deterministic experiment identity, cumulative trial accounting and one-shot holdout seals.
 
-This module is intentionally small and policy-focused.  Statistical selection remains in
-``selection_governance`` and nonlinear model comparison remains in ``model_comparison``;
-this layer makes the *research process* auditable so those statistics are not fed an
-optimistically small trial count or a repeatedly inspected final holdout.
+Statistical tests are only as honest as the research process that feeds them. This module
+gives each research recipe a stable identity, records every attempt together with its
+pre-declared search multiplicity, and makes final-holdout access one-shot.
 
-A trial has two identities:
-
-* ``fingerprint`` identifies the economic/statistical experiment and is stable across
-  reruns.  Wall-clock time and mutable status are deliberately excluded.
-* ``event_hash`` identifies one ledger event and therefore includes timestamp/status.
-
-The distinction matters for multiple-testing governance: rerunning an old recipe is still
-another attempt and must increase the conservative DSR/PBO trial count, while provenance
-must also be able to tell that the recipe itself did not change.
+``fingerprint`` identifies the economic/statistical experiment and excludes wall-clock
+time/status. ``event_hash`` identifies one immutable ledger event and includes those
+event fields. Re-running the same recipe keeps the same fingerprint but consumes
+additional multiple-testing budget.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping, TypeVar
@@ -36,13 +31,11 @@ def _utc_now() -> str:
 
 
 def _canonical(value: Any) -> Any:
-    """Return a JSON-stable representation without relying on ``default=str``.
-
-    Silent ``str(object)`` fallbacks are unsafe for experiment identity because many
-    Python objects include memory addresses or unstable reprs.  Unknown objects are
-    rejected so a fingerprint cannot look deterministic when it is not.
-    """
-
+    """Return a deterministic JSON-compatible representation or fail closed."""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite floats are not allowed in experiment identity")
+        return value
     if isinstance(value, _JSON_SCALARS):
         return value
     if isinstance(value, Mapping):
@@ -51,7 +44,10 @@ def _canonical(value: Any) -> Any:
         return [_canonical(item) for item in value]
     if isinstance(value, (set, frozenset)):
         canonical_items = [_canonical(item) for item in value]
-        return sorted(canonical_items, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        return sorted(
+            canonical_items,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
     if hasattr(value, "item") and callable(value.item):
         return _canonical(value.item())
     raise TypeError(f"unsupported non-deterministic fingerprint value: {type(value).__name__}")
@@ -68,9 +64,25 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _is_sha256(value: str) -> bool:
+    if len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ExperimentSpec:
-    """Immutable identity of one research recipe on one declared data/split contract."""
+    """Immutable identity of one research recipe on one declared data/split contract.
+
+    ``declared_trial_count`` is the conservative number of configurations consumed to
+    arrive at this final-holdout attempt: factor recipes, interaction candidates, model
+    classes, parameter variants and any other outcome-conditioned search. It is part of
+    the fingerprint, so quietly changing the search breadth changes experiment identity.
+    """
 
     family: str
     candidate_id: str
@@ -80,6 +92,7 @@ class ExperimentSpec:
     search_window: tuple[str, str]
     metric: str
     git_hash: str
+    declared_trial_count: int
     recipe_hash: str = ""
     split_id: str = ""
     parent_fingerprint: str = ""
@@ -97,12 +110,13 @@ class ExperimentSpec:
             raise ValueError(f"experiment identity fields cannot be empty: {missing}")
         if len(self.train_window) != 2 or len(self.search_window) != 2:
             raise ValueError("train_window and search_window must be (start, end)")
-        # Force canonicalisation at construction time so bad parameters fail before a run.
+        if int(self.declared_trial_count) < 1:
+            raise ValueError("declared_trial_count must be >= 1")
         _canonical(self.parameters)
 
     def identity_payload(self) -> dict[str, Any]:
         return {
-            "schema": "quantagent.experiment.v1",
+            "schema": "quantagent.experiment.v2",
             "family": self.family,
             "candidate_id": self.candidate_id,
             "parameters": _canonical(self.parameters),
@@ -111,6 +125,7 @@ class ExperimentSpec:
             "search_window": list(self.search_window),
             "metric": self.metric,
             "git_hash": self.git_hash,
+            "declared_trial_count": int(self.declared_trial_count),
             "recipe_hash": self.recipe_hash,
             "split_id": self.split_id,
             "parent_fingerprint": self.parent_fingerprint,
@@ -143,7 +158,7 @@ class ExperimentEvent:
 
 
 class ExperimentLedger:
-    """Append-only attempt ledger used for conservative multiple-testing counts."""
+    """Append-only attempt ledger for lineage and conservative selection correction."""
 
     def __init__(self, path: str | Path = "runtime/state/experiment_trials_v2.jsonl") -> None:
         self.path = Path(path)
@@ -173,20 +188,55 @@ class ExperimentLedger:
         return rows
 
     def attempt_count(self, family: str | None = None) -> int:
-        """Count attempts, not unique recipes; conservative for DSR/multiple testing."""
         return len(self.read(family=family))
 
+    def multiple_testing_trial_count(self, family: str | None = None) -> int:
+        """Sum pre-declared search multiplicity over attempts; never use unique recipes."""
+        total = 0
+        for row in self.read(family=family):
+            value = int(row.get("declared_trial_count", 0))
+            if value < 1:
+                raise ValueError("experiment ledger contains invalid declared_trial_count")
+            total += value
+        return total
+
     def unique_fingerprint_count(self, family: str | None = None) -> int:
-        return len({str(row.get("fingerprint", "")) for row in self.read(family=family) if row.get("fingerprint")})
+        return len(
+            {
+                str(row.get("fingerprint", ""))
+                for row in self.read(family=family)
+                if row.get("fingerprint")
+            }
+        )
 
     def verify(self) -> None:
-        """Fail if any stored event has been edited without recomputing its digest."""
+        """Detect accidental/manual mutation of event or identity fields."""
         for index, row in enumerate(self.read(), start=1):
-            expected = row.get("event_hash")
-            payload = dict(row)
-            payload.pop("event_hash", None)
-            if not expected or _digest(payload) != expected:
+            expected_event = row.get("event_hash")
+            event_payload = dict(row)
+            event_payload.pop("event_hash", None)
+            if not expected_event or _digest(event_payload) != expected_event:
                 raise ValueError(f"experiment ledger integrity failure at line {index}")
+
+            identity_keys = (
+                "schema",
+                "family",
+                "candidate_id",
+                "parameters",
+                "dataset_hash",
+                "train_window",
+                "search_window",
+                "metric",
+                "git_hash",
+                "declared_trial_count",
+                "recipe_hash",
+                "split_id",
+                "parent_fingerprint",
+            )
+            identity = {key: row.get(key) for key in identity_keys}
+            expected_fingerprint = row.get("fingerprint")
+            if not expected_fingerprint or _digest(identity) != expected_fingerprint:
+                raise ValueError(f"experiment fingerprint mismatch at line {index}")
 
 
 @dataclass(frozen=True)
@@ -220,10 +270,8 @@ class FinalHoldoutSpec:
 class FinalHoldoutLedger:
     """Atomic one-shot final-holdout consumer.
 
-    Each holdout identity maps to one immutable seal file. ``O_EXCL`` means two jobs
-    racing for the same final holdout cannot both succeed.  A failed/crashed run still
-    burns the holdout, which is intentionally conservative: once final data may have
-    been observed it must not silently become reusable tuning data.
+    A failed/crashed run still burns the holdout: once final data may have been observed,
+    it must never silently become reusable tuning data.
     """
 
     def __init__(self, directory: str | Path = "runtime/state/final_holdout_seals") -> None:
@@ -237,7 +285,7 @@ class FinalHoldoutLedger:
         git_hash: str,
         run_id: str = "",
     ) -> dict[str, Any]:
-        if len(candidate_fingerprint) != 64:
+        if not _is_sha256(candidate_fingerprint):
             raise ValueError("candidate_fingerprint must be a SHA-256 hex digest")
         if not git_hash.strip():
             raise ValueError("git_hash is required for final holdout consumption")
@@ -260,15 +308,31 @@ class FinalHoldoutLedger:
         try:
             fd = os.open(target, flags, 0o444)
         except FileExistsError as exc:
-            existing = json.loads(target.read_text(encoding="utf-8"))
+            existing_candidate = "unknown"
+            try:
+                existing_candidate = str(
+                    json.loads(target.read_text(encoding="utf-8")).get(
+                        "candidate_fingerprint", "unknown"
+                    )
+                )
+            except (OSError, json.JSONDecodeError):
+                pass
             raise RuntimeError(
                 "final holdout has already been consumed; one-shot policy blocks reuse "
-                f"(candidate={existing.get('candidate_fingerprint', 'unknown')})"
+                f"(candidate={existing_candidate})"
             ) from exc
         try:
             os.write(
                 fd,
-                (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+                (
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8"),
             )
         finally:
             os.close(fd)
