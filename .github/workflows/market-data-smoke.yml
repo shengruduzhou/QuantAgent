@@ -57,12 +57,25 @@ jobs:
           python -m pip install -e . "baostock>=0.9.3"
 
       - name: Pull raw daily, 5m, 60m and independent market calendar
+        shell: bash
         run: |
-          python scripts/run_market_data_smoke.py \
-            --symbols "$SMOKE_SYMBOLS" \
-            --lookback-days "$SMOKE_LOOKBACK_DAYS" \
-            --end-date "$(date -u +%F)" \
-            --output-dir runtime/research/market_data_smoke
+          set -o pipefail
+          for attempt in 1 2 3; do
+            rm -rf runtime/research/market_data_smoke
+            if python scripts/run_market_data_smoke.py \
+              --symbols "$SMOKE_SYMBOLS" \
+              --lookback-days "$SMOKE_LOOKBACK_DAYS" \
+              --end-date "$(date -u +%F)" \
+              --output-dir runtime/research/market_data_smoke; then
+              echo "BaoStock smoke succeeded on attempt ${attempt}."
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "BaoStock smoke failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       - name: Exercise 10m and 60m exchange-session aggregation on real 5m data
         run: |
