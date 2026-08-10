@@ -84,6 +84,32 @@ def test_turnover_is_tail_consistent_after_direction_alignment() -> None:
     assert negative.rolling_rank_ic == pytest.approx(equivalent_positive.rolling_rank_ic)
 
 
+def test_direction_does_not_change_sign_invariant_crowding_or_drift_guards() -> None:
+    frame = _negative_alpha_panel()
+    frame["existing"] = frame["factor"] * 0.9 + np.sin(np.arange(len(frame))) * 0.1
+
+    positive = build_factor_lifecycle_report(
+        frame,
+        "factor",
+        "ret",
+        existing_factor_columns=["existing"],
+        expected_direction="positive",
+    )
+    negative = build_factor_lifecycle_report(
+        frame,
+        "factor",
+        "ret",
+        existing_factor_columns=["existing"],
+        expected_direction="negative",
+    )
+
+    assert negative.max_correlation_to_existing == pytest.approx(
+        positive.max_correlation_to_existing
+    )
+    assert negative.crowding_proxy == pytest.approx(positive.crowding_proxy)
+    assert negative.live_drift == pytest.approx(positive.live_drift)
+
+
 def test_invalid_direction_fails_closed_instead_of_inferring_from_returns() -> None:
     with pytest.raises(ValueError, match="cannot be inferred"):
         build_factor_lifecycle_report(
