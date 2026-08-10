@@ -211,6 +211,11 @@ def aggregate_ashare_bars(
     if "amount" in work.columns:
         work["amount"] = pd.to_numeric(work["amount"], errors="coerce")
     else:
+        if not bool(work["price_adjustment"].eq("raw").all()):
+            raise IntradaySessionError(
+                "adjusted intraday bars require provider-supplied raw amount; "
+                "turnover cannot be reconstructed from adjusted close × volume"
+            )
         work["amount"] = work["volume"] * work["close"]
     if work[["open", "high", "low", "close", "volume", "amount"]].isna().any().any():
         raise IntradaySessionError("intraday OHLCVA contains non-numeric/NaN values")
