@@ -14,6 +14,8 @@ def test_build_do_t_training_labels_from_legal_overlay():
             "symbol": "000001.SZ",
             "datetime": start + pd.Timedelta(minutes=i),
             "close": price,
+            "price_adjustment": "raw",
+            "execution_eligible": True,
         }
         for i, price in enumerate([10.0, 10.8, 10.9, 10.2, 9.8, 9.9])
     ])
