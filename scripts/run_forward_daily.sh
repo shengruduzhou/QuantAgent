@@ -42,8 +42,11 @@ $PY scripts/forward_daily_inference.py || { echo "FATAL inference"; exit 1; }
 # 3) hold-band A/B book update + orders + 反T watchlist for tomorrow
 $PY scripts/forward_book_update.py || echo "WARN book update"
 
-# 3.5) RL C-book (paper-only; gated DO_NOT_ENABLE for capital 2026-06-12)
-$PY scripts/forward_rl_book.py || echo "WARN rl C-book"
+# The historical RL C-book forward runner was removed in the executable-clock
+# audit.  It replayed a training environment that requires future reward data
+# and therefore was not a causal latest-signal inference path.  A future RL
+# forward path must have a dedicated observation-only inference state builder
+# plus a policy artifact trained under the governed reward/calendar contract.
 
 # 4) forward research ledger: freeze today's pool, settle elapsed rows
 $PY scripts/forward_paper_log.py freeze --as-of "$TODAY" \
