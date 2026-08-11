@@ -22,6 +22,10 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest import ashare_rules as market_rules
+from quantagent.data.intraday_sessions import (
+    ExecutionPriceProvenanceError,
+    assert_raw_execution_prices,
+)
 from quantagent.domain.ledger import CanonicalLedger
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
@@ -217,6 +221,42 @@ def _optional_finite(row: pd.Series, name: str) -> float | None:
     return value if np.isfinite(value) else None
 
 
+def _required_market_flag(row: pd.Series, name: str) -> bool:
+    """Parse one execution-critical flag without truthiness fallbacks."""
+
+    if name not in row.index or pd.isna(row[name]):
+        raise ContinuousPaperExecutionBlocked(
+            f"execution market row missing explicit {name}"
+        )
+    value = row[name]
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+        raise ContinuousPaperExecutionBlocked(
+            f"invalid boolean execution flag {name}={value!r}"
+        )
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.notna(numeric) and np.isfinite(float(numeric)) and float(numeric) in {0.0, 1.0}:
+        return bool(int(float(numeric)))
+    raise ContinuousPaperExecutionBlocked(
+        f"invalid boolean execution flag {name}={value!r}"
+    )
+
+
+def _assert_execution_price_provenance(rows: pd.DataFrame, *, symbol: str) -> None:
+    try:
+        assert_raw_execution_prices(rows)
+    except ExecutionPriceProvenanceError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"execution price provenance failed for {symbol}: {exc}"
+        ) from exc
+
+
 def _market_state(
     market_panel: pd.DataFrame,
     *,
@@ -225,7 +265,15 @@ def _market_state(
     required_symbols: set[str],
 ) -> tuple[dict[tuple[str, str], MarketSnapshot], pd.Series]:
     data = market_panel.copy()
-    required_columns = {"trade_date", "symbol", "close", "volume", "amount"}
+    required_columns = {
+        "trade_date",
+        "symbol",
+        "close",
+        "volume",
+        "amount",
+        "is_suspended",
+        "is_st",
+    }
     missing = sorted(required_columns - set(data.columns))
     if missing:
         raise ContinuousPaperExecutionBlocked(f"market panel missing columns: {missing}")
@@ -256,7 +304,8 @@ def _market_state(
     clock = _snapshot_clock(execution_clock)
 
     for symbol in sorted(required_symbols):
-        row = day.loc[day["symbol"] == symbol].iloc[0]
+        current_rows = day.loc[day["symbol"] == symbol]
+        row = current_rows.iloc[0]
         close = float(pd.to_numeric(row["close"], errors="coerce"))
         volume = float(pd.to_numeric(row["volume"], errors="coerce"))
         amount = float(pd.to_numeric(row["amount"], errors="coerce"))
@@ -280,13 +329,25 @@ def _market_state(
             raise ContinuousPaperExecutionBlocked(
                 f"previous close unavailable for execution symbol {symbol}"
             )
+        previous_row = prior.iloc[-1]
         previous_close = float(
-            pd.to_numeric(prior.iloc[-1]["close"], errors="coerce")
+            pd.to_numeric(previous_row["close"], errors="coerce")
         )
         if not np.isfinite(previous_close) or previous_close <= 0:
             raise ContinuousPaperExecutionBlocked(
                 f"invalid previous close for {symbol}"
             )
+
+        # Fill/limit reference prices must be actual exchange prices. Research
+        # qfq/hfq series are useful features but are economically impossible as
+        # execution prices. Validate both the exact execution row and the row
+        # supplying previous_close before any order/journal start is created.
+        _assert_execution_price_provenance(
+            pd.DataFrame([previous_row, row]),
+            symbol=symbol,
+        )
+        is_suspended = _required_market_flag(row, "is_suspended")
+        is_st = _required_market_flag(row, "is_st")
 
         sessions_since_listing = None
         if (
@@ -303,8 +364,8 @@ def _market_state(
             session_volume=volume,
             board=_paper_board(symbol, rule_engine),
             clock=clock,
-            is_suspended=bool(row.get("is_suspended", False)),
-            is_st=bool(row.get("is_st", False)),
+            is_suspended=is_suspended,
+            is_st=is_st,
             sessions_since_listing=sessions_since_listing,
             high=_optional_finite(row, "high"),
             low=_optional_finite(row, "low"),

@@ -7,6 +7,7 @@ import pytest
 
 from quantagent.paper.broker import PaperBroker
 from quantagent.paper.continuous_execution import (
+    ContinuousPaperExecutionBlocked,
     ContinuousPaperExecutionConfig,
     execute_pending_for_session,
 )
@@ -37,6 +38,8 @@ def _market() -> pd.DataFrame:
                 "amount": 100_000_000.0,
                 "is_suspended": False,
                 "is_st": False,
+                "price_adjustment": "raw",
+                "execution_eligible": True,
             }
         )
     return pd.DataFrame(rows)
@@ -250,3 +253,94 @@ def test_close_session_failure_never_publishes_false_terminal(tmp_path, monkeypa
     journal = PendingExecutionJournal(config.execution_journal_path)
     assert journal.terminal(pending.payload_sha256) is None
     assert journal.has_unresolved_start(pending.payload_sha256)
+
+
+def test_missing_execution_critical_flag_fails_before_economic_attempt(tmp_path) -> None:
+    config = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    market = _market().drop(columns=["is_st"])
+
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="missing columns:.*is_st"):
+        execute_pending_for_session(
+            MONDAY,
+            market,
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+
+    assert not (tmp_path / "canonical.jsonl").exists()
+    assert PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
+
+
+def test_unknown_execution_critical_flag_fails_closed(tmp_path) -> None:
+    config = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    market = _market()
+    market.loc[market["trade_date"] == MONDAY, "is_suspended"] = None
+
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="missing explicit is_suspended"):
+        execute_pending_for_session(
+            MONDAY,
+            market,
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+
+    assert not (tmp_path / "canonical.jsonl").exists()
+    assert PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
+
+
+def test_string_false_flags_are_not_truthy_python_strings(tmp_path) -> None:
+    config = _config(tmp_path)
+    _record(tmp_path, FRIDAY, 0.50)
+    market = _market()
+    market["is_suspended"] = "false"
+    market["is_st"] = "0"
+
+    result = execute_pending_for_session(
+        MONDAY,
+        market,
+        config=config,
+        authoritative_sessions=SESSIONS,
+    )
+    assert result[0].status == "execution_observed"
+    assert result[0].fill_count == 1
+
+
+def test_adjusted_execution_prices_fail_before_economic_attempt(tmp_path) -> None:
+    config = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    market = _market()
+    market["price_adjustment"] = "qfq"
+    market["execution_eligible"] = False
+
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="raw/unadjusted"):
+        execute_pending_for_session(
+            MONDAY,
+            market,
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+
+    assert not (tmp_path / "canonical.jsonl").exists()
+    assert PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
+
+
+def test_missing_price_provenance_fails_closed(tmp_path) -> None:
+    config = _config(tmp_path)
+    _record(tmp_path, FRIDAY, 0.50)
+    market = _market().drop(columns=["price_adjustment", "execution_eligible"])
+
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="price provenance failed"):
+        execute_pending_for_session(
+            MONDAY,
+            market,
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
