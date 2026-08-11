@@ -6,10 +6,13 @@ workers supply different values, the same valid ledger can be reconstructed as
 two different accounts/NAVs.  That is unacceptable at a production-style
 boundary.
 
-The first worker touching an account creates one durable identity file beside
-its canonical ledger.  Every later target/execution/recovery worker must present
-exactly the same identity.  The file is immutable, hash-bound, fsync'd and
-created under a cross-process lock; mismatches and corruptions fail closed.
+The first worker touching a *new/empty* account creates one durable identity
+file beside its canonical ledger.  Every later target/execution/recovery worker
+must present exactly the same identity.  A non-empty canonical ledger that
+predates this contract is never silently bound to caller-supplied genesis
+values: it requires an explicit, separately audited migration.  The identity is
+immutable, hash-bound, fsync'd and created under a cross-process lock;
+mismatches and corruptions fail closed.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ import os
 from pathlib import Path
 from threading import RLock
 from typing import Iterator
+
+from quantagent.domain.ledger import CanonicalLedger
 
 try:  # POSIX research/CI hosts
     import fcntl as _fcntl
@@ -49,6 +54,10 @@ class PaperAccountIdentityMismatch(PaperAccountIdentityError):
 
 class PaperAccountIdentityCorruption(PaperAccountIdentityError):
     """The persisted identity cannot be trusted."""
+
+
+class PaperAccountIdentityMigrationRequired(PaperAccountIdentityError):
+    """A legacy non-empty ledger needs explicit genesis migration evidence."""
 
 
 def _normalise_initial_cash(value: object) -> str:
@@ -245,6 +254,38 @@ def account_identity_path_for_canonical(canonical_ledger_path: str | Path) -> Pa
     return Path(canonical_ledger_path).with_name("account_identity.json")
 
 
+def _assert_identity_creation_is_safe(
+    *,
+    canonical_ledger_path: Path,
+    identity_store: PaperAccountIdentityStore,
+) -> None:
+    """Refuse to invent genesis values for a legacy non-empty economic chain."""
+
+    if identity_store.read() is not None:
+        return
+    if not canonical_ledger_path.exists() or canonical_ledger_path.stat().st_size == 0:
+        return
+    ledger = CanonicalLedger(canonical_ledger_path)
+    verification = ledger.verify()
+    if not verification.get("valid"):
+        raise PaperAccountIdentityCorruption(
+            f"cannot establish account identity over invalid canonical ledger: {verification}"
+        )
+    if len(ledger) <= 0:
+        return
+    # Re-check identity after reading the ledger so a concurrent first worker
+    # that successfully created the identity does not cause a false migration
+    # error.  Economic writers are required to pass this identity gate before
+    # appending, so a compliant new account cannot race an append ahead of it.
+    if identity_store.read() is not None:
+        return
+    raise PaperAccountIdentityMigrationRequired(
+        "canonical ledger already contains economic records but has no immutable "
+        "paper account identity; automatic binding to caller-supplied portfolio_id/"
+        "initial_cash is prohibited. Perform an explicit audited migration."
+    )
+
+
 def ensure_paper_account_identity(
     *,
     canonical_ledger_path: str | Path,
@@ -252,12 +293,18 @@ def ensure_paper_account_identity(
     initial_cash: object,
     identity_path: str | Path | None = None,
 ) -> PaperAccountIdentity:
+    canonical_path = Path(canonical_ledger_path)
     path = (
         Path(identity_path)
         if identity_path is not None
-        else account_identity_path_for_canonical(canonical_ledger_path)
+        else account_identity_path_for_canonical(canonical_path)
     )
-    return PaperAccountIdentityStore(path).ensure(
+    store = PaperAccountIdentityStore(path)
+    _assert_identity_creation_is_safe(
+        canonical_ledger_path=canonical_path,
+        identity_store=store,
+    )
+    return store.ensure(
         portfolio_id=portfolio_id,
         initial_cash=initial_cash,
     )
@@ -268,6 +315,7 @@ __all__ = [
     "PaperAccountIdentityError",
     "PaperAccountIdentityMismatch",
     "PaperAccountIdentityCorruption",
+    "PaperAccountIdentityMigrationRequired",
     "PaperAccountIdentity",
     "PaperAccountIdentityStore",
     "account_identity_path_for_canonical",
