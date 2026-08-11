@@ -21,6 +21,8 @@ def paper_run_once(
     market_panel: Path | None = typer.Option(None, "--market-panel"),
     sector_map: Path | None = typer.Option(None, "--sector-map"),
     output_root: Path | None = typer.Option(None, "--output-root"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash", min=0.01),
+    portfolio_id: str = typer.Option("v7-paper", "--portfolio-id"),
     primary_horizon: int = typer.Option(5, "--primary-horizon"),
     top_k: int = typer.Option(30, "--top-k"),
     selection_mode: str = typer.Option("ai_threshold", "--selection-mode", help="ai_threshold | top_k"),
@@ -30,7 +32,12 @@ def paper_run_once(
     selection_top_k_max: int = typer.Option(100, "--selection-top-k-max"),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan"),
 ) -> None:
-    """Run one safe daily paper iteration and freeze target weights."""
+    """Run one safe daily paper iteration and freeze target weights.
+
+    ``portfolio_id`` and ``initial_cash`` are immutable account-genesis fields.
+    The first worker persists them under ``QUANTAGENT_HOME/paper``; every later
+    target/execution worker must pass the same values or the account fails closed.
+    """
     from quantagent.paper.daily_loop import DailyPaperLoopConfig, run_once
 
     defaults = DailyPaperLoopConfig(as_of_date=date)
@@ -41,6 +48,9 @@ def paper_run_once(
         market_panel_path=str(market_panel) if market_panel else defaults.market_panel_path,
         sector_map_path=str(sector_map) if sector_map else None,
         output_root=str(output_root) if output_root else defaults.output_root,
+        account_identity_path=defaults.account_identity_path,
+        portfolio_id=portfolio_id,
+        initial_cash=initial_cash,
         primary_horizon=primary_horizon,
         top_k=top_k,
         selection_mode=selection_mode,
@@ -72,6 +82,9 @@ def paper_execute_session(
     under ``QUANTAGENT_HOME/paper`` so the execution worker, API and UI share the
     same source of truth.  An observed panel remains non-certifying calendar
     evidence until the authoritative-calendar gate is implemented.
+
+    The requested ``portfolio_id``/``initial_cash`` must exactly match the
+    immutable account identity created by the target worker.
     """
     from quantagent.paper.continuous_execution import (
         ContinuousPaperExecutionConfig,
@@ -90,6 +103,7 @@ def paper_execute_session(
         canonical_ledger_path=str(paths.canonical_ledger),
         operational_ledger_path=str(paths.operational_ledger),
         idempotency_path=str(paths.idempotency),
+        account_identity_path=str(paths.account_identity),
         portfolio_id=portfolio_id,
         initial_cash=initial_cash,
         min_order_value_yuan=min_order_value_yuan,
@@ -108,6 +122,11 @@ def paper_execute_session(
                 "date": date,
                 "marketPanel": str(market_path),
                 "runtime": paths.as_dict(),
+                "paperAccount": {
+                    "portfolioId": portfolio_id,
+                    "initialCash": initial_cash,
+                    "identityPath": str(paths.account_identity),
+                },
                 "calendarAssurance": "observed_market_panel_only",
                 "shadowAcceptanceCalendarEligible": False,
                 "results": [result.to_dict() for result in results],
@@ -121,18 +140,31 @@ def paper_execute_session(
 def paper_run_loop(
     interval_seconds: int = typer.Option(86_400, "--interval-seconds"),
     date: str = typer.Option("today", "--date"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash", min=0.01),
+    portfolio_id: str = typer.Option("v7-paper", "--portfolio-id"),
 ) -> None:
     """Minimal restartable target-generation loop.
 
     Use an external scheduler/systemd for exact market-time execution on
     production servers.  This command freezes targets; ``execute-session`` is
     the separate next-session consumer so target construction can never be
-    mistaken for a completed paper fill.
+    mistaken for a completed paper fill.  Account genesis values are immutable
+    and must match the same values used by ``execute-session``.
     """
     from quantagent.paper.daily_loop import DailyPaperLoopConfig, run_once
 
     while True:
-        typer.echo(json_dump(run_once(DailyPaperLoopConfig(as_of_date=date)).to_dict()))
+        typer.echo(
+            json_dump(
+                run_once(
+                    DailyPaperLoopConfig(
+                        as_of_date=date,
+                        portfolio_id=portfolio_id,
+                        initial_cash=initial_cash,
+                    )
+                ).to_dict()
+            )
+        )
         time.sleep(max(60, int(interval_seconds)))
 
 
