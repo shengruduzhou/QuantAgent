@@ -8,6 +8,10 @@ The consumer is deliberately conservative:
   -> PaperBroker chain and the shared canonical ledger;
 * an execution-start record is durable before broker interaction, so a crash is
   resolved as indeterminate rather than retried blindly;
+* every new terminal outcome is bound to the exact canonical-ledger prefix
+  before/after its attempt, so later ledger growth cannot rewrite old evidence;
+* an indeterminate attempt freezes the whole economic account until explicit
+  reconciliation; later signals are not allowed to trade on unknown state;
 * caller-supplied or observed-panel session sets may drive research timing but
   are never promoted to authoritative shadow-calendar evidence without a
   provenance-backed exchange calendar artifact;
@@ -38,7 +42,13 @@ from quantagent.paper.account_identity import (
     ensure_paper_account_identity,
 )
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
-from quantagent.paper.execution_journal import PendingExecutionJournal
+from quantagent.paper.canonical_receipt import (
+    CanonicalPrefixReceiptError,
+    build_canonical_prefix_receipt,
+    canonical_snapshot,
+    verify_canonical_prefix_receipt,
+)
+from quantagent.paper.execution_journal import PendingExecutionJournal, TERMINAL_OUTCOMES
 from quantagent.paper.ledger import EventLedger
 from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
 from quantagent.paper.recovery import recover, recover_from_canonical
@@ -406,6 +416,73 @@ def _execution_orders(
     return orders
 
 
+def _verify_terminal_canonical_binding(
+    *,
+    terminal,
+    canonical_ledger_path: str,
+    expected_target_weights_sha256: str | None = None,
+    expected_paper_account_identity_sha256: str | None = None,
+):
+    """Verify a claimed terminal binding; legacy unbound records remain readable."""
+
+    receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
+    try:
+        return verify_canonical_prefix_receipt(
+            receipt,
+            ledger_or_path=canonical_ledger_path,
+            expected_target_weights_sha256=expected_target_weights_sha256,
+            expected_paper_account_identity_sha256=(
+                expected_paper_account_identity_sha256
+            ),
+        )
+    except CanonicalPrefixReceiptError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            "terminal paper execution evidence no longer matches the canonical "
+            f"economic ledger: {exc}"
+        ) from exc
+
+
+def _assert_no_indeterminate_account_state(
+    journal: PendingExecutionJournal,
+    *,
+    canonical_ledger_path: str,
+) -> None:
+    """Freeze the whole account after any unresolved/indeterminate execution."""
+
+    for record in journal.records():
+        if record.status not in TERMINAL_OUTCOMES:
+            continue
+        _verify_terminal_canonical_binding(
+            terminal=record,
+            canonical_ledger_path=canonical_ledger_path,
+        )
+        if record.status == "execution_indeterminate":
+            raise ContinuousPaperExecutionBlocked(
+                "paper account has an execution_indeterminate terminal outcome; "
+                "manual canonical/broker reconciliation is required before any "
+                "later signal can trade"
+            )
+
+
+def _same_prefix_receipt(
+    *,
+    canonical_ledger_path: str,
+    target_weights_sha256: str,
+    paper_account_identity_sha256: str,
+) -> dict[str, object]:
+    """Bind a no-economic-action terminal to the current canonical prefix."""
+
+    canonical = CanonicalLedger(canonical_ledger_path)
+    before_records, before_head = canonical_snapshot(canonical)
+    return build_canonical_prefix_receipt(
+        ledger=canonical,
+        canonical_before_records=before_records,
+        canonical_before_head=before_head,
+        target_weights_sha256=target_weights_sha256,
+        paper_account_identity_sha256=paper_account_identity_sha256,
+    )
+
+
 def execute_pending_for_session(
     as_of_date: str,
     market_panel: pd.DataFrame,
@@ -462,14 +539,29 @@ def execute_pending_for_session(
         raise ContinuousPaperExecutionBlocked(
             "pending execution journal verification failed"
         )
+    _assert_no_indeterminate_account_state(
+        journal,
+        canonical_ledger_path=config.canonical_ledger_path,
+    )
 
     results: list[ContinuousPaperExecutionResult] = []
     for pending in _pending_signals(store):
         # Historical terminal evidence is immutable. Older completed signals may
-        # predate the account-identity lineage field; they must be skipped before
-        # validating lineage so one legacy artifact cannot block newer signals.
+        # predate account identity / canonical-prefix receipts; such records stay
+        # readable, while every claimed modern receipt must verify fail-closed.
         terminal = journal.terminal(pending.payload_sha256)
         if terminal is not None:
+            _verify_terminal_canonical_binding(
+                terminal=terminal,
+                canonical_ledger_path=config.canonical_ledger_path,
+                expected_target_weights_sha256=pending.target_weights_sha256,
+                expected_paper_account_identity_sha256=(
+                    account_identity.payload_sha256
+                    if dict(terminal.details or {}).get("canonical_prefix_receipt")
+                    is not None
+                    else None
+                ),
+            )
             continue
 
         pending_identity_sha = str(
@@ -486,6 +578,28 @@ def execute_pending_for_session(
             continue
 
         if journal.has_unresolved_start(pending.payload_sha256):
+            history = journal.history(pending.payload_sha256)
+            starts = [row for row in history if row.status == "execution_started"]
+            start = starts[-1]
+            start_details = dict(start.details or {})
+            canonical = CanonicalLedger(config.canonical_ledger_path)
+            canonical_before_records = start_details.get("canonical_records_before")
+            canonical_before_head = start_details.get("canonical_head_before")
+            receipt: dict[str, object] | None = None
+            if canonical_before_records is not None and canonical_before_head:
+                try:
+                    receipt = build_canonical_prefix_receipt(
+                        ledger=canonical,
+                        canonical_before_records=int(canonical_before_records),
+                        canonical_before_head=str(canonical_before_head),
+                        target_weights_sha256=pending.target_weights_sha256,
+                        paper_account_identity_sha256=account_identity.payload_sha256,
+                    )
+                except CanonicalPrefixReceiptError as exc:
+                    raise ContinuousPaperExecutionBlocked(
+                        "cannot bind indeterminate execution to canonical ledger: "
+                        f"{exc}"
+                    ) from exc
             journal.append(
                 pending_payload_sha256=pending.payload_sha256,
                 signal_date=pending.signal_date,
@@ -493,30 +607,30 @@ def execute_pending_for_session(
                 status="execution_indeterminate",
                 details={
                     "paper_account_identity_sha256": account_identity.payload_sha256,
+                    "target_weights_sha256": pending.target_weights_sha256,
+                    "canonical_prefix_receipt": receipt,
                     "reason": (
                         "prior execution_started has no terminal outcome; "
-                        "automatic retry prohibited"
-                    )
+                        "automatic retry and later account execution prohibited"
+                    ),
                 },
             )
-            results.append(
-                ContinuousPaperExecutionResult(
-                    signal_date=pending.signal_date,
-                    execution_date=next_date,
-                    status="execution_indeterminate",
-                    pending_payload_sha256=pending.payload_sha256,
-                    order_count=0,
-                    fill_count=0,
-                    nav_before=None,
-                    nav_after=None,
-                    calendar_assurance=calendar_assurance,
-                    shadow_acceptance_calendar_eligible=acceptance_calendar_eligible,
-                    reasons=("unresolved prior execution attempt",),
-                )
+            raise ContinuousPaperExecutionBlocked(
+                "prior execution attempt became indeterminate; the whole paper "
+                "account is frozen pending manual canonical/broker reconciliation"
             )
-            continue
 
         if next_date < as_of:
+            try:
+                receipt = _same_prefix_receipt(
+                    canonical_ledger_path=config.canonical_ledger_path,
+                    target_weights_sha256=pending.target_weights_sha256,
+                    paper_account_identity_sha256=account_identity.payload_sha256,
+                )
+            except CanonicalPrefixReceiptError as exc:
+                raise ContinuousPaperExecutionBlocked(
+                    f"cannot certify missed-session canonical prefix: {exc}"
+                ) from exc
             journal.append(
                 pending_payload_sha256=pending.payload_sha256,
                 signal_date=pending.signal_date,
@@ -524,6 +638,8 @@ def execute_pending_for_session(
                 status="missed_execution_session",
                 details={
                     "paper_account_identity_sha256": account_identity.payload_sha256,
+                    "target_weights_sha256": pending.target_weights_sha256,
+                    "canonical_prefix_receipt": receipt,
                     "observed_as_of": as_of,
                     "reason": (
                         "consumer did not run on exact next session; "
@@ -549,10 +665,12 @@ def execute_pending_for_session(
             continue
 
         canonical = CanonicalLedger(config.canonical_ledger_path)
-        if not canonical.verify()["valid"]:
+        try:
+            canonical_before_records, canonical_before_head = canonical_snapshot(canonical)
+        except CanonicalPrefixReceiptError as exc:
             raise ContinuousPaperExecutionBlocked(
-                "canonical paper ledger verification failed"
-            )
+                f"canonical paper ledger verification failed: {exc}"
+            ) from exc
         canonical_state = recover_from_canonical(
             config.canonical_ledger_path,
             portfolio_id=account_identity.portfolio_id,
@@ -656,7 +774,9 @@ def execute_pending_for_session(
             status="execution_started",
             details={
                 "order_count": len(orders),
-                "canonical_records_before": len(canonical),
+                "canonical_records_before": canonical_before_records,
+                "canonical_head_before": canonical_before_head,
+                "target_weights_sha256": pending.target_weights_sha256,
                 "paper_account_identity_sha256": account_identity.payload_sha256,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
@@ -682,6 +802,19 @@ def execute_pending_for_session(
         ):
             terminal_status = "execution_blocked"
 
+        try:
+            canonical_receipt = build_canonical_prefix_receipt(
+                ledger=canonical,
+                canonical_before_records=canonical_before_records,
+                canonical_before_head=canonical_before_head,
+                target_weights_sha256=pending.target_weights_sha256,
+                paper_account_identity_sha256=account_identity.payload_sha256,
+            )
+        except CanonicalPrefixReceiptError as exc:
+            raise ContinuousPaperExecutionBlocked(
+                f"canonical terminal receipt creation failed: {exc}"
+            ) from exc
+
         journal.append(
             pending_payload_sha256=pending.payload_sha256,
             signal_date=pending.signal_date,
@@ -694,6 +827,8 @@ def execute_pending_for_session(
                 "nav_before": nav_before,
                 "nav_after": nav_after,
                 "paper_account_identity_sha256": account_identity.payload_sha256,
+                "target_weights_sha256": pending.target_weights_sha256,
+                "canonical_prefix_receipt": canonical_receipt,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
                 "session_closed": True,
