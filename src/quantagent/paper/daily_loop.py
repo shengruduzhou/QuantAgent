@@ -7,8 +7,10 @@ executed same-session, entered into the paper performance book, or reported as
 completed paper PnL.
 
 A later execution stage will consume the durable pending artifact against a
-continuous recovered PaperBroker account.  Until that stage observes the next
-session, this module deliberately stops at ``signal_recorded_pending_execution``.
+continuous recovered PaperBroker account.  Before a non-empty target is frozen,
+this module also replays that same canonical account and reconciles the desired
+target against the shares/cash that were actually filled.  Desired targets are
+never treated as holdings.
 """
 
 from __future__ import annotations
@@ -25,7 +27,12 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.cli._utils import read_frame, write_frame
 from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.daily_evidence_job import DailyEvidenceJob, DailyEvidenceJobConfig
+from quantagent.paper.account_target_state import (
+    recover_paper_account_target_state,
+    reconcile_target_to_canonical_account,
+)
 from quantagent.paper.pending_signal import PendingPaperSignalStore
+from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
 from quantagent.portfolio.v7_target_weights import V7TargetWeightsConfig, build_v7_target_weights, write_v7_target_weights
 from quantagent.training.v7_predictor import predict_v7_alpha
@@ -39,8 +46,10 @@ class DailyPaperLoopConfig:
     market_panel_path: str = field(default_factory=lambda: str(quant_paths().data_root / "v7" / "silver" / "market_panel" / "market_panel.parquet"))
     sector_map_path: str | None = None
     output_root: str = field(default_factory=lambda: str(quant_paths().reports / "v7" / "paper"))
-    paper_book_path: str = field(default_factory=lambda: str(quant_paths().home / "paper" / "paper_book.parquet"))
-    pending_signal_dir: str = field(default_factory=lambda: str(quant_paths().home / "paper" / "pending_signals"))
+    paper_book_path: str = field(default_factory=lambda: str(paper_runtime_paths().paper_book))
+    pending_signal_dir: str = field(default_factory=lambda: str(paper_runtime_paths().pending_signals))
+    canonical_ledger_path: str = field(default_factory=lambda: str(paper_runtime_paths().canonical_ledger))
+    portfolio_id: str = "v7-paper"
     primary_horizon: int = 5
     top_k: int = 30
     selection_mode: str = "ai_threshold"
@@ -83,6 +92,11 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     historical same-call strict simulation was not a shadow execution: it either
     right-censored the signal or required future data. Pending intent and
     executed paper evidence are now distinct states.
+
+    For a non-empty desired target, the final frozen target is additionally
+    constrained against the canonical account as it actually exists at T close.
+    This makes partial fills, rejections, cash fees and dropped holdings visible
+    to the next turnover decision.
     """
 
     as_of = _normalise_date(config.as_of_date)
@@ -125,7 +139,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     day_dir = Path(config.output_root) / as_of
     predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
     sector = read_frame(Path(config.sector_map_path)) if config.sector_map_path else None
-    weights = build_v7_target_weights(
+    desired_weights = build_v7_target_weights(
         predictions,
         market_panel,
         sector_map=sector,
@@ -144,6 +158,24 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             min_selection_pressure=1.0,
         ),
     )
+
+    account_state = None
+    if desired_weights.target_weights is not None and not desired_weights.target_weights.empty:
+        account_state = recover_paper_account_target_state(
+            canonical_ledger_path=config.canonical_ledger_path,
+            market_panel=market_panel,
+            as_of_date=as_of,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+        )
+        weights = reconcile_target_to_canonical_account(
+            desired_weights,
+            account_state=account_state,
+            max_turnover=config.max_turnover,
+        )
+    else:
+        weights = desired_weights
+
     weights_path = write_v7_target_weights(
         weights,
         day_dir / "target_weights.parquet",
@@ -189,8 +221,12 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             warnings=warnings,
         )
 
+    if account_state is None:  # defensive invariant; non-empty targets require account proof
+        raise RuntimeError("non-empty paper target lacks canonical account state")
+
     predictions_file = Path(predictions_path)
     target_weights_file = Path(weights_path)
+    account_evidence = account_state.evidence()
     pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
         signal_date=as_of,
         target_weights=weights.target_weights,
@@ -203,6 +239,10 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "target_weights_path": str(target_weights_file),
             "target_weights_file_sha256": _file_sha256(target_weights_file),
             "primary_horizon": str(config.primary_horizon),
+            "canonical_account_state_sha256": str(account_evidence["account_state_sha256"]),
+            "canonical_ledger_head_hash": str(account_evidence["canonical_head_hash"]),
+            "canonical_ledger_records": str(account_evidence["canonical_records"]),
+            "canonical_account_nav": str(account_evidence["nav"]),
         },
     )
 
@@ -216,6 +256,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         "evidence_warnings": list(evidence.warnings),
         "blend_diagnostics": blend_result.diagnostics,
         "target_weight_diagnostics": weights.diagnostics,
+        "account_state": account_evidence,
         "execution": {
             "status": "pending_next_observed_session",
             "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
@@ -225,6 +266,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "target_weights_sha256": pending.target_weights_sha256,
             "predictions_file_sha256": pending.source_lineage["predictions_file_sha256"],
             "target_weights_file_sha256": pending.source_lineage["target_weights_file_sha256"],
+            "canonical_account_state_sha256": pending.source_lineage["canonical_account_state_sha256"],
+            "canonical_ledger_head_hash": pending.source_lineage["canonical_ledger_head_hash"],
             "executed_fill_count": 0,
             "paper_report_written": False,
             "paper_book_appended": False,
