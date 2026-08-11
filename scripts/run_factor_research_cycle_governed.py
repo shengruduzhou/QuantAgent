@@ -64,6 +64,25 @@ def _file_sha256(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
 
 
+def _sessions_in_window(
+    sessions,
+    *,
+    start_date: str,
+    end_date: str,
+) -> pd.DatetimeIndex:
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    if end < start:
+        raise UniverseMembershipError("research window end precedes start")
+    canonical = pd.DatetimeIndex(pd.to_datetime(sessions)).normalize()
+    window = canonical[(canonical >= start) & (canonical <= end)]
+    if window.empty:
+        raise UniverseMembershipError(
+            "independent market calendar has no sessions in the requested research window"
+        )
+    return window
+
+
 def _static_symbols(args: argparse.Namespace, market_path: Path | None) -> tuple[str, ...]:
     requested = tuple(
         sorted({item.strip() for item in str(args.symbols or "").split(",") if item.strip()})
@@ -191,13 +210,7 @@ def _prepare_pit_input(
             raise UniverseMembershipError(
                 "PIT universe with --market-panel still requires independent --market-calendar"
             )
-        governed_calendar = Path(calendar_path)
-        sessions, calendar_meta = _load_market_calendar(
-            governed_calendar,
-            start_date=args.start_date,
-            end_date=args.end_date,
-        )
-        upstream_source["calendar"] = calendar_meta
+        sessions, calendar_meta = _load_market_calendar(Path(calendar_path))
     elif args.provider == "baostock":
         raw_market, upstream_source = _research_baostock(
             symbols=research_symbols,
@@ -208,14 +221,24 @@ def _prepare_pit_input(
             start_date=args.start_date,
             end_date=args.end_date,
         )
-        governed_calendar = output / "universe_input_market_calendar.csv"
-        pd.DataFrame({"trade_date": sessions}).to_csv(governed_calendar, index=False)
-        upstream_source = dict(upstream_source)
-        upstream_source["calendar"] = calendar_meta
     else:
         raise UniverseMembershipError(
             "PIT universe requires --market-panel or --provider baostock"
         )
+
+    sessions = _sessions_in_window(
+        sessions,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
+    governed_calendar = output / "universe_input_market_calendar.csv"
+    pd.DataFrame({"trade_date": sessions}).to_csv(governed_calendar, index=False)
+    calendar_meta = dict(calendar_meta)
+    calendar_meta["governed_window_start"] = pd.Timestamp(sessions.min()).date().isoformat()
+    calendar_meta["governed_window_end"] = pd.Timestamp(sessions.max()).date().isoformat()
+    calendar_meta["governed_window_trading_sessions"] = int(len(sessions))
+    upstream_source = dict(upstream_source)
+    upstream_source["calendar"] = calendar_meta
 
     coverage = _validate_pit_market_coverage(raw_market, evidence, sessions)
     filtered = filter_market_by_membership(raw_market, evidence)
