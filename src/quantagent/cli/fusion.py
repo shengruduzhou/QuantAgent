@@ -9,9 +9,10 @@ The command deliberately exposes no ``--n-trials`` flag: the trial count is a
 property of the enumerated search space, and letting an operator declare it
 would make the deflated Sharpe ratio meaningless.
 
-A research preference is not a production approval.  Every run now emits an
-independent ``promotion_gate.json`` using the project-wide PBO/DSR/SPA, PIT,
-benchmark and holdout policy.  Missing evidence fails closed.
+The PBO/DSR/SPA/PIT/benchmark/holdout checks emitted here are a research-screening
+layer, not a production authorization certificate. The CLI does not own the
+Stage-4 ExperimentLedger, one-shot FinalHoldoutLedger or executable economic
+certification, so even a passing research screen remains production-ineligible.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import typer
@@ -84,6 +85,39 @@ def _pit_evidence(frame: pd.DataFrame) -> bool | None:
     return None
 
 
+def _fusion_gate_payload(gate: Any, evidence: dict[str, object]) -> dict[str, object]:
+    """Serialize a passing/blocked research screen without granting production.
+
+    ``ResearchGateReport.eligible`` is useful evidence, but this CLI cannot prove
+    authoritative Stage-4 lineage or consume a one-shot final holdout. Preserve
+    the old ``promotionEligible`` field as a backward-compatible *false* value so
+    any legacy consumer also fails closed, while exposing the actual statistical
+    screen separately as ``researchPromotionEligible``.
+    """
+    base = dict(gate.as_dict())
+    base["promotionEligible"] = False
+    base.update(
+        {
+            "researchPromotionEligible": bool(gate.eligible),
+            "productionEligible": False,
+            "stage4Governed": False,
+            "researchOnly": True,
+            "productionBlockers": [
+                "factor-fusion CLI has no authoritative ExperimentLedger cumulative-trial binding",
+                "--holdout-untouched is a research assertion, not a one-shot FinalHoldoutLedger seal",
+                "factor-fusion outcome clock is not bound to the Stage-4 executable-label contract",
+                "factor-fusion economics are not certified through the strict position-carrying A-share simulator",
+            ],
+            "statisticalEvidence": evidence,
+            "note": (
+                "Pareto preference and PBO/DSR/SPA checks are research screening only. "
+                "Production eligibility requires the strict Stage-4 ledger/holdout/label/economic chain."
+            ),
+        }
+    )
+    return base
+
+
 @app.command("search-factor-fusion")
 def search_factor_fusion(
     factor_panel_path: Path = typer.Option(..., exists=True, dir_okay=False),
@@ -103,15 +137,24 @@ def search_factor_fusion(
     single_factor_baselines: int = typer.Option(6, min=0, max=64),
     seed: int = typer.Option(17),
     benchmark_path: Optional[Path] = typer.Option(None, exists=True, dir_okay=False),
-    benchmark_symbol: str = typer.Option("", help="Explicit benchmark, e.g. 000300.SH. Required for promotion eligibility."),
-    holdout_untouched: bool = typer.Option(False, help="Set only when an external final holdout was preserved and not used in selection."),
-    enforce_promotion_gates: bool = typer.Option(False, help="Exit non-zero when the production promotion gate fails."),
+    benchmark_symbol: str = typer.Option("", help="Explicit benchmark, e.g. 000300.SH. Required for a passing research screen."),
+    holdout_untouched: bool = typer.Option(
+        False,
+        help=(
+            "Research assertion that an external holdout was not used in selection. "
+            "This flag is not a one-shot Stage-4 holdout certificate and cannot grant production eligibility."
+        ),
+    ),
+    enforce_promotion_gates: bool = typer.Option(
+        False,
+        help="Exit non-zero when the research PBO/DSR/SPA/PIT/benchmark/holdout screen fails; never grants production eligibility.",
+    ),
     preference_excess_return: float = typer.Option(0.40, min=0.0, max=1.0),
     preference_annual_return: float = typer.Option(0.20, min=0.0, max=1.0),
     preference_drawdown_control: float = typer.Option(0.25, min=0.0, max=1.0),
     preference_robustness: float = typer.Option(0.15, min=0.0, max=1.0),
 ):
-    """Search factor blends, rank the OOS frontier, then audit promotion eligibility."""
+    """Search factor blends and audit a research-only promotion screen."""
     from quantagent.fusion import (
         FusionSearchConfig,
         ObjectivePreference,
@@ -200,12 +243,8 @@ def search_factor_fusion(
         pit_valid=_pit_evidence(factor_panel),
         holdout_untouched=holdout_untouched,
     )
-    gate_payload = {
-        **gate.as_dict(),
-        "preferredCandidate": evidence.get("preferred"),
-        "statisticalEvidence": evidence,
-        "note": "Pareto preference is a research ranking. Production eligibility is controlled only by this gate.",
-    }
+    gate_payload = _fusion_gate_payload(gate, evidence)
+    gate_payload["preferredCandidate"] = evidence.get("preferred")
     output_dir.mkdir(parents=True, exist_ok=True)
     gate_path = output_dir / "promotion_gate.json"
     gate_path.write_text(json.dumps(gate_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -226,12 +265,15 @@ def search_factor_fusion(
     else:
         typer.echo("no candidate produced usable out-of-sample observations")
     typer.echo(
-        "promotion=" + ("ELIGIBLE" if gate.eligible else "BLOCKED")
+        "research_promotion=" + ("PASS" if gate.eligible else "BLOCKED")
+        + " production_eligible=NO"
         + f" dsr={evidence.get('dsrProbability')} spa={evidence.get('spaPValue')}"
     )
     for blocker in gate.blockers:
-        typer.echo(f"promotion_blocker: {blocker}")
-    typer.echo(f"wrote {len(paths) + 1} artifacts to {output_dir}")
+        typer.echo(f"research_promotion_blocker: {blocker}")
+    for blocker in gate_payload["productionBlockers"]:
+        typer.echo(f"production_blocker: {blocker}")
+    typer.echo(f"wrote {len(paths) + 1} research artifacts to {output_dir}")
 
     if enforce_promotion_gates and not gate.eligible:
         raise typer.Exit(code=2)
