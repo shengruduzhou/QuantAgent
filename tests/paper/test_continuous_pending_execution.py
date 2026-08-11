@@ -188,7 +188,7 @@ def test_missed_next_session_is_not_retroactively_filled(tmp_path) -> None:
     ).status == "missed_execution_session"
 
 
-def test_unresolved_started_attempt_becomes_indeterminate_and_is_not_retried(tmp_path) -> None:
+def test_unresolved_started_attempt_blocks_retry_until_explicit_reconciliation(tmp_path) -> None:
     config = _config(tmp_path)
     pending = _record(tmp_path, FRIDAY, 0.50)
     journal = PendingExecutionJournal(config.execution_journal_path)
@@ -203,16 +203,15 @@ def test_unresolved_started_attempt_becomes_indeterminate_and_is_not_retried(tmp
         },
     )
 
-    result = execute_pending_for_session(
-        MONDAY,
-        _market(),
-        config=config,
-        authoritative_sessions=SESSIONS,
-    )
-    assert len(result) == 1
-    assert result[0].status == "execution_indeterminate"
-    assert result[0].order_count == 0
-    assert result[0].fill_count == 0
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="unresolved execution_started"):
+        execute_pending_for_session(
+            MONDAY,
+            _market(),
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+    assert journal.terminal(pending.payload_sha256) is None
+    assert journal.has_unresolved_start(pending.payload_sha256)
     assert not (tmp_path / "canonical.jsonl").exists()
 
 
