@@ -93,6 +93,7 @@ def _install_common_mocks(tmp_path, monkeypatch, *, targets: pd.DataFrame):
         output_root=str(tmp_path / "reports"),
         paper_book_path=str(tmp_path / "paper_book.parquet"),
         pending_signal_dir=str(tmp_path / "pending"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
         dry_run_evidence=True,
     )
     return as_of, config
@@ -122,6 +123,9 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert execution["paper_report_written"] is False
     assert execution["paper_book_appended"] is False
     assert payload["paper_report"] is None
+    assert payload["account_state"]["canonical_records"] == 0
+    assert payload["account_state"]["canonical_head_hash"] == "0" * 64
+    assert payload["target_weight_diagnostics"]["canonical_account_reconciliation"]["applied_l1_weight_churn"] == 0.4
 
     pending = json.loads((tmp_path / "pending" / f"{as_of}.json").read_text(encoding="utf-8"))
     predictions_path = tmp_path / "written_predictions.csv"
@@ -132,8 +136,11 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert pending["source_lineage"]["target_weights_file_sha256"] == sha256(
         weights_path.read_bytes()
     ).hexdigest()
+    assert pending["source_lineage"]["canonical_account_state_sha256"] == payload["account_state"]["account_state_sha256"]
+    assert pending["source_lineage"]["canonical_ledger_head_hash"] == "0" * 64
     assert execution["predictions_file_sha256"] == pending["source_lineage"]["predictions_file_sha256"]
     assert execution["target_weights_file_sha256"] == pending["source_lineage"]["target_weights_file_sha256"]
+    assert execution["canonical_account_state_sha256"] == pending["source_lineage"]["canonical_account_state_sha256"]
 
 
 def test_daily_loop_no_target_is_not_pending_liquidation_or_paper_evidence(tmp_path, monkeypatch) -> None:
