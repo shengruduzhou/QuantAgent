@@ -3,9 +3,28 @@ name: Factor Research Cycle
 on:
   workflow_dispatch:
     inputs:
+      universe_mode:
+        description: "Universe semantics: PIT effective-dated evidence or explicit static research symbols"
+        required: false
+        default: "research_universe_explicit_static"
+        type: choice
+        options:
+          - research_universe_explicit_static
+          - point_in_time_membership
       symbols:
-        description: "Comma-separated canonical A-share symbols, e.g. 600519.SH,000001.SZ"
-        required: true
+        description: "Static-mode only: comma-separated canonical A-share symbols"
+        required: false
+        default: ""
+        type: string
+      universe_membership:
+        description: "PIT-mode only: repository/workspace path to effective-dated membership CSV/Parquet/JSONL"
+        required: false
+        default: ""
+        type: string
+      universe_id:
+        description: "PIT universe_id when the membership file contains multiple universes"
+        required: false
+        default: ""
         type: string
       start_date:
         description: "Research history start date"
@@ -18,9 +37,10 @@ on:
         default: "5"
         type: string
   schedule:
-    # Weekly research refresh. Scheduled runs require repository variable
-    # FACTOR_RESEARCH_SYMBOLS; without an explicit universe the job skips rather
-    # than reconstructing history from today's constituents.
+    # Weekly research refresh. Scheduled runs may use a configured PIT membership
+    # artifact or an explicitly static limited-scope research universe. If the
+    # chosen mode lacks its required evidence, the job skips rather than
+    # reconstructing history from today's constituents.
     - cron: "20 0 * * 1"
 
 permissions:
@@ -31,7 +51,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
+      FACTOR_UNIVERSE_MODE: ${{ github.event.inputs.universe_mode || vars.FACTOR_RESEARCH_UNIVERSE_MODE || 'research_universe_explicit_static' }}
       FACTOR_SYMBOLS: ${{ github.event.inputs.symbols || vars.FACTOR_RESEARCH_SYMBOLS }}
+      FACTOR_UNIVERSE_FILE: ${{ github.event.inputs.universe_membership || vars.FACTOR_RESEARCH_UNIVERSE_FILE }}
+      FACTOR_UNIVERSE_ID: ${{ github.event.inputs.universe_id || vars.FACTOR_RESEARCH_UNIVERSE_ID }}
       FACTOR_START_DATE: ${{ github.event.inputs.start_date || vars.FACTOR_RESEARCH_START_DATE || '2020-01-01' }}
       FACTOR_TARGET_HORIZON: ${{ github.event.inputs.target_horizon || '5' }}
     steps:
@@ -44,16 +67,32 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Validate explicit research universe
+      - name: Validate research-universe evidence
         id: universe
         shell: bash
         run: |
-          if [ -z "${FACTOR_SYMBOLS// }" ]; then
-            echo "No explicit factor-research universe configured; skipping to avoid survivorship-biased universe invention."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
+          case "$FACTOR_UNIVERSE_MODE" in
+            point_in_time_membership)
+              if [ -z "${FACTOR_UNIVERSE_FILE// }" ] || [ ! -f "$FACTOR_UNIVERSE_FILE" ]; then
+                echo "PIT factor-research universe file is not configured/present; skipping rather than inventing historical membership."
+                echo "enabled=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "enabled=true" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            research_universe_explicit_static)
+              if [ -z "${FACTOR_SYMBOLS// }" ]; then
+                echo "No explicit static factor-research symbols configured; skipping to avoid current-constituent survivorship bias."
+                echo "enabled=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "enabled=true" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "Unsupported FACTOR_UNIVERSE_MODE=$FACTOR_UNIVERSE_MODE" >&2
+              exit 2
+              ;;
+          esac
 
       - name: Install research data runtime
         if: steps.universe.outputs.enabled == 'true'
@@ -63,14 +102,25 @@ jobs:
 
       - name: Pull raw BaoStock data and evaluate factors
         if: steps.universe.outputs.enabled == 'true'
+        shell: bash
         run: |
-          python scripts/run_factor_research_cycle.py \
-            --provider baostock \
-            --symbols "$FACTOR_SYMBOLS" \
-            --start-date "$FACTOR_START_DATE" \
-            --end-date "$(date -u +%F)" \
-            --target-horizon "$FACTOR_TARGET_HORIZON" \
+          args=(
+            --provider baostock
+            --universe-mode "$FACTOR_UNIVERSE_MODE"
+            --start-date "$FACTOR_START_DATE"
+            --end-date "$(date -u +%F)"
+            --target-horizon "$FACTOR_TARGET_HORIZON"
             --output-dir runtime/research/factor_cycle
+          )
+          if [ "$FACTOR_UNIVERSE_MODE" = "point_in_time_membership" ]; then
+            args+=(--universe-membership "$FACTOR_UNIVERSE_FILE")
+            if [ -n "${FACTOR_UNIVERSE_ID// }" ]; then
+              args+=(--universe-id "$FACTOR_UNIVERSE_ID")
+            fi
+          else
+            args+=(--symbols "$FACTOR_SYMBOLS")
+          fi
+          python scripts/run_factor_research_cycle_governed.py "${args[@]}"
 
       - name: Assert research-only truth boundary
         if: steps.universe.outputs.enabled == 'true'
@@ -79,10 +129,22 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(Path('runtime/research/factor_cycle/manifest.json').read_text())
+          universe = payload['research_universe']
+          assert payload['schema_version'] == 'factor_research_cycle_v4_pit_universe'
           assert payload['research_only'] is True
           assert payload['economic_live_eligible'] is False
           assert payload['automatic_factor_activation'] is False
           assert payload['source']['production_integrity_certified'] is False
+          assert universe['production_integrity_certified'] is False
+          assert universe['membership_contract_sha256']
+          if universe['mode'] == 'research_universe_explicit_static':
+              assert universe['point_in_time_membership'] is False
+              assert universe['survivorship_bias_possible'] is True
+              assert universe['broad_market_generalization_certified'] is False
+          else:
+              assert universe['mode'] == 'point_in_time_membership'
+              assert universe['point_in_time_membership'] is True
+              assert universe['current_constituent_backfill_blocked'] is True
           PY
 
       - name: Upload factor research evidence
