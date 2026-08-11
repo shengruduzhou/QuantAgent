@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
+from quantagent.factors.coverage import usable_factor_coverage
 from quantagent.quant_math.performance import newey_west_t_stat
 
 
@@ -307,11 +308,16 @@ def evaluate_factor_candidate(
     if duplicate_count:
         raise ValueError(f"duplicate trade_date/symbol rows: {duplicate_count}")
 
-    counts = work.groupby("trade_date")["symbol"].nunique()
-    coverage_dates = int(len(counts))
-    median_symbols = float(counts.median()) if not counts.empty else 0.0
-    eligible_dates = counts[counts >= cfg.min_symbols_per_date].index
-    eligible = work[work["trade_date"].isin(eligible_dates)].copy()
+    coverage = usable_factor_coverage(
+        work,
+        factor_name,
+        target_return_col,
+        min_symbols_per_date=cfg.min_symbols_per_date,
+    )
+    coverage_dates = coverage.coverage_dates
+    median_symbols = coverage.median_symbols_per_date
+    eligible = work[work["trade_date"].isin(coverage.eligible_dates)].copy()
+
     ic = _rank_ic_by_date(eligible, factor_name, target_return_col)
     mean_ic = float(ic.mean()) if not ic.empty else float("nan")
     icir = _ic_ir(ic)
