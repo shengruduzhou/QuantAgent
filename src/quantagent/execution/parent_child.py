@@ -442,6 +442,11 @@ def _verify_state(state: ParentExecutionState) -> None:
             )
 
     if state.parent.algorithm in {ExecutionAlgorithm.TWAP, ExecutionAlgorithm.VWAP}:
+        # Revision 0 is a deliberate bootstrap snapshot created by ``ensure``
+        # before the deterministic static plan is installed transactionally.
+        # Any later empty/partial static plan is corruption and must fail closed.
+        if not state.children and state.revision == 0:
+            return
         if sum(child.quantity for child in state.children) != state.parent.total_quantity:
             raise ParentExecutionCorruption(
                 "static TWAP/VWAP child plan does not sum to parent quantity"
@@ -878,6 +883,15 @@ class ParentChildExecutionEngine:
                 raise ParentExecutionError(
                     "PLANNED child cannot receive acknowledgement before release"
                 )
+            # Terminal immutability is the primary state-machine invariant. Check
+            # it before validating a proposed fill so illegal post-terminal
+            # mutations cannot be misclassified as fill arithmetic errors.
+            if child.status in _TERMINAL_CHILD_STATUSES:
+                if new_status is child.status and filled == child.filled_quantity:
+                    return state
+                raise ParentExecutionError(
+                    f"terminal child state {child.status.value} is immutable"
+                )
             if filled < child.filled_quantity:
                 raise ParentExecutionError(
                     "child cumulative filled quantity moved backwards"
@@ -905,12 +919,6 @@ class ParentChildExecutionEngine:
             if new_status is ChildStatus.CANCELLED and filled >= child.quantity:
                 raise ParentExecutionError(
                     "fully filled child must be FILLED, not CANCELLED"
-                )
-            if child.status in _TERMINAL_CHILD_STATUSES:
-                if new_status is child.status and filled == child.filled_quantity:
-                    return state
-                raise ParentExecutionError(
-                    f"terminal child state {child.status.value} is immutable"
                 )
 
             children[index] = replace(
