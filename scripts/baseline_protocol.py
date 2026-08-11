@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
-"""THE single trusted baseline evaluator for factor sleeves (A-share strict).
+"""Single trusted baseline evaluator for factor sleeves (A-share strict).
 
-Every factor/model comparison must run through this protocol so numbers are
-comparable. It decomposes where returns come from:
+Every factor/model comparison routed through this script uses the same
+position-carrying strict A-share simulator. Target-weight indices are **signal
+sessions**; this script never pre-shifts them. The strict simulator is the sole
+owner of the canonical T-close -> next-global-session execution mapping.
 
-  variant A  flags ON,  t-close fill,  raw ranking      (strict, slot-wasting)
-  variant B  flags ON,  t-close fill,  eligible ranking (strict + smart slots)
-  variant C  flags ON,  t+1 fill,      eligible ranking (honest deliverable)
-  variant D  flags OFF, t-close fill,  raw ranking      (legacy phantom number)
+The historical variant names are preserved for artifact compatibility, but
+execution timing is now one consistent contract for every variant:
+
+  variant A  flags ON,  next-session execution, raw ranking      (slot-wasting)
+  variant B  flags ON,  next-session execution, eligible ranking (smart slots)
+  variant C  flags ON,  next-session execution, eligible ranking (legacy trusted alias)
+  variant D  flags OFF, next-session execution, raw ranking      (forensic/legacy flags-off)
+
+``C_flags_eligible_delay1`` keeps its old identifier because downstream v8.9
+artifacts and scripts reference it. The ``delay1`` suffix is legacy naming only:
+there is no extra target-date shift. A signal at T is mapped exactly once by the
+strict simulator and executes on T+1 global market session when executable.
 
 "eligible ranking" excludes, at signal time, names you provably cannot or
 should not buy that day: suspended, ST (the strategy's own hard risk gate),
-and limit-up-sealed closes. This converts rejected orders into next-best
-picks instead of cash drag — implementable live because all three states
-are observable at the close.
+and limit-up-sealed closes. This converts rejected *signal-date eligibility*
+into next-best picks using information available at the signal close. Actual
+next-session order feasibility still belongs to the strict broker/simulator.
 
 Excess is vs the frictionless equal-weight all-A benchmark (close-to-close
-mean), per the project's stated target. The benchmark pays no costs, so
-excess is a conservative bar.
+mean), per the project's stated target. The benchmark pays no costs, so excess
+is a conservative bar.
 """
 
 from __future__ import annotations
@@ -31,6 +41,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig
+from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.backtest.quarantine import (
     FORENSICS_TRUST_CLASS,
     QuarantineViolation,
@@ -80,8 +91,14 @@ def _regime_excess(nav: pd.Series, bench_daily: pd.Series) -> dict:
     return rows
 
 
-def _target_weights(preds: pd.DataFrame, score_col: str, top_k: int, *, eligible_only: bool,
-                    delay_days: int, trade_dates: list[pd.Timestamp]) -> pd.DataFrame:
+def _target_weights(
+    preds: pd.DataFrame,
+    score_col: str,
+    top_k: int,
+    *,
+    eligible_only: bool,
+) -> pd.DataFrame:
+    """Build signal-date target weights; never shift execution dates here."""
     d = preds.copy()
     if eligible_only:
         bad = (
@@ -94,31 +111,15 @@ def _target_weights(preds: pd.DataFrame, score_col: str, top_k: int, *, eligible
     d["rank"] = d.groupby("trade_date").cumcount()
     d = d[d["rank"] < top_k]
     d["w"] = 1.0 / float(top_k)
-    tw = d.pivot_table(index="trade_date", columns="symbol", values="w", fill_value=0.0).sort_index()
-    return _apply_delay(tw, trade_dates, delay_days)
-
-
-def _apply_delay(tw: pd.DataFrame, trade_dates: list[pd.Timestamp], delay_days: int) -> pd.DataFrame:
-    """Signal at t is executed on the (t + delay)-th trading day."""
-    if delay_days <= 0:
-        return tw
-    date_index = pd.DatetimeIndex(sorted(trade_dates))
-    positions = date_index.searchsorted(tw.index) + delay_days
-    keep = positions < len(date_index)
-    tw = tw.iloc[keep]
-    tw.index = date_index[positions[keep]]
-    return tw[~tw.index.duplicated(keep="last")].sort_index()
+    return d.pivot_table(
+        index="trade_date", columns="symbol", values="w", fill_value=0.0
+    ).sort_index()
 
 
 def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,
                       start: str, end: str | None, top_k: int,
                       trust_class: str | None = None) -> str:
-    """Emit a UI-discoverable backtest artifact (metrics.json + nav.csv) so the
-    real-test CAGR/Calmar surfaces in the quant UI (`services/quant_api`).
-
-    The indexer classifies anything under a ``/backtest/`` path as kind=backtest;
-    the adapter needs metrics.json + a sibling nav.csv and reads `calmar` directly.
-    """
+    """Emit a UI-discoverable backtest artifact (metrics.json + nav.csv)."""
     d = Path(base_dir) / "backtest"
     d.mkdir(parents=True, exist_ok=True)
     nav = res.nav.copy()
@@ -145,6 +146,8 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
         "sharpe": round(float(m.sharpe), 4),
         "calmar": round(float(calmar), 4) if calmar is not None else None,
         "benchmark_annualized_return": round(float(bench_ann), 6),
+        "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+        "target_index_semantics": "signal_date_not_pre_shifted",
     }
     if trust_class:
         metrics["trust_class"] = trust_class
@@ -152,6 +155,8 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
     (d / "run_config.json").write_text(json.dumps({
         "strategy_version": "v89_closed_loop", "feature_policy": "judgment",
         "initial_cash": 1_000_000.0, "horizon": variant, "top_k": top_k,
+        "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+        "target_index_semantics": "signal_date_not_pre_shifted",
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(d)
 
@@ -189,8 +194,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
     p_start = pd.Timestamp(start) - pd.Timedelta(days=10)
     p_end = pd.Timestamp(end) + pd.Timedelta(days=10) if end else None
     if q_record is None:
-        # Clean eval window: keep the +/-10d fill buffers out of quarantine too
-        # (delay-1 fills otherwise execute inside the burned window).
+        # Keep the +/-10d execution buffers out of quarantine too: the strict
+        # simulator consumes the next global session after each signal date.
         p_start, p_end = clamp_panel_window(p_start, p_end, q_windows)
     panel = panel[panel["trade_date"] >= p_start]
     if p_end is not None:
@@ -199,29 +204,44 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
 
     flags = panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
     preds = preds.merge(flags, on=["symbol", "trade_date"], how="left")
-    trade_dates = sorted(panel["trade_date"].unique())
 
     bench = _bench_daily(panel, sorted(preds["trade_date"].unique()))
     bench_ann = float((1 + bench).prod() ** (ANN / max(1, len(bench))) - 1)
 
     panel_noflags = panel.drop(columns=["is_suspended", "is_st", "is_limit_up", "is_limit_down"])
 
+    # All targets stay on their signal dates. The strict simulator is the sole
+    # owner of the next-session execution clock. Variant C keeps its old name
+    # only for backward-compatible artifact discovery and is an alias of B.
     spec = {
-        "A_flags_raw": dict(eligible=False, delay=0, flags=True),
-        "B_flags_eligible": dict(eligible=True, delay=0, flags=True),
-        "C_flags_eligible_delay1": dict(eligible=True, delay=1, flags=True),
-        "D_noflags_raw": dict(eligible=False, delay=0, flags=False),
+        "A_flags_raw": dict(eligible=False, flags=True),
+        "B_flags_eligible": dict(eligible=True, flags=True),
+        "C_flags_eligible_delay1": dict(eligible=True, flags=True),
+        "D_noflags_raw": dict(eligible=False, flags=False),
     }
-    out: dict = {"bench_ann": round(bench_ann, 4), "predictions": preds_path,
-                 "top_k": top_k, "start": start, "end": end, "slippage_bps": slippage_bps,
-                 "variants": {}}
+    out: dict = {
+        "bench_ann": round(bench_ann, 4),
+        "predictions": preds_path,
+        "top_k": top_k,
+        "start": start,
+        "end": end,
+        "slippage_bps": slippage_bps,
+        "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+        "target_index_semantics": "signal_date_not_pre_shifted",
+        "legacy_variant_aliases": {"C_flags_eligible_delay1": "B_flags_eligible"},
+        "variants": {},
+    }
     if q_record is not None:
         out["trust_class"] = FORENSICS_TRUST_CLASS
         out["quarantine_override"] = q_record
     for name in variants:
         v = spec[name]
-        tw = _target_weights(preds, "alpha_score", top_k, eligible_only=v["eligible"],
-                             delay_days=v["delay"], trade_dates=trade_dates)
+        tw = _target_weights(
+            preds,
+            "alpha_score",
+            top_k,
+            eligible_only=v["eligible"],
+        )
         use_panel = panel if v["flags"] else panel_noflags
         res = run_strict_backtest_v8(
             tw, use_panel, sector_map=sector,
@@ -234,6 +254,7 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "total": round(m.total_return, 4),
             "sharpe": round(m.sharpe, 3),
             "maxDD": round(m.max_drawdown, 4),
+            "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
             "regime": _regime_excess(res.nav, bench),
         }
         out["variants"][name] = rec
@@ -260,7 +281,10 @@ def main() -> int:
     ap.add_argument("--save-backtest-dir", default=None,
                     help="If set, write a UI-discoverable <dir>/backtest/{metrics.json,nav.csv} for --save-variant.")
     ap.add_argument("--save-variant", default="C_flags_eligible_delay1",
-                    help="Which variant to export as the UI backtest (default = honest variant C).")
+                    help=(
+                        "Which variant to export. Historical default C is retained as a compatibility alias "
+                        "for eligible ranking under the canonical strict next-session simulator."
+                    ))
     ap.add_argument("--allow-quarantined", default=None, metavar="REASON",
                     help="Forensic override for quarantined windows (configs/quarantined_windows.json). "
                          "Requires a non-empty justification; access is logged and outputs are "
