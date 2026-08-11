@@ -1,26 +1,24 @@
 """PIT portfolio environment with an executable T -> T+1 -> T+2 clock.
 
-The first PortfolioEnv was rejected because its apparent edge came from universe
-lookahead.  The second version removed that bias, but its reward clock still
-preceded the repository's canonical execution clock: a signal produced at the
-T close was rewarded on close(T)->close(T+1) even though strict execution does
-not establish the position until the next market-session close.
-
-This environment makes the execution contract explicit:
+The environment follows the repository's canonical execution semantics:
 
 * Observation / action time: signal close T.
 * Execution constraints: the next market session T+1.
 * Reward holding interval: close(T+1) -> close(T+2).
-* Tradability is fail-closed on the execution session. Missing/ambiguous flags,
-  prices, prediction rows, or required liquidation slots invalidate the env.
-* Universe at each step contains the current passive target plus names held by
-  the previous target so an untradable exit cannot disappear from accounting.
-* Reward remains policy value-add versus the same constrained passive book, so
-  a zero action earns exactly zero reward.
+* A training cutoff censors any transition whose *reward end* exceeds the
+  cutoff; signal-date truncation alone is not sufficient.
+* Tradability is fail-closed on the execution session. A missing bar is accepted
+  only when ``session_gaps`` proves ``SUSPENDED``; its valuation then carries
+  the last traded close rather than fabricating a bar.
+* Limit-up is a no-increase constraint, limit-down is a no-decrease constraint,
+  and suspension freezes the position, matching strict A-share broker semantics.
+* Universe at each step contains the current passive target plus prior/carried
+  names so an untradable exit cannot disappear from accounting.
+* Reward is policy value-add versus the same constrained passive book, so a zero
+  action earns exactly zero reward.
 
-The environment is training/research infrastructure only.  Exported weights
-must still be re-simulated through ``run_strict_backtest_v8`` and pass the
-repository's statistical and risk governance before any promotion.
+This remains research infrastructure. Exported weights require strict replay,
+quarantine governance, statistical validation, and forward shadow evidence.
 """
 
 from __future__ import annotations
@@ -51,14 +49,14 @@ class PITPortfolioEnvConfig:
     max_gross: float = 1.0
     cost_bps: float = 12.0
     reward_scale: float = 100.0
+    reward_end_date_limit: str | None = None
 
 
 class PITPortfolioEnv(gym.Env if gym is not None else object):
-    """Hold-band-book universe with execution-clock-correct value-add reward."""
+    """Hold-band universe with execution-clock-correct value-add reward."""
 
     metadata = {"render_modes": []}
-
-    N_SLOT_FEATURES = 5  # alpha_z, ret_5d, age_norm, prev_minus_target, in_book
+    N_SLOT_FEATURES = 5
 
     def __init__(
         self,
@@ -66,6 +64,8 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         predictions: pd.DataFrame,
         market_panel: pd.DataFrame,
         config: PITPortfolioEnvConfig | None = None,
+        *,
+        session_gaps: pd.DataFrame | None = None,
     ) -> None:
         if gym is None:  # pragma: no cover - optional dependency
             raise ImportError("PITPortfolioEnv requires gymnasium")
@@ -74,7 +74,12 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self.config = config or PITPortfolioEnvConfig()
         if self.config.max_book <= 0:
             raise ValueError("PITPortfolioEnv max_book must be positive")
-        self._build_caches(book_weights, predictions, market_panel)
+        self._build_caches(
+            book_weights,
+            predictions,
+            market_panel,
+            session_gaps=session_gaps,
+        )
 
         n = self.config.max_book
         obs_size = n * self.N_SLOT_FEATURES + 5
@@ -96,12 +101,13 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self._nav = 1.0
         self._nav_passive = 1.0
 
-    # ------------------------------------------------------------------ setup
     def _build_caches(
         self,
         book_weights: pd.DataFrame,
         predictions: pd.DataFrame,
         market_panel: pd.DataFrame,
+        *,
+        session_gaps: pd.DataFrame | None,
     ) -> None:
         if book_weights is None or book_weights.empty:
             raise ValueError("PITPortfolioEnv requires non-empty book weights")
@@ -152,6 +158,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         panel_index = panel.set_index(["trade_date", "symbol"]).sort_index()
         px = panel.pivot(index="trade_date", columns="symbol", values="close").sort_index()
         ret5 = px / px.shift(5) - 1.0
+        gap_index = _prepare_session_gaps(session_gaps)
 
         preds = predictions.copy()
         if "trade_date" not in preds.columns or "symbol" not in preds.columns:
@@ -176,7 +183,6 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             index="trade_date", columns="symbol", values=score_col
         ).sort_index()
 
-        # PIT regime: shifted cumulative benchmark never sees T+1 or later.
         bench = px.pct_change(fill_method=None).mean(axis=1)
         cum = (1 + bench.fillna(0)).cumprod().shift(1)
         trail = cum / cum.shift(60) - 1.0
@@ -185,6 +191,11 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         session_position = {
             pd.Timestamp(session): index for index, session in enumerate(sessions)
         }
+        reward_limit = (
+            pd.Timestamp(self.config.reward_end_date_limit).normalize()
+            if self.config.reward_end_date_limit
+            else None
+        )
         triplets: list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]] = []
         for signal_date in bw.index:
             signal = pd.Timestamp(signal_date)
@@ -193,21 +204,17 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                     f"PITPortfolioEnv signal date {signal.date()} is absent from market sessions"
                 )
             position = session_position[signal]
-            # The final two signal sessions are right-censored: they cannot prove
-            # both an execution session and a post-execution reward session.
             if position + 2 >= len(sessions):
                 continue
-            triplets.append(
-                (
-                    signal,
-                    pd.Timestamp(sessions[position + 1]),
-                    pd.Timestamp(sessions[position + 2]),
-                )
-            )
+            execution_date = pd.Timestamp(sessions[position + 1])
+            reward_end_date = pd.Timestamp(sessions[position + 2])
+            if reward_limit is not None and reward_end_date > reward_limit:
+                continue
+            triplets.append((signal, execution_date, reward_end_date))
         if len(triplets) < 3:
             raise ValueError(
                 "PITPortfolioEnv requires at least 3 signal dates with proven T+1 "
-                "execution and T+2 reward sessions"
+                "execution and T+2 reward sessions inside the configured boundary"
             )
 
         dates = [item[0] for item in triplets]
@@ -226,6 +233,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self.slot_ret5 = np.zeros((T, n), dtype=np.float32)
         self.slot_age = np.zeros((T, n), dtype=np.float32)
         self.slot_no_increase = np.zeros((T, n), dtype=bool)
+        self.slot_no_decrease = np.zeros((T, n), dtype=bool)
         self.slot_frozen = np.zeros((T, n), dtype=bool)
         self.slot_in_book = np.zeros((T, n), dtype=np.float32)
         self.passive_w = np.zeros((T, n), dtype=np.float64)
@@ -239,7 +247,6 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             held = row[row > 1e-12]
             current_symbols = list(held.index.astype(str))
             current_set = set(current_symbols)
-
             if len(current_symbols) > n:
                 raise ValueError(
                     f"PITPortfolioEnv signal {signal_date.date()} has "
@@ -287,52 +294,45 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             self.slot_symbols.append(order)
             k = len(order)
 
-            exec_prices = px.loc[execution_date].reindex(order)
-            end_prices = px.loc[reward_end_date].reindex(order)
-            bad_price_symbols = [
-                symbol
-                for symbol in order
-                if not _finite_positive(exec_prices.get(symbol))
-                or not _finite_positive(end_prices.get(symbol))
-            ]
-            if bad_price_symbols:
-                raise ValueError(
-                    "PITPortfolioEnv missing/non-positive reward price for "
-                    f"{bad_price_symbols[:10]} on execution={execution_date.date()} "
-                    f"or reward_end={reward_end_date.date()}"
-                )
-            reward_returns = end_prices.astype(float) / exec_prices.astype(float) - 1.0
+            exec_prices = pd.Series(
+                {
+                    symbol: _proven_close(
+                        symbol,
+                        execution_date,
+                        px=px,
+                        gap_index=gap_index,
+                    )
+                    for symbol in order
+                },
+                dtype=float,
+            )
+            end_prices = pd.Series(
+                {
+                    symbol: _proven_close(
+                        symbol,
+                        reward_end_date,
+                        px=px,
+                        gap_index=gap_index,
+                    )
+                    for symbol in order
+                },
+                dtype=float,
+            )
+            reward_returns = end_prices / exec_prices - 1.0
 
             no_increase = np.zeros(k, dtype=bool)
+            no_decrease = np.zeros(k, dtype=bool)
             frozen = np.zeros(k, dtype=bool)
             for i, symbol in enumerate(order):
-                key = (execution_date, symbol)
-                if key not in panel_index.index:
-                    raise ValueError(
-                        "PITPortfolioEnv missing execution row for "
-                        f"{symbol} on {execution_date.date()}"
-                    )
-                execution_row = panel_index.loc[key]
-                is_limit_up = _strict_flag(
-                    execution_row["is_limit_up"],
-                    name="is_limit_up",
-                    symbol=symbol,
-                    trade_date=execution_date,
+                flags = _execution_flags(
+                    symbol,
+                    execution_date,
+                    panel_index=panel_index,
+                    gap_index=gap_index,
                 )
-                is_limit_down = _strict_flag(
-                    execution_row["is_limit_down"],
-                    name="is_limit_down",
-                    symbol=symbol,
-                    trade_date=execution_date,
-                )
-                is_suspended = _strict_flag(
-                    execution_row["is_suspended"],
-                    name="is_suspended",
-                    symbol=symbol,
-                    trade_date=execution_date,
-                )
-                no_increase[i] = is_limit_up
-                frozen[i] = is_limit_down or is_suspended
+                no_increase[i] = flags["is_limit_up"]
+                no_decrease[i] = flags["is_limit_down"]
+                frozen[i] = flags["is_suspended"]
 
             r5_row = (
                 ret5.loc[signal_date]
@@ -340,10 +340,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 else pd.Series(dtype=float)
             )
             r5_values = r5_row.reindex(order)
-            # Trailing-return features are observations, not economic evidence.
-            # Missing history is represented as zero while execution/reward data
-            # above remain strictly fail-closed.
-            self.slot_ret[ti, :k] = reward_returns.to_numpy(dtype=np.float64)
+            self.slot_ret[ti, :k] = reward_returns.reindex(order).to_numpy(dtype=np.float64)
             self.slot_alpha[ti, :k] = (
                 alpha_z.reindex(order).fillna(0.0).to_numpy(dtype=np.float32)
             )
@@ -360,6 +357,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 dtype=np.float32,
             )
             self.slot_no_increase[ti, :k] = no_increase
+            self.slot_no_decrease[ti, :k] = no_decrease
             self.slot_frozen[ti, :k] = frozen
             self.slot_in_book[ti, :k] = np.asarray(
                 [symbol in current_set for symbol in order],
@@ -374,21 +372,17 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 float(np.isfinite(regime) and regime < -0.05),
             )
 
-            # A suspended / limit-down exit can remain in the account for more
-            # than one session. Carry those liquidation-only names forward until
-            # an execution session actually permits the exit; never let them
-            # disappear merely because they left the target book.
             carried_exit_symbols = {
                 symbol
                 for i, symbol in enumerate(order)
-                if symbol not in current_set and bool(frozen[i])
+                if symbol not in current_set
+                and (bool(frozen[i]) or bool(no_decrease[i]))
             }
             for symbol in list(age_track):
                 if symbol not in current_set:
                     age_track.pop(symbol)
             previous_target_symbols = current_set
 
-    # ------------------------------------------------------------------ gym api
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         del options
         super_reset = getattr(super(), "reset", None)
@@ -417,9 +411,6 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         in_book = self.slot_in_book[t].astype(bool)
         passive = self.passive_w[t]
         syms = self.slot_symbols[t]
-
-        # Signal-T target: tilt only names in the passive target. Previous names
-        # outside the new target are liquidation-only slots and begin at zero.
         w = passive * (1.0 + cfg.max_tilt * a[:n])
         w = np.where(in_book, np.maximum(w, 0.0), 0.0)
         passive_gross = float(passive.sum())
@@ -434,8 +425,6 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         if weight_sum > 1e-12:
             w = w * (gross / weight_sum)
 
-        # Execute on T+1. The same execution constraints are applied to policy
-        # and passive books, preserving zero-action == zero-value-add.
         prev_vec = np.array(
             [self._prev_w.get(symbol, 0.0) for symbol in syms]
             + [0.0] * (n - len(syms)),
@@ -446,18 +435,21 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             + [0.0] * (n - len(syms)),
             dtype=np.float64,
         )
-        w = np.where(self.slot_no_increase[t], np.minimum(w, prev_vec), w)
-        w = np.where(self.slot_frozen[t], prev_vec, w)
-        w_passive = np.where(
-            self.slot_no_increase[t],
-            np.minimum(passive, prev_passive_vec),
-            passive,
+        w = _apply_execution_constraints(
+            w,
+            prev_vec,
+            no_increase=self.slot_no_increase[t],
+            no_decrease=self.slot_no_decrease[t],
+            frozen=self.slot_frozen[t],
         )
-        w_passive = np.where(
-            self.slot_frozen[t], prev_passive_vec, w_passive
+        w_passive = _apply_execution_constraints(
+            passive,
+            prev_passive_vec,
+            no_increase=self.slot_no_increase[t],
+            no_decrease=self.slot_no_decrease[t],
+            frozen=self.slot_frozen[t],
         )
 
-        # Reward begins only after the T+1 close execution: T+1 -> T+2.
         returns = self.slot_ret[t]
         ret_policy = float(np.dot(w, returns))
         ret_passive = float(np.dot(w_passive, returns))
@@ -466,9 +458,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             symbol: float(w_passive[i]) for i, symbol in enumerate(syms)
         }
         turnover_policy = _sym_turnover(self._prev_w, current)
-        turnover_passive = _sym_turnover(
-            self._prev_w_passive, current_passive
-        )
+        turnover_passive = _sym_turnover(self._prev_w_passive, current_passive)
         cost_policy = turnover_policy * cfg.cost_bps / 1e4
         cost_passive = turnover_passive * cfg.cost_bps / 1e4
 
@@ -500,10 +490,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         }
         return self._obs(), float(reward), bool(terminated), False, info
 
-    # ---------------------------------------------------------------- guards
     def book_dispersion_report(self, eps: float = 1e-6) -> dict:
-        """Report whether the policy can express within-book stock selection."""
-
         stds: list[float] = []
         for t in range(len(self.dates)):
             in_book = self.slot_in_book[t].astype(bool)
@@ -523,6 +510,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             "flat_date_fraction": flat_fraction,
             "env_can_select": bool(count > 0 and flat_fraction < 0.5),
             "reward_clock_semantics": self.reward_clock_semantics,
+            "reward_end_date_limit": self.config.reward_end_date_limit,
         }
 
     def _obs(self) -> np.ndarray:
@@ -556,6 +544,134 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             dtype=np.float32,
         )
         return np.concatenate([feats, globals_]).astype(np.float32)
+
+
+def _prepare_session_gaps(
+    session_gaps: pd.DataFrame | None,
+) -> dict[tuple[pd.Timestamp, str], str]:
+    if session_gaps is None or session_gaps.empty:
+        return {}
+    required = {"trade_date", "symbol", "classification"}
+    missing = sorted(required - set(session_gaps.columns))
+    if missing:
+        raise ValueError(
+            f"PITPortfolioEnv session gaps missing required columns: {missing}"
+        )
+    gaps = session_gaps.copy()
+    gaps["trade_date"] = pd.to_datetime(
+        gaps["trade_date"], errors="coerce"
+    ).dt.normalize()
+    gaps["symbol"] = gaps["symbol"].astype(str)
+    gaps["classification"] = gaps["classification"].astype(str).str.upper()
+    if gaps["trade_date"].isna().any():
+        raise ValueError("PITPortfolioEnv session gaps contain invalid trade dates")
+    duplicated = gaps.duplicated(["trade_date", "symbol"], keep=False)
+    if bool(duplicated.any()):
+        raise ValueError("PITPortfolioEnv session gaps contain duplicate date/symbol rows")
+    return {
+        (pd.Timestamp(row.trade_date), str(row.symbol)): str(row.classification)
+        for row in gaps.itertuples()
+    }
+
+
+def _gap_classification(
+    gap_index: dict[tuple[pd.Timestamp, str], str],
+    *,
+    symbol: str,
+    trade_date: pd.Timestamp,
+) -> str | None:
+    return gap_index.get((pd.Timestamp(trade_date).normalize(), str(symbol)))
+
+
+def _proven_close(
+    symbol: str,
+    trade_date: pd.Timestamp,
+    *,
+    px: pd.DataFrame,
+    gap_index: dict[tuple[pd.Timestamp, str], str],
+) -> float:
+    date = pd.Timestamp(trade_date).normalize()
+    if date in px.index and symbol in px.columns:
+        value = px.at[date, symbol]
+        if _finite_positive(value):
+            return float(value)
+
+    classification = _gap_classification(
+        gap_index,
+        symbol=symbol,
+        trade_date=date,
+    )
+    if classification != "SUSPENDED":
+        reason = classification or "NO_GAP_EVIDENCE"
+        raise ValueError(
+            "PITPortfolioEnv missing/non-positive close without proven suspension "
+            f"for {symbol} on {date.date()}: {reason}"
+        )
+    if symbol not in px.columns:
+        raise ValueError(
+            f"PITPortfolioEnv suspended symbol {symbol} has no prior price history"
+        )
+    prior = pd.to_numeric(px.loc[px.index < date, symbol], errors="coerce")
+    finite = prior[np.isfinite(prior.to_numpy(dtype=float))]
+    finite = finite[finite > 0]
+    if finite.empty:
+        raise ValueError(
+            f"PITPortfolioEnv suspended symbol {symbol} has no prior traded close"
+        )
+    return float(finite.iloc[-1])
+
+
+def _execution_flags(
+    symbol: str,
+    trade_date: pd.Timestamp,
+    *,
+    panel_index: pd.DataFrame,
+    gap_index: dict[tuple[pd.Timestamp, str], str],
+) -> dict[str, bool]:
+    date = pd.Timestamp(trade_date).normalize()
+    key = (date, str(symbol))
+    if key in panel_index.index:
+        row = panel_index.loc[key]
+        return {
+            name: _strict_flag(
+                row[name],
+                name=name,
+                symbol=symbol,
+                trade_date=date,
+            )
+            for name in _REQUIRED_EXECUTION_FLAGS
+        }
+
+    classification = _gap_classification(
+        gap_index,
+        symbol=symbol,
+        trade_date=date,
+    )
+    if classification == "SUSPENDED":
+        return {
+            "is_limit_up": False,
+            "is_limit_down": False,
+            "is_suspended": True,
+        }
+    raise ValueError(
+        "PITPortfolioEnv missing execution bar without proven SUSPENDED gap for "
+        f"{symbol} on {date.date()}: {classification or 'NO_GAP_EVIDENCE'}"
+    )
+
+
+def _apply_execution_constraints(
+    desired: np.ndarray,
+    previous: np.ndarray,
+    *,
+    no_increase: np.ndarray,
+    no_decrease: np.ndarray,
+    frozen: np.ndarray,
+) -> np.ndarray:
+    result = np.asarray(desired, dtype=np.float64).copy()
+    result = np.where(no_increase, np.minimum(result, previous), result)
+    result = np.where(no_decrease, np.maximum(result, previous), result)
+    result = np.where(frozen, previous, result)
+    return result
 
 
 def _finite_positive(value: object) -> bool:
@@ -606,9 +722,7 @@ def _strict_flag(
 
 def _sym_turnover(prev: dict[str, float], cur: dict[str, float]) -> float:
     keys = set(prev) | set(cur)
-    return float(
-        sum(abs(cur.get(key, 0.0) - prev.get(key, 0.0)) for key in keys)
-    )
+    return float(sum(abs(cur.get(key, 0.0) - prev.get(key, 0.0)) for key in keys))
 
 
 __all__ = [
