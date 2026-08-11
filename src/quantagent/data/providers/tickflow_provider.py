@@ -1,17 +1,10 @@
 """TickFlow A-share provider with explicit point-in-time boundaries.
 
 TickFlow is used for daily OHLCV, adjusted prices, current instrument metadata,
-financial statements and industry membership. A critical boundary applies to
-tradability: TickFlow's instrument-name endpoint is a *current snapshot* and the
-provider does not expose dated name/risk-warning intervals. Therefore current
-``ST`` / ``*ST`` names must never be broadcast backwards and certified as
-historical point-in-time data.
-
-``tradability()`` is consequently fail-closed until a dated ST/risk-warning
-source is wired in. Operators that explicitly need a current-monitoring view may
-call ``current_snapshot_tradability()``; that result is stamped
-``point_in_time=False`` and ``st_coverage_status=current_snapshot`` so it cannot
-be promoted as historical backtest/training evidence.
+financial statements and industry membership. Historical tradability is only
+certified when a separate dated ST/risk-warning evidence table is configured.
+TickFlow's current instrument names are never broadcast backwards as historical
+ST state.
 """
 
 from __future__ import annotations
@@ -28,6 +21,12 @@ from quantagent.data.providers.base import (
     ProviderRequest,
     ProviderResult,
     ProviderUnavailable,
+)
+from quantagent.data.providers.st_pit import (
+    HistoricalSTCoverageError,
+    HistoricalSTEvidence,
+    attach_historical_st,
+    load_historical_st_evidence,
 )
 
 
@@ -54,17 +53,22 @@ DAILY_RENAME_FROM_TICKFLOW: dict[str, str] = {}
 TRADABILITY_RENAME_FROM_TICKFLOW: dict[str, str] = {}
 _DEFAULT_BAR_BUFFER = 12_000
 _HISTORICAL_ST_UNAVAILABLE = (
-    "Tickflow historical tradability is fail-closed: the available instrument "
-    "name list is a current snapshot and cannot certify historical ST/risk-warning "
-    "state. Use a dated PIT source (for example a provider exposing row-level "
-    "historical isST) for backtest/training, or call "
-    "current_snapshot_tradability() explicitly for current monitoring only."
+    "Tickflow historical tradability is fail-closed: TickFlow instrument names "
+    "are a current snapshot, not dated ST/risk-warning history. Configure "
+    "historical_st_path with supplier-neutral PIT evidence containing available_at, "
+    "or use current_snapshot_tradability() for current monitoring only."
 )
 
 
 @dataclass
 class TickflowProvider(MarketDataProvider):
-    """Adapter for the TickFlow A-share data service."""
+    """Adapter for the TickFlow A-share data service.
+
+    ``historical_st_path`` may point to parquet/csv/jsonl evidence using either
+    exact daily rows (symbol, trade_date, is_st, available_at) or explicit
+    intervals (symbol, start_date, end_date, is_st, available_at). The evidence
+    loader requires complete, non-overlapping, pre-open-available coverage.
+    """
 
     api_endpoint: str | None = None
     token_env: str = "TICKFLOW_API_KEY"
@@ -72,6 +76,7 @@ class TickflowProvider(MarketDataProvider):
     source_reliability: float = 0.95
     allow_network: bool = False
     allow_free_daily: bool = True
+    historical_st_path: str | None = None
     _client: Any = field(default=None, init=False, repr=False, compare=False)
     _industry_map: dict[str, tuple[str | None, str | None]] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -79,10 +84,6 @@ class TickflowProvider(MarketDataProvider):
     _all_instruments: list[dict] | None = field(
         default=None, init=False, repr=False, compare=False
     )
-
-    # ------------------------------------------------------------------
-    # Public provider contract
-    # ------------------------------------------------------------------
 
     def daily_ohlcv(self, request: ProviderRequest) -> ProviderResult:
         self._require_ready(method="daily_ohlcv")
@@ -119,18 +120,31 @@ class TickflowProvider(MarketDataProvider):
         )
 
     def tradability(self, request: ProviderRequest) -> ProviderResult:
-        """Historical tradability contract; fail closed without dated ST state.
-
-        Suspension can be inferred from historical volume, but main-board price
-        limits depend on the contemporaneous ST/risk-warning state. Returning a
-        partly trustworthy frame would let downstream code silently coerce the
-        unknown ST component to ``False``. Refusing the composite capability is
-        therefore safer and forces the router/operator onto a real PIT source.
-        """
+        """Historical PIT tradability using separately versioned ST evidence."""
 
         self._require_ready(method="tradability")
-        del request
-        raise ProviderUnavailable(_HISTORICAL_ST_UNAVAILABLE)
+        try:
+            evidence = self._historical_st_evidence()
+            raw = self._call_tickflow_historical_tradability(request, evidence)
+        except HistoricalSTCoverageError as exc:
+            raise ProviderUnavailable(
+                f"Tickflow historical tradability PIT coverage failed: {exc}"
+            ) from exc
+        frame = _normalise_historical_tradability_frame(raw, source=self.source)
+        return ProviderResult(
+            frame=frame,
+            source=self.source,
+            point_in_time=True,
+            quality_score=self.source_reliability if not frame.empty else 0.0,
+            warnings=() if not frame.empty else ("tickflow_empty_tradability",),
+            metadata={
+                "st_coverage_status": "historical_pit",
+                "historical_pit_certified": True,
+                "historical_st_evidence_path": evidence.source_path,
+                "historical_st_evidence_sha256": evidence.source_sha256,
+                "historical_st_evidence_mode": evidence.mode,
+            },
+        )
 
     def current_snapshot_tradability(self, request: ProviderRequest) -> ProviderResult:
         """Explicit non-PIT tradability view for current monitoring only."""
@@ -156,17 +170,11 @@ class TickflowProvider(MarketDataProvider):
             },
         )
 
-    # ------------------------------------------------------------------
-    # Extended endpoints
-    # ------------------------------------------------------------------
-
     def stock_basic(self) -> pd.DataFrame:
         self._require_ready(method="stock_basic")
         return self._call_tickflow_stock_basic()
 
     def namechange_history(self) -> pd.DataFrame:
-        """Return empty history; TickFlow does not expose dated name intervals."""
-
         self._require_ready(method="namechange_history")
         return self._call_tickflow_namechange()
 
@@ -186,9 +194,11 @@ class TickflowProvider(MarketDataProvider):
         self._require_ready(method="financials_cash_flow")
         return self._sdk(require_token=True).financials.cash_flow(symbol, as_dataframe=True)
 
-    # ------------------------------------------------------------------
-    # SDK client/caches
-    # ------------------------------------------------------------------
+    def _historical_st_evidence(self) -> HistoricalSTEvidence:
+        path = self.historical_st_path or os.environ.get("QUANTAGENT_HISTORICAL_ST_PATH")
+        if not path:
+            raise HistoricalSTCoverageError(_HISTORICAL_ST_UNAVAILABLE)
+        return load_historical_st_evidence(path)
 
     def _sdk(self, *, require_token: bool = True):
         if self._client is None:
@@ -287,10 +297,6 @@ class TickflowProvider(MarketDataProvider):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # TickFlow calls
-    # ------------------------------------------------------------------
-
     def _fetch_daily(
         self,
         request: ProviderRequest,
@@ -363,16 +369,25 @@ class TickflowProvider(MarketDataProvider):
         return self._fetch_daily(request, adjust="forward", require_token=True)
 
     def _call_tickflow_tradability(self, request: ProviderRequest) -> pd.DataFrame:
-        """Private historical path is guarded too; callers must not bypass public API."""
+        """Private historical path obeys the same PIT evidence contract."""
 
-        del request
-        raise ProviderUnavailable(_HISTORICAL_ST_UNAVAILABLE)
+        evidence = self._historical_st_evidence()
+        return self._call_tickflow_historical_tradability(request, evidence)
+
+    def _call_tickflow_historical_tradability(
+        self,
+        request: ProviderRequest,
+        evidence: HistoricalSTEvidence,
+    ) -> pd.DataFrame:
+        raw = self._call_tickflow_daily(request)
+        if raw.empty:
+            return raw
+        enriched = attach_historical_st(raw, evidence)
+        return _derive_tradability_flags(enriched)
 
     def _call_tickflow_current_snapshot_tradability(
         self, request: ProviderRequest
     ) -> pd.DataFrame:
-        """Derive a non-PIT current-snapshot view from K-lines + current names."""
-
         raw = self._call_tickflow_daily(request)
         if raw.empty:
             return raw
@@ -382,49 +397,10 @@ class TickflowProvider(MarketDataProvider):
             for instrument in instruments
             if "ST" in str(instrument.get("name", "")).upper()
         }
-        from quantagent.quant_math.ashare import board_price_limit_vector
-
-        out_frames: list[pd.DataFrame] = []
-        for symbol, group in raw.groupby("symbol", sort=False):
-            frame = group.sort_values("trade_date").copy()
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-            frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce")
-            frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-            frame["prev_close"] = frame["close"].shift(1)
-            is_st_snapshot = bool(symbol in st_set)
-            ratio = board_price_limit_vector(
-                frame["symbol"].astype(str),
-                pd.Series(is_st_snapshot, index=frame.index, dtype=bool),
-                trade_dates=frame["trade_date"],
-            )
-            cap_up = (frame["prev_close"] * (1.0 + ratio)).round(2)
-            cap_down = (frame["prev_close"] * (1.0 - ratio)).round(2)
-            close_round = frame["close"].round(2)
-            frame["is_suspended"] = (frame["volume"].fillna(0) == 0).astype(bool)
-            frame["is_limit_up"] = (
-                (close_round - cap_up).abs() < 0.005
-            ).fillna(False).astype(bool)
-            frame["is_limit_down"] = (
-                (close_round - cap_down).abs() < 0.005
-            ).fillna(False).astype(bool)
-            frame["is_st"] = is_st_snapshot
-            out_frames.append(
-                frame[
-                    [
-                        "symbol",
-                        "trade_date",
-                        "is_suspended",
-                        "is_st",
-                        "is_limit_up",
-                        "is_limit_down",
-                    ]
-                ]
-            )
-        return (
-            pd.concat(out_frames, ignore_index=True)
-            if out_frames
-            else pd.DataFrame()
-        )
+        enriched = raw.copy()
+        enriched["is_st"] = enriched["symbol"].astype(str).isin(st_set)
+        enriched["is_st_provenance"] = "current_snapshot"
+        return _derive_tradability_flags(enriched)
 
     def _call_tickflow_stock_basic(self) -> pd.DataFrame:
         instruments = self._ensure_all_instruments()
@@ -470,6 +446,57 @@ class TickflowProvider(MarketDataProvider):
             raise ProviderUnavailable(
                 f"TickflowProvider.{method} blocked: env var {self.token_env} not set."
             )
+
+
+def _derive_tradability_flags(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    if "is_st" not in raw.columns or raw["is_st"].isna().any():
+        raise HistoricalSTCoverageError(
+            "tradability derivation requires explicit non-null is_st for every row"
+        )
+    from quantagent.quant_math.ashare import board_price_limit_vector
+
+    out_frames: list[pd.DataFrame] = []
+    for _symbol, group in raw.groupby("symbol", sort=False):
+        frame = group.sort_values("trade_date").copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce")
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame["is_st"] = frame["is_st"].astype(bool)
+        frame["prev_close"] = frame["close"].shift(1)
+        ratio = board_price_limit_vector(
+            frame["symbol"].astype(str),
+            frame["is_st"],
+            trade_dates=frame["trade_date"],
+        )
+        cap_up = (frame["prev_close"] * (1.0 + ratio)).round(2)
+        cap_down = (frame["prev_close"] * (1.0 - ratio)).round(2)
+        close_round = frame["close"].round(2)
+        frame["is_suspended"] = (frame["volume"].fillna(0) == 0).astype(bool)
+        frame["is_limit_up"] = (
+            (close_round - cap_up).abs() < 0.005
+        ).fillna(False).astype(bool)
+        frame["is_limit_down"] = (
+            (close_round - cap_down).abs() < 0.005
+        ).fillna(False).astype(bool)
+        keep = [
+            "symbol",
+            "trade_date",
+            "is_suspended",
+            "is_st",
+            "is_limit_up",
+            "is_limit_down",
+        ]
+        for optional in (
+            "is_st_provenance",
+            "st_evidence_sha256",
+            "st_available_at",
+        ):
+            if optional in frame.columns:
+                keep.append(optional)
+        out_frames.append(frame[keep])
+    return pd.concat(out_frames, ignore_index=True) if out_frames else pd.DataFrame()
 
 
 def _is_permission_error(exc: Exception) -> bool:
@@ -535,10 +562,10 @@ def _normalise_daily_frame(
     ).reset_index(drop=True)
 
 
-def _normalise_current_snapshot_tradability_frame(
+def _normalise_historical_tradability_frame(
     raw: pd.DataFrame, *, source: str
 ) -> pd.DataFrame:
-    columns = (
+    columns = [
         "symbol",
         "trade_date",
         "is_suspended",
@@ -549,7 +576,51 @@ def _normalise_current_snapshot_tradability_frame(
         "source",
         "st_coverage_status",
         "point_in_time_valid",
+    ]
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=columns)
+    frame = raw.rename(columns=TRADABILITY_RENAME_FROM_TICKFLOW).copy()
+    frame["trade_date"] = pd.to_datetime(frame.get("trade_date"), errors="coerce")
+    frame = frame.dropna(subset=["trade_date", "symbol"]).reset_index(drop=True)
+    for column in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
+        if column not in frame.columns or frame[column].isna().any():
+            raise HistoricalSTCoverageError(
+                f"historical tradability missing explicit {column!r} values"
+            )
+        frame[column] = frame[column].astype(bool)
+    if "st_available_at" not in frame.columns:
+        raise HistoricalSTCoverageError(
+            "historical tradability missing st_available_at evidence"
+        )
+    frame["available_at"] = pd.to_datetime(
+        frame["st_available_at"], errors="raise", utc=True
     )
+    frame["source"] = source
+    frame["st_coverage_status"] = "historical_pit"
+    frame["point_in_time_valid"] = True
+    optional = [
+        column
+        for column in ("is_st_provenance", "st_evidence_sha256")
+        if column in frame.columns
+    ]
+    return frame[columns + optional]
+
+
+def _normalise_current_snapshot_tradability_frame(
+    raw: pd.DataFrame, *, source: str
+) -> pd.DataFrame:
+    columns = [
+        "symbol",
+        "trade_date",
+        "is_suspended",
+        "is_st",
+        "is_limit_up",
+        "is_limit_down",
+        "available_at",
+        "source",
+        "st_coverage_status",
+        "point_in_time_valid",
+    ]
     if raw is None or raw.empty:
         return pd.DataFrame(columns=columns)
     frame = raw.rename(columns=TRADABILITY_RENAME_FROM_TICKFLOW).copy()
@@ -561,18 +632,17 @@ def _normalise_current_snapshot_tradability_frame(
                 f"Tickflow current-snapshot tradability missing {column!r}"
             )
         frame[column] = frame[column].astype(bool)
-    observed_at = pd.Timestamp.now(tz="UTC")
-    frame["available_at"] = observed_at
+    frame["available_at"] = pd.Timestamp.now(tz="UTC")
     frame["source"] = source
     frame["st_coverage_status"] = "current_snapshot"
     frame["point_in_time_valid"] = False
-    return frame[list(columns)]
+    return frame[columns]
 
 
-# Backwards-private helper name intentionally remains but cannot normalise an
-# unsafe historical frame because `_call_tickflow_tradability` now fail-closes.
 def _normalise_tradability_frame(raw: pd.DataFrame, *, source: str) -> pd.DataFrame:
-    return _normalise_current_snapshot_tradability_frame(raw, source=source)
+    """Compatibility helper; only safe when raw already carries historical evidence."""
+
+    return _normalise_historical_tradability_frame(raw, source=source)
 
 
 __all__ = [
