@@ -161,7 +161,11 @@ def run_stage4_governed_model_comparison(
     Stage-4 PR #108; the remaining blocker is executable position state.
     """
 
-    cfg = comparison_config or ComparisonConfig(holdout_folds=1)
+    cfg = comparison_config or ComparisonConfig(
+        label_column="forward_executable_return_5d",
+        horizon_days=5,
+        holdout_folds=1,
+    )
     _validate_stage4_contract(experiment, final_holdout, cfg)
     seal = final_holdout_ledger.consume(
         final_holdout,
