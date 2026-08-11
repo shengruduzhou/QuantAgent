@@ -10,7 +10,9 @@ A later execution stage will consume the durable pending artifact against a
 continuous recovered PaperBroker account.  Before a non-empty target is frozen,
 this module also replays that same canonical account and reconciles the desired
 target against the shares/cash that were actually filled.  Desired targets are
-never treated as holdings.
+never treated as holdings.  The account genesis itself is immutable: every run
+must match the persisted portfolio_id/initial_cash identity before any target is
+produced.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.cli._utils import read_frame, write_frame
 from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.daily_evidence_job import DailyEvidenceJob, DailyEvidenceJobConfig
+from quantagent.paper.account_identity import ensure_paper_account_identity
 from quantagent.paper.account_target_state import (
     recover_paper_account_target_state,
     reconcile_target_to_canonical_account,
@@ -49,6 +52,7 @@ class DailyPaperLoopConfig:
     paper_book_path: str = field(default_factory=lambda: str(paper_runtime_paths().paper_book))
     pending_signal_dir: str = field(default_factory=lambda: str(paper_runtime_paths().pending_signals))
     canonical_ledger_path: str = field(default_factory=lambda: str(paper_runtime_paths().canonical_ledger))
+    account_identity_path: str = field(default_factory=lambda: str(paper_runtime_paths().account_identity))
     portfolio_id: str = "v7-paper"
     primary_horizon: int = 5
     top_k: int = 30
@@ -93,13 +97,19 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     right-censored the signal or required future data. Pending intent and
     executed paper evidence are now distinct states.
 
-    For a non-empty desired target, the final frozen target is additionally
-    constrained against the canonical account as it actually exists at T close.
-    This makes partial fills, rejections, cash fees and dropped holdings visible
-    to the next turnover decision.
+    The immutable paper account identity is verified before evidence refresh or
+    prediction.  This prevents a target worker from replaying the same canonical
+    ledger with a different portfolio_id or initial_cash than the execution
+    worker.
     """
 
     as_of = _normalise_date(config.as_of_date)
+    account_identity = ensure_paper_account_identity(
+        canonical_ledger_path=config.canonical_ledger_path,
+        portfolio_id=config.portfolio_id,
+        initial_cash=config.initial_cash,
+        identity_path=config.account_identity_path,
+    )
     evidence = DailyEvidenceJob().run(
         DailyEvidenceJobConfig(as_of_date=as_of, dry_run=config.dry_run_evidence)
     )
@@ -165,8 +175,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             canonical_ledger_path=config.canonical_ledger_path,
             market_panel=market_panel,
             as_of_date=as_of,
-            portfolio_id=config.portfolio_id,
-            initial_cash=config.initial_cash,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
         )
         weights = reconcile_target_to_canonical_account(
             desired_weights,
@@ -181,6 +191,14 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         day_dir / "target_weights.parquet",
     )
 
+    identity_evidence = {
+        "schema_version": account_identity.schema_version,
+        "portfolio_id": account_identity.portfolio_id,
+        "initial_cash_cny": account_identity.initial_cash_cny,
+        "payload_sha256": account_identity.payload_sha256,
+        "identity_path": str(config.account_identity_path),
+    }
+
     if weights.target_weights is None or weights.target_weights.empty:
         warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
         summary = {
@@ -188,6 +206,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "status": "no_target_generated",
             "evidence_rows": int(len(evidence.frame)),
             "evidence_warnings": list(evidence.warnings),
+            "account_identity": identity_evidence,
             "blend_diagnostics": blend_result.diagnostics,
             "target_weight_diagnostics": weights.diagnostics,
             "execution": {
@@ -198,6 +217,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 "executed_fill_count": 0,
                 "paper_report_written": False,
                 "paper_book_appended": False,
+                "paper_account_identity_sha256": account_identity.payload_sha256,
                 "reason": (
                     "portfolio construction produced no target; absence of a target "
                     "is not reinterpreted as an all-zero liquidation instruction"
@@ -239,6 +259,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "target_weights_path": str(target_weights_file),
             "target_weights_file_sha256": _file_sha256(target_weights_file),
             "primary_horizon": str(config.primary_horizon),
+            "paper_account_identity_sha256": account_identity.payload_sha256,
             "canonical_account_state_sha256": str(account_evidence["account_state_sha256"]),
             "canonical_ledger_head_hash": str(account_evidence["canonical_head_hash"]),
             "canonical_ledger_records": str(account_evidence["canonical_records"]),
@@ -254,6 +275,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         "status": "signal_recorded_pending_execution",
         "evidence_rows": int(len(evidence.frame)),
         "evidence_warnings": list(evidence.warnings),
+        "account_identity": identity_evidence,
         "blend_diagnostics": blend_result.diagnostics,
         "target_weight_diagnostics": weights.diagnostics,
         "account_state": account_evidence,
@@ -266,6 +288,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "target_weights_sha256": pending.target_weights_sha256,
             "predictions_file_sha256": pending.source_lineage["predictions_file_sha256"],
             "target_weights_file_sha256": pending.source_lineage["target_weights_file_sha256"],
+            "paper_account_identity_sha256": pending.source_lineage["paper_account_identity_sha256"],
             "canonical_account_state_sha256": pending.source_lineage["canonical_account_state_sha256"],
             "canonical_ledger_head_hash": pending.source_lineage["canonical_ledger_head_hash"],
             "executed_fill_count": 0,
