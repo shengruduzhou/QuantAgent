@@ -191,6 +191,13 @@ def main() -> int:
         )
         if not isinstance(pr, dict) or not isinstance(pr.get("head"), dict):
             raise GitHubApiError("pull request endpoint did not return head metadata")
+        # Comments can race with merge/close/supersede operations. Once a PR is
+        # closed there is no pending merge decision left for this gate to protect;
+        # re-evaluating stale comments would only create misleading red workflow
+        # runs on the default branch. Open PRs remain strictly fail-closed below.
+        if str(pr.get("state", "")).strip().lower() != "open":
+            print(f"isolated audit gate not applicable: PR #{pr_number} is closed")
+            return 0
         head_sha = str(pr["head"].get("sha", "")).lower()
         comments = _list_issue_comments(args.api_root, args.repository, pr_number, token)
         evaluation = evaluate_audit_comments(comments, head_sha=head_sha)
