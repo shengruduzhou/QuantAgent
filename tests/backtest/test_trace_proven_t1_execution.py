@@ -12,6 +12,7 @@ from quantagent.backtest.execution_timing import (
     EXECUTION_TIMING_SEMANTICS,
     validate_execution_trace,
 )
+from quantagent.portfolio.hold_band import HoldBandConfig, build_hold_band_weights
 
 
 def _market(*, periods: int = 4, limit_up_second: bool = False) -> pd.DataFrame:
@@ -61,8 +62,59 @@ def test_signal_date_executes_only_on_next_market_session_close(tmp_path) -> Non
     assert first["price_source"] == "close"
     assert float(first["reference_price"]) == 11.0
     assert result.config["execution_trace_ok"] is True
+    assert result.config["target_input_index_semantics"] == "undeclared_legacy_signal_date"
     assert isinstance(result.config["execution_trace_sha256"], str)
     assert len(result.config["execution_trace_sha256"]) == 64
+
+
+def test_signal_dated_hold_band_is_mapped_exactly_once(tmp_path) -> None:
+    market = _market(periods=4)
+    sessions = pd.DatetimeIndex(sorted(market["trade_date"].unique()))
+    predictions = pd.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "trade_date": [sessions[0]],
+            "alpha_score": [1.0],
+        }
+    )
+    targets = build_hold_band_weights(
+        predictions,
+        config=HoldBandConfig(n_hold=1, entry_rank=1, exit_rank=1, delay_days=0),
+        trade_dates=list(sessions),
+    )
+    result = simulate_ashare_target_weights(
+        targets,
+        market,
+        AShareExecutionSimulationConfig(slippage_bps=0, audit_log_dir=str(tmp_path / "audit")),
+    )
+    mapping = result.execution_trace[result.execution_trace["record_type"] == "session_mapping"].iloc[0]
+    assert pd.Timestamp(mapping["signal_date"]) == sessions[0]
+    assert pd.Timestamp(mapping["execution_date"]) == sessions[1]
+    assert result.config["target_input_index_semantics"] == "signal_date"
+
+
+def test_execution_dated_hold_band_is_rejected_before_second_delay(tmp_path) -> None:
+    market = _market(periods=4)
+    sessions = pd.DatetimeIndex(sorted(market["trade_date"].unique()))
+    predictions = pd.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "trade_date": [sessions[0]],
+            "alpha_score": [1.0],
+        }
+    )
+    targets = build_hold_band_weights(
+        predictions,
+        config=HoldBandConfig(n_hold=1, entry_rank=1, exit_rank=1, delay_days=1),
+        trade_dates=list(sessions),
+    )
+    assert targets.index[0] == sessions[1]
+    with pytest.raises(ExecutionTimingViolation, match="requires signal-dated target weights"):
+        simulate_ashare_target_weights(
+            targets,
+            market,
+            AShareExecutionSimulationConfig(slippage_bps=0, audit_log_dir=str(tmp_path / "audit")),
+        )
 
 
 def test_last_signal_without_next_session_is_explicitly_terminal_censored(tmp_path) -> None:
@@ -88,7 +140,7 @@ def test_last_signal_without_next_session_is_explicitly_terminal_censored(tmp_pa
 
 def test_non_session_signal_date_fails_closed(tmp_path) -> None:
     market = _market(periods=4)
-    targets = pd.DataFrame({"600000.SH": [0.10]}, index=[pd.Timestamp("2024-01-06")])  # Saturday
+    targets = pd.DataFrame({"600000.SH": [0.10]}, index=[pd.Timestamp("2024-01-06")])
     with pytest.raises(ExecutionTimingViolation, match="signal_date_not_market_session"):
         simulate_ashare_target_weights(
             targets,
