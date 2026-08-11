@@ -9,6 +9,7 @@ import pytest
 
 from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
 from quantagent.data.providers import tickflow_provider as tp
+from quantagent.data.providers.st_pit import HistoricalSTCoverageError
 
 
 def _base_daily(symbol: str) -> pd.DataFrame:
@@ -237,7 +238,7 @@ def test_current_snapshot_st_is_explicitly_non_historical(fake_provider):
 
 
 def test_private_historical_tradability_path_cannot_bypass_guard(fake_provider):
-    with pytest.raises(ProviderUnavailable, match="current snapshot"):
+    with pytest.raises(HistoricalSTCoverageError, match="current snapshot"):
         fake_provider._call_tickflow_tradability(
             ProviderRequest("2024-01-02", "2024-01-31", ("600001.SH",))
         )
