@@ -10,7 +10,9 @@ The consumer is deliberately conservative:
   resolved as indeterminate rather than retried blindly;
 * caller-supplied or observed-panel session sets may drive research timing but
   are never promoted to authoritative shadow-calendar evidence without a
-  provenance-backed exchange calendar artifact.
+  provenance-backed exchange calendar artifact;
+* every worker and pending signal must match the immutable paper-account genesis
+  identity before the canonical ledger is replayed.
 """
 
 from __future__ import annotations
@@ -31,6 +33,10 @@ from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
+from quantagent.paper.account_identity import (
+    PaperAccountIdentityError,
+    ensure_paper_account_identity,
+)
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
 from quantagent.paper.execution_journal import PendingExecutionJournal
 from quantagent.paper.ledger import EventLedger
@@ -46,6 +52,7 @@ class ContinuousPaperExecutionConfig:
     canonical_ledger_path: str
     operational_ledger_path: str
     idempotency_path: str
+    account_identity_path: str | None = None
     portfolio_id: str = "v7-paper"
     initial_cash: float = 1_000_000.0
     lot_size: int = 100
@@ -434,6 +441,18 @@ def execute_pending_for_session(
     """
 
     as_of = pd.Timestamp(as_of_date).date().isoformat()
+    try:
+        account_identity = ensure_paper_account_identity(
+            canonical_ledger_path=config.canonical_ledger_path,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+            identity_path=config.account_identity_path,
+        )
+    except PaperAccountIdentityError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"paper account identity verification failed: {exc}"
+        ) from exc
+
     observed_sessions = _normalise_sessions(
         market_panel["trade_date"] if "trade_date" in market_panel.columns else ()
     )
@@ -466,6 +485,15 @@ def execute_pending_for_session(
 
     results: list[ContinuousPaperExecutionResult] = []
     for pending in _pending_signals(store):
+        pending_identity_sha = str(
+            pending.source_lineage.get("paper_account_identity_sha256", "")
+        )
+        if pending_identity_sha != account_identity.payload_sha256:
+            raise ContinuousPaperExecutionBlocked(
+                "pending signal is missing or mismatched paper-account identity; "
+                "regenerate/reconcile the signal instead of executing it"
+            )
+
         terminal = journal.terminal(pending.payload_sha256)
         if terminal is not None:
             continue
@@ -481,6 +509,7 @@ def execute_pending_for_session(
                 execution_date=next_date,
                 status="execution_indeterminate",
                 details={
+                    "paper_account_identity_sha256": account_identity.payload_sha256,
                     "reason": (
                         "prior execution_started has no terminal outcome; "
                         "automatic retry prohibited"
@@ -511,6 +540,7 @@ def execute_pending_for_session(
                 execution_date=next_date,
                 status="missed_execution_session",
                 details={
+                    "paper_account_identity_sha256": account_identity.payload_sha256,
                     "observed_as_of": as_of,
                     "reason": (
                         "consumer did not run on exact next session; "
@@ -542,15 +572,15 @@ def execute_pending_for_session(
             )
         canonical_state = recover_from_canonical(
             config.canonical_ledger_path,
-            portfolio_id=config.portfolio_id,
-            initial_cash=config.initial_cash,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
             as_of_session=as_of,
         )
         operational_ledger = EventLedger(config.operational_ledger_path)
         operational_state = recover(
             operational_ledger,
-            portfolio_id=config.portfolio_id,
-            initial_cash=config.initial_cash,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
         )
         _assert_recovered_account_consistent(canonical_state, operational_state)
 
@@ -584,7 +614,7 @@ def execute_pending_for_session(
             )
 
         book = canonical.replay_book() if len(canonical) else None
-        run_id = f"continuous-paper:{config.portfolio_id}"
+        run_id = f"continuous-paper:{account_identity.portfolio_id}"
         lineage = Lineage(
             run_id=run_id,
             strategy_version_id=config.strategy_version,
@@ -644,6 +674,7 @@ def execute_pending_for_session(
             details={
                 "order_count": len(orders),
                 "canonical_records_before": len(canonical),
+                "paper_account_identity_sha256": account_identity.payload_sha256,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
                 "execution_clock": config.execution_clock,
@@ -683,6 +714,7 @@ def execute_pending_for_session(
                 "order_statuses": statuses,
                 "nav_before": nav_before,
                 "nav_after": nav_after,
+                "paper_account_identity_sha256": account_identity.payload_sha256,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
                 "session_closed": True,
