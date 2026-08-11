@@ -5,6 +5,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+from quantagent.paper.account_identity import ensure_paper_account_identity
 from quantagent.paper.broker import PaperBroker
 from quantagent.paper.continuous_execution import (
     ContinuousPaperExecutionBlocked,
@@ -61,18 +62,30 @@ def _config(tmp_path) -> ContinuousPaperExecutionConfig:
         canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
         operational_ledger_path=str(tmp_path / "operational.jsonl"),
         idempotency_path=str(tmp_path / "idempotency.jsonl"),
+        account_identity_path=str(tmp_path / "account_identity.json"),
         initial_cash=100_000.0,
         max_participation_rate=0.05,
     )
 
 
+def _identity(tmp_path):
+    return ensure_paper_account_identity(
+        canonical_ledger_path=tmp_path / "canonical.jsonl",
+        portfolio_id="v7-paper",
+        initial_cash=100_000.0,
+        identity_path=tmp_path / "account_identity.json",
+    )
+
+
 def _record(tmp_path, signal_date: str, weight: float):
+    identity = _identity(tmp_path)
     return PendingPaperSignalStore(tmp_path / "pending").record(
         signal_date=signal_date,
         target_weights=_target(signal_date, weight),
         source_lineage={
             "model": "test-model",
             "target_weights_file_sha256": f"sha-{signal_date}-{weight}",
+            "paper_account_identity_sha256": identity.payload_sha256,
         },
         created_at=f"{signal_date}T07:00:00+00:00",
     )[0]
@@ -95,8 +108,6 @@ def test_friday_signal_executes_monday_once_on_persistent_account(tmp_path) -> N
     assert result.status == "execution_observed"
     assert result.order_count == 1
     assert result.fill_count == 1
-    # A caller-supplied list can schedule shadow execution but cannot certify
-    # exchange-calendar correctness without source/version/digest provenance.
     assert result.calendar_assurance == "caller_supplied_session_set_unverified"
     assert result.shadow_acceptance_calendar_eligible is False
 
@@ -114,6 +125,7 @@ def test_friday_signal_executes_monday_once_on_persistent_account(tmp_path) -> N
     assert terminal.status == "execution_observed"
     assert terminal.details["session_closed"] is True
     assert terminal.details["production_pretrade_risk_certified"] is False
+    assert terminal.details["paper_account_identity_sha256"] == _identity(tmp_path).payload_sha256
 
 
 def test_next_day_liquidation_uses_recovered_position_and_t_plus_one_sellability(tmp_path) -> None:
@@ -185,7 +197,10 @@ def test_unresolved_started_attempt_becomes_indeterminate_and_is_not_retried(tmp
         signal_date=FRIDAY,
         execution_date=MONDAY,
         status="execution_started",
-        details={"simulated_crash": True},
+        details={
+            "simulated_crash": True,
+            "paper_account_identity_sha256": _identity(tmp_path).payload_sha256,
+        },
     )
 
     result = execute_pending_for_session(
@@ -344,3 +359,58 @@ def test_missing_price_provenance_fails_closed(tmp_path) -> None:
             config=config,
             authoritative_sessions=SESSIONS,
         )
+
+
+def test_worker_initial_cash_mismatch_fails_before_execution(tmp_path) -> None:
+    good = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    bad = replace(good, initial_cash=200_000.0)
+
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="initial_cash mismatch"):
+        execute_pending_for_session(
+            MONDAY,
+            _market(),
+            config=bad,
+            authoritative_sessions=SESSIONS,
+        )
+    assert not (tmp_path / "canonical.jsonl").exists()
+    assert PendingExecutionJournal(good.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
+
+
+def test_worker_portfolio_id_mismatch_fails_before_execution(tmp_path) -> None:
+    good = _config(tmp_path)
+    _record(tmp_path, FRIDAY, 0.50)
+    bad = replace(good, portfolio_id="other-paper-book")
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="portfolio_id mismatch"):
+        execute_pending_for_session(
+            MONDAY,
+            _market(),
+            config=bad,
+            authoritative_sessions=SESSIONS,
+        )
+
+
+def test_pending_signal_from_other_account_identity_is_rejected(tmp_path) -> None:
+    config = _config(tmp_path)
+    _identity(tmp_path)
+    pending = PendingPaperSignalStore(tmp_path / "pending").record(
+        signal_date=FRIDAY,
+        target_weights=_target(FRIDAY, 0.50),
+        source_lineage={
+            "model": "test-model",
+            "paper_account_identity_sha256": "0" * 64,
+        },
+        created_at=f"{FRIDAY}T07:00:00+00:00",
+    )[0]
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="mismatched paper-account identity"):
+        execute_pending_for_session(
+            MONDAY,
+            _market(),
+            config=config,
+            authoritative_sessions=SESSIONS,
+        )
+    assert PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
