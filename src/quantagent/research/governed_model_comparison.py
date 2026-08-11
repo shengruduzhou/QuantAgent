@@ -148,6 +148,12 @@ def run_stage4_governed_model_comparison(
     training set of a later holdout fold, so the union would not be an untouched block.
     Increase ``valid_size_days`` when a longer final block is required.
 
+    Stage-4 outcome evidence must use the canonical executable-label contract:
+    a T-close signal enters on the next global market session and an H-session
+    horizon is named ``forward_executable_return_{H}d``. The final holdout identity
+    must also bind a non-empty label-contract hash so a one-shot seal cannot be
+    reused under a different outcome clock.
+
     Statistical governance is strict, but production remains fail-closed while
     ``model_comparison`` still computes economic Top-K returns from idealised daily
     selections rather than carrying positions through direction-specific A-share
@@ -155,7 +161,11 @@ def run_stage4_governed_model_comparison(
     Stage-4 PR #108; the remaining blocker is executable position state.
     """
 
-    cfg = comparison_config or ComparisonConfig(holdout_folds=1)
+    cfg = comparison_config or ComparisonConfig(
+        label_column="forward_executable_return_5d",
+        horizon_days=5,
+        holdout_folds=1,
+    )
     _validate_stage4_contract(experiment, final_holdout, cfg)
     seal = final_holdout_ledger.consume(
         final_holdout,
@@ -198,6 +208,8 @@ def run_stage4_governed_model_comparison(
         "eventHash": event["event_hash"],
         "holdoutKey": final_holdout.holdout_key,
         "holdoutSealHash": seal["seal_hash"],
+        "labelContractHash": final_holdout.label_contract_hash,
+        "executableLabelColumn": cfg.label_column,
         "familyAttempts": experiment_ledger.attempt_count(family=experiment.family),
         "cumulativeMultipleTestingTrials": cumulative_trials,
         "uniqueFamilyFingerprints": experiment_ledger.unique_fingerprint_count(
@@ -229,6 +241,19 @@ def _validate_stage4_contract(
         raise ValueError(
             "Stage-4 requires exactly one contiguous final holdout fold; "
             "multiple expanding holdout folds are not an untouched block"
+        )
+
+    expected_label = f"forward_executable_return_{int(config.horizon_days)}d"
+    if str(config.label_column) != expected_label:
+        raise ValueError(
+            "Stage-4 requires the canonical executable next-session label for its horizon: "
+            f"expected {expected_label!r}, got {config.label_column!r}. "
+            "Build labels with build_executable_forward_returns on an explicit global market-session schedule."
+        )
+    if not str(holdout.label_contract_hash or "").strip():
+        raise ValueError(
+            "Stage-4 final holdout requires a non-empty label_contract_hash so the one-shot "
+            "holdout seal is bound to the executable outcome clock"
         )
 
     train_start, train_end = map(pd.Timestamp, experiment.train_window)

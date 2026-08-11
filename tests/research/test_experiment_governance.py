@@ -55,7 +55,12 @@ def _holdout(**overrides) -> FinalHoldoutSpec:
 
 
 def _stage4_config(**overrides) -> ComparisonConfig:
-    values = dict(n_folds=4, holdout_folds=1)
+    values = dict(
+        label_column="forward_executable_return_5d",
+        horizon_days=5,
+        n_folds=4,
+        holdout_folds=1,
+    )
     values.update(overrides)
     return ComparisonConfig(**values)
 
@@ -168,7 +173,12 @@ def test_stage4_contract_rejects_multiple_expanding_holdout_folds():
         _validate_stage4_contract(
             _experiment(),
             _holdout(),
-            ComparisonConfig(n_folds=5, holdout_folds=2),
+            ComparisonConfig(
+                label_column="forward_executable_return_5d",
+                horizon_days=5,
+                n_folds=5,
+                holdout_folds=2,
+            ),
         )
 
 
