@@ -1,16 +1,16 @@
 """Daily V7 paper loop: evidence refresh, alpha, and pending target signal.
 
-This loop runs at/after the signal session close.  The target generated from T
+This loop runs at/after the signal session close. The target generated from T
 information is therefore *pending* until the next observed market session under
-``signal_t_close_next_session_close_v1``.  It must not be handed a future bar,
+``signal_t_close_next_session_close_v1``. It must not be handed a future bar,
 executed same-session, entered into the paper performance book, or reported as
 completed paper PnL.
 
 A later execution stage will consume the durable pending artifact against a
-continuous recovered PaperBroker account.  Before a non-empty target is frozen,
+continuous recovered PaperBroker account. Before a non-empty target is frozen,
 this module also replays that same canonical account and reconciles the desired
-target against the shares/cash that were actually filled.  Desired targets are
-never treated as holdings.  The account genesis itself is immutable: every run
+target against the shares/cash that were actually filled. Desired targets are
+never treated as holdings. The account genesis itself is immutable: every run
 must match the persisted portfolio_id/initial_cash identity before any target is
 produced.
 """
@@ -29,7 +29,10 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.cli._utils import read_frame, write_frame
 from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.daily_evidence_job import DailyEvidenceJob, DailyEvidenceJobConfig
-from quantagent.paper.account_identity import ensure_paper_account_identity
+from quantagent.paper.account_identity import (
+    account_identity_path_for_canonical,
+    ensure_paper_account_identity,
+)
 from quantagent.paper.account_target_state import (
     recover_paper_account_target_state,
     reconcile_target_to_canonical_account,
@@ -52,7 +55,7 @@ class DailyPaperLoopConfig:
     paper_book_path: str = field(default_factory=lambda: str(paper_runtime_paths().paper_book))
     pending_signal_dir: str = field(default_factory=lambda: str(paper_runtime_paths().pending_signals))
     canonical_ledger_path: str = field(default_factory=lambda: str(paper_runtime_paths().canonical_ledger))
-    account_identity_path: str = field(default_factory=lambda: str(paper_runtime_paths().account_identity))
+    account_identity_path: str | None = None
     portfolio_id: str = "v7-paper"
     primary_horizon: int = 5
     top_k: int = 30
@@ -98,12 +101,17 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     executed paper evidence are now distinct states.
 
     The immutable paper account identity is verified before evidence refresh or
-    prediction.  This prevents a target worker from replaying the same canonical
+    prediction. This prevents a target worker from replaying the same canonical
     ledger with a different portfolio_id or initial_cash than the execution
     worker.
     """
 
     as_of = _normalise_date(config.as_of_date)
+    resolved_identity_path = (
+        Path(config.account_identity_path)
+        if config.account_identity_path is not None
+        else account_identity_path_for_canonical(config.canonical_ledger_path)
+    )
     account_identity = ensure_paper_account_identity(
         canonical_ledger_path=config.canonical_ledger_path,
         portfolio_id=config.portfolio_id,
@@ -193,10 +201,11 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
 
     identity_evidence = {
         "schema_version": account_identity.schema_version,
+        "account_instance_id": account_identity.account_instance_id,
         "portfolio_id": account_identity.portfolio_id,
         "initial_cash_cny": account_identity.initial_cash_cny,
         "payload_sha256": account_identity.payload_sha256,
-        "identity_path": str(config.account_identity_path),
+        "identity_path": str(resolved_identity_path),
     }
 
     if weights.target_weights is None or weights.target_weights.empty:
@@ -241,7 +250,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             warnings=warnings,
         )
 
-    if account_state is None:  # defensive invariant; non-empty targets require account proof
+    if account_state is None:
         raise RuntimeError("non-empty paper target lacks canonical account state")
 
     predictions_file = Path(predictions_path)
