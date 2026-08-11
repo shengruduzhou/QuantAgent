@@ -2,7 +2,7 @@
 """Research-only real-data factor validity cycle.
 
 This command can evaluate an existing canonical market panel or explicitly pull
-public BaoStock history.  Governed next-session labels never infer their clock
+public BaoStock history. Governed next-session labels never infer their clock
 from the selected stocks: they use either a separately supplied market-calendar
 artifact or BaoStock's independent ``query_trade_dates`` endpoint.
 
@@ -42,7 +42,7 @@ from quantagent.factors.governance_metrics import (
 from quantagent.factors.lifecycle import build_factor_lifecycle_report
 
 
-RESEARCH_CYCLE_SCHEMA = "factor_research_cycle_v2_explicit_market_calendar"
+RESEARCH_CYCLE_SCHEMA = "factor_research_cycle_v3_direction_provenance"
 
 
 def _load_table(path: Path) -> pd.DataFrame:
@@ -56,6 +56,20 @@ def _load_table(path: Path) -> pd.DataFrame:
 
 def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _registry_direction_label(name: str) -> str:
+    """Return the pre-declared raw-factor direction without reorienting values."""
+
+    meta = default_registry.get(name)
+    direction = int(
+        meta.expected_direction if meta.expected_direction is not None else meta.direction
+    )
+    if direction == 1:
+        return "positive"
+    if direction == -1:
+        return "negative"
+    raise ValueError(f"registered factor {name!r} has no expected direction")
 
 
 def _research_baostock(
@@ -235,16 +249,34 @@ def _materialise_factors(
         try:
             output = default_registry.compute(name, market).frame
             values = output[["trade_date", "symbol", "factor_value"]].copy()
-            values["trade_date"] = pd.to_datetime(values["trade_date"], errors="coerce").dt.normalize()
-            direction = int(meta.expected_direction if meta.expected_direction is not None else meta.direction)
+            values["trade_date"] = pd.to_datetime(
+                values["trade_date"], errors="coerce"
+            ).dt.normalize()
+            direction = int(
+                meta.expected_direction
+                if meta.expected_direction is not None
+                else meta.direction
+            )
             if direction == 0:
-                failures.append({"factor": name, "reason": "expected_direction_unspecified"})
+                failures.append(
+                    {"factor": name, "reason": "expected_direction_unspecified"}
+                )
                 continue
-            values[name] = pd.to_numeric(values["factor_value"], errors="coerce") * float(direction)
+            values[name] = (
+                pd.to_numeric(values["factor_value"], errors="coerce")
+                * float(direction)
+            )
             values = values.drop(columns=["factor_value"])
-            base = base.merge(values, on=["trade_date", "symbol"], how="left", validate="one_to_one")
+            base = base.merge(
+                values,
+                on=["trade_date", "symbol"],
+                how="left",
+                validate="one_to_one",
+            )
         except Exception as exc:
-            failures.append({"factor": name, "reason": f"compute_error:{type(exc).__name__}:{exc}"})
+            failures.append(
+                {"factor": name, "reason": f"compute_error:{type(exc).__name__}:{exc}"}
+            )
     return base, failures
 
 
@@ -304,7 +336,11 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
     working = labeled.frame
 
     requested = _parse_csv(args.factors)
-    names, skipped = _select_registered_factors(working, requested, int(args.max_factors))
+    names, skipped = _select_registered_factors(
+        working,
+        requested,
+        int(args.max_factors),
+    )
     working, failures = _materialise_factors(working, names)
     names = [name for name in names if name in working.columns]
     if not names:
@@ -318,7 +354,10 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
     decay_cols = {h: f"forward_executable_return_{h}d" for h in horizons}
     reports: list[dict[str, object]] = []
     lifecycle: list[dict[str, object]] = []
+    direction_contracts: dict[str, str] = {}
     for name in names:
+        registry_direction = _registry_direction_label(name)
+        direction_contracts[name] = registry_direction
         report = evaluate_factor_candidate(
             working,
             factor_name=name,
@@ -340,9 +379,14 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
             amount_column="amount",
             market_sessions=market_sessions,
         )
-        lifecycle.append(asdict(lifecycle_report))
+        lifecycle_payload = asdict(lifecycle_report)
+        lifecycle_payload["registry_expected_direction"] = registry_direction
+        lifecycle_payload["factor_values_direction_aligned"] = True
+        lifecycle.append(lifecycle_payload)
 
-    valid_candidates = [str(row["factor_name"]) for row in reports if bool(row["passed"])]
+    valid_candidates = [
+        str(row["factor_name"]) for row in reports if bool(row["passed"])
+    ]
     clusters = correlation_clusters(
         working,
         factor_columns=valid_candidates,
@@ -357,12 +401,20 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
     market.to_csv(market_path, index=False)
     pd.DataFrame({"trade_date": market_sessions}).to_csv(calendar_path, index=False)
     working[["trade_date", "symbol", *names]].to_csv(factor_path, index=False)
-    reports_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    lifecycle_path.write_text(json.dumps(lifecycle, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    reports_path.write_text(
+        json.dumps(reports, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    lifecycle_path.write_text(
+        json.dumps(lifecycle, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
 
     schedule_digest = market_session_schedule_sha256(market_sessions)
     if schedule_digest != labeled.schema["market_session_schedule_sha256"]:
-        raise RuntimeError("label schema market-calendar digest does not match research-cycle schedule")
+        raise RuntimeError(
+            "label schema market-calendar digest does not match research-cycle schedule"
+        )
     manifest = {
         "schema_version": RESEARCH_CYCLE_SCHEMA,
         "research_only": True,
@@ -383,6 +435,8 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
         "market_snapshot_sha256": _frame_digest(market),
         "requested_factors": requested,
         "materialised_factors": names,
+        "factor_direction_contracts": direction_contracts,
+        "factor_values_direction_aligned": True,
         "skipped_factors": skipped,
         "factor_failures": failures,
         "core_valid_candidates": valid_candidates,
@@ -399,13 +453,20 @@ def run_cycle(args: argparse.Namespace) -> dict[str, object]:
         },
     }
     manifest_path = output / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
     return manifest
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--market-panel", default="", help="Existing CSV/Parquet market panel")
+    parser.add_argument(
+        "--market-panel",
+        default="",
+        help="Existing CSV/Parquet market panel",
+    )
     parser.add_argument(
         "--market-calendar",
         default="",
@@ -415,10 +476,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--provider", choices=("none", "baostock"), default="none")
-    parser.add_argument("--symbols", default="", help="Comma-separated canonical symbols for network research")
+    parser.add_argument(
+        "--symbols",
+        default="",
+        help="Comma-separated canonical symbols for network research",
+    )
     parser.add_argument("--start-date", default="2020-01-01")
     parser.add_argument("--end-date", default=pd.Timestamp.utcnow().strftime("%Y-%m-%d"))
-    parser.add_argument("--factors", default="", help="Comma-separated registered factor names; empty = available registry")
+    parser.add_argument(
+        "--factors",
+        default="",
+        help="Comma-separated registered factor names; empty = available registry",
+    )
     parser.add_argument("--max-factors", type=int, default=80)
     parser.add_argument("--horizons", default="1,3,5,10,20")
     parser.add_argument("--target-horizon", type=int, default=5)
@@ -435,7 +504,10 @@ def main() -> int:
     try:
         manifest = run_cycle(args)
     except Exception as exc:
-        print(f"factor research cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            f"factor research cycle failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(manifest, ensure_ascii=False, indent=2, default=str))
     return 0
