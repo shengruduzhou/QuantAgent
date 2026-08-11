@@ -11,11 +11,13 @@ from quantagent.paper.account_identity import (
 )
 from quantagent.paper.canonical_receipt import (
     CanonicalPrefixReceiptError,
+    build_canonical_prefix_index,
     verify_canonical_prefix_receipt,
 )
 from quantagent.paper.execution_journal import (
     ExecutionJournalCorruption,
     PendingExecutionJournal,
+    RECONCILIATION_STATUS,
     TERMINAL_OUTCOMES,
 )
 from quantagent.paper.runtime_paths import paper_runtime_paths
@@ -98,12 +100,27 @@ class PaperExecutionEvidenceService:
         latest_details = dict(latest.details or {})
         latest_status = latest.status
         counts = Counter(row.status for row in records)
+        unreconciled_indeterminate = 0
+        for payload, history in by_payload.items():
+            terminal = next(
+                (row for row in history if row.status in TERMINAL_OUTCOMES),
+                None,
+            )
+            if terminal is None or terminal.status != "execution_indeterminate":
+                continue
+            reconciliation = next(
+                (row for row in history if row.status == RECONCILIATION_STATUS),
+                None,
+            )
+            if reconciliation is None:
+                unreconciled_indeterminate += 1
 
         attention = "ok"
         if (
             unresolved
-            or latest_status in _CRITICAL_STATUSES
+            or unreconciled_indeterminate
             or identity["state"] != "valid"
+            or prefix_status["state"] == "invalid"
         ):
             attention = "critical"
         elif latest_status in _WARNING_STATUSES:
@@ -111,17 +128,13 @@ class PaperExecutionEvidenceService:
         elif latest_status == "execution_started":
             attention = "pending"
 
-        # These values are evidence, not derived promotion. Absence is false /
-        # unavailable rather than an optimistic default.
         production_certified = bool(
             latest_details.get("production_pretrade_risk_certified", False)
         )
         calendar_eligible = bool(
             latest_details.get("shadow_acceptance_calendar_eligible", False)
         )
-        assurance = str(
-            latest_details.get("calendar_assurance") or "unavailable"
-        )
+        assurance = str(latest_details.get("calendar_assurance") or "unavailable")
         identity_verified = bool(identity.get("verified", False))
         latest_terminal_bound = bool(prefix_status["latestTerminalBound"])
 
@@ -134,6 +147,7 @@ class PaperExecutionEvidenceService:
                 "recordCount": len(records),
                 "terminalCount": len(terminal_records),
                 "unresolvedCount": len(unresolved),
+                "unreconciledIndeterminateCount": unreconciled_indeterminate,
                 "reason": None,
             },
             "accountIdentity": identity,
@@ -237,6 +251,30 @@ class PaperExecutionEvidenceService:
             if account_identity.get("verified")
             else None
         )
+        if not terminal_records:
+            return {
+                "state": "unavailable",
+                "verified": False,
+                "boundTerminalCount": 0,
+                "legacyUnboundTerminalCount": 0,
+                "latestTerminalBound": False,
+                "reason": "no terminal execution record is available",
+            }
+
+        # Build one verified immutable prefix index for the entire projection.
+        # Each terminal lookup is then O(1) rather than reparsing/copying the
+        # canonical ledger for every receipt.
+        try:
+            prefix_index = build_canonical_prefix_index(self.paths.canonical_ledger)
+        except (CanonicalPrefixReceiptError, OSError, UnicodeError, ValueError, TypeError) as exc:
+            return {
+                "state": "invalid",
+                "verified": False,
+                "boundTerminalCount": 0,
+                "legacyUnboundTerminalCount": 0,
+                "latestTerminalBound": False,
+                "reason": f"cannot build canonical prefix index: {exc}",
+            }
 
         for record in terminal_records:
             details = dict(record.details or {})
@@ -249,7 +287,7 @@ class PaperExecutionEvidenceService:
             try:
                 verification = verify_canonical_prefix_receipt(
                     receipt,
-                    ledger_or_path=self.paths.canonical_ledger,
+                    prefix_index=prefix_index,
                     expected_target_weights_sha256=(
                         str(details.get("target_weights_sha256"))
                         if details.get("target_weights_sha256")
@@ -264,7 +302,7 @@ class PaperExecutionEvidenceService:
                         )
                     ),
                 )
-            except (CanonicalPrefixReceiptError, OSError, UnicodeError) as exc:
+            except (CanonicalPrefixReceiptError, OSError, UnicodeError, ValueError, TypeError) as exc:
                 return {
                     "state": "invalid",
                     "verified": False,
@@ -292,23 +330,17 @@ class PaperExecutionEvidenceService:
             if record is latest_terminal:
                 latest_bound = True
 
-        state = "valid" if terminal_records else "unavailable"
         return {
-            "state": state,
-            "verified": bool(terminal_records and bound + legacy_unbound == len(terminal_records)),
+            "state": "valid",
+            "verified": True,
             "boundTerminalCount": bound,
             "legacyUnboundTerminalCount": legacy_unbound,
             "latestTerminalBound": latest_bound,
-            "reason": (
-                None
-                if terminal_records
-                else "no terminal execution record is available"
-            ),
+            "reason": None,
         }
 
     @staticmethod
     def _record(record: Any) -> dict[str, Any]:
-        details = dict(record.details or {})
         return {
             "sequence": record.sequence,
             "payloadSha256": record.pending_payload_sha256,
@@ -317,7 +349,7 @@ class PaperExecutionEvidenceService:
             "status": record.status,
             "recordedAt": record.recorded_at,
             "recordSha256": record.record_sha256,
-            "details": details,
+            "details": dict(record.details or {}),
         }
 
     @staticmethod
@@ -335,6 +367,7 @@ class PaperExecutionEvidenceService:
             "recordCount": 0,
             "terminalCount": 0,
             "unresolvedCount": 0,
+            "unreconciledIndeterminateCount": 0,
             "reason": reason,
         }
 
