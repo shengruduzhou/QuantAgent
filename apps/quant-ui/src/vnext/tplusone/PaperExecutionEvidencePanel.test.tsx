@@ -36,6 +36,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       fillCount: 1,
       navBefore: 1_000_000,
       navAfter: 1_001_200,
+      accountIdentityVerified: true,
+      latestTerminalCanonicalPrefixBound: true,
       statusCounts: { execution_started: 1, execution_observed: 1 },
     },
     records: [
@@ -52,6 +54,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
     ],
     operatorTruth: {
       paperExecutionEvidence: true,
+      accountIdentityVerified: true,
+      canonicalExecutionPrefixCertified: true,
       productionLiveCertified: false,
       authoritativeCalendarCertified: false,
       message: "Paper/shadow execution evidence is available. It is not production/live certification.",
@@ -156,10 +160,14 @@ describe("PaperExecutionEvidencePanel", () => {
         ...evidence().summary,
         attention: "critical",
         latestStatus: null,
+        accountIdentityVerified: false,
+        latestTerminalCanonicalPrefixBound: false,
       },
       records: [],
       operatorTruth: {
         paperExecutionEvidence: false,
+        accountIdentityVerified: false,
+        canonicalExecutionPrefixCertified: false,
         productionLiveCertified: false,
         authoritativeCalendarCertified: false,
         message: "Paper execution evidence is invalid or unverifiable; fail closed.",
