@@ -34,14 +34,21 @@ def audit_nonlinear_factors(
     output_dir: Path = typer.Option(default_reports_root() / "nonlinearity" / "audit"),
     enforce_promotion_gates: bool = typer.Option(
         False,
-        help="Exit non-zero unless PBO<=0.25, DSR>=0.95 and SPA<=0.05 all pass.",
+        help=(
+            "Exit non-zero unless the research-only PBO/DSR/SPA statistical gates pass. "
+            "Passing this option never grants production eligibility."
+        ),
     ),
 ) -> Path:
-    """Compare nonlinear challengers with the linear control, then gate promotion.
+    """Research-only nonlinear-vs-linear diagnostic.
 
-    The raw model comparison is always written for research diagnosis. The
-    separately written ``promotion_gate.json`` is the sole production verdict.
-    Missing statistical evidence fails closed.
+    This legacy-compatible command intentionally does not own the Stage-4
+    ExperimentLedger or one-shot FinalHoldoutLedger. It can tell researchers
+    whether a frozen nonlinear arm clears the PBO/DSR/SPA *statistical* gate,
+    but it cannot issue a production/live eligibility verdict. The generated
+    ``promotion_gate.json`` therefore remains fail-closed with
+    ``productionEligible=false`` until the strict Stage-4 path and executable
+    economic backtest are both satisfied.
     """
     names = tuple(name.strip() for name in factor_names.split(",") if name.strip())
     if len(names) < 2:
@@ -65,7 +72,7 @@ def audit_nonlinear_factors(
         min_train_days=min_train_days,
         embargo_days=embargo_days,
         # The raw comparison retains its internal research threshold. The
-        # production gate below is deliberately stricter and immutable here.
+        # statistical gate below is deliberately stricter and immutable here.
         max_pbo=0.25,
     )
     promotion_config = NonlinearPromotionConfig(
@@ -94,15 +101,18 @@ def audit_nonlinear_factors(
 
     promotion = governed.promotion
     typer.echo(
-        "promotion=" + ("ELIGIBLE" if promotion.accepted else "BLOCKED")
+        "research_promotion=" + ("PASS" if promotion.accepted else "BLOCKED")
+        + " production_eligible=" + ("YES" if governed.production_eligible else "NO")
         + f" champion={promotion.champion or 'none'}"
         + f" pbo={promotion.pbo}"
         + f" dsr={promotion.dsr_probability}"
         + f" spa={promotion.spa_pvalue}"
     )
     for reason in promotion.rejection_reasons:
-        typer.echo(f"promotion_blocker: {reason}")
-    typer.echo(f"wrote governed nonlinear audit to {output_dir}")
+        typer.echo(f"research_promotion_blocker: {reason}")
+    for reason in governed.governance.get("productionBlockers", []):
+        typer.echo(f"production_blocker: {reason}")
+    typer.echo(f"wrote research-only governed nonlinear audit to {output_dir}")
 
     if enforce_promotion_gates and not promotion.accepted:
         raise typer.Exit(code=2)
