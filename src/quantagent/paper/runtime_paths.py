@@ -24,6 +24,7 @@ class PaperRuntimePaths:
     operational_ledger: Path
     idempotency: Path
     paper_book: Path
+    account_identity: Path
 
     def ensure(self) -> "PaperRuntimePaths":
         self.root.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,7 @@ class PaperRuntimePaths:
             "operational_ledger": str(self.operational_ledger),
             "idempotency": str(self.idempotency),
             "paper_book": str(self.paper_book),
+            "account_identity": str(self.account_identity),
         }
 
 
@@ -62,6 +64,7 @@ def paper_runtime_paths(
         operational_ledger=root / "operational_ledger.jsonl",
         idempotency=root / "idempotency.jsonl",
         paper_book=root / "paper_book.parquet",
+        account_identity=root / "account_identity.json",
     )
 
 
