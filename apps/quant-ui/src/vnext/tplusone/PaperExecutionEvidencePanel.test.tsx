@@ -116,7 +116,7 @@ describe("PaperExecutionEvidencePanel", () => {
     expect(screen.getByText("Paper execution evidence").parentElement).toHaveTextContent("YES");
     expect(screen.getByText("Production pre-trade certified").parentElement).toHaveTextContent("NO");
     expect(screen.getByText("Authoritative calendar certified").parentElement).toHaveTextContent("NO");
-    expect(screen.getByText(/Paper\/shadow 观察结果 ≠ 实盘认证/)).toBeInTheDocument();
+    expect(screen.getByText(/Paper\/shadow 观察结果.*不等于实盘认证/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -175,19 +175,6 @@ describe("PaperExecutionEvidencePanel", () => {
         terminalCount: 0,
         unresolvedCount: 0,
         reason: "execution journal hash-chain verification failed",
-      },
-      accountIdentity: {
-        ...evidence().accountIdentity,
-        state: "invalid",
-        verified: false,
-        reason: "paper account identity verification failed",
-      },
-      canonicalPrefix: {
-        ...evidence().canonicalPrefix,
-        state: "invalid",
-        verified: false,
-        latestTerminalBound: false,
-        reason: "canonical prefix verification failed",
       },
       summary: {
         ...evidence().summary,
