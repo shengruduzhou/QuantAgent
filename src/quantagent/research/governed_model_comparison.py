@@ -55,7 +55,14 @@ class HoldoutQualification:
 
 @dataclass(frozen=True)
 class GovernedModelComparison:
-    """Raw model comparison plus authoritative promotion/holdout eligibility."""
+    """Raw comparison plus explicit research-to-production governance state.
+
+    Production eligibility is intentionally fail-closed. A statistical promotion
+    decision alone is never sufficient: the result must come from the strict
+    Stage-4 path, include an accepted one-shot final holdout, and carry an
+    explicit certified economic-backtest flag. Missing governance metadata is a
+    blocker rather than an implicit approval.
+    """
 
     comparison: ComparisonReport
     promotion: NonlinearPromotionReport
@@ -64,9 +71,10 @@ class GovernedModelComparison:
 
     @property
     def production_eligible(self) -> bool:
-        holdout_ok = self.holdout is None or self.holdout.accepted
-        economic_ok = bool(self.governance.get("economicBacktestCertified", True))
-        return bool(self.promotion.accepted and holdout_ok and economic_ok)
+        stage4_ok = self.governance.get("stage4Governed") is True
+        holdout_ok = self.holdout is not None and self.holdout.accepted
+        economic_ok = self.governance.get("economicBacktestCertified") is True
+        return bool(self.promotion.accepted and stage4_ok and holdout_ok and economic_ok)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,9 +84,10 @@ class GovernedModelComparison:
             "holdout": self.holdout.to_dict() if self.holdout is not None else None,
             "governance": dict(self.governance),
             "note": (
-                "Raw model-comparison verdicts are research evidence only. "
-                "Production eligibility requires promotion gates, final-holdout qualification "
-                "on the Stage-4 path, and a certified economic backtest implementation."
+                "Raw model-comparison and statistical-promotion verdicts are research "
+                "evidence only. Production eligibility requires the strict Stage-4 "
+                "experiment ledger, an accepted one-shot final holdout, and an explicitly "
+                "certified executable economic backtest. Missing evidence fails closed."
             ),
         }
 
@@ -92,7 +101,7 @@ def run_governed_model_comparison(
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> GovernedModelComparison:
-    """Legacy-compatible research path; not the Stage-4 production research path."""
+    """Legacy-compatible research path; never grants production eligibility."""
     comparison = run_model_comparison(
         panel,
         factor_columns,
@@ -101,7 +110,21 @@ def run_governed_model_comparison(
         progress=progress,
     )
     promotion = evaluate_nonlinear_promotion(comparison, config=promotion_config)
-    return GovernedModelComparison(comparison=comparison, promotion=promotion)
+    governance = {
+        "stage4Governed": False,
+        "researchOnly": True,
+        "economicBacktestCertified": False,
+        "productionBlockers": [
+            "legacy research path has no ExperimentLedger cumulative multiplicity binding",
+            "legacy research path has no one-shot FinalHoldoutLedger qualification",
+            "model_comparison economic returns are not yet position-carrying/executable under A-share trading constraints",
+        ],
+    }
+    return GovernedModelComparison(
+        comparison=comparison,
+        promotion=promotion,
+        governance=governance,
+    )
 
 
 def run_stage4_governed_model_comparison(
@@ -125,12 +148,11 @@ def run_stage4_governed_model_comparison(
     training set of a later holdout fold, so the union would not be an untouched block.
     Increase ``valid_size_days`` when a longer final block is required.
 
-    This path is deliberately still fail-closed for production while the underlying
-    ``model_comparison`` economic evaluator has known truth-boundary defects: transaction
-    cost is not yet charged proportional to realised turnover, and untradable Top-K names
-    are currently measured but not excluded before economic return calculation. The
-    research evidence remains useful; it cannot grant live eligibility until those defects
-    are repaired and the blocker below is removed in a separately audited change.
+    Statistical governance is strict, but production remains fail-closed while
+    ``model_comparison`` still computes economic Top-K returns from idealised daily
+    selections rather than carrying positions through direction-specific A-share
+    buy/sell constraints. Transaction cost itself is turnover-proportional after
+    Stage-4 PR #108; the remaining blocker is executable position state.
     """
 
     cfg = comparison_config or ComparisonConfig(holdout_folds=1)
@@ -170,6 +192,8 @@ def run_stage4_governed_model_comparison(
     promotion = evaluate_nonlinear_promotion(comparison, config=promotion_config)
     holdout = _qualify_final_holdout(comparison, expected=final_holdout)
     governance = {
+        "stage4Governed": True,
+        "researchOnly": True,
         "experimentFingerprint": experiment.fingerprint,
         "eventHash": event["event_hash"],
         "holdoutKey": final_holdout.holdout_key,
@@ -181,8 +205,7 @@ def run_stage4_governed_model_comparison(
         ),
         "economicBacktestCertified": False,
         "economicBacktestBlockers": [
-            "model_comparison costs are not yet proportional to realised turnover",
-            "model_comparison reports untradable Top-K selections without excluding them from economic returns",
+            "model_comparison economic returns are not yet position-carrying/executable under direction-specific A-share buy/sell constraints",
         ],
     }
     return GovernedModelComparison(
