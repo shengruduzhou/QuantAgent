@@ -43,7 +43,9 @@ Four evaluation dimensions, all reported, none optimised alone:
     series overlaps by construction (every date carries an H-day label), so its
     Sharpe is reported as ``net_sharpe_overlapping`` and is optimistic in
     absolute terms — it is a valid basis for *comparing* arms that share the
-    identical overlap, not a standalone claim.
+    identical overlap, not a standalone claim. Target membership is determined
+    from prediction only; whether a future label happens to be observable is
+    never allowed to backfill a lower-ranked name into today's target.
 ``robustness``
     Per-fold consistency, PBO across the arm family, and a deflated Sharpe whose
     trial count is the number of arms actually run.
@@ -346,6 +348,14 @@ def _topk_daily_returns(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Equal-weight top-K net daily-equivalent returns, turnover, untradable share.
 
+    Target membership is based on information available at selection time:
+    predictions (and, upstream, the PIT research universe). A future outcome
+    label is never used as a membership filter. If any selected name lacks the
+    outcome needed to evaluate that target, the economic observation for that
+    date is omitted rather than replacing the name with a lower-ranked stock.
+    The target state itself is still carried forward for subsequent turnover
+    comparisons, so censoring cannot reset the portfolio history either.
+
     The label is an ``H``-day cumulative return, so it is divided by ``H`` to get
     a daily-equivalent rate before annualising — otherwise 252-fold compounding
     is applied to a 5-day number. The rebalance cost is spread over the same
@@ -375,23 +385,34 @@ def _topk_daily_returns(
         if column in frame.columns
     ]
     for date, group in frame.groupby("trade_date", sort=True):
-        usable = group.dropna(subset=["prediction", label_column])
-        if len(usable) < config.min_symbols_per_date:
+        rankable = group.dropna(subset=["prediction"])
+        if len(rankable) < config.min_symbols_per_date:
             continue
-        picked = usable.nlargest(config.top_k, "prediction")
+        picked = rankable.nlargest(config.top_k, "prediction")
         if picked.empty:
             continue
-        gross[pd.Timestamp(date)] = float(picked[label_column].mean()) / horizon
+
         names = set(picked["symbol"].astype(str))
-        turnover[pd.Timestamp(date)] = (
+        target_turnover = (
             1.0 if not previous else len(names - previous) / max(1, len(names))
         )
         previous = names
+
         if tradability_columns:
             blocked = np.zeros(len(picked), dtype=bool)
             for column in tradability_columns:
                 blocked |= picked[column].fillna(False).astype(bool).to_numpy()
             untradable[pd.Timestamp(date)] = float(blocked.mean())
+
+        selected_returns = (
+            pd.to_numeric(picked[label_column], errors="coerce")
+            .replace([np.inf, -np.inf], np.nan)
+        )
+        if selected_returns.isna().any():
+            continue
+        gross[pd.Timestamp(date)] = float(selected_returns.mean()) / horizon
+        turnover[pd.Timestamp(date)] = target_turnover
+
     gross_series = pd.Series(gross, dtype=float).sort_index()
     turnover_series = pd.Series(turnover, dtype=float).sort_index()
     daily_cost = turnover_series.reindex(gross_series.index).fillna(0.0) * cost_per_day
@@ -487,6 +508,31 @@ def _lightgbm_available() -> bool:
     return True
 
 
+def _prepare_comparison_panel(
+    panel: pd.DataFrame,
+    factor_columns: Sequence[str],
+    config: ComparisonConfig,
+) -> pd.DataFrame:
+    """Prepare model input without conditioning inference rows on future labels.
+
+    The target column is numeric-normalised but deliberately not part of the
+    global ``dropna``. Training folds remove unknown outcomes immediately before
+    fitting; validation/inference folds retain them so target construction never
+    learns whether a future outcome will later be observable.
+    """
+    columns = ["trade_date", "symbol", config.label_column, *factor_columns] + [
+        column
+        for column in ("is_suspended", "is_limit_up", "is_st")
+        if column in panel.columns
+    ]
+    work = panel[columns].copy()
+    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
+    work["symbol"] = work["symbol"].astype(str)
+    work[config.label_column] = pd.to_numeric(work[config.label_column], errors="coerce")
+    work = work.dropna(subset=["trade_date", "symbol"])
+    return work.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+
 def run_model_comparison(
     panel: pd.DataFrame,
     factor_columns: Sequence[str],
@@ -498,10 +544,12 @@ def run_model_comparison(
     """Fit every arm on identical folds and return one verdict.
 
     ``panel`` must carry ``trade_date``, ``symbol``, ``config.label_column`` and
-    the ``factor_columns``. Tradability flags (``is_suspended``, ``is_limit_up``,
-    ``is_st``) are used when present to report how much of each book was
-    untradable on selection day; their absence weakens the trading-reality
-    dimension and is reported rather than assumed benign.
+    the ``factor_columns``. Outcome labels may be missing on inference dates;
+    they are required only for training and for an economic/predictive metric to
+    be observed. They never determine target membership. Tradability flags
+    (``is_suspended``, ``is_limit_up``, ``is_st``) are used when present only as
+    diagnostics in this research evaluator; production economics remain blocked
+    until targets are evaluated through the strict A-share execution simulator.
     """
     cfg = config or ComparisonConfig()
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -521,15 +569,14 @@ def run_model_comparison(
             (f"need >= 2 usable factor columns, found {len(usable_factors)}",),
         )
 
-    work = panel[["trade_date", "symbol", cfg.label_column, *usable_factors]
-                 + [c for c in ("is_suspended", "is_limit_up", "is_st") if c in panel.columns]].copy()
-    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
-    work["symbol"] = work["symbol"].astype(str)
-    work[cfg.label_column] = pd.to_numeric(work[cfg.label_column], errors="coerce")
-    work = work.dropna(subset=["trade_date", "symbol", cfg.label_column])
-    work = work.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
-    if work.empty:
-        return _invalid_report(cfg, generated_at, "data_invalid", ("panel is empty after cleaning",))
+    work = _prepare_comparison_panel(panel, usable_factors, cfg)
+    if work.empty or not bool(work[cfg.label_column].notna().any()):
+        return _invalid_report(
+            cfg,
+            generated_at,
+            "data_invalid",
+            ("panel has no usable labelled observations for model fitting",),
+        )
 
     folds = split_walk_forward(
         work,
@@ -579,12 +626,12 @@ def run_model_comparison(
     completed = 0
 
     for fold in folds:
-        train = work.iloc[fold.train_idx]
+        train = work.iloc[fold.train_idx].dropna(subset=[cfg.label_column])
         test = work.iloc[fold.valid_idx]
         if train.empty or test.empty:
             continue
 
-        # Pair selection is fitted on this fold's training segment only.
+        # Pair selection is fitted on this fold's labelled training segment only.
         pairs: list[InteractionPair] = select_interaction_pairs(
             train,
             usable_factors,
