@@ -230,9 +230,13 @@ def build_executable_training_labels(
     for horizon in horizons_tuple:
         canonical = f"forward_executable_return_{horizon}d"
         compatible = f"forward_return_{horizon}d"
+        compatible_end = f"label_end_{horizon}d"
         df[compatible] = pd.to_numeric(df[canonical], errors="coerce").where(
             df["_execution_tradable"]
         )
+        # Preserve the historic training-schema name while sourcing it from the
+        # exact global-session mapping.  Purged/WFA consumers rely on label_end_*.
+        df[compatible_end] = df[f"factor_label_end_{horizon}d"]
 
     if 5 in horizons_tuple:
         future_min, path_observed = _exact_holding_period_min_close(
@@ -279,6 +283,7 @@ def build_executable_training_labels(
         "market_session_count": int(len(sessions)),
         "missing_bar_semantics": "exact global session required; missing entry/exit/path bar => NaN, never next-row shift",
         "critical_flag_semantics": "is_suspended/is_st/is_limit_up must be explicitly known false on signal and entry sessions",
+        "compatible_label_end_semantics": "label_end_{h}d aliases factor_label_end_{h}d exact global session",
         "canonical_builder_schema": built.schema,
     }
     return df, schema
