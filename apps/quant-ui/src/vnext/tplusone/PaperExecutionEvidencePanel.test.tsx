@@ -21,6 +21,24 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       unresolvedCount: 0,
       reason: null,
     },
+    accountIdentity: {
+      state: "valid",
+      verified: true,
+      path: "runtime/paper/account_identity.json",
+      accountInstanceId: "paper-account-instance-a",
+      portfolioId: "v7-paper",
+      initialCashCny: "1000000.0000000000",
+      payloadSha256: "abcdef1234567890",
+      reason: null,
+    },
+    canonicalPrefix: {
+      state: "valid",
+      verified: true,
+      boundTerminalCount: 1,
+      legacyUnboundTerminalCount: 0,
+      latestTerminalBound: true,
+      reason: null,
+    },
     summary: {
       attention: "ok",
       latestStatus: "execution_observed",
@@ -36,6 +54,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       fillCount: 1,
       navBefore: 1_000_000,
       navAfter: 1_001_200,
+      accountIdentityVerified: true,
+      latestTerminalCanonicalPrefixBound: true,
       statusCounts: { execution_started: 1, execution_observed: 1 },
     },
     records: [
@@ -52,6 +72,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
     ],
     operatorTruth: {
       paperExecutionEvidence: true,
+      accountIdentityVerified: true,
+      canonicalExecutionPrefixCertified: true,
       productionLiveCertified: false,
       authoritativeCalendarCertified: false,
       message: "Paper/shadow execution evidence is available. It is not production/live certification.",
@@ -61,6 +83,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
     ...base,
     ...overrides,
     journal: { ...base.journal, ...(overrides.journal ?? {}) },
+    accountIdentity: { ...base.accountIdentity, ...(overrides.accountIdentity ?? {}) },
+    canonicalPrefix: { ...base.canonicalPrefix, ...(overrides.canonicalPrefix ?? {}) },
     summary: { ...base.summary, ...(overrides.summary ?? {}) },
     operatorTruth: { ...base.operatorTruth, ...(overrides.operatorTruth ?? {}) },
     records: overrides.records ?? base.records,
@@ -92,7 +116,7 @@ describe("PaperExecutionEvidencePanel", () => {
     expect(screen.getByText("Paper execution evidence").parentElement).toHaveTextContent("YES");
     expect(screen.getByText("Production pre-trade certified").parentElement).toHaveTextContent("NO");
     expect(screen.getByText("Authoritative calendar certified").parentElement).toHaveTextContent("NO");
-    expect(screen.getByText(/Paper\/shadow 观察结果 ≠ 实盘认证/)).toBeInTheDocument();
+    expect(screen.getByText(/Paper\/shadow 观察结果.*不等于实盘认证/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -156,10 +180,14 @@ describe("PaperExecutionEvidencePanel", () => {
         ...evidence().summary,
         attention: "critical",
         latestStatus: null,
+        accountIdentityVerified: false,
+        latestTerminalCanonicalPrefixBound: false,
       },
       records: [],
       operatorTruth: {
         paperExecutionEvidence: false,
+        accountIdentityVerified: false,
+        canonicalExecutionPrefixCertified: false,
         productionLiveCertified: false,
         authoritativeCalendarCertified: false,
         message: "Paper execution evidence is invalid or unverifiable; fail closed.",

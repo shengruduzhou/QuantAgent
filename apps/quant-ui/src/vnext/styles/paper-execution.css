@@ -103,7 +103,7 @@
 
 .paper-evidence-cert-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: 9px;
 }
@@ -156,6 +156,65 @@
   color: var(--vnx-muted);
   font-size: 9px;
   overflow-wrap: anywhere;
+}
+
+.paper-evidence-identity {
+  display: grid;
+  grid-template-columns: auto repeat(4, minmax(0, 1fr)) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--vnx-border);
+  border-radius: 8px;
+  background: var(--vnx-surface-1);
+}
+
+.paper-evidence-identity.verified {
+  border-color: color-mix(in srgb, var(--iw-positive) 32%, var(--vnx-border));
+}
+
+.paper-evidence-identity.unverified {
+  border-color: color-mix(in srgb, var(--iw-warning) 42%, var(--vnx-border));
+}
+
+.paper-evidence-identity > svg:first-child {
+  color: var(--iw-cyan);
+}
+
+.paper-evidence-identity > svg:last-child {
+  color: var(--iw-positive);
+}
+
+.paper-evidence-identity.unverified > svg:last-child {
+  color: var(--iw-warning);
+}
+
+.paper-evidence-identity span {
+  min-width: 0;
+}
+
+.paper-evidence-identity small,
+.paper-evidence-identity strong,
+.paper-evidence-identity code {
+  display: block;
+}
+
+.paper-evidence-identity small {
+  color: var(--vnx-muted-2);
+  font: 700 8px var(--vnx-font-mono);
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.paper-evidence-identity strong,
+.paper-evidence-identity code {
+  margin-top: 3px;
+  color: var(--vnx-text-soft);
+  font: 700 10px var(--vnx-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .paper-execution-panel .iw-truth-notice {
@@ -292,6 +351,14 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .paper-evidence-identity {
+    grid-template-columns: auto repeat(2, minmax(0, 1fr)) auto;
+  }
+
+  .paper-evidence-identity span:nth-of-type(n + 3) {
+    grid-column: span 1;
+  }
+
   .paper-evidence-metrics {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -311,6 +378,19 @@
   .paper-evidence-metrics,
   .paper-evidence-records {
     grid-template-columns: 1fr;
+  }
+
+  .paper-evidence-identity {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .paper-evidence-identity span {
+    grid-column: 2;
+  }
+
+  .paper-evidence-identity > svg:last-child {
+    grid-column: 3;
+    grid-row: 1;
   }
 
   .paper-evidence-history > header {
