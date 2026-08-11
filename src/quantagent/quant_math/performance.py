@@ -70,11 +70,11 @@ def deflated_sharpe_ratio(
       that sample. Declare it whenever the search tried more configurations
       than are represented in ``candidate_sharpes``.
 
-    Do not conflate them by padding the sample up to the trial count.  A
+    Do not conflate them by padding the sample up to the trial count. A
     constant pad shrinks ``var(candidate_sharpes)`` like ``1/n_trials`` while
     the order-statistic term grows only like ``sqrt(log n_trials)``, so the
     benchmark *falls* towards zero and declaring more data mining makes the
-    gate easier to pass -- backwards for a multiple-testing correction.  With
+    gate easier to pass -- backwards for a multiple-testing correction. With
     the two passed separately the benchmark is non-decreasing in ``n_trials``,
     so the returned probability is non-increasing in it.
     """
@@ -296,6 +296,50 @@ def _stationary_bootstrap_indices(
     return idx
 
 
+def _spa_recenter_means(
+    mean_excess: np.ndarray,
+    omega: np.ndarray,
+    n: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Hansen SPA lower/consistent/upper null means for return differentials.
+
+    Positive ``mean_excess`` means a candidate outperforms the benchmark. For
+    the consistent estimator, a candidate is asymptotically relevant when its
+    observed mean is no farther below zero than Hansen's ``log(log(n))`` bound.
+    Since ``omega`` is the standard error of the sample mean, the raw-return
+    threshold is ``-omega * sqrt(2 log log n)``.
+
+    The three recentering rules mirror the standard SPA construction:
+
+    * lower: do not recenter clearly inferior (negative-mean) candidates;
+    * consistent: recenter only sample-dependent relevant candidates;
+    * upper: recenter every candidate.
+
+    They are returned in p-value order ``lower, consistent, upper`` together
+    with the consistent relevance mask.
+    """
+    if n < 3:
+        raise ValueError("SPA recentering requires n >= 3")
+    if mean_excess.shape != omega.shape:
+        raise ValueError("mean_excess and omega must have identical shape")
+    if np.any(~np.isfinite(mean_excess)) or np.any(~np.isfinite(omega)):
+        raise ValueError("SPA recentering requires finite means and standard errors")
+    if np.any(omega <= 0.0):
+        raise ValueError("SPA standard errors must be strictly positive")
+
+    log_log = np.log(np.log(float(n)))
+    bound_scale = np.sqrt(max(2.0 * log_log, 0.0))
+    threshold = -omega * bound_scale
+    relevant = mean_excess >= threshold
+
+    upper_mean = mean_excess.copy()
+    consistent_mean = upper_mean.copy()
+    consistent_mean[~relevant] = 0.0
+    lower_mean = upper_mean.copy()
+    lower_mean[lower_mean < 0.0] = 0.0
+    return lower_mean, consistent_mean, upper_mean, relevant
+
+
 def spa_test(
     candidate_returns: pd.DataFrame,
     benchmark_returns: pd.Series,
@@ -305,21 +349,32 @@ def spa_test(
 ) -> dict[str, float]:
     """Hansen (2005) Superior Predictive Ability test, consistent variant.
 
-    Returns p-values for the null "no candidate beats benchmark". Smaller
-    p-values are evidence at least one candidate strategy has genuine edge
-    after correcting for multiple testing.
+    Returns p-values for the one-sided null ``no candidate beats benchmark``.
+    The statistic is studentized by a HAC standard error and the stationary
+    bootstrap uses Hansen's lower/consistent/upper sample-dependent null
+    recentering. A smaller consistent p-value is stronger evidence that at
+    least one candidate has genuine positive excess return after correcting for
+    data snooping.
+
+    Notes
+    -----
+    ``candidate_returns - benchmark_returns`` is the performance differential,
+    so positive values are better. The bootstrap sample mean is recentered
+    **once** by the null mean. Subtracting the observed mean a second time would
+    shift the simulated distribution and invalidate the SPA p-value.
 
     Returns
     -------
     dict with keys:
-      ``p_consistent``   — main SPA p-value
-      ``p_lower``        — conservative lower-bound p-value
-      ``p_upper``        — liberal upper-bound p-value
-      ``best_strategy``  — column name of the strategy with the largest
-                           standardised mean excess return
-      ``test_statistic`` — observed standardised statistic value
-      ``block_length``   — auto-selected (or user) block length used
+      ``p_consistent``   — Hansen sample-dependent SPA p-value
+      ``p_lower``        — lower-bound p-value
+      ``p_upper``        — upper-bound p-value
+      ``best_strategy``  — largest studentized mean excess return
+      ``test_statistic`` — observed one-sided studentized maximum
+      ``block_length``   — stationary-bootstrap mean block length
     """
+    if int(n_bootstrap) < 1:
+        raise ValueError("n_bootstrap must be >= 1")
     rng = np.random.default_rng(rng_seed)
     aligned = candidate_returns.dropna(how="all").copy()
     bench = benchmark_returns.reindex(aligned.index).astype(float)
@@ -345,7 +400,12 @@ def spa_test(
         block_length = _politis_romano_block_length(
             excess.mean(axis=1) if m > 1 else excess[:, 0]
         )
+    block_length = int(block_length)
+    if block_length < 1:
+        raise ValueError("block_length must be >= 1")
 
+    # HAC long-run variance of each performance differential. ``var_lr`` is
+    # variance per observation; omega is the standard error of the sample mean.
     var_lr = np.empty(m)
     for j in range(m):
         col = centered[:, j]
@@ -353,40 +413,53 @@ def spa_test(
         max_lag = max(1, int(np.floor(min(n - 1, 4.0 * (n / 100.0) ** (2.0 / 9.0)))))
         var = gamma0
         for k in range(1, max_lag + 1):
-            kernel = (1.0 - k / (max_lag + 1.0))
+            kernel = 1.0 - k / (max_lag + 1.0)
             cov = float(np.dot(col[k:], col[:-k]) / n)
             var += 2.0 * kernel * cov
         var_lr[j] = max(var, 1e-12)
 
     omega = np.sqrt(var_lr / n)
     standardized = mean_excess / omega
-    test_stat = float(max(standardized.max(), 0.0))
+    test_stat = float(max(float(standardized.max()), 0.0))
     best_idx = int(np.argmax(standardized))
 
-    threshold_consistent = -np.sqrt(2.0 * np.log(np.log(n)) / n)
-    mu_consistent = np.where(standardized <= threshold_consistent, 0.0, mean_excess)
-    mu_lower = np.zeros(m)
-    mu_upper = np.where(mean_excess > 0.0, 0.0, mean_excess)
+    mu_lower, mu_consistent, mu_upper, _ = _spa_recenter_means(
+        mean_excess,
+        omega,
+        n,
+    )
 
-    boot_stats_consistent = np.empty(n_bootstrap)
     boot_stats_lower = np.empty(n_bootstrap)
+    boot_stats_consistent = np.empty(n_bootstrap)
     boot_stats_upper = np.empty(n_bootstrap)
     for b in range(n_bootstrap):
         idx = _stationary_bootstrap_indices(n, block_length, rng)
-        sample = excess[idx]
-        sample_mean = sample.mean(axis=0)
-        z_consistent = (sample_mean - mu_consistent - mean_excess) / omega
-        z_lower = (sample_mean - mu_lower - mean_excess) / omega
-        z_upper = (sample_mean - mu_upper - mean_excess) / omega
-        boot_stats_consistent[b] = max(z_consistent.max(), 0.0)
-        boot_stats_lower[b] = max(z_lower.max(), 0.0)
-        boot_stats_upper[b] = max(z_upper.max(), 0.0)
+        sample_mean = excess[idx].mean(axis=0)
+        # One recentering only. This is the studentized analogue of the
+        # standard SPA stationary-bootstrap construction.
+        z_lower = (sample_mean - mu_lower) / omega
+        z_consistent = (sample_mean - mu_consistent) / omega
+        z_upper = (sample_mean - mu_upper) / omega
+        boot_stats_lower[b] = max(float(z_lower.max()), 0.0)
+        boot_stats_consistent[b] = max(float(z_consistent.max()), 0.0)
+        boot_stats_upper[b] = max(float(z_upper.max()), 0.0)
+
+    p_lower = float((boot_stats_lower >= test_stat).mean())
+    p_consistent = float((boot_stats_consistent >= test_stat).mean())
+    p_upper = float((boot_stats_upper >= test_stat).mean())
+    # Shared bootstrap draws and nested recentering sets imply this order. Fail
+    # closed if future edits violate the mathematical contract beyond rounding.
+    if not (p_lower <= p_consistent + 1e-12 and p_consistent <= p_upper + 1e-12):
+        raise RuntimeError(
+            "SPA p-value ordering invariant failed: expected lower <= consistent <= upper, "
+            f"got {p_lower:.6f}, {p_consistent:.6f}, {p_upper:.6f}"
+        )
 
     return {
-        "p_consistent": float((boot_stats_consistent >= test_stat).mean()),
-        "p_lower": float((boot_stats_lower >= test_stat).mean()),
-        "p_upper": float((boot_stats_upper >= test_stat).mean()),
+        "p_consistent": p_consistent,
+        "p_lower": p_lower,
+        "p_upper": p_upper,
         "best_strategy": str(aligned.columns[best_idx]),
         "test_statistic": test_stat,
-        "block_length": int(block_length),
+        "block_length": block_length,
     }
