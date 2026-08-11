@@ -6,6 +6,7 @@ from typing import Iterable, Literal
 import numpy as np
 import pandas as pd
 
+from quantagent.factors.coverage import usable_factor_coverage
 from quantagent.factors.evaluation import (
     capacity_proxy,
     factor_correlation_matrix,
@@ -86,6 +87,12 @@ def build_factor_lifecycle_report(
     capacity of that tail and executable decay. Correlation/crowding and live drift use
     the raw factor because their gates are sign-invariant (absolute correlation/drift).
 
+    Predictive validity coverage counts only finite factor/return pairs. A dense parent
+    market panel cannot make a sparse factor satisfy lifecycle sample-size gates. Core
+    IC/group/capacity diagnostics use dates meeting the configured usable cross-section
+    threshold; executable decay keeps the full market-session frame because deleting
+    intermediate dates would change the T-close -> global-next-session outcome clock.
+
     ``return_column`` is caller-supplied and may be used for the core diagnostic. When
     ``close`` is available, lifecycle decay is recomputed from raw prices under the
     governed T-close -> global-next-session contract. That strict recomputation requires
@@ -109,11 +116,18 @@ def build_factor_lifecycle_report(
     raw_factor = pd.to_numeric(data[factor_column], errors="coerce")
     data[directed_column] = raw_factor * direction
 
-    counts = data.groupby("trade_date")["symbol"].nunique()
-    effective_dates = int(len(counts))
-    median_symbols = float(counts.median()) if not counts.empty else 0.0
-    ic = information_coefficient(data, directed_column, return_column)
-    groups = quantile_group_backtest(data, directed_column, return_column)
+    coverage = usable_factor_coverage(
+        data,
+        directed_column,
+        return_column,
+        min_symbols_per_date=thresholds.min_median_symbols_per_date,
+    )
+    effective_dates = coverage.coverage_dates
+    median_symbols = coverage.median_symbols_per_date
+    validity_data = data[data["trade_date"].isin(coverage.eligible_dates)].copy()
+
+    ic = information_coefficient(validity_data, directed_column, return_column)
+    groups = quantile_group_backtest(validity_data, directed_column, return_column)
 
     decay = None
     calendar_digest: str | None = None
@@ -135,8 +149,8 @@ def build_factor_lifecycle_report(
         label_semantics = FACTOR_LABEL_SEMANTICS
 
     capacity = (
-        capacity_proxy(data, directed_column, amount_column=amount_column)
-        if amount_column in data.columns
+        capacity_proxy(validity_data, directed_column, amount_column=amount_column)
+        if amount_column in validity_data.columns
         else None
     )
     max_corr = _max_existing_corr(data, factor_column, existing_factor_columns)
