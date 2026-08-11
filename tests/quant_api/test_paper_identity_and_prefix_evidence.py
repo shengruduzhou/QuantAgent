@@ -138,3 +138,43 @@ def test_tampered_canonical_prefix_receipt_invalidates_operator_evidence(tmp_pat
     assert result["operatorTruth"]["paperExecutionEvidence"] is False
     assert result["operatorTruth"]["canonicalExecutionPrefixCertified"] is False
     assert result["operatorTruth"]["productionLiveCertified"] is False
+
+
+def test_structurally_malformed_canonical_json_is_projected_invalid_not_raised(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    paths = paper_runtime_paths(settings.runtime_root)
+    identity = ensure_paper_account_identity(
+        canonical_ledger_path=paths.canonical_ledger,
+        portfolio_id="v7-paper",
+        initial_cash=1_000_000.0,
+        identity_path=paths.account_identity,
+    )
+    before_records, before_head = canonical_snapshot(paths.canonical_ledger)
+    receipt = build_canonical_prefix_receipt(
+        ledger=paths.canonical_ledger,
+        canonical_before_records=before_records,
+        canonical_before_head=before_head,
+        target_weights_sha256="target-sha",
+        paper_account_identity_sha256=identity.payload_sha256,
+    )
+    PendingExecutionJournal(paths.execution_journal).append(
+        pending_payload_sha256="payload-sha",
+        signal_date="2026-08-07",
+        execution_date="2026-08-10",
+        status="execution_observed",
+        details={
+            "target_weights_sha256": "target-sha",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_prefix_receipt": receipt,
+        },
+    )
+    # Valid JSON, invalid canonical record structure: this used to escape the
+    # evidence service as KeyError/TypeError instead of fail-closed projection.
+    paths.canonical_ledger.write_text('{"schema_version":"bad"}\n', encoding="utf-8")
+
+    result = PaperExecutionEvidenceService(settings).status()
+
+    assert result["journal"]["state"] == "invalid"
+    assert result["canonicalPrefix"]["state"] == "invalid"
+    assert result["summary"]["attention"] == "critical"
+    assert result["operatorTruth"]["productionLiveCertified"] is False
