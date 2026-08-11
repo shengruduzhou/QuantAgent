@@ -3,8 +3,12 @@
 The journal is intentionally conservative. ``execution_started`` is appended
 *before* the OMS/broker is touched. If the process dies before a terminal
 outcome is appended, restart returns ``execution_indeterminate`` and refuses to
-auto-retry. That sacrifices liveness to preserve at-most-once economic safety;
-canonical/broker reconciliation may later resolve the incident explicitly.
+auto-retry. That sacrifices liveness to preserve at-most-once economic safety.
+
+An indeterminate incident is not a permanent dead end: an explicit account
+reconciliation may append ``execution_reconciled`` after the indeterminate
+terminal. The reconciliation never edits or replaces the original outcome and
+must reference its record hash, so the audit trail remains append-only.
 
 The hash-chain decision and append are protected by a sibling file lock on both
 POSIX and Windows. Without that critical section, two consumers can read the
@@ -44,7 +48,8 @@ TERMINAL_OUTCOMES = frozenset(
         "execution_indeterminate",
     }
 )
-_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {"execution_started"}
+RECONCILIATION_STATUS = "execution_reconciled"
+_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {"execution_started", RECONCILIATION_STATUS}
 
 
 class ExecutionJournalCorruption(RuntimeError):
@@ -150,6 +155,15 @@ class PendingExecutionJournal:
             )
         return terminals[0] if terminals else None
 
+    def reconciliation(self, pending_payload_sha256: str) -> PendingExecutionRecord | None:
+        history = self.history(pending_payload_sha256)
+        rows = [record for record in history if record.status == RECONCILIATION_STATUS]
+        if len(rows) > 1:
+            raise ExecutionJournalCorruption(
+                f"pending signal {pending_payload_sha256} has multiple reconciliation records"
+            )
+        return rows[0] if rows else None
+
     def has_unresolved_start(self, pending_payload_sha256: str) -> bool:
         history = self.history(pending_payload_sha256)
         return any(record.status == "execution_started" for record in history) and not any(
@@ -203,6 +217,7 @@ class PendingExecutionJournal:
         if not str(pending_payload_sha256).strip():
             raise ValueError("pending_payload_sha256 must be non-empty")
 
+        normalized_details = dict(details or {})
         with self._thread_lock, self._exclusive_file_lock():
             if not self.verify():
                 raise ExecutionJournalCorruption(
@@ -217,18 +232,43 @@ class PendingExecutionJournal:
             terminals = [
                 record for record in history if record.status in TERMINAL_OUTCOMES
             ]
+            reconciliations = [
+                record for record in history if record.status == RECONCILIATION_STATUS
+            ]
             if len(terminals) > 1:
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} has multiple terminal outcomes"
                 )
+            if len(reconciliations) > 1:
+                raise ExecutionJournalCorruption(
+                    f"pending signal {pending_payload_sha256} has multiple reconciliation records"
+                )
             terminal = terminals[0] if terminals else None
-            if terminal is not None:
-                if status == terminal.status and dict(details or {}) == terminal.details:
+            reconciliation = reconciliations[0] if reconciliations else None
+
+            if status == RECONCILIATION_STATUS:
+                if terminal is None or terminal.status != "execution_indeterminate":
+                    raise ExecutionJournalCorruption(
+                        "execution_reconciled requires an execution_indeterminate terminal"
+                    )
+                if str(normalized_details.get("indeterminate_record_sha256") or "") != terminal.record_sha256:
+                    raise ExecutionJournalCorruption(
+                        "execution_reconciled must bind the indeterminate terminal record hash"
+                    )
+                if reconciliation is not None:
+                    if reconciliation.details == normalized_details:
+                        return reconciliation
+                    raise ExecutionJournalCorruption(
+                        f"pending signal {pending_payload_sha256} is already reconciled"
+                    )
+            elif terminal is not None:
+                if status == terminal.status and normalized_details == terminal.details:
                     return terminal
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} already has terminal "
                     f"status {terminal.status}"
                 )
+
             if status == "execution_started" and any(
                 record.status == "execution_started" for record in history
             ):
@@ -245,7 +285,7 @@ class PendingExecutionJournal:
                 "signal_date": str(signal_date),
                 "execution_date": str(execution_date),
                 "status": str(status),
-                "details": dict(details or {}),
+                "details": normalized_details,
                 "recorded_at": recorded_at
                 or datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "previous_record_sha256": previous,
@@ -253,9 +293,7 @@ class PendingExecutionJournal:
             }
             payload["record_sha256"] = _digest(payload)
             record = PendingExecutionRecord(**payload)
-            line = (
-                json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
-            )
+            line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -267,15 +305,22 @@ def replay_terminal_status(
     records: Iterable[PendingExecutionRecord],
 ) -> dict[str, str]:
     result: dict[str, str] = {}
+    reconciled: set[str] = set()
     for record in records:
         if record.status in TERMINAL_OUTCOMES:
             result[record.pending_payload_sha256] = record.status
+        elif record.status == RECONCILIATION_STATUS:
+            reconciled.add(record.pending_payload_sha256)
+    for payload in reconciled:
+        if result.get(payload) == "execution_indeterminate":
+            result[payload] = RECONCILIATION_STATUS
     return result
 
 
 __all__ = [
     "JOURNAL_SCHEMA_VERSION",
     "TERMINAL_OUTCOMES",
+    "RECONCILIATION_STATUS",
     "ExecutionJournalCorruption",
     "PendingExecutionRecord",
     "PendingExecutionJournal",
