@@ -3,15 +3,15 @@
     {
       "start": "2025-09-01",
       "end": "2026-05-18",
-      "reason": "burned final holdout: >=35 direct strict evaluations + >=5 selection decisions used this window",
-      "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md / HOLDOUT_ARTIFACT_CENSUS.csv",
+      "reason": "burned final holdout: >=35 direct strict evaluations + >=5 selection decisions used this window; historical tradability evidence also requires dated-ST PIT rebuild before any forensic performance reuse",
+      "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md / HOLDOUT_ARTIFACT_CENSUS.csv / TRADABILITY_PIT_INVALIDATION_MANIFEST.md",
       "declared": "2026-07-03"
     },
     {
       "start": "2026-05-19",
       "end": "2027-12-31",
-      "reason": "frozen_future_holdout: fresh window accumulating for the first formal read (>=120 trading days, ~2026-11); preregistered evals only — lift via config change, never via override",
-      "evidence": "FRESH_HOLDOUT_FREEZE_MANIFEST.md / EVALUATION_PROTOCOL_V2.md section 2",
+      "reason": "frozen_future_holdout: fresh window accumulating for the first formal read (>=120 trading days, ~2026-11); additionally, historical ST current_snapshot_broadcast rows are promotion-invalid until rebuilt from dated PIT evidence; lift via config change only after PIT rebuild/re-QC and preregistered acceptance, never via override",
+      "evidence": "FRESH_HOLDOUT_FREEZE_MANIFEST.md / TRADABILITY_PIT_INVALIDATION_MANIFEST.md / EVALUATION_PROTOCOL_V2.md section 2",
       "declared": "2026-07-03"
     }
   ],

@@ -6,7 +6,7 @@ from quantagent.data.providers.base import ProviderRequest
 from quantagent.data.providers.tickflow_provider import TickflowProvider
 
 
-def test_current_main_board_st_tickflow_flags_use_ten_percent_band(monkeypatch) -> None:
+def test_current_snapshot_main_board_st_uses_current_ten_percent_band(monkeypatch) -> None:
     raw = pd.DataFrame(
         {
             "symbol": ["600000.SH", "600000.SH", "600000.SH"],
@@ -27,16 +27,20 @@ def test_current_main_board_st_tickflow_flags_use_ten_percent_band(monkeypatch) 
         lambda: [{"symbol": "600000.SH", "name": "ST测试", "type": "stock"}],
     )
 
-    result = provider._call_tickflow_tradability(
-        ProviderRequest(symbols=("600000.SH",), start_date="2026-08-05", end_date="2026-08-07")
+    result = provider._call_tickflow_current_snapshot_tradability(
+        ProviderRequest(
+            symbols=("600000.SH",),
+            start_date="2026-08-05",
+            end_date="2026-08-07",
+        )
     )
 
     assert bool(result.loc[1, "is_st"]) is True
-    assert bool(result.loc[1, "is_limit_up"]) is False  # +5% is no longer the main-board ST seal.
-    assert bool(result.loc[2, "is_limit_up"]) is True   # +10% is the current seal.
+    assert bool(result.loc[1, "is_limit_up"]) is False
+    assert bool(result.loc[2, "is_limit_up"]) is True
 
 
-def test_chinext_tickflow_flags_are_not_flattened_to_main_board_band(monkeypatch) -> None:
+def test_current_snapshot_chinext_flags_are_not_flattened_to_main_board_band(monkeypatch) -> None:
     raw = pd.DataFrame(
         {
             "symbol": ["300001.SZ", "300001.SZ"],
@@ -57,8 +61,12 @@ def test_chinext_tickflow_flags_are_not_flattened_to_main_board_band(monkeypatch
         lambda: [{"symbol": "300001.SZ", "name": "测试股份", "type": "stock"}],
     )
 
-    result = provider._call_tickflow_tradability(
-        ProviderRequest(symbols=("300001.SZ",), start_date="2026-08-06", end_date="2026-08-07")
+    result = provider._call_tickflow_current_snapshot_tradability(
+        ProviderRequest(
+            symbols=("300001.SZ",),
+            start_date="2026-08-06",
+            end_date="2026-08-07",
+        )
     )
 
-    assert bool(result.loc[1, "is_limit_up"]) is False  # +10% is not a ChiNext seal.
+    assert bool(result.loc[1, "is_limit_up"]) is False
