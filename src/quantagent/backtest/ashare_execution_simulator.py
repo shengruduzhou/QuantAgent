@@ -1,8 +1,10 @@
 """Strict A-share cash-account execution simulator facade.
 
-This facade owns two non-negotiable production contracts:
+This facade owns three non-negotiable production contracts:
 
 * a cash stock account cannot establish naked negative stock weights;
+* target-weight rows presented to this boundary are signal dated, never already
+  delayed execution dates;
 * signal-dated target weights cannot execute until the next market session.
 
 The historical implementation lives in ``ashare_execution_simulator_impl.py``;
@@ -25,6 +27,7 @@ from quantagent.backtest.execution_timing import (
 
 
 STRICT_CASH_ACCOUNT_SEMANTICS = "ashare_cash_long_only_v1_no_naked_stock_short"
+TARGET_INDEX_SIGNAL_DATE = "signal_date"
 
 AShareExecutionSimulationConfig = _impl.AShareExecutionSimulationConfig
 AShareExecutionSimulationResult = _impl.AShareExecutionSimulationResult
@@ -35,7 +38,33 @@ class UnsupportedStockShortError(ValueError):
 
 
 class ExecutionTimingViolation(ValueError):
-    """Raised when the trace cannot prove next-session execution semantics."""
+    """Raised when target/trace timing cannot prove the strict signal-date contract."""
+
+
+def validate_signal_dated_target_weights(
+    target_weight_history: pd.DataFrame | None,
+) -> None:
+    """Reject matrices that declare an already-delayed execution-date index.
+
+    Generic callers written before index metadata existed remain supported when
+    the attr is absent; builders that *do* know their index semantics must not be
+    allowed to contradict the strict simulator.  In particular, a hold-band
+    matrix with ``delay_days=1`` is execution dated and passing it here would
+    otherwise turn one intended T+1 delay into T+2.
+    """
+    if target_weight_history is None:
+        return
+    semantics = target_weight_history.attrs.get("target_index_semantics")
+    if semantics is None:
+        return
+    normalized = str(semantics).strip().lower()
+    if normalized == TARGET_INDEX_SIGNAL_DATE:
+        return
+    raise ExecutionTimingViolation(
+        "strict A-share simulator requires signal-dated target weights because "
+        "it owns the sole T-close -> next-session execution mapping; got "
+        f"target_index_semantics={semantics!r}"
+    )
 
 
 def validate_cash_account_target_weights(
@@ -72,6 +101,7 @@ def simulate_ashare_target_weights(
     config: AShareExecutionSimulationConfig | None = None,
 ) -> AShareExecutionSimulationResult:
     """Run the public production-grade simulator and verify its timing trace."""
+    validate_signal_dated_target_weights(target_weight_history)
     validate_cash_account_target_weights(target_weight_history)
     result = _impl.simulate_ashare_target_weights(
         target_weight_history,
@@ -82,6 +112,10 @@ def simulate_ashare_target_weights(
     metadata["stock_shorting_capability"] = "cash_long_only"
     metadata["execution_semantics_version"] = STRICT_CASH_ACCOUNT_SEMANTICS
     metadata["execution_timing_semantics"] = EXECUTION_TIMING_SEMANTICS
+    declared_semantics = target_weight_history.attrs.get("target_index_semantics")
+    metadata["target_input_index_semantics"] = (
+        str(declared_semantics) if declared_semantics is not None else "undeclared_legacy_signal_date"
+    )
 
     if target_weight_history is not None and not target_weight_history.empty:
         timing = validate_execution_trace(result.execution_trace)
@@ -113,11 +147,13 @@ def __getattr__(name: str):
 
 __all__ = [
     "STRICT_CASH_ACCOUNT_SEMANTICS",
+    "TARGET_INDEX_SIGNAL_DATE",
     "EXECUTION_TIMING_SEMANTICS",
     "UnsupportedStockShortError",
     "ExecutionTimingViolation",
     "AShareExecutionSimulationConfig",
     "AShareExecutionSimulationResult",
+    "validate_signal_dated_target_weights",
     "validate_cash_account_target_weights",
     "simulate_ashare_target_weights",
 ]

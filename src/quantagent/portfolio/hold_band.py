@@ -1,23 +1,30 @@
 """Hold-band target-weight builder (turnover-controlled top-K selection).
 
-Why this exists: the strict A-share simulator throttles execution
-(volume-participation caps, lot sizes, min order values), so a daily-roll
-"hold today's top-K" portfolio realises only a fraction of its target
-turnover and its return is driven by the *persistent* subset of picks.
-The hold-band rule makes persistence explicit and cuts turnover ~5-10x:
+A hold-band can be used in two distinct contexts and the index meaning must not
+be conflated:
+
+* ``delay_days == 0`` -> rows are **signal dated**.  This is the only form that
+  may be passed to QuantAgent's strict A-share simulator, which itself maps a
+  T-close signal to the next global market session.
+* ``delay_days > 0`` -> rows are **execution dated**.  This is useful for
+  forward/paper planning files (for example, materialising tomorrow's target),
+  but feeding such a matrix into the strict simulator would apply the delay a
+  second time.
+
+The returned DataFrame therefore carries ``target_index_semantics`` and
+``hold_band_delay_days`` attrs.  The strict simulator rejects execution-dated or
+mixed-semantic matrices rather than silently producing a double-T+1 backtest.
+
+The selection rule itself remains unchanged:
 
   * a name ENTERS only while ranked <= ``entry_rank`` (and there is room),
   * a held name EXITS only when its rank falls below ``exit_rank``,
   * the book holds at most ``n_hold`` names, equal-weighted.
 
-Validated 2026-06-11/12: v8.7 short sleeve +29.4% -> +50.0%/yr; v8.8 full
-ensemble +28.8% -> +58.6%/yr (sharpe 1.94, ~zero sensitivity 8->16bps),
-the first configuration to beat the paper equal-weight all-A benchmark.
-
-Eligibility: names flagged ST / suspended / limit-up-sealed at signal time
-are excluded from both entry AND rank maps (an ineligible held name keeps
-its position unless its rank — computed among eligible names — decays out
-of the band; suspension blocks the sell at the simulator level anyway).
+Eligibility: names flagged ST / suspended / limit-up-sealed at signal time are
+excluded from both entry and rank maps.  Execution-session tradability is still
+owned by the simulator/broker and must not be inferred from this signal-time
+filter.
 """
 
 from __future__ import annotations
@@ -28,6 +35,11 @@ import numpy as np
 import pandas as pd
 
 
+SIGNAL_DATE_SEMANTICS = "signal_date"
+EXECUTION_DATE_SEMANTICS = "execution_date"
+MIXED_DATE_SEMANTICS = "mixed"
+
+
 @dataclass(frozen=True)
 class HoldBandConfig:
     n_hold: int = 50
@@ -35,6 +47,10 @@ class HoldBandConfig:
     exit_rank: int = 150
     delay_days: int = 1
     score_column: str = "alpha_score"
+
+    def __post_init__(self) -> None:
+        if int(self.delay_days) < 0:
+            raise ValueError("delay_days must be >= 0")
 
 
 def build_hold_band_weights(
@@ -52,13 +68,19 @@ def build_hold_band_weights(
         Long frame with ``symbol``, ``trade_date``, the score column and
         (optionally pre-joined) boolean eligibility columns.
     trade_dates
-        The full trading calendar used to apply ``delay_days`` (signal at
-        t is executed on the (t+delay)-th trading day). Defaults to the
-        prediction dates themselves.
+        Full trading calendar used only when ``delay_days > 0`` materialises a
+        future execution-dated planning matrix.  For a strict backtest set
+        ``delay_days=0`` so the output index remains the original signal date;
+        the strict simulator owns the sole T -> T+1 mapping.
     """
     cfg = config or HoldBandConfig()
-    return _build_weights(predictions, lambda _d: cfg, cfg.score_column,
-                          trade_dates, eligibility_columns)
+    return _build_weights(
+        predictions,
+        lambda _d: cfg,
+        cfg.score_column,
+        trade_dates,
+        eligibility_columns,
+    )
 
 
 def build_regime_hold_band_weights(
@@ -72,10 +94,10 @@ def build_regime_hold_band_weights(
 ) -> pd.DataFrame:
     """Hold-band weights with regime-conditional band parameters.
 
-    ``regime_by_date`` maps trade_date -> regime label (must be PIT-safe:
-    computed from data strictly before that date). Each day's entry/exit
-    ranks and book size come from ``config_map[regime]``; the held book
-    itself persists across regime switches (only the rules change).
+    ``regime_by_date`` maps trade_date -> regime label and must itself be PIT
+    safe.  If regime configs use different ``delay_days`` values, the returned
+    frame is labelled ``mixed`` and is intentionally rejected by the strict
+    simulator.
     """
     if default_regime not in config_map:
         raise ValueError(f"config_map missing default regime '{default_regime}'")
@@ -84,11 +106,18 @@ def build_regime_hold_band_weights(
     score_column = config_map[default_regime].score_column
 
     def cfg_for(date: pd.Timestamp) -> HoldBandConfig:
-        return config_map.get(str(regimes.get(date, default_regime)),
-                              config_map[default_regime])
+        return config_map.get(
+            str(regimes.get(date, default_regime)),
+            config_map[default_regime],
+        )
 
-    return _build_weights(predictions, cfg_for, score_column,
-                          trade_dates, eligibility_columns)
+    return _build_weights(
+        predictions,
+        cfg_for,
+        score_column,
+        trade_dates,
+        eligibility_columns,
+    )
 
 
 def _build_weights(
@@ -109,19 +138,29 @@ def _build_weights(
     data = data[~blocked]
 
     data["_rank"] = data.groupby("trade_date")[score_column].rank(
-        ascending=False, method="first"
+        ascending=False,
+        method="first",
     )
 
-    calendar = pd.DatetimeIndex(sorted(set(trade_dates))) if trade_dates is not None \
+    calendar = (
+        pd.DatetimeIndex(sorted(set(trade_dates)))
+        if trade_dates is not None
         else pd.DatetimeIndex(sorted(data["trade_date"].unique()))
+    )
     position = {d: i for i, d in enumerate(calendar)}
 
     held: list[str] = []
     rows: dict[pd.Timestamp, pd.Series] = {}
+    delays_used: set[int] = set()
     for date, group in data.groupby("trade_date"):
         cfg = cfg_for_date(date)
         if cfg.entry_rank > cfg.exit_rank:
             raise ValueError("entry_rank must be <= exit_rank")
+        delay = int(cfg.delay_days)
+        if delay < 0:
+            raise ValueError("delay_days must be >= 0")
+        delays_used.add(delay)
+
         rank_map = dict(zip(group["symbol"].astype(str), group["_rank"]))
         held = [s for s in held if rank_map.get(s, np.inf) <= cfg.exit_rank]
         if len(held) < cfg.n_hold:
@@ -133,14 +172,28 @@ def _build_weights(
         idx = position.get(date)
         if idx is None or not held:
             continue
-        exec_idx = idx + cfg.delay_days
-        if exec_idx >= len(calendar):
+        output_idx = idx + delay
+        if output_idx >= len(calendar):
             continue
-        rows[calendar[exec_idx]] = pd.Series(1.0 / len(held), index=list(held))
+        rows[calendar[output_idx]] = pd.Series(1.0 / len(held), index=list(held))
 
-    weights = pd.DataFrame(rows).T.fillna(0.0)
+    weights = pd.DataFrame(rows).T.fillna(0.0).sort_index()
     weights.index.name = "trade_date"
-    return weights.sort_index()
+    if not delays_used:
+        semantics = SIGNAL_DATE_SEMANTICS
+        delays = (0,)
+    elif delays_used == {0}:
+        semantics = SIGNAL_DATE_SEMANTICS
+        delays = (0,)
+    elif len(delays_used) == 1:
+        semantics = EXECUTION_DATE_SEMANTICS
+        delays = tuple(sorted(delays_used))
+    else:
+        semantics = MIXED_DATE_SEMANTICS
+        delays = tuple(sorted(delays_used))
+    weights.attrs["target_index_semantics"] = semantics
+    weights.attrs["hold_band_delay_days"] = delays
+    return weights
 
 
 def turnover_stats(weights: pd.DataFrame) -> dict[str, float]:
@@ -154,5 +207,12 @@ def turnover_stats(weights: pd.DataFrame) -> dict[str, float]:
     }
 
 
-__all__ = ["HoldBandConfig", "build_hold_band_weights",
-           "build_regime_hold_band_weights", "turnover_stats"]
+__all__ = [
+    "SIGNAL_DATE_SEMANTICS",
+    "EXECUTION_DATE_SEMANTICS",
+    "MIXED_DATE_SEMANTICS",
+    "HoldBandConfig",
+    "build_hold_band_weights",
+    "build_regime_hold_band_weights",
+    "turnover_stats",
+]
