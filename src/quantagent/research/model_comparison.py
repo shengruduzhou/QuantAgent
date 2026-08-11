@@ -349,7 +349,9 @@ def _topk_daily_returns(
     The label is an ``H``-day cumulative return, so it is divided by ``H`` to get
     a daily-equivalent rate before annualising — otherwise 252-fold compounding
     is applied to a 5-day number. The rebalance cost is spread over the same
-    ``H`` days for the same reason.
+    ``H`` days for the same reason. Cost is then charged in proportion to the
+    one-way top-K replacement turnover actually implied by that rebalance; a
+    book that does not trade must not pay the same cost as a fully replaced book.
 
     **The returned series overlaps.** Every date carries an ``H``-day forward
     return, so consecutive entries share ``H-1`` days of realisation and are
@@ -392,7 +394,8 @@ def _topk_daily_returns(
             untradable[pd.Timestamp(date)] = float(blocked.mean())
     gross_series = pd.Series(gross, dtype=float).sort_index()
     turnover_series = pd.Series(turnover, dtype=float).sort_index()
-    net = gross_series - cost_per_day
+    daily_cost = turnover_series.reindex(gross_series.index).fillna(0.0) * cost_per_day
+    net = gross_series - daily_cost
     return net, turnover_series, pd.Series(untradable, dtype=float).sort_index()
 
 
