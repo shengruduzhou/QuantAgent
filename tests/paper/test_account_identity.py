@@ -4,10 +4,12 @@ import json
 
 import pytest
 
+from quantagent.domain.ledger import CanonicalLedger
 from quantagent.paper.account_identity import (
     ACCOUNT_IDENTITY_SCHEMA,
     PaperAccountIdentityCorruption,
     PaperAccountIdentityError,
+    PaperAccountIdentityMigrationRequired,
     PaperAccountIdentityMismatch,
     PaperAccountIdentityStore,
     account_identity_path_for_canonical,
@@ -90,4 +92,34 @@ def test_default_identity_path_is_sibling_of_canonical_ledger(tmp_path) -> None:
         initial_cash=100_000.0,
     )
     assert canonical.with_name("account_identity.json").exists()
+    assert identity.initial_cash == pytest.approx(100_000.0)
+
+
+def test_nonempty_legacy_canonical_ledger_requires_explicit_identity_migration(tmp_path) -> None:
+    canonical = tmp_path / "canonical_ledger.jsonl"
+    ledger = CanonicalLedger(canonical)
+    # Any valid canonical record means an economic history already exists.  The
+    # identity layer may not guess which initial_cash/portfolio_id created it.
+    ledger.append(None, trade_date="2026-08-10")
+    assert ledger.verify()["valid"] is True
+    assert len(ledger) == 1
+
+    with pytest.raises(PaperAccountIdentityMigrationRequired, match="explicit audited migration"):
+        ensure_paper_account_identity(
+            canonical_ledger_path=canonical,
+            portfolio_id="v7-paper",
+            initial_cash=100_000.0,
+        )
+    assert not canonical.with_name("account_identity.json").exists()
+
+
+def test_empty_existing_canonical_file_can_establish_identity(tmp_path) -> None:
+    canonical = tmp_path / "canonical_ledger.jsonl"
+    canonical.touch()
+    identity = ensure_paper_account_identity(
+        canonical_ledger_path=canonical,
+        portfolio_id="v7-paper",
+        initial_cash=100_000.0,
+    )
+    assert identity.portfolio_id == "v7-paper"
     assert identity.initial_cash == pytest.approx(100_000.0)
