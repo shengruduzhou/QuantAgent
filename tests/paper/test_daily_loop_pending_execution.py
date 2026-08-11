@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
 import json
 
 import pandas as pd
+import pytest
 
 import quantagent.paper.daily_loop as daily_loop
 from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
+from quantagent.paper.account_identity import PaperAccountIdentityMismatch
 
 
 def _install_common_mocks(tmp_path, monkeypatch, *, targets: pd.DataFrame):
@@ -41,12 +44,17 @@ def _install_common_mocks(tmp_path, monkeypatch, *, targets: pd.DataFrame):
         }
     )
 
+    evidence_calls = {"count": 0}
+
+    def evidence_run(cfg):
+        del cfg
+        evidence_calls["count"] += 1
+        return SimpleNamespace(frame=pd.DataFrame([{"ok": True}]), warnings=())
+
     monkeypatch.setattr(
         daily_loop,
         "DailyEvidenceJob",
-        lambda: SimpleNamespace(
-            run=lambda cfg: SimpleNamespace(frame=pd.DataFrame([{"ok": True}]), warnings=())
-        ),
+        lambda: SimpleNamespace(run=evidence_run),
     )
     monkeypatch.setattr(
         daily_loop,
@@ -94,9 +102,10 @@ def _install_common_mocks(tmp_path, monkeypatch, *, targets: pd.DataFrame):
         paper_book_path=str(tmp_path / "paper_book.parquet"),
         pending_signal_dir=str(tmp_path / "pending"),
         canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        account_identity_path=str(tmp_path / "account_identity.json"),
         dry_run_evidence=True,
     )
-    return as_of, config
+    return as_of, config, evidence_calls
 
 
 def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, monkeypatch) -> None:
@@ -106,7 +115,7 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
             "600000.SH": [1.0],
         }
     )
-    as_of, config = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
     result = daily_loop.run_once(config)
 
     assert result.status == "signal_recorded_pending_execution"
@@ -114,6 +123,7 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert result.executed_fill_count == 0
     assert result.pending_signal_path
     assert not (tmp_path / "paper_book.parquet").exists()
+    assert (tmp_path / "account_identity.json").exists()
 
     summary_path = tmp_path / "reports" / as_of / "daily_loop_summary.json"
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -125,6 +135,9 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert payload["paper_report"] is None
     assert payload["account_state"]["canonical_records"] == 0
     assert payload["account_state"]["canonical_head_hash"] == "0" * 64
+    assert payload["account_identity"]["portfolio_id"] == "v7-paper"
+    assert payload["account_identity"]["initial_cash_cny"] == "1000000.00"
+    assert len(payload["account_identity"]["payload_sha256"]) == 64
     assert payload["target_weight_diagnostics"]["canonical_account_reconciliation"]["applied_l1_weight_churn"] == 0.4
 
     pending = json.loads((tmp_path / "pending" / f"{as_of}.json").read_text(encoding="utf-8"))
@@ -136,15 +149,17 @@ def test_daily_loop_records_pending_signal_without_paper_pnl_or_book(tmp_path, m
     assert pending["source_lineage"]["target_weights_file_sha256"] == sha256(
         weights_path.read_bytes()
     ).hexdigest()
+    assert pending["source_lineage"]["paper_account_identity_sha256"] == payload["account_identity"]["payload_sha256"]
     assert pending["source_lineage"]["canonical_account_state_sha256"] == payload["account_state"]["account_state_sha256"]
     assert pending["source_lineage"]["canonical_ledger_head_hash"] == "0" * 64
+    assert execution["paper_account_identity_sha256"] == pending["source_lineage"]["paper_account_identity_sha256"]
     assert execution["predictions_file_sha256"] == pending["source_lineage"]["predictions_file_sha256"]
     assert execution["target_weights_file_sha256"] == pending["source_lineage"]["target_weights_file_sha256"]
     assert execution["canonical_account_state_sha256"] == pending["source_lineage"]["canonical_account_state_sha256"]
 
 
 def test_daily_loop_no_target_is_not_pending_liquidation_or_paper_evidence(tmp_path, monkeypatch) -> None:
-    as_of, config = _install_common_mocks(tmp_path, monkeypatch, targets=pd.DataFrame())
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=pd.DataFrame())
     result = daily_loop.run_once(config)
 
     assert result.status == "no_target_generated"
@@ -152,6 +167,9 @@ def test_daily_loop_no_target_is_not_pending_liquidation_or_paper_evidence(tmp_p
     assert result.executed_fill_count == 0
     assert not (tmp_path / "paper_book.parquet").exists()
     assert not (tmp_path / "pending" / f"{as_of}.json").exists()
+    # Account identity is a genesis invariant and is created even if the day's
+    # strategy produces no target.
+    assert (tmp_path / "account_identity.json").exists()
 
     payload = json.loads(
         (tmp_path / "reports" / as_of / "daily_loop_summary.json").read_text(encoding="utf-8")
@@ -159,6 +177,28 @@ def test_daily_loop_no_target_is_not_pending_liquidation_or_paper_evidence(tmp_p
     assert payload["execution"]["status"] == "no_target_generated"
     assert payload["execution"]["paper_report_written"] is False
     assert payload["execution"]["paper_book_appended"] is False
+    assert payload["execution"]["paper_account_identity_sha256"] == payload["account_identity"]["payload_sha256"]
+
+
+def test_daily_loop_mismatched_genesis_fails_before_evidence_or_prediction(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp("2026-08-07")],
+            "600000.SH": [0.5],
+        }
+    )
+    _, config, evidence_calls = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    # First run establishes the immutable account identity.
+    daily_loop.run_once(config)
+    calls_after_first = evidence_calls["count"]
+
+    with pytest.raises(PaperAccountIdentityMismatch, match="initial_cash mismatch"):
+        daily_loop.run_once(replace(config, initial_cash=2_000_000.0))
+    assert evidence_calls["count"] == calls_after_first
+
+    with pytest.raises(PaperAccountIdentityMismatch, match="portfolio_id mismatch"):
+        daily_loop.run_once(replace(config, portfolio_id="different-paper-book"))
+    assert evidence_calls["count"] == calls_after_first
 
 
 def test_daily_loop_source_has_no_same_call_strict_execution_path() -> None:
