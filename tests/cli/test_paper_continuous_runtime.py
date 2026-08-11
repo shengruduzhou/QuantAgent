@@ -69,9 +69,18 @@ def test_execute_session_uses_the_same_canonical_runtime_as_api_and_ui(
     assert config.canonical_ledger_path == str(paths.canonical_ledger)
     assert config.operational_ledger_path == str(paths.operational_ledger)
     assert config.idempotency_path == str(paths.idempotency)
+    assert config.account_identity_path == str(paths.account_identity)
+    assert config.portfolio_id == "v7-paper"
+    assert config.initial_cash == 1_000_000.0
 
     output = json.loads(capsys.readouterr().out)
     assert output["runtime"]["execution_journal"] == str(paths.execution_journal)
+    assert output["runtime"]["account_identity"] == str(paths.account_identity)
+    assert output["paperAccount"] == {
+        "portfolioId": "v7-paper",
+        "initialCash": 1_000_000.0,
+        "identityPath": str(paths.account_identity),
+    }
     assert output["calendarAssurance"] == "observed_market_panel_only"
     assert output["shadowAcceptanceCalendarEligible"] is False
     assert output["results"] == [{"status": "execution_observed"}]

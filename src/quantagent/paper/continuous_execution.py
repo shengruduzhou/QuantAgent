@@ -10,7 +10,9 @@ The consumer is deliberately conservative:
   resolved as indeterminate rather than retried blindly;
 * caller-supplied or observed-panel session sets may drive research timing but
   are never promoted to authoritative shadow-calendar evidence without a
-  provenance-backed exchange calendar artifact.
+  provenance-backed exchange calendar artifact;
+* every worker and non-terminal pending signal must match the immutable
+  paper-account genesis identity before the canonical ledger is replayed.
 """
 
 from __future__ import annotations
@@ -31,6 +33,10 @@ from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
+from quantagent.paper.account_identity import (
+    PaperAccountIdentityError,
+    ensure_paper_account_identity,
+)
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
 from quantagent.paper.execution_journal import PendingExecutionJournal
 from quantagent.paper.ledger import EventLedger
@@ -46,6 +52,7 @@ class ContinuousPaperExecutionConfig:
     canonical_ledger_path: str
     operational_ledger_path: str
     idempotency_path: str
+    account_identity_path: str | None = None
     portfolio_id: str = "v7-paper"
     initial_cash: float = 1_000_000.0
     lot_size: int = 100
@@ -126,13 +133,6 @@ def _assert_recovered_account_consistent(
     *,
     tolerance: float = 1e-6,
 ) -> None:
-    # The canonical ledger is the economic record of account. The operational
-    # ledger may already contain telemetry-only events such as mark-to-market or
-    # session-close records while still carrying no independent order/fill/cash/
-    # position economics. Treating those telemetry rows as a second economic
-    # ledger makes the next-session recovery compare canonical post-trade cash
-    # against operational initial cash and falsely fail. Once the operational
-    # replay contains any economic state, however, it must reconcile strictly.
     operational_positions = _position_quantities(operational_state.portfolio)
     initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
     operational_cash = float(operational_state.portfolio.cash)
@@ -183,14 +183,7 @@ def _execution_timestamp(execution_date: str, execution_clock: str) -> str:
 
 
 def _paper_board(symbol: str, rule_engine: AshareRuleEngine) -> str:
-    """Translate portfolio-rule board names to paper microstructure board names.
-
-    The portfolio rule engine and paper fill model deliberately use different
-    vocabularies. Passing ``main_board`` or ``star`` straight into
-    ``backtest.ashare_rules`` silently yields UNKNOWN_BOARD and disables the
-    intended price-limit semantics, so the translation is explicit and
-    unsupported non-equity instruments fail closed.
-    """
+    """Translate portfolio-rule board names to paper microstructure board names."""
 
     text = str(symbol).upper()
     board = rule_engine.infer_board(text)
@@ -338,10 +331,6 @@ def _market_state(
                 f"invalid previous close for {symbol}"
             )
 
-        # Fill/limit reference prices must be actual exchange prices. Research
-        # qfq/hfq series are useful features but are economically impossible as
-        # execution prices. Validate both the exact execution row and the row
-        # supplying previous_close before any order/journal start is created.
         _assert_execution_price_provenance(
             pd.DataFrame([previous_row, row]),
             symbol=symbol,
@@ -386,8 +375,6 @@ def _execution_orders(
     execution_date: str,
     execution_clock: str,
 ) -> list[ExecutionOrder]:
-    # target_weights_to_order_intents queries the adapter's recovered positions,
-    # so these are true target deltas, not repeated gross target purchases.
     intents = manager.target_weights_to_order_intents(
         target_weights,
         prices,
@@ -434,6 +421,18 @@ def execute_pending_for_session(
     """
 
     as_of = pd.Timestamp(as_of_date).date().isoformat()
+    try:
+        account_identity = ensure_paper_account_identity(
+            canonical_ledger_path=config.canonical_ledger_path,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+            identity_path=config.account_identity_path,
+        )
+    except PaperAccountIdentityError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"paper account identity verification failed: {exc}"
+        ) from exc
+
     observed_sessions = _normalise_sessions(
         market_panel["trade_date"] if "trade_date" in market_panel.columns else ()
     )
@@ -466,9 +465,21 @@ def execute_pending_for_session(
 
     results: list[ContinuousPaperExecutionResult] = []
     for pending in _pending_signals(store):
+        # Historical terminal evidence is immutable. Older completed signals may
+        # predate the account-identity lineage field; they must be skipped before
+        # validating lineage so one legacy artifact cannot block newer signals.
         terminal = journal.terminal(pending.payload_sha256)
         if terminal is not None:
             continue
+
+        pending_identity_sha = str(
+            pending.source_lineage.get("paper_account_identity_sha256", "")
+        )
+        if pending_identity_sha != account_identity.payload_sha256:
+            raise ContinuousPaperExecutionBlocked(
+                "pending signal is missing or mismatched paper-account identity; "
+                "regenerate/reconcile the signal instead of executing it"
+            )
 
         next_date = _next_session(pending.signal_date, sessions)
         if next_date is None or next_date > as_of:
@@ -481,6 +492,7 @@ def execute_pending_for_session(
                 execution_date=next_date,
                 status="execution_indeterminate",
                 details={
+                    "paper_account_identity_sha256": account_identity.payload_sha256,
                     "reason": (
                         "prior execution_started has no terminal outcome; "
                         "automatic retry prohibited"
@@ -511,6 +523,7 @@ def execute_pending_for_session(
                 execution_date=next_date,
                 status="missed_execution_session",
                 details={
+                    "paper_account_identity_sha256": account_identity.payload_sha256,
                     "observed_as_of": as_of,
                     "reason": (
                         "consumer did not run on exact next session; "
@@ -542,15 +555,15 @@ def execute_pending_for_session(
             )
         canonical_state = recover_from_canonical(
             config.canonical_ledger_path,
-            portfolio_id=config.portfolio_id,
-            initial_cash=config.initial_cash,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
             as_of_session=as_of,
         )
         operational_ledger = EventLedger(config.operational_ledger_path)
         operational_state = recover(
             operational_ledger,
-            portfolio_id=config.portfolio_id,
-            initial_cash=config.initial_cash,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
         )
         _assert_recovered_account_consistent(canonical_state, operational_state)
 
@@ -584,7 +597,7 @@ def execute_pending_for_session(
             )
 
         book = canonical.replay_book() if len(canonical) else None
-        run_id = f"continuous-paper:{config.portfolio_id}"
+        run_id = f"continuous-paper:{account_identity.portfolio_id}"
         lineage = Lineage(
             run_id=run_id,
             strategy_version_id=config.strategy_version,
@@ -644,6 +657,7 @@ def execute_pending_for_session(
             details={
                 "order_count": len(orders),
                 "canonical_records_before": len(canonical),
+                "paper_account_identity_sha256": account_identity.payload_sha256,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
                 "execution_clock": config.execution_clock,
@@ -660,10 +674,6 @@ def execute_pending_for_session(
         fill_count = len(broker.fills) - fills_before
         statuses = [state.status.value for state in states]
 
-        # Session settlement is part of the economic outcome. It must happen
-        # before the terminal journal record; otherwise a crash after "observed"
-        # but before close_session would make the retry guard skip an unsettled
-        # account forever.
         broker.close_session(as_of)
 
         terminal_status = "execution_observed"
@@ -683,6 +693,7 @@ def execute_pending_for_session(
                 "order_statuses": statuses,
                 "nav_before": nav_before,
                 "nav_after": nav_after,
+                "paper_account_identity_sha256": account_identity.payload_sha256,
                 "calendar_assurance": calendar_assurance,
                 "shadow_acceptance_calendar_eligible": acceptance_calendar_eligible,
                 "session_closed": True,
