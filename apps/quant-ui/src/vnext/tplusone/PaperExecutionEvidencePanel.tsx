@@ -2,6 +2,8 @@ import {
   CheckCircle,
   ClockCounterClockwise,
   Database,
+  Fingerprint,
+  ShieldCheck,
   ShieldWarning,
   WarningCircle,
 } from "@phosphor-icons/react";
@@ -34,6 +36,24 @@ export interface PaperExecutionEvidence {
     unresolvedCount: number;
     reason?: string | null;
   };
+  accountIdentity: {
+    state: "valid" | "invalid" | "unavailable";
+    verified: boolean;
+    path: string;
+    accountInstanceId?: string | null;
+    portfolioId?: string | null;
+    initialCashCny?: string | null;
+    payloadSha256?: string | null;
+    reason?: string | null;
+  };
+  canonicalPrefix: {
+    state: "valid" | "invalid" | "unavailable";
+    verified: boolean;
+    boundTerminalCount: number;
+    legacyUnboundTerminalCount: number;
+    latestTerminalBound: boolean;
+    reason?: string | null;
+  };
   summary: {
     attention: "ok" | "warning" | "critical" | "pending" | "unavailable";
     latestStatus?: string | null;
@@ -43,6 +63,8 @@ export interface PaperExecutionEvidence {
     calendarAssurance: string;
     shadowAcceptanceCalendarEligible: boolean;
     productionPretradeRiskCertified: boolean;
+    accountIdentityVerified: boolean;
+    latestTerminalCanonicalPrefixBound: boolean;
     riskScope?: string | null;
     sessionClosed?: boolean | null;
     orderCount?: number | null;
@@ -54,6 +76,8 @@ export interface PaperExecutionEvidence {
   records: PaperExecutionRecord[];
   operatorTruth: {
     paperExecutionEvidence: boolean;
+    accountIdentityVerified: boolean;
+    canonicalExecutionPrefixCertified: boolean;
     productionLiveCertified: boolean;
     authoritativeCalendarCertified: boolean;
     message: string;
@@ -65,7 +89,7 @@ const STATUS_LABEL: Record<string, string> = {
   execution_observed: "Paper 执行已观察",
   execution_blocked: "执行被风控/市场条件阻止",
   missed_execution_session: "错过精确下一交易会话",
-  execution_indeterminate: "执行结果不确定",
+  execution_indeterminate: "执行结果不确定 / 账户冻结",
 };
 
 const STATUS_TONE: Record<string, string> = {
@@ -93,6 +117,11 @@ function navDelta(before?: number | null, after?: number | null): string {
 function recordedAt(value?: string | null): string {
   if (!value) return "—";
   return value.replace("T", " ").slice(0, 19);
+}
+
+function shortHash(value?: string | null, length = 12): string {
+  if (!value) return "—";
+  return value.length <= length ? value : `${value.slice(0, length)}…`;
 }
 
 export function PaperExecutionEvidencePanel(): JSX.Element {
@@ -137,22 +166,37 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
 
   const evidence = query.data.data;
   const unresolved = evidence.journal.unresolvedCount > 0;
-  const critical = evidence.journal.state === "invalid" || evidence.summary.attention === "critical";
+  const identityInvalid = evidence.accountIdentity.state === "invalid";
+  const prefixInvalid = evidence.canonicalPrefix.state === "invalid";
+  const critical = evidence.journal.state === "invalid"
+    || evidence.summary.attention === "critical"
+    || identityInvalid
+    || prefixInvalid;
   const liveRegionRole = critical ? "alert" : "status";
   const liveCertified = evidence.operatorTruth.productionLiveCertified;
   const calendarCertified = evidence.operatorTruth.authoritativeCalendarCertified;
+  const identityVerified = evidence.operatorTruth.accountIdentityVerified;
+  const prefixCertified = evidence.operatorTruth.canonicalExecutionPrefixCertified;
   const latestStatus = evidence.summary.latestStatus;
   const latestRecords = evidence.records.slice(0, 6);
-  const leadTitle = evidence.journal.state === "invalid"
-    ? "执行证据链校验失败"
-    : unresolved
-      ? "存在未闭合执行尝试"
-      : evidence.journal.state === "unavailable"
-        ? "尚无连续执行 journal"
-        : statusLabel(latestStatus);
+  const leadTitle = identityInvalid
+    ? "Paper 账户身份校验失败"
+    : prefixInvalid
+      ? "Canonical 执行前缀校验失败"
+      : evidence.journal.state === "invalid"
+        ? "执行证据链校验失败"
+        : unresolved
+          ? "存在未闭合执行尝试"
+          : evidence.journal.state === "unavailable"
+            ? "尚无连续执行 journal"
+            : statusLabel(latestStatus);
   const leadMessage = unresolved && evidence.journal.state === "valid"
     ? `${evidence.journal.unresolvedCount} 个 execution_started 尚无 terminal outcome；禁止把最新成功记录解释为账户整体健康。`
-    : evidence.operatorTruth.message;
+    : identityInvalid
+      ? evidence.accountIdentity.reason ?? "account_identity.json 无法验证；按 fail-closed 处理。"
+      : prefixInvalid
+        ? evidence.canonicalPrefix.reason ?? "terminal receipt 无法绑定 canonical ledger prefix。"
+        : evidence.operatorTruth.message;
 
   return (
     <WorkbenchPanel
@@ -173,11 +217,21 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
         </div>
       </div>
 
-      <div className="paper-evidence-cert-grid" aria-label="Paper 与实盘证据隔离">
+      <div className="paper-evidence-cert-grid" aria-label="Paper、账户与实盘证据隔离">
         <article>
           <span>Paper execution evidence</span>
           <strong>{yesNo(evidence.operatorTruth.paperExecutionEvidence)}</strong>
-          <small>hash-chain / terminal evidence</small>
+          <small>journal hash-chain</small>
+        </article>
+        <article className={identityVerified ? "certified" : "locked"}>
+          <span>Account identity verified</span>
+          <strong>{yesNo(identityVerified)}</strong>
+          <small>{evidence.accountIdentity.portfolioId ?? evidence.accountIdentity.state}</small>
+        </article>
+        <article className={prefixCertified ? "certified" : "locked"}>
+          <span>Canonical terminal prefix</span>
+          <strong>{yesNo(prefixCertified)}</strong>
+          <small>{evidence.canonicalPrefix.boundTerminalCount} bound · {evidence.canonicalPrefix.legacyUnboundTerminalCount} legacy</small>
         </article>
         <article className={liveCertified ? "certified" : "locked"}>
           <span>Production pre-trade certified</span>
@@ -196,9 +250,18 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
         </article>
       </div>
 
+      <div className={`paper-evidence-identity ${identityVerified ? "verified" : "unverified"}`} aria-label="Paper account identity evidence">
+        <Fingerprint size={18} weight="duotone" aria-hidden="true" />
+        <span><small>Portfolio</small><strong>{evidence.accountIdentity.portfolioId ?? "—"}</strong></span>
+        <span><small>Account instance</small><code title={evidence.accountIdentity.accountInstanceId ?? undefined}>{shortHash(evidence.accountIdentity.accountInstanceId, 16)}</code></span>
+        <span><small>Initial cash CNY</small><strong>{evidence.accountIdentity.initialCashCny ?? "—"}</strong></span>
+        <span><small>Identity SHA-256</small><code title={evidence.accountIdentity.payloadSha256 ?? undefined}>{shortHash(evidence.accountIdentity.payloadSha256, 16)}</code></span>
+        {identityVerified ? <ShieldCheck size={16} weight="fill" aria-label="identity verified" /> : <ShieldWarning size={16} weight="fill" aria-label="identity unavailable or invalid" />}
+      </div>
+
       {!liveCertified || !calendarCertified ? (
         <TruthNotice tone="warning">
-          Paper/shadow 观察结果 ≠ 实盘认证。当前界面不会因为 execution_observed、正收益或 session_closed 自动显示“可实盘”。
+          Paper/shadow 观察结果、账户 identity、canonical prefix 均不等于实盘认证。当前界面不会因为 execution_observed、正收益或 session_closed 自动显示“可实盘”。
         </TruthNotice>
       ) : null}
 
@@ -215,8 +278,8 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
           compact
           tone="danger"
           icon={ShieldWarning}
-          title="执行证据链校验失败"
-          detail={evidence.journal.reason ?? "journal 无法验证；按 fail-closed 处理。"}
+          title="执行证据无法验证"
+          detail={evidence.journal.reason ?? evidence.canonicalPrefix.reason ?? evidence.accountIdentity.reason ?? "journal / identity / canonical prefix 无法验证；按 fail-closed 处理。"}
         />
       ) : (
         <>
@@ -249,4 +312,4 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
   );
 }
 
-export { navDelta, statusLabel };
+export { navDelta, shortHash, statusLabel };
