@@ -1,18 +1,18 @@
 """Immutable identity for one persistent paper/shadow economic account.
 
 A canonical ledger contains economic events, but replay still needs two genesis
-inputs supplied by its caller: ``portfolio_id`` and ``initial_cash``.  If two
+inputs supplied by its caller: ``portfolio_id`` and ``initial_cash``. If two
 workers supply different values, the same valid ledger can be reconstructed as
-two different accounts/NAVs.  That is unacceptable at a production-style
+two different accounts/NAVs. That is unacceptable at a production-style
 boundary.
 
 The first worker touching a *new/empty* account creates one durable identity
-file beside its canonical ledger.  Every later target/execution/recovery worker
-must present exactly the same identity.  A non-empty canonical ledger that
+file beside its canonical ledger. Every later target/execution/recovery worker
+must present exactly the same identity. A non-empty canonical ledger that
 predates this contract is never silently bound to caller-supplied genesis
-values: it requires an explicit, separately audited migration.  The identity is
-immutable, hash-bound, fsync'd and created under a cross-process lock;
-mismatches and corruptions fail closed.
+values: it requires an explicit, separately audited migration. The identity is
+immutable, uniquely instance-bound, hash-bound, fsync'd and created under a
+cross-process lock; mismatches and corruptions fail closed.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 from threading import RLock
 from typing import Iterator
+from uuid import UUID, uuid4
 
 from quantagent.domain.ledger import CanonicalLedger
 
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover - Unix
     _msvcrt = None
 
 
-ACCOUNT_IDENTITY_SCHEMA = "quantagent.paper.account_identity.v1"
+ACCOUNT_IDENTITY_SCHEMA = "quantagent.paper.account_identity.v2"
 
 
 class PaperAccountIdentityError(RuntimeError):
@@ -67,8 +68,6 @@ def _normalise_initial_cash(value: object) -> str:
         raise PaperAccountIdentityError(f"invalid initial_cash {value!r}") from exc
     if not amount.is_finite() or amount <= 0:
         raise PaperAccountIdentityError("initial_cash must be finite and > 0")
-    # Fixed two-decimal CNY genesis value; callers supplying sub-cent values are
-    # not allowed to create a second semantic identity through float noise.
     quantized = amount.quantize(Decimal("0.01"))
     if quantized != amount:
         raise PaperAccountIdentityError(
@@ -84,6 +83,22 @@ def _normalise_portfolio_id(value: object) -> str:
     if len(text) > 128:
         raise PaperAccountIdentityError("portfolio_id exceeds 128 characters")
     return text
+
+
+def _normalise_account_instance_id(value: object) -> str:
+    text = str(value).strip().lower()
+    try:
+        parsed = UUID(text)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise PaperAccountIdentityCorruption(
+            f"invalid paper account instance id {value!r}"
+        ) from exc
+    canonical = parsed.hex
+    if text != canonical:
+        raise PaperAccountIdentityCorruption(
+            "paper account instance id is not canonical UUID hex"
+        )
+    return canonical
 
 
 def _digest(payload: dict[str, object]) -> str:
@@ -110,6 +125,7 @@ def _strict_object(pairs):
 @dataclass(frozen=True, slots=True)
 class PaperAccountIdentity:
     schema_version: str
+    account_instance_id: str
     portfolio_id: str
     initial_cash_cny: str
     created_at: str
@@ -126,6 +142,10 @@ class PaperAccountIdentity:
         if self.schema_version != ACCOUNT_IDENTITY_SCHEMA:
             raise PaperAccountIdentityCorruption(
                 f"unsupported account identity schema {self.schema_version!r}"
+            )
+        if _normalise_account_instance_id(self.account_instance_id) != self.account_instance_id:
+            raise PaperAccountIdentityCorruption(
+                "paper account instance id is not canonical"
             )
         if _normalise_portfolio_id(self.portfolio_id) != self.portfolio_id:
             raise PaperAccountIdentityCorruption("paper account portfolio_id is not canonical")
@@ -194,6 +214,7 @@ class PaperAccountIdentityStore:
         portfolio_id: str,
         initial_cash: object,
         created_at: str | None = None,
+        account_instance_id: str | None = None,
     ) -> PaperAccountIdentity:
         expected_id = _normalise_portfolio_id(portfolio_id)
         expected_cash = _normalise_initial_cash(initial_cash)
@@ -212,8 +233,14 @@ class PaperAccountIdentityStore:
                     )
                 return existing
 
+            instance_id = (
+                _normalise_account_instance_id(account_instance_id)
+                if account_instance_id is not None
+                else uuid4().hex
+            )
             payload: dict[str, object] = {
                 "schema_version": ACCOUNT_IDENTITY_SCHEMA,
+                "account_instance_id": instance_id,
                 "portfolio_id": expected_id,
                 "initial_cash_cny": expected_cash,
                 "created_at": created_at
@@ -236,8 +263,6 @@ class PaperAccountIdentityStore:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp, self.path)
-                # Best effort directory durability on POSIX. Windows does not
-                # expose a portable directory fsync through Python.
                 if os.name == "posix":
                     directory_fd = os.open(self.path.parent, os.O_RDONLY)
                     try:
@@ -273,10 +298,6 @@ def _assert_identity_creation_is_safe(
         )
     if len(ledger) <= 0:
         return
-    # Re-check identity after reading the ledger so a concurrent first worker
-    # that successfully created the identity does not cause a false migration
-    # error.  Economic writers are required to pass this identity gate before
-    # appending, so a compliant new account cannot race an append ahead of it.
     if identity_store.read() is not None:
         return
     raise PaperAccountIdentityMigrationRequired(
