@@ -99,7 +99,10 @@ class AkShareMacroProvider:
                 raw = _safe_call(ak, "bond_china_yield",
                                  start_date=_compact(chunk_start),
                                  end_date=_compact(chunk_end))
-                yield_frames.append(_normalize_yield_curve(raw, trading_calendar=calendar))
+                normalized = _normalize_yield_curve(raw, trading_calendar=calendar)
+                yield_frames.append(
+                    _restrict_observation_window(normalized, start_date=start_date, end_date=end_date)
+                )
             except Exception:
                 continue
         results["yield_curve"] = self._upsert_combined(
@@ -109,7 +112,8 @@ class AkShareMacroProvider:
             akshare_version=akshare_version,
         )
 
-        # Shibor: one row per (date, tenor); fetch each tenor sequentially.
+        # Shibor: rate_interbank has no bounded date arguments, so normalize then
+        # restrict to the requested observation window before PIT validation.
         shibor_frames: list[pd.DataFrame] = []
         for tenor in _SHIBOR_TENORS:
             try:
@@ -117,8 +121,9 @@ class AkShareMacroProvider:
                                  market="上海银行同业拆借市场",
                                  symbol="Shibor人民币",
                                  indicator=_shibor_tenor_label(tenor))
+                normalized = _normalize_shibor(raw, tenor=tenor, trading_calendar=calendar)
                 shibor_frames.append(
-                    _normalize_shibor(raw, tenor=tenor, trading_calendar=calendar)
+                    _restrict_observation_window(normalized, start_date=start_date, end_date=end_date)
                 )
             except Exception:
                 continue
@@ -130,11 +135,14 @@ class AkShareMacroProvider:
         )
 
         # repo_rate_hist breaks if only start_date is passed (KeyError 'frValueMap'
-        # in akshare 1.18); call with no args to get the recent window safely.
+        # in akshare 1.18); call with no args, then apply the governed observation
+        # window before deciding whether the resulting rows are PIT-resolved.
         results["repo"] = self._fetch_and_upsert(
             "repo",
-            lambda: _normalize_repo(
-                _safe_call(ak, "repo_rate_hist"), trading_calendar=calendar
+            lambda: _restrict_observation_window(
+                _normalize_repo(_safe_call(ak, "repo_rate_hist"), trading_calendar=calendar),
+                start_date=start_date,
+                end_date=end_date,
             ),
             calendar_evidence=calendar_evidence,
             akshare_version=akshare_version,
@@ -285,8 +293,13 @@ class AkShareMacroProvider:
             and pd.to_datetime(frame["available_at"], errors="coerce").notna().all()
         )
         warnings = list(calendar_evidence.warnings) if calendar_evidence is not None else []
+        persisted_frame = frame.reset_index(drop=True)
         if not pit_valid:
             warnings.append("akshare_macro_available_at_unresolved:not_cached_as_pit")
+            # A cache-building caller must not treat descriptive-but-uncached rows
+            # as a successful PIT artifact. Preserve the observed row count in
+            # metadata while returning an empty usable frame.
+            persisted_frame = pd.DataFrame(columns=frame.columns)
         else:
             self.cache.upsert(table, frame)
         metadata: dict[str, object] = {
@@ -299,7 +312,7 @@ class AkShareMacroProvider:
         if calendar_evidence is not None:
             metadata["calendar"] = calendar_evidence.metadata
         return ProviderResult(
-            frame.reset_index(drop=True),
+            persisted_frame,
             source=f"akshare_macro:{table}",
             point_in_time=pit_valid,
             quality_score=0.78 if pit_valid else 0.35,
@@ -568,6 +581,32 @@ def _normalize_cpi_ppi(raw: pd.DataFrame, *, kind: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------- #
 # Helpers                                                                 #
 # ---------------------------------------------------------------------- #
+
+
+def _restrict_observation_window(
+    frame: pd.DataFrame,
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> pd.DataFrame:
+    """Restrict normalized observations before all-row PIT validation.
+
+    Several AKShare daily endpoints return their full history and ignore the
+    requested research window because they expose no date parameters. Rows
+    outside a bounded request must not invalidate otherwise usable in-window
+    observations merely because the injected/research calendar intentionally
+    ends at the request boundary.
+    """
+    if frame is None or frame.empty or "observation_date" not in frame.columns:
+        return frame
+    out = frame.copy()
+    observation = pd.to_datetime(out["observation_date"], errors="coerce")
+    keep = observation.notna()
+    if start_date:
+        keep &= observation >= pd.Timestamp(start_date).normalize()
+    if end_date:
+        keep &= observation <= pd.Timestamp(end_date).normalize()
+    return out.loc[keep].reset_index(drop=True)
 
 
 def _first_match(columns: Iterable[str], candidates: tuple[str, ...]) -> str | None:
