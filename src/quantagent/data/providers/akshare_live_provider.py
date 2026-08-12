@@ -20,31 +20,48 @@ AKSHARE_MARKET_REQUIRED_COLUMNS: tuple[str, ...] = (
     "available_at",
 )
 
-_DEFAULT_SOURCE_ORDER: tuple[str, ...] = ("east_money", "sina")
+# EastMoney remains the preferred documented A-share daily endpoint. The
+# Tencent endpoint is the default failover because the current AKShare 1.18.84
+# implementation normalises its volume to shares and amount to CNY, and the
+# repository live source smoke can reach it when EastMoney/Sina are remote-
+# closing GitHub Actions connections. Sina stays explicit opt-in only.
+_DEFAULT_SOURCE_ORDER: tuple[str, ...] = ("east_money", "tencent")
 _CANONICAL_VOLUME_UNIT = "shares"
 _CANONICAL_AMOUNT_UNIT = "CNY"
 _RAW_VOLUME_UNIT_BY_SOURCE: dict[str, str] = {
     "east_money": "lots_100_shares",
+    "tencent": "shares",
     "sina": "shares",
+}
+_SOURCE_FUNCTIONS: dict[str, str] = {
+    "east_money": "stock_zh_a_hist",
+    "tencent": "stock_zh_a_hist_tx",
+    "sina": "stock_zh_a_daily",
+}
+_SOURCE_RELIABILITY: dict[str, float] = {
+    "east_money": 0.78,
+    "tencent": 0.76,
+    "sina": 0.72,
 }
 
 
 @dataclass
 class AkShareLiveProvider:
-    """Optional AkShare downloader with explicit source and PIT contracts.
+    """Optional AKShare downloader with explicit source/unit/PIT contracts.
 
     Network access is opt-in. Raw/unadjusted prices are the default because an
     adjusted series computed today is not, by itself, proof of the adjustment
     factors that were knowable at a historical decision time.
 
-    ``stock_zh_a_hist`` (EastMoney) and ``stock_zh_a_daily`` (Sina) expose
-    different volume units. The canonical provider output is always **shares**:
-    EastMoney lots are multiplied by 100 while Sina share counts are unchanged.
+    The upstream endpoints do not share one raw unit contract. EastMoney daily
+    ``成交量`` is lots (手), while current AKShare Tencent and Sina daily output
+    volume in shares. The canonical QuantAgent output is always **shares** and
+    amount is **CNY**; the original source unit is retained per row.
 
-    A daily bar is considered research-PIT valid only when it is raw and its
-    next-session availability can be resolved from an explicit trading calendar.
-    Missing calendar coverage fails closed; this adapter never invents sessions
-    with ``pandas.BDay``.
+    A daily bar is research-PIT valid only when it is raw and its next-session
+    availability resolves from an explicit trading calendar. Missing calendar
+    coverage fails closed; this adapter never invents sessions with
+    ``pandas.BDay``.
     """
 
     allow_network: bool = False
@@ -67,6 +84,7 @@ class AkShareLiveProvider:
                 "akshare_version": _akshare_version(ak),
                 "canonical_volume_unit": _CANONICAL_VOLUME_UNIT,
                 "canonical_amount_unit": _CANONICAL_AMOUNT_UNIT,
+                "source_order": list(self.source_order),
             }
         try:
             result = self.daily_ohlcv(request)
@@ -78,11 +96,14 @@ class AkShareLiveProvider:
             "warnings": list(result.warnings),
             "schema_report": result.metadata.get("schema_report", {}),
             "akshare_version": result.metadata.get("akshare_version"),
+            "source_counts": result.metadata.get("source_counts", {}),
         }
 
     def daily_ohlcv(self, request: ProviderRequest) -> ProviderResult:
         if not self.allow_network:
-            raise ProviderUnavailable("AkShare live download is disabled; set data.allow_network=true explicitly")
+            raise ProviderUnavailable(
+                "AkShare live download is disabled; set data.allow_network=true explicitly"
+            )
         try:
             import akshare as ak  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -91,11 +112,17 @@ class AkShareLiveProvider:
             raise ProviderUnavailable("AkShare live daily_ohlcv requires explicit symbols")
         if self.adjust not in {"", "qfq", "hfq"}:
             raise ProviderUnavailable("AkShare adjust must be one of '', 'qfq', or 'hfq'")
+        unknown_sources = sorted(set(self.source_order).difference(_SOURCE_FUNCTIONS))
+        if unknown_sources:
+            raise ProviderUnavailable(
+                "unknown AKShare daily source(s): " + ",".join(unknown_sources)
+            )
 
         frames: list[pd.DataFrame] = []
         failed_symbols: list[str] = []
         warnings: list[str] = []
         source_counts: dict[str, int] = {}
+        source_by_symbol: dict[str, str] = {}
         for symbol in request.symbols:
             raw, used_source, attempt_warnings = _fetch_daily_with_fallback(
                 ak,
@@ -131,10 +158,13 @@ class AkShareLiveProvider:
                 continue
             frames.append(normalised)
             source_counts[used_source] = source_counts.get(used_source, 0) + 1
+            source_by_symbol[str(symbol)] = used_source
 
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         schema_report = akshare_market_schema_report(frame)
-        warnings.extend(f"akshare_schema_missing:{column}" for column in schema_report["missing_columns"])
+        warnings.extend(
+            f"akshare_schema_missing:{column}" for column in schema_report["missing_columns"]
+        )
         if failed_symbols:
             warnings.append(
                 "akshare_incomplete_symbol_coverage:" + ",".join(sorted(set(failed_symbols)))
@@ -145,8 +175,12 @@ class AkShareLiveProvider:
             )
         if self.trading_calendar is None or self.trading_calendar.empty:
             warnings.append("akshare_market_calendar_missing:pit_not_certified")
-        elif int(frame.get("point_in_time_valid", pd.Series(dtype=bool)).fillna(False).sum()) < len(frame):
+        elif int(
+            frame.get("point_in_time_valid", pd.Series(dtype=bool)).fillna(False).sum()
+        ) < len(frame):
             warnings.append("akshare_market_calendar_incomplete:some_available_at_unresolved")
+        if "tencent" in source_counts:
+            warnings.append("akshare_tencent_failover_used")
 
         point_in_time = bool(
             not frame.empty
@@ -156,6 +190,8 @@ class AkShareLiveProvider:
             and frame["point_in_time_valid"].fillna(False).astype(bool).all()
         )
         quality_score = 0.78 if not frame.empty and schema_report["status"] == "passed" else 0.0
+        if source_counts and set(source_counts) == {"tencent"}:
+            quality_score = min(quality_score, 0.76)
         if failed_symbols or not point_in_time:
             quality_score = min(quality_score, 0.60)
 
@@ -164,12 +200,16 @@ class AkShareLiveProvider:
             source="akshare_live_provider:multi_source",
             point_in_time=point_in_time,
             quality_score=quality_score,
-            warnings=tuple(warnings),
+            warnings=tuple(dict.fromkeys(warnings)),
             metadata={
                 "schema_report": schema_report,
-                "function_name": "stock_zh_a_hist|stock_zh_a_daily",
+                "function_name": "|".join(_SOURCE_FUNCTIONS[source] for source in self.source_order),
                 "source_order": list(self.source_order),
+                "source_functions": {
+                    source: _SOURCE_FUNCTIONS[source] for source in self.source_order
+                },
                 "source_counts": source_counts,
+                "source_by_symbol": source_by_symbol,
                 "failed_symbols": failed_symbols,
                 "requested_symbol_count": int(len(request.symbols)),
                 "fetched_symbol_count": int(sum(source_counts.values())),
@@ -179,9 +219,12 @@ class AkShareLiveProvider:
                 "canonical_amount_unit": _CANONICAL_AMOUNT_UNIT,
                 "raw_volume_unit_by_source": dict(_RAW_VOLUME_UNIT_BY_SOURCE),
                 "calendar_source": self.calendar_source or None,
-                "calendar_bound": bool(self.trading_calendar is not None and not self.trading_calendar.empty),
+                "calendar_bound": bool(
+                    self.trading_calendar is not None and not self.trading_calendar.empty
+                ),
                 "calendar_production_certified": False,
                 "akshare_version": _akshare_version(ak),
+                "production_integrity_certified": False,
             },
         )
 
@@ -199,8 +242,8 @@ def _plain_a_code(symbol: str) -> str:
     return text
 
 
-def _sina_a_symbol(symbol: str) -> str:
-    """Return Sina-format A-share code, e.g. ``sh600519``/``sz000001``."""
+def _prefixed_a_symbol(symbol: str) -> str:
+    """Return sh/sz/bj-prefixed code used by Tencent and Sina endpoints."""
     text = str(symbol).strip()
     upper = text.upper()
     if "." in upper:
@@ -212,7 +255,7 @@ def _sina_a_symbol(symbol: str) -> str:
     code = upper.zfill(6)
     if code.startswith(("6", "9")):
         return f"sh{code}"
-    if code.startswith(("4", "8")):
+    if code.startswith(("4", "8", "92")):
         return f"bj{code}"
     return f"sz{code}"
 
@@ -226,7 +269,7 @@ def _fetch_daily_with_fallback(
     adjust: str,
     source_order: tuple[str, ...],
 ) -> tuple[pd.DataFrame | None, str, list[str]]:
-    """Try each source in ``source_order``; return the first non-empty frame."""
+    """Try each configured source and return the first non-empty response."""
     warnings: list[str] = []
     compact_start = start_date.replace("-", "")
     compact_end = end_date.replace("-", "")
@@ -240,14 +283,25 @@ def _fetch_daily_with_fallback(
                     end_date=compact_end,
                     adjust=adjust,
                 )
+            elif source == "tencent":
+                api = getattr(ak, "stock_zh_a_hist_tx", None)
+                if api is None:
+                    raise AttributeError("stock_zh_a_hist_tx unavailable")
+                raw = api(
+                    symbol=_prefixed_a_symbol(symbol),
+                    start_date=compact_start,
+                    end_date=compact_end,
+                    adjust=adjust,
+                    timeout=15,
+                )
             elif source == "sina":
                 raw = ak.stock_zh_a_daily(
-                    symbol=_sina_a_symbol(symbol),
+                    symbol=_prefixed_a_symbol(symbol),
                     start_date=compact_start,
                     end_date=compact_end,
                     adjust=adjust,
                 )
-            else:
+            else:  # guarded by daily_ohlcv validation; defensive for direct tests
                 warnings.append(f"akshare_unknown_source:{source}")
                 continue
         except Exception as exc:  # pragma: no cover - network path
@@ -268,11 +322,12 @@ def _normalize_akshare_daily(
     adjust: str = "",
     trading_calendar: TradingCalendar | None = None,
 ) -> pd.DataFrame:
-    """Normalise EastMoney/Sina output into one explicit economic schema.
+    """Normalise EastMoney/Tencent/Sina output to one economic schema.
 
-    Canonical ``volume`` is shares. AKShare documents EastMoney daily volume in
-    lots (手) and Sina daily volume in shares, so the EastMoney path is scaled by
-    100 before the sources may coexist in one panel.
+    Canonical ``volume`` is shares and ``amount`` is CNY. EastMoney daily raw
+    volume is lots and therefore scales by 100. Current AKShare Tencent already
+    performs its source-specific lot/share and amount-unit conversions inside
+    ``stock_zh_a_hist_tx``; Sina daily volume is shares.
     """
     rename_map = {
         "日期": "trade_date",
@@ -323,7 +378,7 @@ def _normalize_akshare_daily(
     data["adjustment_pit_vintage_bound"] = False
     data["source"] = f"akshare:{source}"
     data["source_type"] = "market_data"
-    data["source_reliability"] = 0.78 if source == "east_money" else 0.72
+    data["source_reliability"] = _SOURCE_RELIABILITY.get(source, 0.0)
     data["point_in_time_valid"] = bool(raw_prices and calendar_ok) & available.notna()
     return data
 
@@ -346,17 +401,27 @@ def _rows_outside_request(frame: pd.DataFrame, request: ProviderRequest) -> int:
     return int((dates.isna() | (dates < start) | (dates > end)).sum())
 
 
-def akshare_market_schema_report(frame: pd.DataFrame, as_of_date: str | None = None) -> dict[str, object]:
+def akshare_market_schema_report(
+    frame: pd.DataFrame, as_of_date: str | None = None
+) -> dict[str, object]:
     missing = [column for column in AKSHARE_MARKET_REQUIRED_COLUMNS if column not in frame.columns]
     pit_violations = 0
     if "available_at" in frame.columns:
         available_at = pd.to_datetime(frame["available_at"], errors="coerce")
-        trade_date = pd.to_datetime(frame["trade_date"], errors="coerce") if "trade_date" in frame.columns else None
+        trade_date = (
+            pd.to_datetime(frame["trade_date"], errors="coerce")
+            if "trade_date" in frame.columns
+            else None
+        )
         pit_violations += int(available_at.isna().sum())
         if trade_date is not None:
-            pit_violations += int((available_at.notna() & trade_date.notna() & (available_at <= trade_date)).sum())
+            pit_violations += int(
+                (available_at.notna() & trade_date.notna() & (available_at <= trade_date)).sum()
+            )
         if as_of_date:
-            pit_violations += int((available_at.notna() & (available_at > pd.Timestamp(as_of_date))).sum())
+            pit_violations += int(
+                (available_at.notna() & (available_at > pd.Timestamp(as_of_date))).sum()
+            )
     if "point_in_time_valid" in frame.columns:
         pit_violations += int((~frame["point_in_time_valid"].fillna(False).astype(bool)).sum())
     return {
