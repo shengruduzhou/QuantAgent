@@ -141,15 +141,16 @@ def _normalize_initial_weights(
         return None
     if not isinstance(initial_weights, pd.Series):
         raise TypeError("initial_weights must be a pandas Series indexed by symbol")
+    if initial_weights.index.isna().any():
+        raise ValueError("initial_weights contains a missing symbol")
     weights = pd.to_numeric(initial_weights.copy(), errors="coerce")
-    weights.index = weights.index.astype(str)
-    if weights.index.str.strip().eq("").any():
+    weights.index = weights.index.astype(str).str.strip()
+    if bool((weights.index == "").any()):
         raise ValueError("initial_weights contains a blank symbol")
-    weights.index = weights.index.str.strip()
-    weights = weights.groupby(level=0).sum().astype(float)
-    values = weights.to_numpy(dtype=float)
-    if not np.isfinite(values).all():
+    raw_values = weights.to_numpy(dtype=float)
+    if not np.isfinite(raw_values).all():
         raise ValueError("initial_weights contains missing or non-finite values")
+    weights = weights.groupby(level=0).sum().astype(float)
     if not long_short and bool((weights < -1e-12).any()):
         raise ValueError("long-only target construction cannot start from negative weights")
     weights = weights.where(weights.abs() > 1e-12, 0.0)
