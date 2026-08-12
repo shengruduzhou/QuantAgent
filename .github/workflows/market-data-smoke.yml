@@ -168,10 +168,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install tested AKShare compatibility line
+      - name: Install tested AKShare compatibility version
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -e . "akshare>=1.18.84,<1.19"
+          python -m pip install -e . "akshare==1.18.84"
           python - <<'PY'
           import akshare as ak
           print(f"AKShare runtime version: {ak.__version__}")
@@ -229,6 +229,8 @@ jobs:
           assert payload["primary"]["metadata"]["failed_symbols"] == []
           assert payload["tencent_independent_probe"]["status"] == "observed"
           assert payload["tencent_independent_probe"]["missing_columns"] == []
+          assert payload["tencent_independent_probe"]["economic_scale_check_passed"] is True
+          assert payload["tencent_independent_probe"]["economic_scale_rows"] > 0
 
           valuation = payload["historical_valuation_baidu_probe"]
           assert valuation["status"] == "observed"
