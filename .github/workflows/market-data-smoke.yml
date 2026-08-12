@@ -23,11 +23,20 @@ on:
       - "scripts/run_intraday_session_smoke.py"
       - "tests/data/test_market_data_smoke.py"
       - "tests/data/test_akshare_contract_hardening.py"
+      - "tests/data/test_akshare_valuation_calendar_contract.py"
+      - "tests/test_akshare_flow_provider.py"
+      - "tests/test_akshare_index_provider.py"
       - "tests/data/test_intraday_sessions.py"
       - "src/quantagent/data/intraday_sessions.py"
+      - "src/quantagent/data/providers/akshare_calendar.py"
       - "src/quantagent/data/providers/akshare_live_provider.py"
       - "src/quantagent/data/providers/akshare_financial_provider.py"
+      - "src/quantagent/data/providers/akshare_valuation_provider.py"
+      - "src/quantagent/data/providers/akshare_flow_provider.py"
+      - "src/quantagent/data/providers/akshare_index_provider.py"
       - "src/quantagent/data/bootstrap/akshare_market_bootstrap.py"
+      - "src/quantagent/data/bootstrap/akshare_bootstrap.py"
+      - "src/quantagent/data/bootstrap/valuation_bootstrap.py"
       - "src/quantagent/data/providers/baostock_provider.py"
       - "src/quantagent/data/providers/qlib_intraday_reader.py"
       - "src/quantagent/cli/v7_data.py"
@@ -208,14 +217,28 @@ jobs:
           assert payload["economic_live_eligible"] is False
           assert payload["automatic_factor_activation"] is False
           assert payload["production_integrity_certified"] is False
-          assert payload["akshare_version"].startswith("1.18.")
+          assert payload["akshare_version"] == "1.18.84"
           assert payload["calendar"]["production_certified"] is False
+          assert payload["calendar"]["session_count"] > 0
           assert payload["primary"]["canonical_units_ok"] is True
           assert payload["primary"]["all_symbols_present"] is True
           assert payload["primary"]["point_in_time"] is True
           assert payload["primary"]["metadata"]["canonical_volume_unit"] == "shares"
           assert payload["primary"]["metadata"]["canonical_amount_unit"] == "CNY"
           assert payload["primary"]["metadata"]["adjust"] == ""
+          assert payload["primary"]["metadata"]["failed_symbols"] == []
+          assert payload["tencent_independent_probe"]["status"] == "observed"
+          assert payload["tencent_independent_probe"]["missing_columns"] == []
+
+          valuation = payload["historical_valuation_baidu_probe"]
+          assert valuation["status"] == "observed"
+          assert valuation["historical_dates_are_source_supplied"] is True
+          assert valuation["production_integrity_certified"] is False
+          assert valuation["common_date_count"] > 0
+          for indicator in ("pe_ttm", "pb", "market_cap"):
+              evidence = valuation["indicators"][indicator]
+              assert evidence["status"] == "observed"
+              assert evidence["valid_rows"] > 0
           PY
 
       - name: Upload AKShare source diagnostics
