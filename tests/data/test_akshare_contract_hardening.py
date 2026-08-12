@@ -21,6 +21,23 @@ def _calendar() -> TradingCalendar:
     )
 
 
+def _tencent_raw(volume: int = 123_400) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": "2024-01-02",
+                "open": 10.0,
+                "close": 10.5,
+                "high": 11.0,
+                "low": 9.5,
+                "volume": volume,
+                "turnover": 0.01,
+                "amount": 12_950_000.0,
+            }
+        ]
+    )
+
+
 def test_eastmoney_daily_volume_lots_are_normalized_to_shares() -> None:
     raw = pd.DataFrame(
         [
@@ -49,6 +66,23 @@ def test_eastmoney_daily_volume_lots_are_normalized_to_shares() -> None:
     assert result["raw_volume_unit"].tolist() == ["lots_100_shares"]
     assert result["amount_unit"].tolist() == ["CNY"]
     assert result["available_at"].tolist() == ["2024-01-03"]
+    assert result["point_in_time_valid"].tolist() == [True]
+
+
+def test_tencent_daily_volume_and_amount_are_already_canonical() -> None:
+    result = _normalize_akshare_daily(
+        _tencent_raw(),
+        "600000.SH",
+        source="tencent",
+        adjust="",
+        trading_calendar=_calendar(),
+    )
+
+    assert result["volume"].tolist() == [123_400]
+    assert result["raw_volume_unit"].tolist() == ["shares"]
+    assert result["amount"].tolist() == [12_950_000.0]
+    assert result["amount_unit"].tolist() == ["CNY"]
+    assert result["source"].tolist() == ["akshare:tencent"]
     assert result["point_in_time_valid"].tolist() == [True]
 
 
@@ -200,6 +234,43 @@ def test_provider_binds_version_units_and_complete_symbol_coverage(monkeypatch) 
     assert result.metadata["raw_volume_unit_by_source"]["east_money"] == "lots_100_shares"
     assert result.metadata["failed_symbols"] == []
     assert result.frame["volume"].tolist() == [123_400.0]
+
+
+def test_default_router_fails_over_from_eastmoney_to_tencent(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def stock_zh_a_hist(**kwargs):
+        calls.append("east_money")
+        raise ConnectionError("remote closed")
+
+    def stock_zh_a_hist_tx(**kwargs):
+        calls.append("tencent")
+        assert kwargs["symbol"] == "sh600000"
+        assert kwargs["adjust"] == ""
+        return _tencent_raw()
+
+    fake_akshare = types.SimpleNamespace(
+        __version__="1.18.84",
+        stock_zh_a_hist=stock_zh_a_hist,
+        stock_zh_a_hist_tx=stock_zh_a_hist_tx,
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    result = AkShareLiveProvider(
+        allow_network=True,
+        trading_calendar=_calendar(),
+        calendar_source="test_calendar",
+    ).daily_ohlcv(
+        ProviderRequest("2024-01-02", "2024-01-02", symbols=("600000.SH",))
+    )
+
+    assert calls == ["east_money", "tencent"]
+    assert result.point_in_time is True
+    assert result.metadata["source_by_symbol"] == {"600000.SH": "tencent"}
+    assert result.metadata["source_counts"] == {"tencent": 1}
+    assert result.frame["volume"].tolist() == [123_400]
+    assert any("east_money_failed" in warning for warning in result.warnings)
+    assert "akshare_tencent_failover_used" in result.warnings
 
 
 def test_provider_partial_symbol_failure_is_not_pit_certified(monkeypatch) -> None:
