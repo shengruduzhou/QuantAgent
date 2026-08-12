@@ -2,31 +2,30 @@
 
 Pulls the macro time-series that the V7 "national-team money flow" thesis
 depends on: government yield curve, interbank rates (Shibor / DR / R),
-central-bank open-market operations, aggregate financing, money supply,
+central-bank balance-sheet liquidity, aggregate financing, money supply,
 CPI/PPI. Each table is stored under
 ``v7/raw/akshare/macro/<table>.parquet`` with an explicit
 ``available_at`` column following the publishing-lag policy below.
 
 Publishing-lag policy (conservative):
 
-* Daily curves & money-market rates (yield_curve, shibor, repo) →
-  next-business-day available (publicly visible at T+1 close).
-* Central-bank OMO (daily net injection) → T+1 (announced after market).
-* Aggregate financing, money supply, CPI, PPI → +35 calendar days
-  from observation date (PBoC / NBS typically release 10-20 days after
-  month end; +35 days gives a healthy safety margin and avoids any
-  preliminary-revision leakage).
+* Daily curves & money-market rates (yield_curve, shibor, repo) -> the next
+  explicit A-share research session. If the session calendar cannot be
+  resolved, ``available_at`` remains unknown and the daily frame is not
+  admitted to the PIT cache.
+* Central-bank balance, aggregate financing, money supply, CPI, PPI -> +35
+  calendar days from observation date. This is an information-lag model, not
+  a market-session rule, and therefore remains separate from the daily
+  session resolver.
 
-All public methods are PIT-clean: ``fetch_*`` returns a normalised
-DataFrame with ``available_at`` set, never the raw akshare frame. Tests
-can call ``_normalize_*`` directly on hand-built akshare-shaped frames
-without touching the network.
+The shared AKShare/Sina session calendar is research evidence only and remains
+``production_certified=False`` pending the authoritative calendar contract in
+#71. Public normalisers never invent weekdays or exchange holidays.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -34,8 +33,14 @@ import numpy as np
 import pandas as pd
 
 from quantagent.config.paths import quant_paths
+from quantagent.data.providers.akshare_calendar import (
+    AkShareCalendarEvidence,
+    load_akshare_research_calendar,
+    next_session_available_at,
+)
 from quantagent.data.providers.base import ProviderResult, ProviderUnavailable
 from quantagent.data.providers.pit_cache import PITCacheConfig, PITTableSpec, PITTimeSeriesCache
+from quantagent.data.trading_calendar import TradingCalendar
 
 
 MACRO_AVAILABLE_AT_LAG_DAYS = 35
@@ -69,6 +74,7 @@ _TABLES: tuple[PITTableSpec, ...] = (
 class AkShareMacroProvider:
     allow_network: bool = False
     root: str | None = None
+    trading_calendar: TradingCalendar | None = None
 
     def __post_init__(self) -> None:
         root = self.root or str(quant_paths().data_root / "v7" / "raw" / "akshare" / "macro")
@@ -79,9 +85,13 @@ class AkShareMacroProvider:
     # ------------------------------------------------------------------ #
 
     def fetch_all(self, start_date: str | None = None, end_date: str | None = None) -> dict[str, ProviderResult]:
-        """Fetch every macro table and persist into the PIT cache."""
+        """Fetch every macro table and persist only PIT-resolved rows."""
         ak = self._akshare()
+        calendar_evidence = self._calendar_evidence(ak)
+        calendar = calendar_evidence.calendar
+        akshare_version = str(getattr(ak, "__version__", "unknown"))
         results: dict[str, ProviderResult] = {}
+
         # Yield-curve API limits each call to a roughly 1-year window, so chunk.
         yield_frames: list[pd.DataFrame] = []
         for chunk_start, chunk_end in _year_chunks(start_date, end_date):
@@ -89,11 +99,21 @@ class AkShareMacroProvider:
                 raw = _safe_call(ak, "bond_china_yield",
                                  start_date=_compact(chunk_start),
                                  end_date=_compact(chunk_end))
-                yield_frames.append(_normalize_yield_curve(raw))
+                normalized = _normalize_yield_curve(raw, trading_calendar=calendar)
+                yield_frames.append(
+                    _restrict_observation_window(normalized, start_date=start_date, end_date=end_date)
+                )
             except Exception:
                 continue
-        results["yield_curve"] = self._upsert_combined("yield_curve", yield_frames)
-        # Shibor: one row per (date, tenor); fetch each tenor sequentially.
+        results["yield_curve"] = self._upsert_combined(
+            "yield_curve",
+            yield_frames,
+            calendar_evidence=calendar_evidence,
+            akshare_version=akshare_version,
+        )
+
+        # Shibor: rate_interbank has no bounded date arguments, so normalize then
+        # restrict to the requested observation window before PIT validation.
         shibor_frames: list[pd.DataFrame] = []
         for tenor in _SHIBOR_TENORS:
             try:
@@ -101,49 +121,100 @@ class AkShareMacroProvider:
                                  market="上海银行同业拆借市场",
                                  symbol="Shibor人民币",
                                  indicator=_shibor_tenor_label(tenor))
-                shibor_frames.append(_normalize_shibor(raw, tenor=tenor))
+                normalized = _normalize_shibor(raw, tenor=tenor, trading_calendar=calendar)
+                shibor_frames.append(
+                    _restrict_observation_window(normalized, start_date=start_date, end_date=end_date)
+                )
             except Exception:
                 continue
-        results["shibor"] = self._upsert_combined("shibor", shibor_frames)
+        results["shibor"] = self._upsert_combined(
+            "shibor",
+            shibor_frames,
+            calendar_evidence=calendar_evidence,
+            akshare_version=akshare_version,
+        )
 
         # repo_rate_hist breaks if only start_date is passed (KeyError 'frValueMap'
-        # in akshare 1.18); call with no args to get the recent window safely.
+        # in akshare 1.18); call with no args, then apply the governed observation
+        # window before deciding whether the resulting rows are PIT-resolved.
         results["repo"] = self._fetch_and_upsert(
-            "repo", lambda: _normalize_repo(_safe_call(ak, "repo_rate_hist")),
+            "repo",
+            lambda: _restrict_observation_window(
+                _normalize_repo(_safe_call(ak, "repo_rate_hist"), trading_calendar=calendar),
+                start_date=start_date,
+                end_date=end_date,
+            ),
+            calendar_evidence=calendar_evidence,
+            akshare_version=akshare_version,
         )
         results["central_bank_balance"] = self._fetch_and_upsert(
             "central_bank_balance",
             lambda: _normalize_central_bank_balance(_safe_call(ak, "macro_china_central_bank_balance")),
+            akshare_version=akshare_version,
         )
         results["aggregate_financing"] = self._fetch_and_upsert(
             "aggregate_financing",
             lambda: _normalize_aggregate_financing(_safe_call(ak, "macro_china_shrzgm")),
+            akshare_version=akshare_version,
         )
         results["money_supply"] = self._fetch_and_upsert(
             "money_supply",
             lambda: _normalize_money_supply(_safe_call(ak, "macro_china_money_supply")),
+            akshare_version=akshare_version,
         )
         results["cpi"] = self._fetch_and_upsert(
-            "cpi", lambda: _normalize_cpi_ppi(_safe_call(ak, "macro_china_cpi_yearly"), kind="cpi"),
+            "cpi",
+            lambda: _normalize_cpi_ppi(_safe_call(ak, "macro_china_cpi_yearly"), kind="cpi"),
+            akshare_version=akshare_version,
         )
         results["ppi"] = self._fetch_and_upsert(
-            "ppi", lambda: _normalize_cpi_ppi(_safe_call(ak, "macro_china_ppi_yearly"), kind="ppi"),
+            "ppi",
+            lambda: _normalize_cpi_ppi(_safe_call(ak, "macro_china_ppi_yearly"), kind="ppi"),
+            akshare_version=akshare_version,
         )
         return results
 
-    def _upsert_combined(self, table: str, frames: list[pd.DataFrame]) -> ProviderResult:
+    def _calendar_evidence(self, ak: object) -> AkShareCalendarEvidence:
+        if self.trading_calendar is not None:
+            return AkShareCalendarEvidence(
+                self.trading_calendar,
+                {
+                    "source": "injected_trading_calendar",
+                    "production_certified": False,
+                    "status": "passed" if not self.trading_calendar.empty else "empty",
+                },
+            )
+        return load_akshare_research_calendar(
+            allow_network=self.allow_network, ak_module=ak
+        )
+
+    def _upsert_combined(
+        self,
+        table: str,
+        frames: list[pd.DataFrame],
+        *,
+        calendar_evidence: AkShareCalendarEvidence,
+        akshare_version: str,
+    ) -> ProviderResult:
         non_empty = [f for f in frames if f is not None and not f.empty]
         if not non_empty:
             return ProviderResult(
-                pd.DataFrame(), source=f"akshare_macro:{table}", quality_score=0.0,
+                pd.DataFrame(),
+                source=f"akshare_macro:{table}",
+                quality_score=0.0,
                 warnings=("empty_response",),
+                metadata={
+                    "calendar": calendar_evidence.metadata,
+                    "akshare_version": akshare_version,
+                    "production_integrity_certified": False,
+                },
             )
         combined = pd.concat(non_empty, ignore_index=True)
-        self.cache.upsert(table, combined)
-        return ProviderResult(
-            combined.reset_index(drop=True), source=f"akshare_macro:{table}",
-            quality_score=0.78,
-            metadata={"row_count": int(len(combined)), "path": str(self.cache.path_for(table))},
+        return self._persist_result(
+            table,
+            combined,
+            calendar_evidence=calendar_evidence,
+            akshare_version=akshare_version,
         )
 
     def load_pit(self, table: str, as_of_date: str) -> ProviderResult:
@@ -164,29 +235,89 @@ class AkShareMacroProvider:
             raise ProviderUnavailable("akshare is not installed") from exc
         return ak
 
-    def _fetch_and_upsert(self, table: str, fetcher) -> ProviderResult:
+    def _fetch_and_upsert(
+        self,
+        table: str,
+        fetcher,
+        *,
+        calendar_evidence: AkShareCalendarEvidence | None = None,
+        akshare_version: str = "unknown",
+    ) -> ProviderResult:
         try:
             frame = fetcher()
         except Exception as exc:
+            metadata: dict[str, object] = {
+                "akshare_version": akshare_version,
+                "production_integrity_certified": False,
+            }
+            if calendar_evidence is not None:
+                metadata["calendar"] = calendar_evidence.metadata
             return ProviderResult(
                 pd.DataFrame(),
                 source=f"akshare_macro:{table}",
                 quality_score=0.0,
                 warnings=(f"fetch_failed:{type(exc).__name__}:{exc}",),
+                metadata=metadata,
             )
-        if frame.empty:
+        if frame is None or frame.empty:
+            metadata = {
+                "akshare_version": akshare_version,
+                "production_integrity_certified": False,
+            }
+            if calendar_evidence is not None:
+                metadata["calendar"] = calendar_evidence.metadata
             return ProviderResult(
                 pd.DataFrame(),
                 source=f"akshare_macro:{table}",
                 quality_score=0.0,
                 warnings=("empty_response",),
+                metadata=metadata,
             )
-        self.cache.upsert(table, frame)
+        return self._persist_result(
+            table,
+            frame,
+            calendar_evidence=calendar_evidence,
+            akshare_version=akshare_version,
+        )
+
+    def _persist_result(
+        self,
+        table: str,
+        frame: pd.DataFrame,
+        *,
+        calendar_evidence: AkShareCalendarEvidence | None,
+        akshare_version: str,
+    ) -> ProviderResult:
+        pit_valid = bool(
+            "available_at" in frame.columns
+            and pd.to_datetime(frame["available_at"], errors="coerce").notna().all()
+        )
+        warnings = list(calendar_evidence.warnings) if calendar_evidence is not None else []
+        persisted_frame = frame.reset_index(drop=True)
+        if not pit_valid:
+            warnings.append("akshare_macro_available_at_unresolved:not_cached_as_pit")
+            # A cache-building caller must not treat descriptive-but-uncached rows
+            # as a successful PIT artifact. Preserve the observed row count in
+            # metadata while returning an empty usable frame.
+            persisted_frame = pd.DataFrame(columns=frame.columns)
+        else:
+            self.cache.upsert(table, frame)
+        metadata: dict[str, object] = {
+            "row_count": int(len(frame)),
+            "path": str(self.cache.path_for(table)) if pit_valid else None,
+            "cached_as_pit": pit_valid,
+            "akshare_version": akshare_version,
+            "production_integrity_certified": False,
+        }
+        if calendar_evidence is not None:
+            metadata["calendar"] = calendar_evidence.metadata
         return ProviderResult(
-            frame.reset_index(drop=True),
+            persisted_frame,
             source=f"akshare_macro:{table}",
-            quality_score=0.78,
-            metadata={"row_count": int(len(frame)), "path": str(self.cache.path_for(table))},
+            point_in_time=pit_valid,
+            quality_score=0.78 if pit_valid else 0.35,
+            warnings=tuple(dict.fromkeys(warnings)),
+            metadata=metadata,
         )
 
 
@@ -205,13 +336,12 @@ _YIELD_CURVE_CHINESE_LABEL = {
 _YIELD_CURVE_TREASURY_NAME = "中债国债收益率曲线"
 
 
-def _normalize_yield_curve(raw: pd.DataFrame) -> pd.DataFrame:
-    """Map akshare ``bond_china_yield`` to our PIT schema.
-
-    The endpoint returns multiple curves per date (国债 / 中短期票据 / 商业银行普通债 …).
-    We keep only the government-bond curve ("中债国债收益率曲线") so each
-    (observation_date, maturity) cell is unique.
-    """
+def _normalize_yield_curve(
+    raw: pd.DataFrame,
+    *,
+    trading_calendar: TradingCalendar | None = None,
+) -> pd.DataFrame:
+    """Map akshare ``bond_china_yield`` to our PIT schema."""
     if raw is None or raw.empty:
         return pd.DataFrame()
     df = raw.copy()
@@ -249,12 +379,21 @@ def _normalize_yield_curve(raw: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
     out = out.drop_duplicates(subset=["observation_date", "maturity"], keep="last")
-    out["available_at"] = out["observation_date"] + pd.Timedelta(days=DAILY_AVAILABLE_AT_LAG_DAYS)
+    out["available_at"] = next_session_available_at(
+        out["observation_date"],
+        trading_calendar,
+        lag_sessions=DAILY_AVAILABLE_AT_LAG_DAYS,
+    ).to_numpy()
     out["source"] = "akshare:bond_china_yield"
     return out
 
 
-def _normalize_shibor(raw: pd.DataFrame, tenor: str = "O/N") -> pd.DataFrame:
+def _normalize_shibor(
+    raw: pd.DataFrame,
+    tenor: str = "O/N",
+    *,
+    trading_calendar: TradingCalendar | None = None,
+) -> pd.DataFrame:
     """Normalise akshare ``rate_interbank`` for one Shibor tenor."""
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -271,18 +410,21 @@ def _normalize_shibor(raw: pd.DataFrame, tenor: str = "O/N") -> pd.DataFrame:
         "tenor": tenor,
         "rate_pct": rate,
     }).dropna(subset=["observation_date", "rate_pct"])
-    out["available_at"] = out["observation_date"] + pd.Timedelta(days=DAILY_AVAILABLE_AT_LAG_DAYS)
+    out["available_at"] = next_session_available_at(
+        out["observation_date"],
+        trading_calendar,
+        lag_sessions=DAILY_AVAILABLE_AT_LAG_DAYS,
+    ).to_numpy()
     out["source"] = "akshare:rate_interbank"
     return out
 
 
-def _normalize_repo(raw: pd.DataFrame) -> pd.DataFrame:
-    """Normalise akshare ``repo_rate_hist`` (wide → long for key tenors).
-
-    Source schema: ``date, FR001, FR007, FR014, FDR001, FDR007, FDR014``.
-    We keep FR007 (interbank repo 7d) and FDR007 (depository repo 7d, DR007 proxy)
-    as the two policy-monitored benchmarks.
-    """
+def _normalize_repo(
+    raw: pd.DataFrame,
+    *,
+    trading_calendar: TradingCalendar | None = None,
+) -> pd.DataFrame:
+    """Normalise akshare ``repo_rate_hist`` (wide -> long for key tenors)."""
     if raw is None or raw.empty:
         return pd.DataFrame()
     df = raw.copy()
@@ -307,7 +449,11 @@ def _normalize_repo(raw: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    out["available_at"] = out["observation_date"] + pd.Timedelta(days=DAILY_AVAILABLE_AT_LAG_DAYS)
+    out["available_at"] = next_session_available_at(
+        out["observation_date"],
+        trading_calendar,
+        lag_sessions=DAILY_AVAILABLE_AT_LAG_DAYS,
+    ).to_numpy()
     out["source"] = "akshare:repo_rate_hist"
     return out
 
@@ -328,7 +474,6 @@ def _normalize_central_bank_balance(raw: pd.DataFrame) -> pd.DataFrame:
     date_col = _first_match(df.columns, ("统计时间", "月份", "日期", "date"))
     if date_col is None:
         return pd.DataFrame()
-    # 统计时间 looks like "2026.4" — parse as YYYY-MM with day=last.
     obs = df[date_col].astype(str).apply(_parse_yearmonth)
     keep = {
         "总资产": "total_assets_cny",
@@ -438,12 +583,37 @@ def _normalize_cpi_ppi(raw: pd.DataFrame, *, kind: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------- #
 
 
+def _restrict_observation_window(
+    frame: pd.DataFrame,
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> pd.DataFrame:
+    """Restrict normalized observations before all-row PIT validation.
+
+    Several AKShare daily endpoints return their full history and ignore the
+    requested research window because they expose no date parameters. Rows
+    outside a bounded request must not invalidate otherwise usable in-window
+    observations merely because the injected/research calendar intentionally
+    ends at the request boundary.
+    """
+    if frame is None or frame.empty or "observation_date" not in frame.columns:
+        return frame
+    out = frame.copy()
+    observation = pd.to_datetime(out["observation_date"], errors="coerce")
+    keep = observation.notna()
+    if start_date:
+        keep &= observation >= pd.Timestamp(start_date).normalize()
+    if end_date:
+        keep &= observation <= pd.Timestamp(end_date).normalize()
+    return out.loc[keep].reset_index(drop=True)
+
+
 def _first_match(columns: Iterable[str], candidates: tuple[str, ...]) -> str | None:
     available = {str(c).strip(): str(c) for c in columns}
     for candidate in candidates:
         if candidate in available:
             return available[candidate]
-    # case-insensitive lower-cased fallback
     lower = {str(c).strip().lower(): str(c) for c in columns}
     for candidate in candidates:
         if candidate.lower() in lower:
@@ -494,13 +664,10 @@ def _parse_yearmonth(value: object) -> pd.Timestamp:
     text = str(value).strip()
     if not text:
         return pd.NaT
-    # YYYYMM compact form ("201501")
     if text.isdigit() and len(text) == 6:
         text = f"{text[:4]}-{text[4:]}"
-    # Chinese form "2026年04月份"
     if "年" in text:
         text = text.replace("年", "-").replace("月份", "").replace("月", "")
-    # Dot form "2026.4"
     if "." in text and "-" not in text:
         text = text.replace(".", "-")
     try:
@@ -513,12 +680,7 @@ def _parse_yearmonth(value: object) -> pd.Timestamp:
 
 
 def _year_chunks(start_date: str | None, end_date: str | None) -> list[tuple[str, str]]:
-    """Yield (chunk_start, chunk_end) pairs of at most ~1 calendar year.
-
-    Used for endpoints (e.g. bond_china_yield) that silently return 0 rows
-    when the requested window spans more than a year. Empty input → a
-    single (None, None) call so the caller still attempts at least once.
-    """
+    """Yield (chunk_start, chunk_end) pairs of at most ~1 calendar year."""
     if not start_date and not end_date:
         return [(None, None)]
     try:

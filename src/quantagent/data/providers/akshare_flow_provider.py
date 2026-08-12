@@ -30,6 +30,7 @@ from quantagent.data.trading_calendar import TradingCalendar
 
 
 FLOW_AVAILABLE_AT_LAG_DAYS = 1
+_NORTHBOUND_SUMMARY_CNY_PER_SOURCE_UNIT = 1e8
 
 _TABLES: tuple[PITTableSpec, ...] = (
     PITTableSpec(
@@ -183,7 +184,12 @@ def _normalize_northbound(
     *,
     trading_calendar: TradingCalendar | None = None,
 ) -> pd.DataFrame:
-    """Normalise ``stock_hsgt_fund_flow_summary_em`` current-day rows."""
+    """Normalise ``stock_hsgt_fund_flow_summary_em`` current-day rows.
+
+    AKShare documents ``成交净买额`` / ``资金净流入`` from this endpoint in
+    亿元. The canonical QuantAgent field is CNY, so conversion happens once at
+    the ingestion boundary before per-channel aggregation.
+    """
     if raw is None or raw.empty:
         return pd.DataFrame()
     df = raw.copy()
@@ -218,14 +224,15 @@ def _normalize_northbound(
         else:
             continue
         day = pd.Timestamp(ts).normalize()
+        value_cny = float(value) * _NORTHBOUND_SUMMARY_CNY_PER_SOURCE_UNIT
         rows.append(
             {
                 "observation_date": day,
                 "channel": channel,
-                "net_inflow_cny": float(value),
+                "net_inflow_cny": value_cny,
             }
         )
-        by_date[day] = by_date.get(day, 0.0) + float(value)
+        by_date[day] = by_date.get(day, 0.0) + value_cny
     for ts, total in by_date.items():
         rows.append(
             {
