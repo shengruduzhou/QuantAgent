@@ -78,6 +78,55 @@ def _calendar_window(
     )
 
 
+def _economic_scale_evidence(raw: pd.DataFrame) -> dict[str, object]:
+    """Check that amount/volume has the same price scale as the daily bar.
+
+    String unit labels cannot detect an upstream 100x lot/share regression. For
+    positive-volume rows, CNY turnover divided by shares must be an attainable
+    volume-weighted price and therefore lie inside the day's traded low/high
+    range, modulo a small tolerance for vendor rounding.
+    """
+    required = ("low", "high", "volume", "amount")
+    if any(column not in raw.columns for column in required):
+        return {
+            "economic_scale_check_passed": False,
+            "economic_scale_rows": 0,
+            "economic_scale_violations": 0,
+            "reason": "missing_scale_columns",
+        }
+    numeric = raw.loc[:, list(required)].apply(pd.to_numeric, errors="coerce")
+    valid = (
+        numeric["low"].gt(0)
+        & numeric["high"].ge(numeric["low"])
+        & numeric["volume"].gt(0)
+        & numeric["amount"].ge(0)
+    )
+    if not bool(valid.any()):
+        return {
+            "economic_scale_check_passed": False,
+            "economic_scale_rows": 0,
+            "economic_scale_violations": 0,
+            "reason": "no_positive_volume_rows",
+        }
+    checked = numeric.loc[valid].copy()
+    implied_vwap = checked["amount"] / checked["volume"]
+    # 2% accommodates harmless vendor rounding while remaining orders of
+    # magnitude away from the 100x error caused by confusing lots and shares.
+    lower_bound = checked["low"] * 0.98
+    upper_bound = checked["high"] * 1.02
+    within = implied_vwap.ge(lower_bound) & implied_vwap.le(upper_bound)
+    return {
+        "economic_scale_check_passed": bool(within.all()),
+        "economic_scale_rows": int(len(checked)),
+        "economic_scale_violations": int((~within).sum()),
+        "implied_vwap_min": float(implied_vwap.min()),
+        "implied_vwap_max": float(implied_vwap.max()),
+        "price_low_min": float(checked["low"].min()),
+        "price_high_max": float(checked["high"].max()),
+        "tolerance_fraction": 0.02,
+    }
+
+
 def _tencent_probe(
     ak, symbol: str, start_date: str, end_date: str
 ) -> dict[str, object]:
@@ -107,14 +156,23 @@ def _tencent_probe(
         }
     required = {"date", "open", "high", "low", "close", "volume", "amount"}
     missing = sorted(required.difference(raw.columns))
+    scale = _economic_scale_evidence(raw) if not missing else {
+        "economic_scale_check_passed": False,
+        "economic_scale_rows": 0,
+        "economic_scale_violations": 0,
+        "reason": "schema_incomplete",
+    }
+    observed = not missing and bool(scale["economic_scale_check_passed"])
     return {
-        "status": "observed" if not missing else "schema_failed",
+        "status": "observed" if observed else ("schema_failed" if missing else "economic_scale_failed"),
         "required_for_primary_smoke": False,
         "rows": int(len(raw)),
         "columns": [str(column) for column in raw.columns],
         "missing_columns": missing,
-        "current_source_volume_unit": "shares",
-        "current_source_amount_unit": "CNY",
+        # These are accepted as observed source units only after the independent
+        # economic scale invariant above passes.
+        "current_source_volume_unit": "shares" if observed else "unverified",
+        "current_source_amount_unit": "CNY" if observed else "unverified",
         "nonnegative_volume": bool(
             pd.to_numeric(raw.get("volume"), errors="coerce").dropna().ge(0).all()
         ),
@@ -123,6 +181,7 @@ def _tencent_probe(
         ),
         "first_date": str(raw["date"].iloc[0]) if "date" in raw.columns else None,
         "last_date": str(raw["date"].iloc[-1]) if "date" in raw.columns else None,
+        **scale,
     }
 
 
@@ -307,11 +366,21 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
     all_symbols_present = all(
         symbol in per_symbol_rows and per_symbol_rows[symbol] > 0 for symbol in symbols
     )
+    tencent_probe = _tencent_probe(ak, symbols[0], start_date, end_date)
+    tencent_used = bool(result.metadata.get("source_counts", {}).get("tencent", 0))
+    tencent_scale_ok = bool(
+        not tencent_used
+        or (
+            tencent_probe.get("status") == "observed"
+            and tencent_probe.get("economic_scale_check_passed") is True
+        )
+    )
     primary_pass = bool(
         result.point_in_time
         and canonical_units_ok
         and all_symbols_present
         and not result.metadata.get("failed_symbols")
+        and tencent_scale_ok
     )
 
     return {
@@ -336,12 +405,12 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
             "quality_score": float(result.quality_score),
             "canonical_units_ok": canonical_units_ok,
             "all_symbols_present": all_symbols_present,
+            "tencent_economic_scale_required": tencent_used,
+            "tencent_economic_scale_ok": tencent_scale_ok,
             "metadata": result.metadata,
             "warnings": list(result.warnings),
         },
-        "tencent_independent_probe": _tencent_probe(
-            ak, symbols[0], start_date, end_date
-        ),
+        "tencent_independent_probe": tencent_probe,
         "historical_valuation_baidu_probe": _baidu_valuation_probe(ak, symbols[0]),
         "sina_optional_parity": _sina_parity_probe(
             ak, symbols[0], start_date, end_date, calendar
