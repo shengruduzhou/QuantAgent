@@ -56,10 +56,10 @@ def _calendar_window(
     sessions = pd.DatetimeIndex(sorted(set(sessions)))
     today = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None).normalize()
     completed = sessions[sessions < today]
-    # Exclude the newest known session so every requested bar can resolve to a
-    # following session under QuantAgent's conservative T+1 availability rule.
     if len(completed) < max(lookback_sessions + 2, 5):
         raise RuntimeError("AKShare trading calendar does not cover enough completed sessions")
+    # Exclude the newest known session so every requested bar can resolve to a
+    # following session under QuantAgent's conservative T+1 availability rule.
     end = completed[-2]
     eligible = completed[completed <= end]
     start = eligible[-lookback_sessions]
@@ -123,6 +123,68 @@ def _tencent_probe(
         ),
         "first_date": str(raw["date"].iloc[0]) if "date" in raw.columns else None,
         "last_date": str(raw["date"].iloc[-1]) if "date" in raw.columns else None,
+    }
+
+
+def _baidu_valuation_probe(ak, symbol: str) -> dict[str, object]:
+    """Probe genuine dated A-share valuation history before routing to it."""
+    api = getattr(ak, "stock_zh_valuation_baidu", None)
+    if api is None:
+        return {"status": "api_unavailable", "required_for_primary_smoke": False}
+    indicators = {
+        "pe_ttm": "市盈率(TTM)",
+        "pb": "市净率",
+        "market_cap": "总市值",
+    }
+    per_indicator: dict[str, object] = {}
+    date_sets: list[set[pd.Timestamp]] = []
+    all_ok = True
+    for canonical, indicator in indicators.items():
+        try:
+            raw = api(symbol=_plain_code(symbol), indicator=indicator, period="近一年")
+        except Exception as exc:
+            per_indicator[canonical] = {
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}:{exc}",
+            }
+            all_ok = False
+            continue
+        if raw is None or raw.empty or not {"date", "value"}.issubset(raw.columns):
+            per_indicator[canonical] = {
+                "status": "empty_or_schema_failed",
+                "rows": int(0 if raw is None else len(raw)),
+                "columns": [] if raw is None else [str(column) for column in raw.columns],
+            }
+            all_ok = False
+            continue
+        dates = pd.to_datetime(raw["date"], errors="coerce").dropna().dt.normalize()
+        values = pd.to_numeric(raw["value"], errors="coerce")
+        valid = dates.notna() & values.notna()
+        valid_dates = set(dates.loc[valid])
+        date_sets.append(valid_dates)
+        per_indicator[canonical] = {
+            "status": "observed" if valid.any() else "no_valid_rows",
+            "rows": int(len(raw)),
+            "valid_rows": int(valid.sum()),
+            "first_date": None if not valid.any() else str(dates.loc[valid].min().date()),
+            "last_date": None if not valid.any() else str(dates.loc[valid].max().date()),
+            "min_value": None if not valid.any() else float(values.loc[valid].min()),
+            "max_value": None if not valid.any() else float(values.loc[valid].max()),
+        }
+        all_ok = all_ok and bool(valid.any())
+    overlap = set.intersection(*date_sets) if date_sets and len(date_sets) == len(indicators) else set()
+    return {
+        "status": "observed" if all_ok and overlap else "failed",
+        "required_for_primary_smoke": False,
+        "symbol": symbol,
+        "function_name": "stock_zh_valuation_baidu",
+        "period": "近一年",
+        "indicators": per_indicator,
+        "common_date_count": int(len(overlap)),
+        "common_first_date": None if not overlap else str(min(overlap).date()),
+        "common_last_date": None if not overlap else str(max(overlap).date()),
+        "historical_dates_are_source_supplied": True,
+        "production_integrity_certified": False,
     }
 
 
@@ -220,10 +282,6 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
 
     calendar, start_date, end_date, calendar_meta = _calendar_window(ak, lookback_sessions)
     request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=symbols)
-    # Primary contract now exercises the actual audited router. EastMoney remains
-    # first; current-source Tencent is the deterministic failover. Sina remains
-    # an optional independent diagnostic because its endpoint may rate-limit or
-    # remote-close CI egress.
     source_order = ("east_money", "tencent")
     result = AkShareLiveProvider(
         allow_network=True,
@@ -284,6 +342,7 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
         "tencent_independent_probe": _tencent_probe(
             ak, symbols[0], start_date, end_date
         ),
+        "historical_valuation_baidu_probe": _baidu_valuation_probe(ak, symbols[0]),
         "sina_optional_parity": _sina_parity_probe(
             ak, symbols[0], start_date, end_date, calendar
         ),
