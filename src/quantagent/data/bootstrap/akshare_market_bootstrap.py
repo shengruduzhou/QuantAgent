@@ -71,6 +71,7 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
     merged_frame, merge_info = _merge_with_existing_panel(result.frame, resolved_output)
     normalised = _normalise_dtypes(merged_frame)
     schema_report = akshare_market_schema_report(normalised)
+    economic_report = _market_economic_contract_report(normalised)
     failed_symbols = list(result.metadata.get("failed_symbols", []))
     warnings = [*result.warnings, *calendar_warnings]
 
@@ -83,14 +84,19 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         blockers.append("akshare_market_not_pit_certified")
     if schema_report["status"] != "passed":
         blockers.append("akshare_market_schema_or_pit_failed")
+    if economic_report["status"] != "passed":
+        blockers.append("akshare_market_economic_contract_failed")
+        warnings.extend(str(item) for item in economic_report["violations"])
     if config.adjust:
         blockers.append("akshare_adjusted_history_has_no_vintaged_adjustment_evidence")
     if research_calendar.empty:
         blockers.append("akshare_independent_research_calendar_unavailable")
 
     # Never replace the canonical silver panel with a candidate that failed its
-    # own source/PIT contract. The caller gets complete diagnostics and may retry
-    # or repair evidence; the last known panel stays untouched.
+    # own source/PIT/economic-unit contract. In particular, an older panel built
+    # before AKSHARE-DATA-CONTRACT-001 has no explicit unit/adjustment provenance
+    # and is quarantined for rebuild instead of being silently re-certified by a
+    # small number of new valid rows.
     if blockers:
         return {
             "status": "blocked",
@@ -101,12 +107,16 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
             "symbols": list(request.symbols),
             "failed_symbols": failed_symbols,
             "warnings": list(dict.fromkeys(warnings)),
-            "blockers": blockers,
+            "blockers": list(dict.fromkeys(blockers)),
             "schema_report": schema_report,
+            "economic_contract_report": economic_report,
             "calendar": calendar_meta,
             "heuristic_range": heuristic_range.to_dict(),
             "resolved_range": resolved_range.to_dict(),
             "existing_panel_preserved": bool(resolved_output.exists()),
+            "rebuild_required": bool(
+                economic_report["status"] != "passed" and merge_info["merged_with_existing"]
+            ),
         }
 
     written = _write_frame(normalised, resolved_output)
@@ -142,6 +152,7 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         "canonical_amount_unit": result.metadata.get("canonical_amount_unit", "CNY"),
         "raw_volume_unit_by_source": result.metadata.get("raw_volume_unit_by_source", {}),
         "schema_report": schema_report,
+        "economic_contract_report": economic_report,
         "availability_rule": "daily_bar_available_next_explicit_trading_session",
         "calendar": calendar_meta,
         "heuristic_range": heuristic_range.to_dict(),
@@ -149,6 +160,7 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         "akshare_fetched_rows": int(len(result.frame)),
         "merge_info": merge_info,
         "config": asdict(config),
+        "legacy_panel_auto_recertification_blocked": True,
         "production_integrity_certified": False,
     }
     if "adjustment_repair" in prior_extra:
@@ -176,9 +188,52 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         "symbols": list(request.symbols),
         "warnings": list(dict.fromkeys(warnings)),
         "schema_report": schema_report,
+        "economic_contract_report": economic_report,
         "calendar": calendar_meta,
         "heuristic_range": heuristic_range.to_dict(),
         "resolved_range": resolved_range.to_dict(),
+    }
+
+
+def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
+    """Validate economics/provenance that a column-presence schema cannot prove."""
+    violations: list[str] = []
+    if frame is None or frame.empty:
+        return {"status": "failed", "rows": 0, "violations": ["empty_market_candidate"]}
+    required_truth = {
+        "volume_unit": "shares",
+        "amount_unit": "CNY",
+        "price_adjustment": "raw",
+    }
+    for column, expected in required_truth.items():
+        if column not in frame.columns:
+            violations.append(f"missing_economic_provenance:{column}")
+            continue
+        values = frame[column].astype("string")
+        bad = values.isna() | values.ne(expected)
+        if bool(bad.any()):
+            violations.append(
+                f"noncanonical_{column}:expected={expected}:rows={int(bad.sum())}"
+            )
+    if "point_in_time_valid" not in frame.columns:
+        violations.append("missing_economic_provenance:point_in_time_valid")
+    else:
+        valid = frame["point_in_time_valid"].fillna(False).astype(bool)
+        if not bool(valid.all()):
+            violations.append(f"non_pit_market_rows:{int((~valid).sum())}")
+    if "source" not in frame.columns:
+        violations.append("missing_economic_provenance:source")
+    else:
+        missing_source = frame["source"].astype("string").isna()
+        if bool(missing_source.any()):
+            violations.append(f"missing_source_rows:{int(missing_source.sum())}")
+    return {
+        "status": "passed" if not violations else "failed",
+        "rows": int(len(frame)),
+        "violations": violations,
+        "canonical_volume_unit": "shares",
+        "canonical_amount_unit": "CNY",
+        "canonical_price_adjustment": "raw",
     }
 
 
@@ -186,14 +241,7 @@ def _snap_range_to_calendar(
     value: V7ResolvedDateRange,
     calendar: TradingCalendar,
 ) -> V7ResolvedDateRange:
-    """Snap heuristic weekday dates to the actual research session set.
-
-    ``v7_auto_range`` remains provider-neutral and may produce a weekday bridge
-    when a local Qlib calendar ends. Before an AKShare request is issued, this
-    boundary converts that heuristic to the first/last real session contained in
-    the independently fetched calendar. No holiday is manufactured as a fetch
-    or availability date.
-    """
+    """Snap heuristic weekday dates to the actual research session set."""
     if calendar.empty:
         return value
     sessions = pd.DatetimeIndex(calendar.trading_days).normalize()
