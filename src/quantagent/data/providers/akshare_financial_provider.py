@@ -1,8 +1,11 @@
 """AkShare financial-statement adapter used as a fallback for TuShare.
 
-The adapter is intentionally strict: network access is opt-in, each output
-frame must carry PIT keys, and AkShare API drift is returned as explicit
-warnings or ``ProviderUnavailable`` instead of synthetic rows.
+The adapter is intentionally strict: network access is opt-in, each PIT output
+must carry a genuine publication/availability path, and AkShare API drift is
+returned as explicit warnings or ``ProviderUnavailable`` instead of synthetic
+rows. Descriptive rows that have a report date but no source publication date
+are retained as non-PIT data; a report period is never promoted to an
+announcement date.
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ from typing import Callable
 import pandas as pd
 
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
-from quantagent.data.providers.tushare_financial_provider import _available_at
 from quantagent.data.trading_calendar import TradingCalendar
 
 
@@ -121,6 +123,7 @@ AKSHARE_FINANCIAL_CANONICAL_COLUMNS: tuple[str, ...] = tuple(
             "source_reliability",
             "raw_hash",
             "point_in_time_valid",
+            "publication_date_provenance",
         }
     )
 )
@@ -128,7 +131,7 @@ AKSHARE_FINANCIAL_CANONICAL_COLUMNS: tuple[str, ...] = tuple(
 
 @dataclass
 class AkShareFinancialProvider:
-    """AkShare adapter that emits PIT-friendly statement frames."""
+    """AkShare adapter that preserves PIT truth instead of inferring it."""
 
     allow_network: bool = False
     available_lag_days: int = 1
@@ -183,11 +186,15 @@ class AkShareFinancialProvider:
         if not self.allow_network:
             return {"status": "disabled", "reason": "allow_network_false"}
         try:
-            import akshare as ak  # type: ignore  # noqa: F401
+            import akshare as ak  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
             return {"status": "unavailable", "reason": f"akshare_unavailable:{type(exc).__name__}"}
         if request is None:
-            return {"status": "passed", "source": self.source}
+            return {
+                "status": "passed",
+                "source": self.source,
+                "akshare_version": str(getattr(ak, "__version__", "unknown")),
+            }
         try:
             result = self.income(request)
         except ProviderUnavailable as exc:
@@ -195,6 +202,7 @@ class AkShareFinancialProvider:
         return {
             "status": "passed" if result.quality_score > 0 else "failed",
             "source": result.source,
+            "point_in_time": result.point_in_time,
             "warnings": list(result.warnings),
             "schema_report": result.metadata.get("schema_report", {}),
         }
@@ -252,15 +260,34 @@ class AkShareFinancialProvider:
             if raw is None or raw.empty:
                 warnings.append(f"akshare_empty_{statement_name}:{symbol}")
             else:
-                frames.append(self._filter_by_request(self._normalize(raw, rename, symbol, statement_name), request))
+                normalised = self._normalize(raw, rename, symbol, statement_name)
+                frames.append(self._filter_by_request(normalised, request))
             if self.rate_limit_seconds > 0:
                 time.sleep(self.rate_limit_seconds)
 
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         schema_report = akshare_financial_schema_report(frame)
         warnings.extend(f"akshare_schema_missing:{column}" for column in schema_report["missing_columns"])
+        if schema_report["pit_violation_count"]:
+            warnings.append(
+                f"akshare_{statement_name}_non_pit_rows:{schema_report['pit_violation_count']}"
+            )
+        if failed_symbols:
+            warnings.append(
+                "akshare_financial_incomplete_symbol_coverage:"
+                + ",".join(sorted(set(failed_symbols)))
+            )
+
+        point_in_time = bool(
+            not frame.empty
+            and not failed_symbols
+            and schema_report["status"] == "passed"
+            and "point_in_time_valid" in frame.columns
+            and frame["point_in_time_valid"].fillna(False).astype(bool).all()
+        )
         metadata = {
             "source": "akshare",
+            "akshare_version": str(getattr(ak, "__version__", "unknown")),
             "function_name": api_name,
             "params": {
                 "start_date": request.start_date,
@@ -275,13 +302,18 @@ class AkShareFinancialProvider:
             "failed_symbols": failed_symbols,
             "schema_report": schema_report,
             "statement_name": statement_name,
+            "point_in_time": point_in_time,
+            "trading_calendar_bound": bool(
+                self.trading_calendar is not None and not self.trading_calendar.empty
+            ),
+            "production_integrity_certified": False,
         }
         return ProviderResult(
             frame,
             source=f"{self.source}:{api_name}:{statement_name}",
-            point_in_time=True,
-            quality_score=0.72 if not frame.empty and schema_report["status"] == "passed" else 0.0,
-            warnings=tuple(warnings),
+            point_in_time=point_in_time,
+            quality_score=0.72 if point_in_time else (0.35 if not frame.empty else 0.0),
+            warnings=tuple(dict.fromkeys(warnings)),
             metadata=metadata,
         )
 
@@ -295,26 +327,46 @@ class AkShareFinancialProvider:
         keep = [column for column in rename if column in frame.columns]
         data = frame[keep].rename(columns=rename).copy()
         data["symbol"] = symbol
-        if "ann_date" not in data.columns and "update_date" in data.columns:
-            data["ann_date"] = data["update_date"]
-        for column in ("ann_date", "report_period", "ex_dividend_date", "record_date"):
-            if column in data.columns:
-                data[column] = pd.to_datetime(data[column].astype(str), errors="coerce").dt.strftime("%Y-%m-%d")
-        if "report_period" not in data.columns:
-            data["report_period"] = data.get("ann_date", pd.Series([""] * len(data), index=data.index))
-        if "ann_date" not in data.columns and "report_period" in data.columns:
-            data["ann_date"] = data["report_period"]
+
+        # A source-supplied update date is a conservative publication fallback;
+        # a report period is not. The latter is an economic period end and may
+        # precede public release by weeks or months.
         if "ann_date" in data.columns:
-            if self.trading_calendar is not None and not self.trading_calendar.empty:
-                data["available_at"] = self.trading_calendar.resolve_available_at(
-                    data["ann_date"], lag_days=self.available_lag_days
-                ).dt.strftime("%Y-%m-%d")
-            else:
-                data["available_at"] = _available_at(data["ann_date"], self.available_lag_days)
+            publication_provenance = "reported_ann_date"
+        elif "update_date" in data.columns:
+            data["ann_date"] = data["update_date"]
+            publication_provenance = "source_update_date_fallback"
+        else:
+            data["ann_date"] = pd.Series(pd.NA, index=data.index, dtype="string")
+            publication_provenance = "missing"
+
+        for column in (
+            "ann_date",
+            "report_period",
+            "update_date",
+            "ex_dividend_date",
+            "record_date",
+        ):
+            if column in data.columns:
+                parsed = pd.to_datetime(data[column], errors="coerce")
+                data[column] = parsed.dt.strftime("%Y-%m-%d")
+        if "report_period" not in data.columns:
+            data["report_period"] = pd.Series(pd.NA, index=data.index, dtype="string")
+
+        ann_dates = pd.to_datetime(data["ann_date"], errors="coerce")
+        if self.trading_calendar is not None and not self.trading_calendar.empty:
+            available = self.trading_calendar.resolve_available_at(
+                data["ann_date"], lag_days=self.available_lag_days
+            )
+        else:
+            available = pd.Series(pd.NaT, index=data.index, dtype="datetime64[ns]")
+        data["available_at"] = available.dt.strftime("%Y-%m-%d")
+        data["publication_date_provenance"] = publication_provenance
         data["source"] = f"{self.source}:{statement_name}" if statement_name else self.source
         data["source_reliability"] = 0.72
+        pit_valid = ann_dates.notna() & available.notna()
+        data["point_in_time_valid"] = pit_valid.astype(bool)
         data["raw_hash"] = [_row_hash(row) for row in data.to_dict("records")]
-        data["point_in_time_valid"] = True
         return data
 
     def _call_financial_report_sina(self, callable_api: object, symbol: str, category: str) -> pd.DataFrame:
@@ -338,7 +390,13 @@ class AkShareFinancialProvider:
     def _filter_by_request(frame: pd.DataFrame, request: ProviderRequest) -> pd.DataFrame:
         if frame is None or frame.empty:
             return pd.DataFrame()
-        date_column = "report_period" if "report_period" in frame.columns else "ann_date" if "ann_date" in frame.columns else ""
+        date_column = (
+            "report_period"
+            if "report_period" in frame.columns
+            else "ann_date"
+            if "ann_date" in frame.columns
+            else ""
+        )
         if not date_column:
             return frame
         parsed = pd.to_datetime(frame[date_column], errors="coerce")
@@ -404,9 +462,12 @@ def to_akshare_symbol(symbol: str) -> str:
 def akshare_financial_schema_report(frame: pd.DataFrame) -> dict[str, object]:
     missing = [column for column in AKSHARE_FINANCIAL_REQUIRED_COLUMNS if column not in frame.columns]
     pit_violations = 0
+    if "ann_date" in frame.columns:
+        pit_violations += int(pd.to_datetime(frame["ann_date"], errors="coerce").isna().sum())
     if "available_at" in frame.columns:
-        parsed = pd.to_datetime(frame["available_at"], errors="coerce")
-        pit_violations = int(parsed.isna().sum())
+        pit_violations += int(pd.to_datetime(frame["available_at"], errors="coerce").isna().sum())
+    if "point_in_time_valid" in frame.columns:
+        pit_violations += int((~frame["point_in_time_valid"].fillna(False).astype(bool)).sum())
     return {
         "status": "passed" if not missing and pit_violations == 0 else "failed",
         "row_count": int(0 if frame is None else len(frame)),
