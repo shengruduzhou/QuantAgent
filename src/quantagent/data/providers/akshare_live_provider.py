@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from quantagent.data.ashare.contracts import QUALITY_DERIVED, QUALITY_OK
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.trading_calendar import TradingCalendar
 
@@ -17,7 +18,11 @@ AKSHARE_MARKET_REQUIRED_COLUMNS: tuple[str, ...] = (
     "close",
     "volume",
     "amount",
+    "source",
+    "source_endpoint",
+    "retrieved_at",
     "available_at",
+    "quality_status",
 )
 
 # EastMoney remains the preferred documented A-share daily endpoint. The
@@ -377,6 +382,9 @@ def _normalize_akshare_daily(
     data["price_adjustment"] = adjust or "raw"
     data["adjustment_pit_vintage_bound"] = False
     data["source"] = f"akshare:{source}"
+    data["source_endpoint"] = _SOURCE_FUNCTIONS.get(source, "unknown")
+    data["retrieved_at"] = pd.Timestamp.now(tz="UTC").isoformat()
+    data["quality_status"] = QUALITY_OK if raw_prices else QUALITY_DERIVED
     data["source_type"] = "market_data"
     data["source_reliability"] = _SOURCE_RELIABILITY.get(source, 0.0)
     data["point_in_time_valid"] = bool(raw_prices and calendar_ok) & available.notna()
