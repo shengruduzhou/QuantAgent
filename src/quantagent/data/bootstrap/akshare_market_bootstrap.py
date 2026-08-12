@@ -196,7 +196,15 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
 
 
 def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
-    """Validate economics/provenance that a column-presence schema cannot prove."""
+    """Validate provenance plus unit economics, not merely generated unit labels.
+
+    For raw daily equity bars with positive turnover, ``amount / volume`` is an
+    observed VWAP proxy.  It must live on the same price scale as the day's
+    low/high range.  This catches the common 100x lots-vs-shares corruption even
+    if an adapter still stamps the row with ``volume_unit='shares'``.  A small
+    tolerance accommodates vendor rounding; zero-turnover suspension rows are
+    not forced through a meaningless VWAP calculation.
+    """
     violations: list[str] = []
     if frame is None or frame.empty:
         return {"status": "failed", "rows": 0, "violations": ["empty_market_candidate"]}
@@ -227,6 +235,55 @@ def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
         missing_source = frame["source"].astype("string").isna()
         if bool(missing_source.any()):
             violations.append(f"missing_source_rows:{int(missing_source.sum())}")
+
+    economic_columns = ("low", "high", "volume", "amount")
+    missing_economic_columns = [column for column in economic_columns if column not in frame.columns]
+    scale_checked_rows = 0
+    scale_violation_rows = 0
+    zero_turnover_rows = 0
+    tolerance = 0.02
+    if missing_economic_columns:
+        violations.append(
+            "missing_economic_scale_columns:" + ",".join(missing_economic_columns)
+        )
+    else:
+        low = pd.to_numeric(frame["low"], errors="coerce")
+        high = pd.to_numeric(frame["high"], errors="coerce")
+        volume = pd.to_numeric(frame["volume"], errors="coerce")
+        amount = pd.to_numeric(frame["amount"], errors="coerce")
+
+        invalid_price = low.isna() | high.isna() | (low <= 0) | (high <= 0) | (high < low)
+        if bool(invalid_price.any()):
+            violations.append(f"invalid_raw_price_scale_rows:{int(invalid_price.sum())}")
+
+        asymmetric_zero = ((volume <= 0) & (amount > 0)) | ((amount <= 0) & (volume > 0))
+        asymmetric_zero |= volume.isna() ^ amount.isna()
+        if bool(asymmetric_zero.any()):
+            violations.append(f"inconsistent_volume_amount_rows:{int(asymmetric_zero.sum())}")
+
+        zero_turnover = volume.fillna(0).eq(0) & amount.fillna(0).eq(0)
+        zero_turnover_rows = int(zero_turnover.sum())
+        testable = (
+            (~invalid_price)
+            & volume.notna()
+            & amount.notna()
+            & (volume > 0)
+            & (amount > 0)
+        )
+        scale_checked_rows = int(testable.sum())
+        if scale_checked_rows:
+            vwap_proxy = amount[testable] / volume[testable]
+            lower_bound = low[testable] * (1.0 - tolerance)
+            upper_bound = high[testable] * (1.0 + tolerance)
+            bad_scale = (vwap_proxy < lower_bound) | (vwap_proxy > upper_bound)
+            scale_violation_rows = int(bad_scale.sum())
+            if scale_violation_rows:
+                violations.append(
+                    f"amount_volume_price_scale_mismatch:rows={scale_violation_rows}"
+                )
+        elif not zero_turnover_rows:
+            violations.append("economic_scale_unverifiable:no_positive_turnover_rows")
+
     return {
         "status": "passed" if not violations else "failed",
         "rows": int(len(frame)),
@@ -234,6 +291,11 @@ def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
         "canonical_volume_unit": "shares",
         "canonical_amount_unit": "CNY",
         "canonical_price_adjustment": "raw",
+        "economic_scale_rule": "amount/volume_within_raw_low_high",
+        "economic_scale_tolerance": tolerance,
+        "economic_scale_checked_rows": scale_checked_rows,
+        "economic_scale_violation_rows": scale_violation_rows,
+        "zero_turnover_rows": zero_turnover_rows,
     }
 
 
