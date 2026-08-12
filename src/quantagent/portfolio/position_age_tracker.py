@@ -7,8 +7,10 @@ information the alpha used to open it. The tracker exposes a small
 state machine:
 
 * ``begin_session(initial_weights)`` — seed the tracker with weights at
-  ``t0`` (or empty for a cold start). Each seeded name's ``entry_date``
-  becomes ``None`` until the first observed update sets it.
+  ``t0`` (or empty for a cold start). A seeded holding whose historical age or
+  expected horizon is unavailable is conservatively locked until explicit
+  horizon evidence arrives; restart must never turn an existing holding into a
+  free-to-trade new position.
 * ``record_session(date, weights, expected_horizons)`` — update the
   registry: new names get an ``entry_date``; names whose weight drops to
   zero leave the registry; names whose weight is non-zero increment
@@ -24,12 +26,17 @@ would never bind.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Mapping
 
-import numpy as np
 import pandas as pd
+
+
+# A seeded canonical holding with no trustworthy lifecycle horizon must be
+# treated as locked rather than silently unlocked. A real theme/lifecycle
+# horizon replaces this sentinel as soon as one is observed.
+UNKNOWN_INITIAL_HORIZON_DAYS = 2_147_483_647
 
 
 @dataclass
@@ -68,6 +75,49 @@ class PositionAgeTracker:
                 )
         return tracker
 
+    def begin_session(
+        self,
+        initial_weights: Mapping[str, float] | None,
+        expected_horizons: Mapping[str, int | None] | None = None,
+    ) -> None:
+        """Seed missing live records from an externally recovered portfolio.
+
+        Persisted records take precedence because they contain observed age. A
+        non-zero canonical holding absent from persisted state is inserted with
+        unknown entry date and a conservative horizon sentinel unless explicit
+        lifecycle evidence is supplied. Zero weights are not holdings.
+        """
+
+        expected_horizons = dict(expected_horizons or {})
+        for raw_symbol, raw_weight in dict(initial_weights or {}).items():
+            symbol = str(raw_symbol)
+            weight = float(raw_weight)
+            if abs(weight) < 1e-9:
+                continue
+            existing = self._records.get(symbol)
+            if existing is not None:
+                existing.weight = weight
+                if (
+                    symbol in expected_horizons
+                    and expected_horizons[symbol] is not None
+                    and existing.expected_horizon_days is None
+                ):
+                    existing.expected_horizon_days = int(expected_horizons[symbol])
+                continue
+            supplied_horizon = expected_horizons.get(symbol)
+            self._records[symbol] = PositionRecord(
+                symbol=symbol,
+                entry_date=None,
+                last_seen=None,
+                weight=weight,
+                expected_horizon_days=(
+                    int(supplied_horizon)
+                    if supplied_horizon is not None
+                    else UNKNOWN_INITIAL_HORIZON_DAYS
+                ),
+                days_held=0,
+            )
+
     def persist(self) -> Path | None:
         if self._state_path is None:
             return None
@@ -105,6 +155,10 @@ class PositionAgeTracker:
                 # Position fully closed.
                 self._records.pop(str(symbol), None)
                 continue
+            # A recovered holding may have unknown historical entry date. The
+            # first observed session becomes a conservative age-zero anchor.
+            if record.entry_date is None:
+                record.entry_date = ts
             # Update existing — increment days_held only when calendar moves forward.
             if record.last_seen is None or ts > record.last_seen:
                 record.days_held += 1
@@ -156,4 +210,8 @@ class PositionAgeTracker:
         self._records.clear()
 
 
-__all__ = ["PositionRecord", "PositionAgeTracker"]
+__all__ = [
+    "UNKNOWN_INITIAL_HORIZON_DAYS",
+    "PositionRecord",
+    "PositionAgeTracker",
+]
