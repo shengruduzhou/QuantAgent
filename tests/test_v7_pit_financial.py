@@ -21,6 +21,7 @@ from quantagent.data.providers.tushare_financial_provider import (
     merge_statements,
 )
 from quantagent.data.providers.qlib_provider import QlibProvider, validate_qlib_market_schema
+from quantagent.data.trading_calendar import TradingCalendar
 from quantagent.fundamental.financial_features import (
     FinancialFeatureConfig,
     apply_point_in_time_filter as features_pit_filter,
@@ -56,6 +57,12 @@ def _cashflow_frame() -> pd.DataFrame:
     )
 
 
+def _publication_calendar() -> TradingCalendar:
+    return TradingCalendar.from_dates(
+        ["2026-03-31", "2026-04-01", "2026-04-02"]
+    )
+
+
 def test_tushare_provider_requires_network_and_token():
     provider = TuShareFinancialProvider(allow_network=False)
     with pytest.raises(ProviderUnavailable):
@@ -69,7 +76,10 @@ def test_akshare_provider_requires_network():
 
 
 def test_akshare_schema_normalization_and_snapshot_columns():
-    provider = AkShareFinancialProvider(allow_network=False)
+    provider = AkShareFinancialProvider(
+        allow_network=False,
+        trading_calendar=_publication_calendar(),
+    )
     raw = pd.DataFrame(
         [
             {
@@ -88,7 +98,29 @@ def test_akshare_schema_normalization_and_snapshot_columns():
 
     assert AKSHARE_FINANCIAL_REQUIRED_COLUMNS == ("symbol", "report_period", "ann_date", "available_at")
     assert report["status"] == "passed"
+    assert normalized.iloc[0]["available_at"] == "2026-04-01"
+    assert normalized.iloc[0]["point_in_time_valid"]
     assert {"symbol", "report_period", "ann_date", "available_at", "revenue", "raw_hash"}.issubset(normalized.columns)
+
+
+def test_financial_indicator_without_publication_date_is_explicitly_non_pit():
+    provider = AkShareFinancialProvider(
+        allow_network=False,
+        trading_calendar=_publication_calendar(),
+    )
+    normalized = provider._normalize(
+        pd.DataFrame([{"日期": "2025-12-31", "净资产收益率": 18.0}]),
+        {"日期": "report_period", "净资产收益率": "roe"},
+        "600519.SH",
+        "financial_indicator",
+    )
+    report = akshare_financial_schema_report(normalized)
+
+    assert pd.isna(normalized.iloc[0]["ann_date"])
+    assert pd.isna(normalized.iloc[0]["available_at"])
+    assert not normalized.iloc[0]["point_in_time_valid"]
+    assert normalized.iloc[0]["publication_date_provenance"] == "missing"
+    assert report["status"] == "failed"
 
 
 def test_akshare_symbol_conversion_and_update_date_fallback():
@@ -97,7 +129,10 @@ def test_akshare_symbol_conversion_and_update_date_fallback():
     assert to_akshare_symbol("300750.SZ") == "sz300750"
     assert to_akshare_symbol("688981.SH") == "sh688981"
 
-    provider = AkShareFinancialProvider(allow_network=False)
+    provider = AkShareFinancialProvider(
+        allow_network=False,
+        trading_calendar=_publication_calendar(),
+    )
     normalized = provider._normalize(
         pd.DataFrame([{"报告日期": "2025-12-31", "更新日期": "2026-03-31", "营业收入": 100.0}]),
         {"报告日期": "report_period", "更新日期": "update_date", "营业收入": "revenue"},
@@ -105,6 +140,8 @@ def test_akshare_symbol_conversion_and_update_date_fallback():
     )
     assert normalized.iloc[0]["ann_date"] == "2026-03-31"
     assert normalized.iloc[0]["available_at"] == "2026-04-01"
+    assert normalized.iloc[0]["publication_date_provenance"] == "source_update_date_fallback"
+    assert normalized.iloc[0]["point_in_time_valid"]
 
 
 def test_market_provider_schema_reports_missing_columns_and_pit_violations():
@@ -195,8 +232,6 @@ def test_build_financial_features_computes_ratios_and_growth():
     assert "gross_margin" in features.columns
     assert "ocf_to_profit" in features.columns
     assert "revenue_growth" in features.columns
-    # The 2024 annual report has no prior period, so revenue_growth should be nan,
-    # while the 2025 Q1 report has growth defined.
     by_period = features.set_index("report_period")
     assert pd.isna(by_period.loc["2024-12-31", "revenue_growth"])
 
@@ -223,5 +258,4 @@ def test_derive_v7_financial_columns_projects_existing_columns_only():
     assert "symbol" in projected.columns
     assert "revenue" in projected.columns
     assert "gross_margin" in projected.columns
-    # No PE/PB columns were supplied, so the projection must omit them
     assert "pe_ttm" not in projected.columns

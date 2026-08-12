@@ -61,7 +61,7 @@ quantagent download-qlib-v7 --target-dir E:\Project\QuantAgent\runtime\data\raw\
 quantagent check-qlib-v7 --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data --symbols 600519.SH
 quantagent build-market-panel-v7 --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data --symbols 600519.SH --start-date 2020-01-01 --end-date 2026-05-15
 quantagent build-akshare-v7 --symbols 600519.SH,000858.SZ --start-date 2020-01-01 --end-date 2026-05-15 --allow-network
-quantagent build-valuation-v7 --as-of-dates 2026-05-15 --allow-network
+quantagent build-valuation-v7 --as-of-dates 2026-05-15 --symbols 600519.SH,000001.SZ --allow-network   # historical infrastructure probe only; research universes must be governed PIT inputs
 quantagent build-labels-v7 --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet
 quantagent build-training-dataset-v7 --market-panel ... --labels ... --fundamentals-root ...
 quantagent train-alpha-v7 --dataset ...

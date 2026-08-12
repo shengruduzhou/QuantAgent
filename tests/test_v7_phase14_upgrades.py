@@ -79,8 +79,8 @@ def test_akshare_sector_provider_local_mapping_keeps_one_industry_per_symbol():
 
     local = pd.DataFrame(
         [
-            {"symbol": "600519.SH", "industry": "白酒"},
-            {"symbol": "000651.SZ", "industry": "家电"},
+            {"symbol": "600519.SH", "industry": "白酒", "available_at": "2024-12-31"},
+            {"symbol": "000651.SZ", "industry": "家电", "available_at": "2024-12-31"},
         ]
     )
     provider = AkShareSectorProvider(allow_network=False, local_mapping=local)

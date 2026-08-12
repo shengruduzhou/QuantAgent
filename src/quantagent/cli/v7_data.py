@@ -134,7 +134,7 @@ def build_akshare_v7(
         )
     )
     typer.echo(json_dump(result))
-    if result.get("status") == "empty":
+    if result.get("status") != "passed":
         raise typer.Exit(code=1)
 
 
@@ -147,19 +147,23 @@ def build_akshare_market_panel_v7(
     output_root: Path = typer.Option(None, "--output-root"),
     output_path: Path = typer.Option(None, "--output"),
     allow_network: bool = typer.Option(False, "--allow-network"),
-    adjust: str = typer.Option("qfq", "--adjust"),
+    adjust: str = typer.Option(
+        "",
+        "--adjust",
+        help="Raw/unadjusted is the canonical PIT default. qfq/hfq are derived research series and fail closed for PIT use unless vintaged adjustment-factor evidence is bound.",
+    ),
     provider_uri_for_range: Path | None = typer.Option(
         None,
         "--provider-uri-for-range",
         help="Optional Qlib provider_uri used to infer the AkShare start date after the local Qlib calendar.",
     ),
-    as_of_date: str | None = typer.Option(None, "--as-of-date", help="Default end-date anchor; weekends roll back to Friday."),
+    as_of_date: str | None = typer.Option(None, "--as-of-date", help="Default end-date anchor; resolved against the explicit A-share research calendar."),
 ) -> None:
     """Build a recent PIT market panel from AkShare daily OHLCV.
 
     This is the real-data path for dates beyond the official free Qlib CN
-    dump. Daily bars are marked available on the next business day so labels
-    and training can enforce PIT semantics downstream.
+    dump. Raw daily bars are marked available on the next explicit A-share
+    research session so labels and training can enforce PIT semantics downstream.
     """
     from quantagent.config.paths import quant_paths
     from quantagent.data.bootstrap.akshare_market_bootstrap import AkShareMarketPanelConfig, build_akshare_market_panel
@@ -274,8 +278,12 @@ def smoke_akshare_v7(
 @app.command("build-valuation-v7")
 def build_valuation_v7(
     as_of_dates: str = typer.Option("", "--as-of-dates", help="Comma-separated valuation snapshot dates (YYYY-MM-DD)."),
-    symbols: str = typer.Option("", "--symbols"),
-    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
+    symbols: str = typer.Option(
+        "",
+        "--symbols",
+        help="Explicit A-share symbols. Historical network snapshots require an explicit governed symbol set instead of a current-universe backfill.",
+    ),
+    symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line governed universe file."),
     lake_root: Path = typer.Option(None, "--lake-root"),
     allow_network: bool = typer.Option(False, "--allow-network"),
     csv_snapshot: Path | None = typer.Option(None, "--csv-snapshot", help="Optional pre-collected valuation snapshot."),

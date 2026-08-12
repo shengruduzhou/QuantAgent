@@ -1,4 +1,4 @@
-"""AkShare daily market-panel bootstrap for the V7 silver lake."""
+"""AKShare daily market-panel bootstrap for the V7 silver lake."""
 
 from __future__ import annotations
 
@@ -10,13 +10,15 @@ import pandas as pd
 from quantagent.config.paths import quant_paths
 from quantagent.data.lake import v7_lake_paths
 from quantagent.data.manifest import build_manifest_for_frame
+from quantagent.data.providers.akshare_calendar import load_akshare_research_calendar
 from quantagent.data.providers.akshare_live_provider import (
     AKSHARE_MARKET_REQUIRED_COLUMNS,
     AkShareLiveProvider,
     akshare_market_schema_report,
 )
 from quantagent.data.providers.base import ProviderRequest
-from quantagent.data.v7_auto_range import resolve_akshare_market_fetch_range
+from quantagent.data.trading_calendar import TradingCalendar
+from quantagent.data.v7_auto_range import V7ResolvedDateRange, resolve_akshare_market_fetch_range
 
 
 @dataclass(frozen=True)
@@ -27,79 +29,318 @@ class AkShareMarketPanelConfig:
     output_root: str | None = None
     output_path: str | None = None
     allow_network: bool = False
-    adjust: str = "qfq"
+    adjust: str = ""
     provider_uri_for_range: str | None = None
     as_of_date: str | None = None
 
 
 def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, object]:
     if not config.symbols:
-        raise ValueError("AkShare market panel requires at least one symbol")
+        raise ValueError("AKShare market panel requires at least one symbol")
     resolved_root = Path(config.output_root) if config.output_root else quant_paths().data_root / "v7"
     lake = v7_lake_paths(resolved_root).ensure()
-    resolved_range = resolve_akshare_market_fetch_range(
+    heuristic_range = resolve_akshare_market_fetch_range(
         start_date=config.start_date,
         end_date=config.end_date,
         provider_uri=config.provider_uri_for_range,
         lake_root=resolved_root,
         as_of_date=config.as_of_date,
     )
-    resolved_output = Path(config.output_path) if config.output_path else lake.silver_market_panel / "market_panel.parquet"
+    calendar_evidence = load_akshare_research_calendar(allow_network=config.allow_network)
+    research_calendar = calendar_evidence.calendar
+    calendar_meta = calendar_evidence.metadata
+    calendar_warnings = calendar_evidence.warnings
+    resolved_range = _snap_range_to_calendar(heuristic_range, research_calendar)
+    resolved_output = (
+        Path(config.output_path)
+        if config.output_path
+        else lake.silver_market_panel / "market_panel.parquet"
+    )
     request = ProviderRequest(
         start_date=resolved_range.start_date,
         end_date=resolved_range.end_date,
         symbols=config.symbols,
     )
-    result = AkShareLiveProvider(allow_network=config.allow_network, adjust=config.adjust).daily_ohlcv(request)
+
+    result = AkShareLiveProvider(
+        allow_network=config.allow_network,
+        adjust=config.adjust,
+        trading_calendar=research_calendar,
+        calendar_source=str(calendar_meta.get("source") or ""),
+    ).daily_ohlcv(request)
     merged_frame, merge_info = _merge_with_existing_panel(result.frame, resolved_output)
-    written = _write_frame(merged_frame, resolved_output)
-    schema_report = akshare_market_schema_report(merged_frame)
-    panel_start = str(merged_frame["trade_date"].min())[:10] if not merged_frame.empty else resolved_range.start_date
-    panel_end = str(merged_frame["trade_date"].max())[:10] if not merged_frame.empty else resolved_range.end_date
+    normalised = _normalise_dtypes(merged_frame)
+    schema_report = akshare_market_schema_report(normalised)
+    economic_report = _market_economic_contract_report(normalised)
+    failed_symbols = list(result.metadata.get("failed_symbols", []))
+    warnings = [*result.warnings, *calendar_warnings]
+
+    blockers: list[str] = []
+    if result.frame.empty:
+        blockers.append("akshare_fetch_empty")
+    if failed_symbols:
+        blockers.append("akshare_requested_symbol_coverage_incomplete")
+    if not result.point_in_time:
+        blockers.append("akshare_market_not_pit_certified")
+    if schema_report["status"] != "passed":
+        blockers.append("akshare_market_schema_or_pit_failed")
+    if economic_report["status"] != "passed":
+        blockers.append("akshare_market_economic_contract_failed")
+        warnings.extend(str(item) for item in economic_report["violations"])
+    if config.adjust:
+        blockers.append("akshare_adjusted_history_has_no_vintaged_adjustment_evidence")
+    if research_calendar.empty:
+        blockers.append("akshare_independent_research_calendar_unavailable")
+
+    # Never replace the canonical silver panel with a candidate that failed its
+    # own source/PIT/economic-unit contract. In particular, an older panel built
+    # before AKSHARE-DATA-CONTRACT-001 has no explicit unit/adjustment provenance
+    # and is quarantined for rebuild instead of being silently re-certified by a
+    # small number of new valid rows.
+    if blockers:
+        return {
+            "status": "blocked",
+            "output": None,
+            "manifest": None,
+            "rows": int(len(result.frame)),
+            "candidate_rows": int(len(normalised)),
+            "symbols": list(request.symbols),
+            "failed_symbols": failed_symbols,
+            "warnings": list(dict.fromkeys(warnings)),
+            "blockers": list(dict.fromkeys(blockers)),
+            "schema_report": schema_report,
+            "economic_contract_report": economic_report,
+            "calendar": calendar_meta,
+            "heuristic_range": heuristic_range.to_dict(),
+            "resolved_range": resolved_range.to_dict(),
+            "existing_panel_preserved": bool(resolved_output.exists()),
+            "rebuild_required": bool(
+                economic_report["status"] != "passed" and merge_info["merged_with_existing"]
+            ),
+        }
+
+    written = _write_frame(normalised, resolved_output)
+    panel_start = (
+        str(pd.to_datetime(normalised["trade_date"]).min().date())
+        if not normalised.empty
+        else resolved_range.start_date
+    )
+    panel_end = (
+        str(pd.to_datetime(normalised["trade_date"]).max().date())
+        if not normalised.empty
+        else resolved_range.end_date
+    )
     manifest_path = lake.manifests / "market_panel.json"
     prior_manifest = _read_prior_manifest(manifest_path)
-    prior_extra = prior_manifest.get("extra", {}) if isinstance(prior_manifest.get("extra"), dict) else {}
+    prior_extra = (
+        prior_manifest.get("extra", {})
+        if isinstance(prior_manifest.get("extra"), dict)
+        else {}
+    )
     extra = {
         "source": result.source,
-        "adjust": config.adjust,
+        "adjust": config.adjust or "raw",
         "function_name": result.metadata.get("function_name"),
-        "failed_symbols": result.metadata.get("failed_symbols", []),
+        "akshare_version": result.metadata.get("akshare_version"),
+        "source_order": result.metadata.get("source_order", []),
+        "source_counts": result.metadata.get("source_counts", {}),
+        "source_by_symbol": result.metadata.get("source_by_symbol", {}),
+        "failed_symbols": failed_symbols,
+        "requested_symbol_count": result.metadata.get("requested_symbol_count"),
+        "fetched_symbol_count": result.metadata.get("fetched_symbol_count"),
+        "canonical_volume_unit": result.metadata.get("canonical_volume_unit", "shares"),
+        "canonical_amount_unit": result.metadata.get("canonical_amount_unit", "CNY"),
+        "raw_volume_unit_by_source": result.metadata.get("raw_volume_unit_by_source", {}),
         "schema_report": schema_report,
-        "availability_rule": "daily_ohlcv_available_next_business_day",
+        "economic_contract_report": economic_report,
+        "availability_rule": "daily_bar_available_next_explicit_trading_session",
+        "calendar": calendar_meta,
+        "heuristic_range": heuristic_range.to_dict(),
         "resolved_range": resolved_range.to_dict(),
         "akshare_fetched_rows": int(len(result.frame)),
         "merge_info": merge_info,
         "config": asdict(config),
+        "legacy_panel_auto_recertification_blocked": True,
+        "production_integrity_certified": False,
     }
     if "adjustment_repair" in prior_extra:
         extra["adjustment_repair"] = prior_extra["adjustment_repair"]
     vendor = "qlib+akshare" if merge_info["merged_with_existing"] else "akshare"
-    if result.frame.empty and prior_manifest.get("vendor"):
-        vendor = str(prior_manifest["vendor"])
     manifest = build_manifest_for_frame(
         dataset_name="market_panel",
         vendor=vendor,
-        frame=merged_frame,
+        frame=normalised,
         output_paths=[written],
         start_date=panel_start,
         end_date=panel_end,
         symbols=request.symbols,
         required_columns=AKSHARE_MARKET_REQUIRED_COLUMNS,
         pit_violation_count=int(schema_report.get("pit_violation_count", 0)),
-        warnings=result.warnings,
+        warnings=tuple(dict.fromkeys(warnings)),
         extra=extra,
     )
     manifest.write(manifest_path)
     return {
-        "status": "passed" if not result.frame.empty and schema_report["status"] == "passed" else "empty",
+        "status": "passed",
         "output": str(written),
         "manifest": str(manifest_path),
         "rows": int(len(result.frame)),
         "symbols": list(request.symbols),
-        "warnings": list(result.warnings),
+        "warnings": list(dict.fromkeys(warnings)),
         "schema_report": schema_report,
+        "economic_contract_report": economic_report,
+        "calendar": calendar_meta,
+        "heuristic_range": heuristic_range.to_dict(),
         "resolved_range": resolved_range.to_dict(),
     }
+
+
+def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
+    """Validate provenance plus unit economics, not merely generated unit labels.
+
+    For raw daily equity bars with positive turnover, ``amount / volume`` is an
+    observed VWAP proxy.  It must live on the same price scale as the day's
+    low/high range.  This catches the common 100x lots-vs-shares corruption even
+    if an adapter still stamps the row with ``volume_unit='shares'``.  A small
+    tolerance accommodates vendor rounding; zero-turnover suspension rows are
+    not forced through a meaningless VWAP calculation.
+    """
+    violations: list[str] = []
+    if frame is None or frame.empty:
+        return {"status": "failed", "rows": 0, "violations": ["empty_market_candidate"]}
+    required_truth = {
+        "volume_unit": "shares",
+        "amount_unit": "CNY",
+        "price_adjustment": "raw",
+    }
+    for column, expected in required_truth.items():
+        if column not in frame.columns:
+            violations.append(f"missing_economic_provenance:{column}")
+            continue
+        values = frame[column].astype("string")
+        bad = values.isna() | values.ne(expected)
+        if bool(bad.any()):
+            violations.append(
+                f"noncanonical_{column}:expected={expected}:rows={int(bad.sum())}"
+            )
+    if "point_in_time_valid" not in frame.columns:
+        violations.append("missing_economic_provenance:point_in_time_valid")
+    else:
+        valid = frame["point_in_time_valid"].fillna(False).astype(bool)
+        if not bool(valid.all()):
+            violations.append(f"non_pit_market_rows:{int((~valid).sum())}")
+    if "source" not in frame.columns:
+        violations.append("missing_economic_provenance:source")
+    else:
+        missing_source = frame["source"].astype("string").isna()
+        if bool(missing_source.any()):
+            violations.append(f"missing_source_rows:{int(missing_source.sum())}")
+
+    economic_columns = ("low", "high", "volume", "amount")
+    missing_economic_columns = [column for column in economic_columns if column not in frame.columns]
+    scale_checked_rows = 0
+    scale_violation_rows = 0
+    zero_turnover_rows = 0
+    tolerance = 0.02
+    if missing_economic_columns:
+        violations.append(
+            "missing_economic_scale_columns:" + ",".join(missing_economic_columns)
+        )
+    else:
+        low = pd.to_numeric(frame["low"], errors="coerce")
+        high = pd.to_numeric(frame["high"], errors="coerce")
+        volume = pd.to_numeric(frame["volume"], errors="coerce")
+        amount = pd.to_numeric(frame["amount"], errors="coerce")
+
+        invalid_price = low.isna() | high.isna() | (low <= 0) | (high <= 0) | (high < low)
+        if bool(invalid_price.any()):
+            violations.append(f"invalid_raw_price_scale_rows:{int(invalid_price.sum())}")
+
+        asymmetric_zero = ((volume <= 0) & (amount > 0)) | ((amount <= 0) & (volume > 0))
+        asymmetric_zero |= volume.isna() ^ amount.isna()
+        if bool(asymmetric_zero.any()):
+            violations.append(f"inconsistent_volume_amount_rows:{int(asymmetric_zero.sum())}")
+
+        zero_turnover = volume.fillna(0).eq(0) & amount.fillna(0).eq(0)
+        zero_turnover_rows = int(zero_turnover.sum())
+        testable = (
+            (~invalid_price)
+            & volume.notna()
+            & amount.notna()
+            & (volume > 0)
+            & (amount > 0)
+        )
+        scale_checked_rows = int(testable.sum())
+        if scale_checked_rows:
+            vwap_proxy = amount[testable] / volume[testable]
+            lower_bound = low[testable] * (1.0 - tolerance)
+            upper_bound = high[testable] * (1.0 + tolerance)
+            bad_scale = (vwap_proxy < lower_bound) | (vwap_proxy > upper_bound)
+            scale_violation_rows = int(bad_scale.sum())
+            if scale_violation_rows:
+                violations.append(
+                    f"amount_volume_price_scale_mismatch:rows={scale_violation_rows}"
+                )
+        elif not zero_turnover_rows:
+            violations.append("economic_scale_unverifiable:no_positive_turnover_rows")
+
+    return {
+        "status": "passed" if not violations else "failed",
+        "rows": int(len(frame)),
+        "violations": violations,
+        "canonical_volume_unit": "shares",
+        "canonical_amount_unit": "CNY",
+        "canonical_price_adjustment": "raw",
+        "economic_scale_rule": "amount/volume_within_raw_low_high",
+        "economic_scale_tolerance": tolerance,
+        "economic_scale_checked_rows": scale_checked_rows,
+        "economic_scale_violation_rows": scale_violation_rows,
+        "zero_turnover_rows": zero_turnover_rows,
+    }
+
+
+def _snap_range_to_calendar(
+    value: V7ResolvedDateRange,
+    calendar: TradingCalendar,
+) -> V7ResolvedDateRange:
+    """Snap heuristic weekday dates to the actual research session set."""
+    if calendar.empty:
+        return value
+    sessions = pd.DatetimeIndex(calendar.trading_days).normalize()
+    start = pd.Timestamp(value.start_date).normalize()
+    end = pd.Timestamp(value.end_date).normalize()
+    starts = sessions[sessions >= start]
+    ends = sessions[sessions <= end]
+    if starts.empty or ends.empty:
+        raise ValueError(
+            "AKShare research calendar has no session covering the resolved fetch window"
+        )
+    snapped_start = starts[0]
+    snapped_end = ends[-1]
+    if snapped_start > snapped_end:
+        raise ValueError(
+            "AKShare fetch window contains no trading session after calendar snapping"
+        )
+    notes = list(value.notes)
+    if snapped_start != start:
+        notes.append(f"start_snapped_to_session={snapped_start.date()}")
+    if snapped_end != end:
+        notes.append(f"end_snapped_to_session={snapped_end.date()}")
+    return V7ResolvedDateRange(
+        start_date=str(snapped_start.date()),
+        end_date=str(snapped_end.date()),
+        source=value.source + "+akshare_session_calendar",
+        notes=tuple(notes),
+    )
+
+
+# Compatibility wrapper for callers/tests that imported the former bootstrap-
+# local helper. New code should use providers.akshare_calendar directly.
+def _load_akshare_research_calendar(
+    *, allow_network: bool
+) -> tuple[TradingCalendar, dict[str, object], tuple[str, ...]]:
+    evidence = load_akshare_research_calendar(allow_network=allow_network)
+    return evidence.calendar, evidence.metadata, evidence.warnings
 
 
 def _read_prior_manifest(path: Path) -> dict[str, object]:
@@ -130,36 +371,46 @@ def _write_frame(frame: pd.DataFrame, path: Path) -> Path:
 
 
 def _normalise_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
-    """Coerce mixed dtypes (qlib+akshare concat) into a parquet-safe schema."""
+    """Coerce mixed dtypes without inventing missing PIT evidence."""
     out = frame.copy()
-    for col in ("open", "high", "low", "close", "volume", "amount", "source_reliability"):
+    for col in (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "source_reliability",
+    ):
         if col in out:
             out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
     for col in ("trade_date", "available_at"):
         if col in out:
             out[col] = pd.to_datetime(out[col], errors="coerce")
-    if "trade_date" in out:
-        if "available_at" not in out:
-            out["available_at"] = pd.NaT
-        missing_available = out["available_at"].isna()
-        out.loc[missing_available, "available_at"] = (
-            pd.to_datetime(out.loc[missing_available, "trade_date"], errors="coerce") + pd.offsets.BDay(1)
-        )
-    for col in ("symbol", "source", "source_type"):
+    if "trade_date" in out and "available_at" not in out:
+        out["available_at"] = pd.NaT
+    for col in (
+        "symbol",
+        "source",
+        "source_type",
+        "volume_unit",
+        "raw_volume_unit",
+        "amount_unit",
+        "price_adjustment",
+    ):
         if col in out:
             out[col] = out[col].astype("string")
     if "point_in_time_valid" in out:
-        out["point_in_time_valid"] = out["point_in_time_valid"].fillna(True).astype("bool")
+        out["point_in_time_valid"] = (
+            out["point_in_time_valid"].fillna(False).astype("bool")
+        )
     return out
 
 
-def _merge_with_existing_panel(new_frame: pd.DataFrame, output_path: Path) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Concat new AkShare rows with any existing panel and dedup on (symbol, trade_date).
-
-    Existing rows (typically the qlib 1999→2020 base) are preserved; AkShare rows win
-    on overlap because they reflect the latest adjusted close. The merged panel becomes
-    the contiguous 1999→today market_panel used downstream.
-    """
+def _merge_with_existing_panel(
+    new_frame: pd.DataFrame, output_path: Path
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Concat new rows with an existing panel and dedup on (symbol, trade_date)."""
     info: dict[str, object] = {
         "merged_with_existing": False,
         "existing_rows": 0,
@@ -190,7 +441,9 @@ def _merge_with_existing_panel(new_frame: pd.DataFrame, output_path: Path) -> tu
     new_aligned = new_frame.reindex(columns=aligned_cols)
     combined = pd.concat([existing, new_aligned], ignore_index=True)
     combined["trade_date"] = pd.to_datetime(combined["trade_date"])
-    combined = combined.drop_duplicates(subset=["symbol", "trade_date"], keep="last")
+    combined = combined.drop_duplicates(
+        subset=["symbol", "trade_date"], keep="last"
+    )
     combined = combined.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     info["final_rows"] = int(len(combined))
     return combined, info
