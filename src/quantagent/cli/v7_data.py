@@ -304,6 +304,8 @@ def build_valuation_v7(
         )
     )
     typer.echo(json_dump(result))
+    if result.get("status") != "passed":
+        raise typer.Exit(code=1)
 
 
 @app.command("build-fundamentals-v7")
