@@ -254,6 +254,28 @@ def _install_fake_akshare_calendar(monkeypatch, dates: list[str]) -> None:
     monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
 
 
+def _fake_canonical_market_row(trade_date: str, available_at: str) -> dict[str, object]:
+    return {
+        "symbol": "600519.SH",
+        "trade_date": trade_date,
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.5,
+        "close": 10.5,
+        "volume": 1000,
+        "amount": 10500.0,
+        "available_at": available_at,
+        "volume_unit": "shares",
+        "amount_unit": "CNY",
+        "price_adjustment": "raw",
+        "point_in_time_valid": True,
+        "source": "akshare:tencent",
+        "source_endpoint": "stock_zh_a_hist_tx",
+        "retrieved_at": "2026-08-12T00:00:00+00:00",
+        "quality_status": "OK",
+    }
+
+
 def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
     from quantagent.data.providers.base import ProviderResult
@@ -264,26 +286,7 @@ def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     )
 
     def fake_daily(self, request):
-        frame = pd.DataFrame(
-            [
-                {
-                    "symbol": "600519.SH",
-                    "trade_date": "2024-01-02",
-                    "open": 10.0,
-                    "high": 11.0,
-                    "low": 9.5,
-                    "close": 10.5,
-                    "volume": 1000,
-                    "amount": 10500.0,
-                    "available_at": "2024-01-03",
-                    "volume_unit": "shares",
-                    "amount_unit": "CNY",
-                    "price_adjustment": "raw",
-                    "point_in_time_valid": True,
-                    "source": "akshare:tencent",
-                }
-            ]
-        )
+        frame = pd.DataFrame([_fake_canonical_market_row("2024-01-02", "2024-01-03")])
         return ProviderResult(frame, source="akshare_live_provider:stock_zh_a_hist", point_in_time=True)
 
     monkeypatch.setattr(AkShareLiveProvider, "daily_ohlcv", fake_daily)
@@ -311,6 +314,62 @@ def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     assert (output_root / "manifests" / "market_panel.json").exists()
 
 
+def test_build_akshare_market_panel_defaults_to_raw(monkeypatch, tmp_path):
+    from quantagent.data.bootstrap import akshare_market_bootstrap
+
+    captured: dict[str, object] = {}
+
+    def fake_build(config):
+        captured["adjust"] = config.adjust
+        return {"status": "passed", "output": str(tmp_path / "market.parquet")}
+
+    monkeypatch.setattr(akshare_market_bootstrap, "build_akshare_market_panel", fake_build)
+    result = CliRunner().invoke(
+        app,
+        [
+            "build-akshare-market-panel-v7",
+            "--symbols",
+            "600519.SH",
+            "--start-date",
+            "2024-01-02",
+            "--end-date",
+            "2024-01-03",
+            "--output-root",
+            str(tmp_path / "lake"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["adjust"] == ""
+
+
+def test_build_akshare_v7_blocked_status_exits_nonzero(monkeypatch, tmp_path):
+    from quantagent.data.bootstrap import akshare_bootstrap
+
+    monkeypatch.setattr(
+        akshare_bootstrap,
+        "build_akshare_financial_cache",
+        lambda config: {"status": "blocked", "warnings": ["missing_pit_evidence"]},
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "build-akshare-v7",
+            "--symbols",
+            "600519.SH",
+            "--start-date",
+            "2024-01-01",
+            "--end-date",
+            "2025-01-01",
+            "--lake-root",
+            str(tmp_path / "lake"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["status"] == "blocked"
+
+
 def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, tmp_path):
     from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
     from quantagent.data.providers.base import ProviderResult
@@ -327,26 +386,7 @@ def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, 
     def fake_daily(self, request):
         assert request.start_date == "2020-09-28"
         assert request.end_date == "2026-05-15"
-        frame = pd.DataFrame(
-            [
-                {
-                    "symbol": "600519.SH",
-                    "trade_date": "2021-01-04",
-                    "open": 10.0,
-                    "high": 11.0,
-                    "low": 9.5,
-                    "close": 10.5,
-                    "volume": 1000,
-                    "amount": 10500.0,
-                    "available_at": "2021-01-05",
-                    "volume_unit": "shares",
-                    "amount_unit": "CNY",
-                    "price_adjustment": "raw",
-                    "point_in_time_valid": True,
-                    "source": "akshare:tencent",
-                }
-            ]
-        )
+        frame = pd.DataFrame([_fake_canonical_market_row("2021-01-04", "2021-01-05")])
         return ProviderResult(frame, source="akshare_live_provider:stock_zh_a_hist", point_in_time=True)
 
     monkeypatch.setattr(AkShareLiveProvider, "daily_ohlcv", fake_daily)
