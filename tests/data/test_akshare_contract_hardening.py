@@ -38,7 +38,7 @@ def _tencent_raw(volume: int = 123_400) -> pd.DataFrame:
                 "low": 9.5,
                 "volume": volume,
                 "turnover": 0.01,
-                "amount": 12_950_000.0,
+                "amount": 1_295_000.0,
             }
         ]
     )
@@ -54,7 +54,7 @@ def test_eastmoney_daily_volume_lots_are_normalized_to_shares() -> None:
                 "最低": 9.5,
                 "收盘": 10.5,
                 "成交量": 1234,
-                "成交额": 12_950_000.0,
+                "成交额": 1_295_000.0,
             }
         ]
     )
@@ -83,7 +83,7 @@ def test_tencent_daily_volume_and_amount_are_already_canonical() -> None:
     )
     assert result["volume"].tolist() == [123_400]
     assert result["raw_volume_unit"].tolist() == ["shares"]
-    assert result["amount"].tolist() == [12_950_000.0]
+    assert result["amount"].tolist() == [1_295_000.0]
     assert result["amount_unit"].tolist() == ["CNY"]
     assert result["source"].tolist() == ["akshare:tencent"]
     assert result["point_in_time_valid"].tolist() == [True]
@@ -99,7 +99,7 @@ def test_sina_daily_volume_shares_are_not_rescaled() -> None:
                 "low": 9.5,
                 "close": 10.5,
                 "volume": 123_400,
-                "amount": 12_950_000.0,
+                "amount": 1_295_000.0,
             }
         ]
     )
@@ -228,7 +228,7 @@ def test_legacy_panel_without_unit_or_adjustment_provenance_fails_contract() -> 
                 "low": 9.5,
                 "close": 10.5,
                 "volume": 1234.0,
-                "amount": 12_950_000.0,
+                "amount": 1_295_000.0,
                 "source": "akshare_live_provider",
                 "point_in_time_valid": True,
             }
@@ -281,7 +281,7 @@ def test_provider_binds_version_units_and_complete_symbol_coverage(monkeypatch) 
                     "最低": 9.5,
                     "收盘": 10.5,
                     "成交量": 1234,
-                    "成交额": 12_950_000.0,
+                    "成交额": 1_295_000.0,
                 }
             ]
         )
@@ -356,7 +356,7 @@ def test_provider_partial_symbol_failure_is_not_pit_certified(monkeypatch) -> No
                     "最低": 9.5,
                     "收盘": 10.5,
                     "成交量": 1234,
-                    "成交额": 12_950_000.0,
+                    "成交额": 1_295_000.0,
                 }
             ]
         )
