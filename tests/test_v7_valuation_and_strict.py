@@ -1,4 +1,4 @@
-"""AkShare valuation provider normalisation, valuation bootstrap, strict-mode checks."""
+"""AKShare valuation provider normalisation, valuation bootstrap, strict-mode checks."""
 from __future__ import annotations
 
 import json
@@ -16,12 +16,14 @@ from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_tr
 from quantagent.data.providers.akshare_valuation_provider import (
     AKSHARE_UNIVERSE_REQUIRED_COLUMNS,
     AKSHARE_VALUATION_REQUIRED_COLUMNS,
+    AkShareSectorProvider,
     AkShareUniverseProvider,
     AkShareValuationProvider,
     akshare_universe_schema_report,
     akshare_valuation_schema_report,
 )
 from quantagent.data.providers.base import ProviderRequest, ProviderUnavailable
+from quantagent.data.trading_calendar import TradingCalendar
 from quantagent.data.v7_label_builder import build_forward_return_labels
 
 
@@ -51,73 +53,95 @@ def _market_panel(days: int = 30) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _valuation_calendar() -> TradingCalendar:
+    return TradingCalendar.from_dates(
+        ["2026-05-14", "2026-05-15", "2026-05-18", "2026-05-19"]
+    )
+
+
 def test_universe_provider_requires_network():
     with pytest.raises(ProviderUnavailable):
         AkShareUniverseProvider(allow_network=False).list_universe()
 
 
-def test_valuation_provider_normalises_chinese_columns():
+def test_valuation_internal_backdate_normalizer_is_explicitly_non_pit():
     raw = pd.DataFrame(
         [
-            {"代码": "600519", "名称": "贵州茅台", "市盈率-动态": 30.0, "市净率": 9.5, "总市值": 2_000_000_000_000, "流通市值": 1_900_000_000_000},
-            {"代码": "000858", "名称": "五粮液", "市盈率-动态": 18.0, "市净率": 6.0, "总市值": 800_000_000_000, "流通市值": 600_000_000_000},
+            {
+                "代码": "600519",
+                "名称": "贵州茅台",
+                "市盈率-动态": 30.0,
+                "市净率": 9.5,
+                "总市值": 2_000_000_000_000,
+                "流通市值": 1_900_000_000_000,
+            }
         ]
     )
     provider = AkShareValuationProvider(allow_network=False)
     normalised = provider._normalize(raw, "2026-05-15")
-    report = akshare_valuation_schema_report(normalised)
-    assert report["status"] == "passed"
-    assert {"symbol", "trade_date", "available_at", "pe_ttm", "pb", "market_cap"}.issubset(normalised.columns)
-    assert normalised["symbol"].tolist() == ["600519.SH", "000858.SZ"]
+
+    assert normalised["symbol"].tolist() == ["600519.SH"]
+    assert normalised["point_in_time_valid"].tolist() == [False]
+    assert normalised["available_at"].isna().all()
+    assert akshare_valuation_schema_report(normalised)["status"] == "failed"
 
 
-def test_valuation_provider_falls_back_to_symbol_endpoints(monkeypatch):
-    def stock_zh_a_spot_em() -> pd.DataFrame:
-        raise ConnectionError("spot disconnected")
+def test_current_spot_snapshot_cannot_be_backdated():
+    request = ProviderRequest("2026-01-01", "2026-05-15", symbols=("600519.SH",))
+    with pytest.raises(ProviderUnavailable, match="cannot be backdated"):
+        AkShareValuationProvider(allow_network=True).snapshot("2026-05-15", request)
 
-    def stock_individual_info_em(symbol: str) -> pd.DataFrame:
+
+def test_historical_baidu_valuation_uses_source_dates_and_canonical_market_cap(monkeypatch):
+    def stock_zh_valuation_baidu(symbol: str, indicator: str, period: str) -> pd.DataFrame:
+        assert symbol == "600519"
+        assert period in {"近一年", "近三年", "近五年", "近十年", "全部"}
+        values = {
+            "市盈率(TTM)": [20.0, 21.0],
+            "市净率": [7.0, 7.2],
+            # Baidu UI/source series is displayed in 亿; provider converts to CNY.
+            "总市值": [20000.0, 21000.0],
+        }[indicator]
         return pd.DataFrame(
-            [
-                {"item": "股票代码", "value": symbol},
-                {"item": "股票简称", "value": "贵州茅台"},
-                {"item": "总市值", "value": 2_000_000_000_000},
-                {"item": "流通市值", "value": 1_900_000_000_000},
-            ]
-        )
-
-    def stock_zh_valuation_comparison_em(symbol: str) -> pd.DataFrame:
-        return pd.DataFrame(
-            [
-                {
-                    "代码": "600519",
-                    "简称": "贵州茅台",
-                    "市盈率-TTM": 24.5,
-                    "市净率-MRQ": 8.5,
-                    "市销率-TTM": 12.0,
-                    "PEG": 1.2,
-                    "EV/EBITDA-24A": 18.0,
-                }
-            ]
+            {
+                "date": ["2026-05-14", "2026-05-15"],
+                "value": values,
+            }
         )
 
     fake_akshare = types.SimpleNamespace(
-        stock_zh_a_spot_em=stock_zh_a_spot_em,
-        stock_individual_info_em=stock_individual_info_em,
-        stock_zh_valuation_comparison_em=stock_zh_valuation_comparison_em,
+        __version__="1.18.84",
+        stock_zh_valuation_baidu=stock_zh_valuation_baidu,
     )
     monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+    provider = AkShareValuationProvider(
+        allow_network=True,
+        retry_sleep_seconds=0,
+        rate_limit_seconds=0,
+        trading_calendar=_valuation_calendar(),
+    )
+    result = provider.historical(
+        ProviderRequest("2026-05-14", "2026-05-15", symbols=("600519.SH",))
+    )
 
-    request = ProviderRequest("2026-01-01", "2026-05-15", symbols=("600519.SH",))
-    result = AkShareValuationProvider(allow_network=True, retry_sleep_seconds=0).snapshot("2026-05-15", request)
+    assert result.point_in_time is True
+    assert result.metadata["function_name"] == "stock_zh_valuation_baidu"
+    assert result.metadata["market_cap_source_unit"] == "1e8_CNY"
+    assert result.metadata["market_cap_unit"] == "CNY"
+    assert result.frame["market_cap"].tolist() == [2_000_000_000_000.0, 2_100_000_000_000.0]
+    assert result.frame["market_cap_raw"].tolist() == [20000.0, 21000.0]
+    assert pd.to_datetime(result.frame["available_at"]).dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-05-15",
+        "2026-05-18",
+    ]
+    assert result.frame["point_in_time_valid"].tolist() == [True, True]
 
-    assert result.metadata["schema_report"]["status"] == "passed"
-    assert result.frame[["symbol", "pe_ttm", "pb", "market_cap"]].iloc[0].to_dict() == {
-        "symbol": "600519.SH",
-        "pe_ttm": 24.5,
-        "pb": 8.5,
-        "market_cap": 2_000_000_000_000,
-    }
-    assert any("akshare_valuation_spot_em_failed" in warning for warning in result.warnings)
+
+def test_sector_network_snapshot_cannot_be_backdated():
+    with pytest.raises(ProviderUnavailable, match="current membership only"):
+        AkShareSectorProvider(allow_network=True).industry_classification(
+            as_of_date="2026-05-15"
+        )
 
 
 def test_universe_schema_report_lists_required_columns():
@@ -127,10 +151,18 @@ def test_universe_schema_report_lists_required_columns():
     assert "name" in report["missing_columns"]
 
 
-def test_valuation_bootstrap_uses_csv_snapshot_and_writes_manifest(tmp_path):
+def test_valuation_bootstrap_uses_explicit_pit_csv_snapshot_and_writes_manifest(tmp_path):
     snapshot = pd.DataFrame(
         [
-            {"symbol": "600519.SH", "trade_date": "2026-05-15", "available_at": "2026-05-15", "pe_ttm": 30.0, "pb": 9.5, "market_cap": 2_000_000_000_000},
+            {
+                "symbol": "600519.SH",
+                "trade_date": "2026-05-15",
+                "available_at": "2026-05-18",
+                "pe_ttm": 30.0,
+                "pb": 9.5,
+                "market_cap": 2_000_000_000_000,
+                "point_in_time_valid": True,
+            },
         ]
     )
     csv_path = tmp_path / "valuation_snapshot.csv"
@@ -147,9 +179,45 @@ def test_valuation_bootstrap_uses_csv_snapshot_and_writes_manifest(tmp_path):
     assert Path(result["manifest_path"]).exists()
 
 
+def test_valuation_bootstrap_blocks_csv_without_explicit_pit_evidence(tmp_path):
+    snapshot = pd.DataFrame(
+        [
+            {
+                "symbol": "600519.SH",
+                "trade_date": "2026-05-15",
+                "pe_ttm": 30.0,
+                "pb": 9.5,
+                "market_cap": 2_000_000_000_000,
+            }
+        ]
+    )
+    csv_path = tmp_path / "valuation_snapshot.csv"
+    snapshot.to_csv(csv_path, index=False)
+    result = build_valuation_cache(
+        ValuationBootstrapConfig(
+            as_of_dates=(),
+            lake_root=str(tmp_path / "lake"),
+            csv_snapshot=str(csv_path),
+        )
+    )
+    assert result["status"] == "blocked"
+    assert result["output_path"] is None
+    assert "valuation_local_snapshot_missing_explicit_pit_evidence" in result["blockers"]
+
+
 def test_cli_build_valuation_v7(tmp_path):
     snapshot = pd.DataFrame(
-        [{"symbol": "600519.SH", "trade_date": "2026-05-15", "available_at": "2026-05-15", "pe_ttm": 30.0, "pb": 9.5, "market_cap": 2_000_000_000_000}]
+        [
+            {
+                "symbol": "600519.SH",
+                "trade_date": "2026-05-15",
+                "available_at": "2026-05-18",
+                "pe_ttm": 30.0,
+                "pb": 9.5,
+                "market_cap": 2_000_000_000_000,
+                "point_in_time_valid": True,
+            }
+        ]
     )
     csv_path = tmp_path / "snapshot.csv"
     snapshot.to_csv(csv_path, index=False)
@@ -256,5 +324,4 @@ def test_cli_lists_new_v7_commands():
         assert command in result.output, command
 
 
-# silence "imported but unused" for the JSON guard used in the strict-mode test loop
 _ = json
