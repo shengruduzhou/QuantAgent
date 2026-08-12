@@ -241,7 +241,7 @@ test("a missing PBO estimate is reported as no evidence, never as a pass", async
   renderPage();
   await screen.findByText("因子融合工场");
   await waitFor(() => expect(screen.getAllByText("无估计").length).toBeGreaterThan(0));
-  expect(screen.getByText(/不按通过计入/)).toBeInTheDocument();
+  expect(await screen.findByText(/不按通过计入/)).toBeInTheDocument();
 });
 
 test("launching a search posts the governed command without a trial count", async () => {
