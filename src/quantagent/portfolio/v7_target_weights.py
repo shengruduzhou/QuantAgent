@@ -124,6 +124,38 @@ def _effective_participation_rate(config: V7TargetWeightsConfig) -> float:
     return rate
 
 
+def _normalize_initial_weights(
+    initial_weights: pd.Series | None,
+    *,
+    long_short: bool,
+) -> pd.Series | None:
+    """Validate an externally recovered starting portfolio.
+
+    Historical multi-date research calls can omit this input and retain the
+    legacy in-call previous-day state. Paper/shadow callers use it to seed the
+    first date from canonical executed holdings instead of an implicit zero
+    portfolio. Duplicate symbols are aggregated after string normalisation.
+    """
+
+    if initial_weights is None:
+        return None
+    if not isinstance(initial_weights, pd.Series):
+        raise TypeError("initial_weights must be a pandas Series indexed by symbol")
+    weights = pd.to_numeric(initial_weights.copy(), errors="coerce")
+    weights.index = weights.index.astype(str)
+    if weights.index.str.strip().eq("").any():
+        raise ValueError("initial_weights contains a blank symbol")
+    weights.index = weights.index.str.strip()
+    weights = weights.groupby(level=0).sum().astype(float)
+    values = weights.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("initial_weights contains missing or non-finite values")
+    if not long_short and bool((weights < -1e-12).any()):
+        raise ValueError("long-only target construction cannot start from negative weights")
+    weights = weights.where(weights.abs() > 1e-12, 0.0)
+    return weights.sort_index()
+
+
 def build_v7_target_weights(
     predictions: pd.DataFrame,
     market_panel: pd.DataFrame,
@@ -133,6 +165,7 @@ def build_v7_target_weights(
     theme_signals: pd.DataFrame | None = None,
     timing_plan: pd.DataFrame | None = None,
     position_state_path: Path | None = None,
+    initial_weights: pd.Series | None = None,
 ) -> V7TargetWeightsResult:
     """Convert per-symbol predictions into a daily target-weights panel.
 
@@ -149,6 +182,9 @@ def build_v7_target_weights(
     * ``position_state_path`` — parquet path the position-age tracker
       persists to. State survives walk-forward fold boundaries, so the
       holding-period constraint actually binds.
+    * ``initial_weights`` — optional externally recovered current weights used
+      as the first-date ``previous_weights``. Historical research can omit it;
+      paper/shadow target construction should bind it to canonical fills.
     """
 
     config = config or V7TargetWeightsConfig()
@@ -200,7 +236,16 @@ def build_v7_target_weights(
         "timing_gate_summary": [],
         "holding_period_locks": [],
     }
-    previous_weights: pd.Series | None = None
+    previous_weights = _normalize_initial_weights(
+        initial_weights,
+        long_short=bool(config.long_short),
+    )
+    initial_state_diagnostics = {
+        "supplied": bool(initial_weights is not None),
+        "symbol_count": int(len(previous_weights)) if previous_weights is not None else 0,
+        "gross_exposure": float(previous_weights.abs().sum()) if previous_weights is not None else 0.0,
+        "net_exposure": float(previous_weights.sum()) if previous_weights is not None else 0.0,
+    }
 
     effective_participation = _effective_participation_rate(config)
 
@@ -531,7 +576,10 @@ def build_v7_target_weights(
         )
 
     if not by_date_weights:
-        return V7TargetWeightsResult(pd.DataFrame(), {"status": "all_dates_rejected", **diagnostics})
+        return V7TargetWeightsResult(
+            pd.DataFrame(),
+            {"status": "all_dates_rejected", "initial_weights": initial_state_diagnostics, **diagnostics},
+        )
 
     long_format = pd.concat(by_date_weights, ignore_index=True)
     pivot = long_format.pivot_table(index="trade_date", columns="symbol", values="weight", aggfunc="last").fillna(0.0)
@@ -580,6 +628,7 @@ def build_v7_target_weights(
             "max_turnover": config.max_turnover,
             "weighting": config.weighting,
         },
+        "initial_weights": initial_state_diagnostics,
         "config": asdict(config),
         **diagnostics,
     }
