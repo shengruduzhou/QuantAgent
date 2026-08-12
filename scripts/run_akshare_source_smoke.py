@@ -31,13 +31,17 @@ def _plain_code(symbol: str) -> str:
     return str(symbol).split(".", 1)[0].zfill(6)
 
 
-def _sina_symbol(symbol: str) -> str:
+def _prefixed_symbol(symbol: str) -> str:
     text = str(symbol).strip().upper()
     if "." in text:
         code, exchange = text.split(".", 1)
         return f"{exchange.lower()}{code.zfill(6)}"
     code = text.zfill(6)
-    return ("sh" if code.startswith(("6", "9")) else "sz") + code
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    if code.startswith(("4", "8", "92")):
+        return f"bj{code}"
+    return f"sz{code}"
 
 
 def _calendar_window(ak, lookback_sessions: int) -> tuple[TradingCalendar, str, str, dict[str, object]]:
@@ -70,6 +74,47 @@ def _calendar_window(ak, lookback_sessions: int) -> tuple[TradingCalendar, str, 
     )
 
 
+def _tencent_probe(ak, symbol: str, start_date: str, end_date: str) -> dict[str, object]:
+    """Probe current AKShare Tencent semantics without promoting it automatically."""
+    api = getattr(ak, "stock_zh_a_hist_tx", None)
+    if api is None:
+        return {"status": "api_unavailable", "required_for_primary_smoke": False}
+    try:
+        raw = api(
+            symbol=_prefixed_symbol(symbol),
+            start_date=start_date.replace("-", ""),
+            end_date=end_date.replace("-", ""),
+            adjust="",
+            timeout=15,
+        )
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "required_for_primary_smoke": False,
+        }
+    if raw is None or raw.empty:
+        return {"status": "empty", "rows": int(0 if raw is None else len(raw)), "required_for_primary_smoke": False}
+    required = {"date", "open", "high", "low", "close", "volume", "amount"}
+    missing = sorted(required.difference(raw.columns))
+    return {
+        "status": "observed" if not missing else "schema_failed",
+        "required_for_primary_smoke": False,
+        "rows": int(len(raw)),
+        "columns": [str(column) for column in raw.columns],
+        "missing_columns": missing,
+        # Current AKShare 1.18.84 source explicitly normalises these inside
+        # stock_zh_a_hist_tx; the live sample verifies the function still emits
+        # the expected columns and non-negative values.
+        "documented_current_source_volume_unit": "shares",
+        "documented_current_source_amount_unit": "CNY",
+        "nonnegative_volume": bool(pd.to_numeric(raw.get("volume"), errors="coerce").dropna().ge(0).all()),
+        "nonnegative_amount": bool(pd.to_numeric(raw.get("amount"), errors="coerce").dropna().ge(0).all()),
+        "first_date": str(raw["date"].iloc[0]) if "date" in raw.columns else None,
+        "last_date": str(raw["date"].iloc[-1]) if "date" in raw.columns else None,
+    }
+
+
 def _sina_parity_probe(ak, symbol: str, start_date: str, end_date: str, calendar: TradingCalendar) -> dict[str, object]:
     compact_start = start_date.replace("-", "")
     compact_end = end_date.replace("-", "")
@@ -82,7 +127,7 @@ def _sina_parity_probe(ak, symbol: str, start_date: str, end_date: str, calendar
             adjust="",
         )
         sina_raw = ak.stock_zh_a_daily(
-            symbol=_sina_symbol(symbol),
+            symbol=_prefixed_symbol(symbol),
             start_date=compact_start,
             end_date=compact_end,
             adjust="",
@@ -152,8 +197,8 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
     result = AkShareLiveProvider(
         allow_network=True,
         adjust="",
-        # Primary smoke isolates the recommended EastMoney source. Sina is
-        # exercised exactly once below as an optional fallback/parity probe.
+        # Primary smoke isolates the historical production path. Alternative
+        # sources are probed independently below before any routing change.
         source_order=("east_money",),
         trading_calendar=calendar,
         calendar_source="akshare:tool_trade_date_hist_sina",
@@ -180,7 +225,6 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
         and not result.metadata.get("failed_symbols")
     )
 
-    sina_probe = _sina_parity_probe(ak, symbols[0], start_date, end_date, calendar)
     return {
         "schema_version": "akshare_source_smoke_v1",
         "status": "passed" if primary_pass else "failed",
@@ -206,7 +250,8 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
             "metadata": result.metadata,
             "warnings": list(result.warnings),
         },
-        "sina_optional_parity": sina_probe,
+        "tencent_independent_probe": _tencent_probe(ak, symbols[0], start_date, end_date),
+        "sina_optional_parity": _sina_parity_probe(ak, symbols[0], start_date, end_date, calendar),
     }
 
 
