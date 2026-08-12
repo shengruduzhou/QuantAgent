@@ -7,12 +7,14 @@ executed same-session, entered into the paper performance book, or reported as
 completed paper PnL.
 
 A later execution stage will consume the durable pending artifact against a
-continuous recovered PaperBroker account. Before a non-empty target is frozen,
-this module also replays that same canonical account and reconciles the desired
-target against the shares/cash that were actually filled. Desired targets are
-never treated as holdings. The account genesis itself is immutable: every run
-must match the persisted portfolio_id/initial_cash identity before any target is
-produced.
+continuous recovered PaperBroker account. Target construction itself starts
+from that same canonical executed account: recovered marked NAV drives
+liquidity capacity and recovered actual weights seed first-date timing,
+holding-period and turnover state. The desired target is then reconciled again
+against the union of actual and desired symbols before it is frozen. Desired
+targets are never treated as holdings. The account genesis itself is immutable:
+every run must match the persisted portfolio_id/initial_cash identity before any
+target is produced.
 """
 
 from __future__ import annotations
@@ -101,9 +103,10 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     executed paper evidence are now distinct states.
 
     The immutable paper account identity is verified before evidence refresh or
-    prediction. This prevents a target worker from replaying the same canonical
-    ledger with a different portfolio_id or initial_cash than the execution
-    worker.
+    prediction. The canonical account is then recovered and marked before target
+    construction, so one account snapshot supplies both the liquidity-capital
+    denominator and first-date current weights. The same snapshot is retained
+    for the final union reconciliation before pending intent is frozen.
     """
 
     as_of = _normalise_date(config.as_of_date)
@@ -136,6 +139,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
 
     feature_dataset = read_frame(feature_path)
     market_panel = read_frame(market_path)
+    account_state = recover_paper_account_target_state(
+        canonical_ledger_path=config.canonical_ledger_path,
+        market_panel=market_panel,
+        as_of_date=as_of,
+        portfolio_id=account_identity.portfolio_id,
+        initial_cash=account_identity.initial_cash,
+    )
     features_asof = _asof_slice(feature_dataset, as_of)
     if features_asof.empty:
         raise ValueError(f"no feature rows available at or before {as_of}")
@@ -172,20 +182,14 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             max_sector_weight=config.max_sector_weight,
             max_turnover=config.max_turnover,
             cost_bps=config.cost_bps,
+            capital_yuan=float(account_state.nav),
             shrink_on_small_universe=True,
             min_selection_pressure=1.0,
         ),
+        initial_weights=account_state.current_weights,
     )
 
-    account_state = None
     if desired_weights.target_weights is not None and not desired_weights.target_weights.empty:
-        account_state = recover_paper_account_target_state(
-            canonical_ledger_path=config.canonical_ledger_path,
-            market_panel=market_panel,
-            as_of_date=as_of,
-            portfolio_id=account_identity.portfolio_id,
-            initial_cash=account_identity.initial_cash,
-        )
         weights = reconcile_target_to_canonical_account(
             desired_weights,
             account_state=account_state,
@@ -207,6 +211,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         "payload_sha256": account_identity.payload_sha256,
         "identity_path": str(resolved_identity_path),
     }
+    account_evidence = account_state.evidence()
 
     if weights.target_weights is None or weights.target_weights.empty:
         warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
@@ -216,6 +221,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "evidence_rows": int(len(evidence.frame)),
             "evidence_warnings": list(evidence.warnings),
             "account_identity": identity_evidence,
+            "account_state": account_evidence,
             "blend_diagnostics": blend_result.diagnostics,
             "target_weight_diagnostics": weights.diagnostics,
             "execution": {
@@ -227,6 +233,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 "paper_report_written": False,
                 "paper_book_appended": False,
                 "paper_account_identity_sha256": account_identity.payload_sha256,
+                "canonical_account_state_sha256": account_state.account_state_sha256,
                 "reason": (
                     "portfolio construction produced no target; absence of a target "
                     "is not reinterpreted as an all-zero liquidation instruction"
@@ -250,12 +257,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             warnings=warnings,
         )
 
-    if account_state is None:
-        raise RuntimeError("non-empty paper target lacks canonical account state")
-
     predictions_file = Path(predictions_path)
     target_weights_file = Path(weights_path)
-    account_evidence = account_state.evidence()
     pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
         signal_date=as_of,
         target_weights=weights.target_weights,
