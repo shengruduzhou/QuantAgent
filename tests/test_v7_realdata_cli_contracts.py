@@ -409,6 +409,6 @@ def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, 
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["resolved_range"]["source"] == "after_qlib_calendar"
+    assert payload["resolved_range"]["source"] == "after_qlib_calendar+akshare_session_calendar"
     assert payload["resolved_range"]["start_date"] == "2020-09-28"
     assert payload["resolved_range"]["end_date"] == "2026-05-15"
