@@ -1,9 +1,10 @@
 """V7 valuation bootstrap with explicit historical/current semantics.
 
 Past as-of dates use AKShare's source-dated Baidu valuation history. A current
-spot snapshot is accepted only for the current Asia/Shanghai date. Local files
-must carry explicit availability/PIT evidence; missing provenance is never
-invented from ``trade_date``.
+spot snapshot is accepted only for the current Asia/Shanghai date **and** an
+explicit A-share trading session. Local files must carry explicit
+availability/PIT evidence; missing provenance is never invented from
+``trade_date``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from quantagent.data.providers.akshare_valuation_provider import (
     akshare_valuation_schema_report,
 )
 from quantagent.data.providers.base import ProviderRequest
+from quantagent.data.trading_calendar import TradingCalendar
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,9 @@ def build_valuation_cache(config: ValuationBootstrapConfig) -> dict[str, object]
 
     if config.symbols and not frame.empty:
         requested_symbols = {str(symbol) for symbol in config.symbols}
-        observed_symbols = set(frame["symbol"].astype(str).unique()) if "symbol" in frame else set()
+        observed_symbols = (
+            set(frame["symbol"].astype(str).unique()) if "symbol" in frame else set()
+        )
         missing_symbols = sorted(requested_symbols - observed_symbols)
         if missing_symbols:
             blockers.append("valuation_requested_symbol_coverage_incomplete")
@@ -93,7 +97,9 @@ def build_valuation_cache(config: ValuationBootstrapConfig) -> dict[str, object]
             "schema_report": schema_report,
             "calendar": calendar_meta,
             "provider_metadata": provider_metadata,
-            "existing_output_preserved": bool(output_path.exists() or output_path.with_suffix(".csv").exists()),
+            "existing_output_preserved": bool(
+                output_path.exists() or output_path.with_suffix(".csv").exists()
+            ),
         }
 
     if frame.empty:
@@ -129,6 +135,7 @@ def build_valuation_cache(config: ValuationBootstrapConfig) -> dict[str, object]
             "calendar": calendar_meta,
             "provider_metadata": provider_metadata,
             "historical_current_snapshot_backdating_blocked": True,
+            "non_session_valuation_dates_blocked": True,
             "canonical_market_cap_unit": "CNY",
             "production_integrity_certified": False,
         },
@@ -146,6 +153,32 @@ def build_valuation_cache(config: ValuationBootstrapConfig) -> dict[str, object]
         "schema_report": schema_report,
         "calendar": calendar_meta,
     }
+
+
+def _assert_requested_dates_are_sessions(
+    dates: pd.DatetimeIndex,
+    calendar: TradingCalendar,
+) -> None:
+    """Reject weekend/holiday valuation as-of labels instead of silently snapping.
+
+    AKShare's Baidu valuation endpoint can expose calendar-day observations. The
+    canonical silver table is keyed by ``trade_date`` and therefore only accepts
+    dates explicitly present in the bound A-share session set.
+    """
+    if calendar.empty:
+        raise ValueError(
+            "historical/current AKShare valuation requires an explicit A-share trading calendar"
+        )
+    invalid = [
+        str(pd.Timestamp(value).date())
+        for value in dates
+        if not calendar.contains(pd.Timestamp(value))
+    ]
+    if invalid:
+        raise ValueError(
+            "valuation as_of_dates must be actual A-share trading sessions; invalid="
+            + ",".join(invalid)
+        )
 
 
 def _fetch_network_valuation(
@@ -167,11 +200,14 @@ def _fetch_network_valuation(
     today = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None).normalize()
     if bool((requested_dates > today).any()):
         future = [str(value.date()) for value in requested_dates[requested_dates > today]]
-        raise ValueError("valuation as_of_dates cannot be in the future: " + ",".join(future))
+        raise ValueError(
+            "valuation as_of_dates cannot be in the future: " + ",".join(future)
+        )
 
     research_calendar, calendar_meta, calendar_warnings = _load_akshare_research_calendar(
         allow_network=config.allow_network
     )
+    _assert_requested_dates_are_sessions(requested_dates, research_calendar)
     provider = AkShareValuationProvider(
         allow_network=config.allow_network,
         trading_calendar=research_calendar,
@@ -203,6 +239,8 @@ def _fetch_network_valuation(
             historical["trade_date"] = pd.to_datetime(
                 historical["trade_date"], errors="coerce"
             ).dt.normalize()
+            # Source can expose weekend/calendar-day valuations. Only exact
+            # requested session dates survive into canonical silver evidence.
             historical = historical[historical["trade_date"].isin(past_dates)]
             frames.append(historical)
             _assert_requested_key_coverage(
@@ -218,7 +256,9 @@ def _fetch_network_valuation(
 
     if today in requested_dates:
         request = (
-            ProviderRequest(str(today.date()), str(today.date()), symbols=config.symbols)
+            ProviderRequest(
+                str(today.date()), str(today.date()), symbols=config.symbols
+            )
             if config.symbols
             else None
         )
@@ -264,7 +304,11 @@ def _assert_requested_key_coverage(
             pd.to_datetime(frame["trade_date"], errors="coerce").dt.normalize(),
         )
     )
-    expected = {(str(symbol), pd.Timestamp(date).normalize()) for symbol in symbols for date in dates}
+    expected = {
+        (str(symbol), pd.Timestamp(date).normalize())
+        for symbol in symbols
+        for date in dates
+    }
     missing = sorted(expected - observed, key=lambda item: (item[0], item[1]))
     if missing:
         blockers.append(f"valuation_{label}_requested_key_coverage_incomplete")
@@ -284,7 +328,9 @@ def _load_local_snapshot(path_value: str) -> pd.DataFrame:
     if "point_in_time_valid" not in frame.columns:
         frame["point_in_time_valid"] = False
     else:
-        frame["point_in_time_valid"] = frame["point_in_time_valid"].fillna(False).astype(bool)
+        frame["point_in_time_valid"] = (
+            frame["point_in_time_valid"].fillna(False).astype(bool)
+        )
     return frame
 
 
