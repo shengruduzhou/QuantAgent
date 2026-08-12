@@ -17,18 +17,24 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/market-data-smoke.yml"
+      - "pyproject.toml"
       - "scripts/run_market_data_smoke.py"
+      - "scripts/run_akshare_source_smoke.py"
       - "scripts/run_intraday_session_smoke.py"
       - "tests/data/test_market_data_smoke.py"
+      - "tests/data/test_akshare_contract_hardening.py"
       - "tests/data/test_intraday_sessions.py"
       - "src/quantagent/data/intraday_sessions.py"
+      - "src/quantagent/data/providers/akshare_live_provider.py"
+      - "src/quantagent/data/providers/akshare_financial_provider.py"
+      - "src/quantagent/data/bootstrap/akshare_market_bootstrap.py"
       - "src/quantagent/data/providers/baostock_provider.py"
       - "src/quantagent/data/providers/qlib_intraday_reader.py"
-      - "src/quantagent/cli/v8_intraday.py"
+      - "src/quantagent/cli/v7_data.py"
       - "src/quantagent/portfolio/do_t_overlay.py"
   schedule:
-    # 17:40 Asia/Shanghai on weekdays: after the A-share close. This is a
-    # connectivity/schema smoke, not a factor-performance research run.
+    # 17:40 Asia/Shanghai on weekdays: after the A-share close. These are
+    # connectivity/schema smokes, not factor-performance research runs.
     - cron: "40 9 * * 1-5"
 
 permissions:
@@ -137,5 +143,88 @@ jobs:
           path: |
             runtime/research/market_data_smoke/manifest.json
             runtime/research/market_data_smoke/session_manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  akshare-source-contract-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tested AKShare compatibility line
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -e . "akshare>=1.18.84,<1.19"
+          python - <<'PY'
+          import akshare as ak
+          print(f"AKShare runtime version: {ak.__version__}")
+          PY
+
+      - name: Pull tiny raw AKShare sample and validate source contract
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p runtime/research/akshare_source_smoke
+          for attempt in 1 2 3; do
+            rm -f runtime/research/akshare_source_smoke/manifest.json
+            if python scripts/run_akshare_source_smoke.py \
+              --symbols "600000.SH,000001.SZ" \
+              --lookback-sessions 8 \
+              --output runtime/research/akshare_source_smoke/manifest.json \
+              2>&1 | tee runtime/research/akshare_source_smoke/smoke.log; then
+              echo "AKShare smoke succeeded on attempt ${attempt}."
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "AKShare smoke failed after ${attempt} attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
+      - name: Assert AKShare smoke truth boundary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("runtime/research/akshare_source_smoke/manifest.json").read_text(encoding="utf-8")
+          )
+          assert payload["schema_version"] == "akshare_source_smoke_v1"
+          assert payload["status"] == "passed"
+          assert payload["research_smoke_only"] is True
+          assert payload["performance_evidence"] is False
+          assert payload["factor_promotion"] is False
+          assert payload["model_promotion"] is False
+          assert payload["economic_live_eligible"] is False
+          assert payload["automatic_factor_activation"] is False
+          assert payload["production_integrity_certified"] is False
+          assert payload["akshare_version"].startswith("1.18.")
+          assert payload["calendar"]["production_certified"] is False
+          assert payload["primary"]["canonical_units_ok"] is True
+          assert payload["primary"]["all_symbols_present"] is True
+          assert payload["primary"]["point_in_time"] is True
+          assert payload["primary"]["metadata"]["canonical_volume_unit"] == "shares"
+          assert payload["primary"]["metadata"]["canonical_amount_unit"] == "CNY"
+          assert payload["primary"]["metadata"]["adjust"] == ""
+          PY
+
+      - name: Upload AKShare source diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: akshare-source-smoke-${{ github.run_id }}
+          path: |
+            runtime/research/akshare_source_smoke/manifest.json
+            runtime/research/akshare_source_smoke/smoke.log
           if-no-files-found: warn
           retention-days: 30
