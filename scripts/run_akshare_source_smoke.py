@@ -44,11 +44,15 @@ def _prefixed_symbol(symbol: str) -> str:
     return f"sz{code}"
 
 
-def _calendar_window(ak, lookback_sessions: int) -> tuple[TradingCalendar, str, str, dict[str, object]]:
+def _calendar_window(
+    ak, lookback_sessions: int
+) -> tuple[TradingCalendar, str, str, dict[str, object]]:
     raw = ak.tool_trade_date_hist_sina()
     if raw is None or raw.empty or "trade_date" not in raw.columns:
         raise RuntimeError("AKShare tool_trade_date_hist_sina returned no usable sessions")
-    sessions = pd.DatetimeIndex(pd.to_datetime(raw["trade_date"], errors="coerce").dropna()).normalize()
+    sessions = pd.DatetimeIndex(
+        pd.to_datetime(raw["trade_date"], errors="coerce").dropna()
+    ).normalize()
     sessions = pd.DatetimeIndex(sorted(set(sessions)))
     today = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None).normalize()
     completed = sessions[sessions < today]
@@ -74,8 +78,10 @@ def _calendar_window(ak, lookback_sessions: int) -> tuple[TradingCalendar, str, 
     )
 
 
-def _tencent_probe(ak, symbol: str, start_date: str, end_date: str) -> dict[str, object]:
-    """Probe current AKShare Tencent semantics without promoting it automatically."""
+def _tencent_probe(
+    ak, symbol: str, start_date: str, end_date: str
+) -> dict[str, object]:
+    """Probe current AKShare Tencent schema/unit semantics independently."""
     api = getattr(ak, "stock_zh_a_hist_tx", None)
     if api is None:
         return {"status": "api_unavailable", "required_for_primary_smoke": False}
@@ -94,7 +100,11 @@ def _tencent_probe(ak, symbol: str, start_date: str, end_date: str) -> dict[str,
             "required_for_primary_smoke": False,
         }
     if raw is None or raw.empty:
-        return {"status": "empty", "rows": int(0 if raw is None else len(raw)), "required_for_primary_smoke": False}
+        return {
+            "status": "empty",
+            "rows": int(0 if raw is None else len(raw)),
+            "required_for_primary_smoke": False,
+        }
     required = {"date", "open", "high", "low", "close", "volume", "amount"}
     missing = sorted(required.difference(raw.columns))
     return {
@@ -103,19 +113,26 @@ def _tencent_probe(ak, symbol: str, start_date: str, end_date: str) -> dict[str,
         "rows": int(len(raw)),
         "columns": [str(column) for column in raw.columns],
         "missing_columns": missing,
-        # Current AKShare 1.18.84 source explicitly normalises these inside
-        # stock_zh_a_hist_tx; the live sample verifies the function still emits
-        # the expected columns and non-negative values.
-        "documented_current_source_volume_unit": "shares",
-        "documented_current_source_amount_unit": "CNY",
-        "nonnegative_volume": bool(pd.to_numeric(raw.get("volume"), errors="coerce").dropna().ge(0).all()),
-        "nonnegative_amount": bool(pd.to_numeric(raw.get("amount"), errors="coerce").dropna().ge(0).all()),
+        "current_source_volume_unit": "shares",
+        "current_source_amount_unit": "CNY",
+        "nonnegative_volume": bool(
+            pd.to_numeric(raw.get("volume"), errors="coerce").dropna().ge(0).all()
+        ),
+        "nonnegative_amount": bool(
+            pd.to_numeric(raw.get("amount"), errors="coerce").dropna().ge(0).all()
+        ),
         "first_date": str(raw["date"].iloc[0]) if "date" in raw.columns else None,
         "last_date": str(raw["date"].iloc[-1]) if "date" in raw.columns else None,
     }
 
 
-def _sina_parity_probe(ak, symbol: str, start_date: str, end_date: str, calendar: TradingCalendar) -> dict[str, object]:
+def _sina_parity_probe(
+    ak,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    calendar: TradingCalendar,
+) -> dict[str, object]:
     compact_start = start_date.replace("-", "")
     compact_end = end_date.replace("-", "")
     try:
@@ -169,11 +186,20 @@ def _sina_parity_probe(ak, symbol: str, start_date: str, end_date: str, calendar
         return {"status": "no_overlap", "required_for_primary_smoke": False}
     close_rel = (
         (joined["close_em"] - joined["close_sina"]).abs()
-        / joined[["close_em", "close_sina"]].abs().max(axis=1).replace(0, pd.NA)
+        / joined[["close_em", "close_sina"]]
+        .abs()
+        .max(axis=1)
+        .replace(0, pd.NA)
     ).dropna()
     volume_ratio = (
-        joined.loc[(joined["volume_em"] > 0) & (joined["volume_sina"] > 0), "volume_sina"]
-        / joined.loc[(joined["volume_em"] > 0) & (joined["volume_sina"] > 0), "volume_em"]
+        joined.loc[
+            (joined["volume_em"] > 0) & (joined["volume_sina"] > 0),
+            "volume_sina",
+        ]
+        / joined.loc[
+            (joined["volume_em"] > 0) & (joined["volume_sina"] > 0),
+            "volume_em",
+        ]
     ).dropna()
     return {
         "status": "observed",
@@ -194,12 +220,15 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
 
     calendar, start_date, end_date, calendar_meta = _calendar_window(ak, lookback_sessions)
     request = ProviderRequest(start_date=start_date, end_date=end_date, symbols=symbols)
+    # Primary contract now exercises the actual audited router. EastMoney remains
+    # first; current-source Tencent is the deterministic failover. Sina remains
+    # an optional independent diagnostic because its endpoint may rate-limit or
+    # remote-close CI egress.
+    source_order = ("east_money", "tencent")
     result = AkShareLiveProvider(
         allow_network=True,
         adjust="",
-        # Primary smoke isolates the historical production path. Alternative
-        # sources are probed independently below before any routing change.
-        source_order=("east_money",),
+        source_order=source_order,
         trading_calendar=calendar,
         calendar_source="akshare:tool_trade_date_hist_sina",
     ).daily_ohlcv(request)
@@ -217,7 +246,9 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
         and "amount_unit" in frame.columns
         and set(frame["amount_unit"].dropna().astype(str)) == {"CNY"}
     )
-    all_symbols_present = all(symbol in per_symbol_rows and per_symbol_rows[symbol] > 0 for symbol in symbols)
+    all_symbols_present = all(
+        symbol in per_symbol_rows and per_symbol_rows[symbol] > 0 for symbol in symbols
+    )
     primary_pass = bool(
         result.point_in_time
         and canonical_units_ok
@@ -240,7 +271,7 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
         "window": {"start_date": start_date, "end_date": end_date},
         "calendar": calendar_meta,
         "primary": {
-            "source_order": ["east_money"],
+            "source_order": list(source_order),
             "rows": int(len(frame)),
             "per_symbol_rows": per_symbol_rows,
             "point_in_time": result.point_in_time,
@@ -250,8 +281,12 @@ def run_smoke(symbols: tuple[str, ...], lookback_sessions: int) -> dict[str, obj
             "metadata": result.metadata,
             "warnings": list(result.warnings),
         },
-        "tencent_independent_probe": _tencent_probe(ak, symbols[0], start_date, end_date),
-        "sina_optional_parity": _sina_parity_probe(ak, symbols[0], start_date, end_date, calendar),
+        "tencent_independent_probe": _tencent_probe(
+            ak, symbols[0], start_date, end_date
+        ),
+        "sina_optional_parity": _sina_parity_probe(
+            ak, symbols[0], start_date, end_date, calendar
+        ),
     }
 
 
@@ -263,7 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tiny infrastructure-smoke sample only; never a research universe",
     )
     parser.add_argument("--lookback-sessions", type=int, default=8)
-    parser.add_argument("--output", default="runtime/research/akshare_source_smoke/manifest.json")
+    parser.add_argument(
+        "--output", default="runtime/research/akshare_source_smoke/manifest.json"
+    )
     return parser
 
 
@@ -275,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     payload = run_smoke(symbols, max(3, int(args.lookback_sessions)))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     return 0 if payload["status"] == "passed" else 1
 
