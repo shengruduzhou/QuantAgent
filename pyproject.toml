@@ -28,11 +28,11 @@ dependencies = [
 
 [project.optional-dependencies]
 data = [
-  # AKShare wraps fast-changing upstream websites. Bind the compatibility floor
-  # to the version exercised by QuantAgent's live source smoke instead of letting
-  # an arbitrary old install silently change endpoint schemas/units. The minor
-  # cap forces an explicit audit before a future compatibility-breaking line.
-  "akshare>=1.18.84,<1.19",
+  # AKShare wraps fast-changing upstream websites and provider-side unit
+  # normalization is part of the research data contract. Keep the runtime on
+  # the exact release exercised by Market Data Smoke; version bumps require a
+  # source/schema/unit audit before this pin moves.
+  "akshare==1.18.84",
   "tushare",
   # Real public A-share daily/minute history provider used by the research-only
   # factor cycle. Production certification remains governed by router integrity;
@@ -65,7 +65,7 @@ test = [
   "httpx>=0.27",
 ]
 all = [
-  "akshare>=1.18.84,<1.19",
+  "akshare==1.18.84",
   "tushare",
   "baostock>=0.9.3",
   "torch>=2.3",
