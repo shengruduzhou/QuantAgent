@@ -246,9 +246,22 @@ def test_llm_skill_config_loads_local_dotenv_without_exposing_secret(tmp_path, m
     assert "secret-value" not in repr(config)
 
 
+def _install_fake_akshare_calendar(monkeypatch, dates: list[str]) -> None:
+    fake_akshare = types.SimpleNamespace(
+        __version__="test",
+        tool_trade_date_hist_sina=lambda: pd.DataFrame({"trade_date": dates}),
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+
 def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
     from quantagent.data.providers.akshare_live_provider import AkShareLiveProvider
     from quantagent.data.providers.base import ProviderResult
+
+    _install_fake_akshare_calendar(
+        monkeypatch,
+        ["2024-01-02", "2024-01-03", "2024-01-31", "2024-02-01"],
+    )
 
     def fake_daily(self, request):
         frame = pd.DataFrame(
@@ -263,6 +276,11 @@ def test_build_akshare_market_panel_writes_manifest(monkeypatch, tmp_path):
                     "volume": 1000,
                     "amount": 10500.0,
                     "available_at": "2024-01-03",
+                    "volume_unit": "shares",
+                    "amount_unit": "CNY",
+                    "price_adjustment": "raw",
+                    "point_in_time_valid": True,
+                    "source": "akshare:tencent",
                 }
             ]
         )
@@ -301,6 +319,10 @@ def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, 
     calendar = qlib_root / "calendars"
     calendar.mkdir(parents=True)
     (calendar / "day.txt").write_text("2020-09-24\n2020-09-25\n", encoding="utf-8")
+    _install_fake_akshare_calendar(
+        monkeypatch,
+        ["2020-09-28", "2021-01-04", "2021-01-05", "2026-05-15", "2026-05-18"],
+    )
 
     def fake_daily(self, request):
         assert request.start_date == "2020-09-28"
@@ -317,6 +339,11 @@ def test_build_akshare_market_panel_auto_dates_after_qlib_calendar(monkeypatch, 
                     "volume": 1000,
                     "amount": 10500.0,
                     "available_at": "2021-01-05",
+                    "volume_unit": "shares",
+                    "amount_unit": "CNY",
+                    "price_adjustment": "raw",
+                    "point_in_time_valid": True,
+                    "source": "akshare:tencent",
                 }
             ]
         )
