@@ -4,6 +4,7 @@ import sys
 import types
 
 import pandas as pd
+import pytest
 
 from quantagent.data.bootstrap.akshare_market_bootstrap import (
     _market_economic_contract_report,
@@ -167,19 +168,30 @@ def test_missing_trading_calendar_never_falls_back_to_weekday_arithmetic() -> No
     assert akshare_market_schema_report(result)["pit_violation_count"] >= 1
 
 
-def test_fetch_window_snaps_weekend_or_holiday_boundaries_to_sessions() -> None:
+def test_fetch_window_with_no_actual_session_fails_closed() -> None:
+    with pytest.raises(ValueError, match="contains no trading session"):
+        _snap_range_to_calendar(
+            V7ResolvedDateRange(
+                start_date="2024-01-06",
+                end_date="2024-01-07",
+                source="heuristic",
+            ),
+            TradingCalendar.from_dates(["2024-01-05", "2024-01-08", "2024-01-09"]),
+        )
+
+
+def test_fetch_window_snaps_holiday_boundaries_when_sessions_exist() -> None:
     resolved = _snap_range_to_calendar(
         V7ResolvedDateRange(
             start_date="2024-01-06",
-            end_date="2024-01-07",
+            end_date="2024-01-09",
             source="heuristic",
         ),
         TradingCalendar.from_dates(["2024-01-05", "2024-01-08", "2024-01-09"]),
     )
-    # A window containing no session is rejected rather than translated to a
-    # fictitious weekend fetch range.
     assert resolved.start_date == "2024-01-08"
-    assert resolved.end_date == "2024-01-05"
+    assert resolved.end_date == "2024-01-09"
+    assert any("start_snapped_to_session" in note for note in resolved.notes)
 
 
 def test_bootstrap_dtype_normalization_never_upgrades_unknown_pit_to_true() -> None:
