@@ -251,6 +251,23 @@ def test_canonical_raw_market_row_passes_economic_contract() -> None:
     report = _market_economic_contract_report(_normalise_dtypes(row))
     assert report["status"] == "passed"
     assert report["violations"] == []
+    assert report["economic_scale_checked_rows"] == 1
+    assert report["economic_scale_violation_rows"] == 0
+
+
+def test_economic_contract_rejects_100x_lot_share_scale_corruption() -> None:
+    row = _normalize_akshare_daily(
+        _tencent_raw(volume=1234),
+        "600000.SH",
+        source="tencent",
+        adjust="",
+        trading_calendar=_calendar(),
+    )
+    report = _market_economic_contract_report(_normalise_dtypes(row))
+    assert report["status"] == "failed"
+    assert report["economic_scale_checked_rows"] == 1
+    assert report["economic_scale_violation_rows"] == 1
+    assert "amount_volume_price_scale_mismatch:rows=1" in report["violations"]
 
 
 def test_provider_binds_version_units_and_complete_symbol_coverage(monkeypatch) -> None:
