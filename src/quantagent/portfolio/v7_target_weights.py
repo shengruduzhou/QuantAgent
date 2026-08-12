@@ -134,7 +134,9 @@ def _normalize_initial_weights(
     Historical multi-date research calls can omit this input and retain the
     legacy in-call previous-day state. Paper/shadow callers use it to seed the
     first date from canonical executed holdings instead of an implicit zero
-    portfolio. Duplicate symbols are aggregated after string normalisation.
+    portfolio. Duplicate symbols are aggregated only after every source row has
+    passed the long-only and finite-value checks, so opposing duplicate rows
+    cannot hide an invalid short position.
     """
 
     if initial_weights is None:
@@ -150,10 +152,12 @@ def _normalize_initial_weights(
     raw_values = weights.to_numpy(dtype=float)
     if not np.isfinite(raw_values).all():
         raise ValueError("initial_weights contains missing or non-finite values")
-    weights = weights.groupby(level=0).sum().astype(float)
     if not long_short and bool((weights < -1e-12).any()):
         raise ValueError("long-only target construction cannot start from negative weights")
-    weights = weights.where(weights.abs() > 1e-12, 0.0)
+    weights = weights.groupby(level=0).sum().astype(float)
+    # Zero/near-zero entries are not holdings. Keeping them in the index would
+    # let the timing gate misclassify a fresh open as an existing position.
+    weights = weights[weights.abs() > 1e-12]
     return weights.sort_index()
 
 
@@ -271,6 +275,15 @@ def build_v7_target_weights(
             if position_state_path is not None
             else PositionAgeTracker()
         )
+        if previous_weights is not None and not previous_weights.empty:
+            initial_expected_horizons: dict[str, int | None] = {}
+            if theme_frame is not None and not theme_frame.empty and "expected_horizon_days" in theme_frame.columns:
+                first_date = preds["trade_date"].min()
+                first_theme = theme_frame[theme_frame["trade_date"] == first_date]
+                for symbol, horizon in zip(first_theme["symbol"], first_theme["expected_horizon_days"]):
+                    if pd.notna(horizon):
+                        initial_expected_horizons[str(symbol)] = int(horizon)
+            age_tracker.begin_session(previous_weights.to_dict(), initial_expected_horizons)
 
     dynamic_topk_cfg = DynamicTopKConfig(
         top_k_min=int(config.top_k_min),
@@ -517,13 +530,15 @@ def build_v7_target_weights(
             sign = np.sign(weights.replace(0.0, 1.0))
             weights = weights + redistribute * sign
 
-        # Holding-period lock (Phase 3.4): force ``|Δw| ≤ holding_period_max_delta``
-        # for names whose age < expected_horizon, unless timing-gate
-        # marks them force_close.
+        # Holding-period lock (Phase 3.4): apply to the union of desired and
+        # actually held names. A selected-only loop would allow a locked
+        # recovered holding to disappear simply because it fell out of Top-K.
         locked_symbols: list[str] = []
         if age_tracker is not None and previous_weights is not None:
-            prev_aligned = previous_weights.reindex(weights.index).fillna(0.0)
-            for symbol in list(weights.index.astype(str)):
+            union_symbols = weights.index.union(previous_weights.index)
+            weights = weights.reindex(union_symbols).fillna(0.0)
+            prev_aligned = previous_weights.reindex(union_symbols).fillna(0.0)
+            for symbol in list(union_symbols.astype(str)):
                 if symbol in force_close_symbols:
                     weights.loc[symbol] = 0.0
                     continue
@@ -539,10 +554,12 @@ def build_v7_target_weights(
                 {"trade_date": str(date), "locked_symbols": locked_symbols}
             )
 
-        # Apply turnover cap vs previous weights.
+        # Apply one coherent turnover projection over current ∪ desired. This
+        # counts exits of held names that disappeared from timing/selection and
+        # prevents a later account-aware reconciliation from discovering an
+        # additional, previously invisible leg of turnover.
         if previous_weights is not None and config.max_turnover > 0:
-            blended = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
-            weights = blended
+            weights = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
         previous_weights = weights.copy()
 
         if age_tracker is not None:
@@ -705,11 +722,13 @@ def _alpha_distribution_stats(selected_alpha: pd.Series, unselected_alpha: pd.Se
 
 
 def _apply_turnover_cap(target: pd.Series, previous: pd.Series, cap: float) -> pd.Series:
-    aligned_prev = previous.reindex(target.index).fillna(0.0)
-    delta = target - aligned_prev
+    symbols = target.index.union(previous.index)
+    aligned_target = target.reindex(symbols).fillna(0.0)
+    aligned_prev = previous.reindex(symbols).fillna(0.0)
+    delta = aligned_target - aligned_prev
     turnover = float(delta.abs().sum())
     if turnover <= cap:
-        return target
+        return aligned_target
     scale = cap / max(turnover, 1e-9)
     return aligned_prev + delta * scale
 
@@ -755,7 +774,14 @@ def _try_cvxpy_long_only(
             idx = [i for i, symbol in enumerate(symbols) if sector_series.loc[symbol] == sector]
             constraints.append(cp.sum(w[idx]) <= config.max_sector_weight)
     if previous_weights is not None and config.max_turnover > 0:
-        constraints.append(cp.norm1(w - prev) <= config.max_turnover)
+        # Selected-variable turnover alone is not sufficient when a held name
+        # has fallen out of the candidate set. Reserve the dropped-name exit
+        # budget here; the deterministic union projection below remains the
+        # final hard bound and can retain part of the dropped holding.
+        dropped_turnover = float(
+            previous_weights.loc[~previous_weights.index.isin(symbols)].abs().sum()
+        )
+        constraints.append(cp.norm1(w - prev) + dropped_turnover <= config.max_turnover)
     problem = cp.Problem(objective, constraints)
     try:
         problem.solve(solver=cp.CLARABEL, verbose=False)
