@@ -1,0 +1,61 @@
+name: PR141 Remediation Anchor Diagnose
+
+on:
+  push:
+    branches:
+      - agent/account-aware-target-construction
+    paths:
+      - .github/workflows/pr141-remediation-diagnose.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/account-aware-target-construction
+      - name: Check replacement anchors without mutation
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          tree = ast.parse(Path('scripts/pr141_remediate.py').read_text(encoding='utf-8'))
+          i = 0
+          bad = 0
+          for node in ast.walk(tree):
+              if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                  continue
+              if node.func.id != 'replace_once' or len(node.args) < 3:
+                  continue
+              path = ast.literal_eval(node.args[0]) if isinstance(node.args[0], ast.Constant) else None
+              if path is None:
+                  # Resolve simple module-level aliases such as journal/daily/execution/cli/target.
+                  name = node.args[0].id if isinstance(node.args[0], ast.Name) else ''
+                  aliases = {
+                      'journal': 'src/quantagent/paper/execution_journal.py',
+                      'daily': 'src/quantagent/paper/daily_loop.py',
+                      'execution': 'src/quantagent/paper/continuous_execution.py',
+                      'cli': 'src/quantagent/cli/paper.py',
+                      'target': 'src/quantagent/portfolio/v7_target_weights.py',
+                  }
+                  path = aliases.get(name)
+              old = ast.literal_eval(node.args[1])
+              if not path:
+                  print(f'UNRESOLVED path at line {node.lineno}')
+                  bad += 1
+                  continue
+              text = Path(path).read_text(encoding='utf-8')
+              count = text.count(old)
+              i += 1
+              marker = old.strip().splitlines()[0][:110] if old.strip() else '<blank>'
+              print(f'{i:02d} line={node.lineno} count={count} path={path} anchor={marker!r}')
+              if count != 1:
+                  bad += 1
+          print(f'anchors={i} bad={bad}')
+          raise SystemExit(1 if bad else 0)
+          PY
