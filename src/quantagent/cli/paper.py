@@ -85,7 +85,14 @@ def paper_execute_session(
 
     The requested ``portfolio_id``/``initial_cash`` must exactly match the
     immutable account identity created by the target worker.
+
+    The whole continuous-execution call is serialized on the canonical-account
+    lock. This is intentionally broader than individual ledger appends: target
+    generation must never freeze a new signal from a snapshot taken while this
+    worker is between recovery, order submission, canonical append and terminal
+    journal sealing.
     """
+    from quantagent.paper.account_lock import paper_account_lock
     from quantagent.paper.continuous_execution import (
         ContinuousPaperExecutionConfig,
         execute_pending_for_session,
@@ -110,12 +117,13 @@ def paper_execute_session(
         max_participation_rate=max_participation_rate,
         execution_clock=execution_clock,
     )
-    results = execute_pending_for_session(
-        date,
-        frame,
-        config=config,
-        authoritative_sessions=None,
-    )
+    with paper_account_lock(config.canonical_ledger_path):
+        results = execute_pending_for_session(
+            date,
+            frame,
+            config=config,
+            authoritative_sessions=None,
+        )
     typer.echo(
         json_dump(
             {
