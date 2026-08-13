@@ -10,10 +10,11 @@ A later execution stage will consume the durable pending artifact against a
 continuous recovered PaperBroker account. Target construction itself starts
 from that same canonical executed account: recovered marked NAV drives
 liquidity capacity and recovered actual weights seed first-date timing,
-holding-period and turnover state. The desired target is then reconciled again
-against the union of actual and desired symbols before it is frozen. Desired
-targets are never treated as holdings. The account genesis itself is immutable:
-every run must match the persisted portfolio_id/initial_cash identity before any
+holding-period and turnover state. Before a non-empty target is frozen, the
+canonical account is recovered again while holding the cross-process account
+lock. Any ledger/state drift makes the stale target fail closed. Desired targets
+are never treated as holdings. The account genesis itself is immutable: every
+run must match the persisted portfolio_id/initial_cash identity before any
 target is produced.
 """
 
@@ -35,7 +36,9 @@ from quantagent.paper.account_identity import (
     account_identity_path_for_canonical,
     ensure_paper_account_identity,
 )
+from quantagent.paper.account_lock import paper_account_lock
 from quantagent.paper.account_target_state import (
+    PaperAccountStateRefused,
     recover_paper_account_target_state,
     reconcile_target_to_canonical_account,
 )
@@ -103,10 +106,11 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     executed paper evidence are now distinct states.
 
     The immutable paper account identity is verified before evidence refresh or
-    prediction. The canonical account is then recovered and marked before target
-    construction, so one account snapshot supplies both the liquidity-capital
-    denominator and first-date current weights. The same snapshot is retained
-    for the final union reconciliation before pending intent is frozen.
+    prediction. The canonical account is recovered and marked before target
+    construction. Immediately before a non-empty pending intent is frozen, the
+    account is recovered again under the same cross-process lock used by the
+    continuous execution worker. A changed state/head/count invalidates the
+    computed target instead of silently executing it against different holdings.
     """
 
     as_of = _normalise_date(config.as_of_date)
@@ -259,25 +263,46 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
 
     predictions_file = Path(predictions_path)
     target_weights_file = Path(weights_path)
-    pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
-        signal_date=as_of,
-        target_weights=weights.target_weights,
-        source_lineage={
-            "model_dir": config.model_dir,
-            "feature_dataset_path": str(feature_path),
-            "market_panel_path": str(market_path),
-            "predictions_path": str(predictions_file),
-            "predictions_file_sha256": _file_sha256(predictions_file),
-            "target_weights_path": str(target_weights_file),
-            "target_weights_file_sha256": _file_sha256(target_weights_file),
-            "primary_horizon": str(config.primary_horizon),
-            "paper_account_identity_sha256": account_identity.payload_sha256,
-            "canonical_account_state_sha256": str(account_evidence["account_state_sha256"]),
-            "canonical_ledger_head_hash": str(account_evidence["canonical_head_hash"]),
-            "canonical_ledger_records": str(account_evidence["canonical_records"]),
-            "canonical_account_nav": str(account_evidence["nav"]),
-        },
-    )
+    with paper_account_lock(config.canonical_ledger_path):
+        fresh_account_state = recover_paper_account_target_state(
+            canonical_ledger_path=config.canonical_ledger_path,
+            market_panel=market_panel,
+            as_of_date=as_of,
+            portfolio_id=account_identity.portfolio_id,
+            initial_cash=account_identity.initial_cash,
+        )
+        if (
+            fresh_account_state.account_state_sha256 != account_state.account_state_sha256
+            or fresh_account_state.canonical_records != account_state.canonical_records
+            or fresh_account_state.canonical_head_hash != account_state.canonical_head_hash
+        ):
+            target_weights_file.unlink(missing_ok=True)
+            raise PaperAccountStateRefused(
+                "canonical paper account changed during target construction; "
+                "stale target was discarded before pending freeze. Rerun target "
+                "generation from the freshly executed account state"
+            )
+        account_state = fresh_account_state
+        account_evidence = account_state.evidence()
+        pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
+            signal_date=as_of,
+            target_weights=weights.target_weights,
+            source_lineage={
+                "model_dir": config.model_dir,
+                "feature_dataset_path": str(feature_path),
+                "market_panel_path": str(market_path),
+                "predictions_path": str(predictions_file),
+                "predictions_file_sha256": _file_sha256(predictions_file),
+                "target_weights_path": str(target_weights_file),
+                "target_weights_file_sha256": _file_sha256(target_weights_file),
+                "primary_horizon": str(config.primary_horizon),
+                "paper_account_identity_sha256": account_identity.payload_sha256,
+                "canonical_account_state_sha256": str(account_evidence["account_state_sha256"]),
+                "canonical_ledger_head_hash": str(account_evidence["canonical_head_hash"]),
+                "canonical_ledger_records": str(account_evidence["canonical_records"]),
+                "canonical_account_nav": str(account_evidence["nav"]),
+            },
+        )
 
     warnings = tuple(
         [*evidence.warnings, "paper_signal_pending_next_observed_session"]
