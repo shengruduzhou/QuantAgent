@@ -10,6 +10,12 @@ reconciliation may append ``execution_reconciled`` after the indeterminate
 terminal. The reconciliation never edits or replaces the original outcome and
 must reference its record hash, so the audit trail remains append-only.
 
+Legacy terminal rows created before canonical-prefix receipts existed can be
+migrated without rewriting history. ``legacy_terminal_bound`` is a distinct,
+lower-assurance append-only attestation that binds the immutable terminal record
+hash to the current paper-account identity and a verified reconciled canonical
+prefix. It must never be reported as an original execution-time receipt.
+
 The hash-chain decision and append are protected by a sibling file lock on both
 POSIX and Windows. Without that critical section, two consumers can read the
 same tail, allocate the same sequence/previous hash, and both append internally
@@ -49,7 +55,12 @@ TERMINAL_OUTCOMES = frozenset(
     }
 )
 RECONCILIATION_STATUS = "execution_reconciled"
-_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {"execution_started", RECONCILIATION_STATUS}
+LEGACY_BINDING_STATUS = "legacy_terminal_bound"
+_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {
+    "execution_started",
+    RECONCILIATION_STATUS,
+    LEGACY_BINDING_STATUS,
+}
 
 
 class ExecutionJournalCorruption(RuntimeError):
@@ -164,6 +175,15 @@ class PendingExecutionJournal:
             )
         return rows[0] if rows else None
 
+    def legacy_binding(self, pending_payload_sha256: str) -> PendingExecutionRecord | None:
+        history = self.history(pending_payload_sha256)
+        rows = [record for record in history if record.status == LEGACY_BINDING_STATUS]
+        if len(rows) > 1:
+            raise ExecutionJournalCorruption(
+                f"pending signal {pending_payload_sha256} has multiple legacy binding records"
+            )
+        return rows[0] if rows else None
+
     def has_unresolved_start(self, pending_payload_sha256: str) -> bool:
         history = self.history(pending_payload_sha256)
         return any(record.status == "execution_started" for record in history) and not any(
@@ -235,6 +255,9 @@ class PendingExecutionJournal:
             reconciliations = [
                 record for record in history if record.status == RECONCILIATION_STATUS
             ]
+            legacy_bindings = [
+                record for record in history if record.status == LEGACY_BINDING_STATUS
+            ]
             if len(terminals) > 1:
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} has multiple terminal outcomes"
@@ -243,8 +266,13 @@ class PendingExecutionJournal:
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} has multiple reconciliation records"
                 )
+            if len(legacy_bindings) > 1:
+                raise ExecutionJournalCorruption(
+                    f"pending signal {pending_payload_sha256} has multiple legacy binding records"
+                )
             terminal = terminals[0] if terminals else None
             reconciliation = reconciliations[0] if reconciliations else None
+            legacy_binding = legacy_bindings[0] if legacy_bindings else None
 
             if status == RECONCILIATION_STATUS:
                 if terminal is None or terminal.status != "execution_indeterminate":
@@ -260,6 +288,46 @@ class PendingExecutionJournal:
                         return reconciliation
                     raise ExecutionJournalCorruption(
                         f"pending signal {pending_payload_sha256} is already reconciled"
+                    )
+            elif status == LEGACY_BINDING_STATUS:
+                if terminal is None:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires an existing terminal outcome"
+                    )
+                if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound is only valid for a terminal without an original receipt"
+                    )
+                if str(normalized_details.get("terminal_record_sha256") or "") != terminal.record_sha256:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound must bind the immutable terminal record hash"
+                    )
+                identity_sha = str(normalized_details.get("paper_account_identity_sha256") or "")
+                if len(identity_sha) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires paper_account_identity_sha256"
+                    )
+                try:
+                    canonical_records = int(normalized_details["canonical_records"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires canonical_records"
+                    ) from exc
+                canonical_head = str(normalized_details.get("canonical_head") or "")
+                if canonical_records < 0 or len(canonical_head) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound canonical prefix metadata is invalid"
+                    )
+                assurance = str(normalized_details.get("assurance") or "")
+                if assurance != "operator_reconciled_legacy_terminal_v1":
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires explicit migration assurance"
+                    )
+                if legacy_binding is not None:
+                    if legacy_binding.details == normalized_details:
+                        return legacy_binding
+                    raise ExecutionJournalCorruption(
+                        f"pending signal {pending_payload_sha256} is already legacy-bound"
                     )
             elif terminal is not None:
                 if status == terminal.status and normalized_details == terminal.details:
@@ -321,6 +389,7 @@ __all__ = [
     "JOURNAL_SCHEMA_VERSION",
     "TERMINAL_OUTCOMES",
     "RECONCILIATION_STATUS",
+    "LEGACY_BINDING_STATUS",
     "ExecutionJournalCorruption",
     "PendingExecutionRecord",
     "PendingExecutionJournal",
