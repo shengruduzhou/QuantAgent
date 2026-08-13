@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integrate:
-    if: "github.event.head_commit.message == 'chore(ci): execute authoritative calendar binding integration'"
+    if: "github.event.head_commit.message == 'chore(ci): diagnose authoritative calendar binding integration'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,14 +28,26 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -e ".[test]"
       - name: Compile and focused governance tests
+        shell: bash
         run: |
+          set -o pipefail
           python -m compileall -q src
           python -m pytest \
             tests/execution/test_acceptance_calendar.py \
             tests/execution/test_live_model_trust_v2.py \
             tests/execution/test_live_model_trust_v2_window_isolation.py \
-            -q
+            -q --junitxml=calendar-results.xml 2>&1 | tee calendar.log
           git diff --check
+      - name: Upload calendar diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue71-calendar-focused
+          path: |
+            calendar.log
+            calendar-results.xml
+          if-no-files-found: warn
+          retention-days: 7
       - name: Commit validated business and regression changes
         run: |
           git config user.name "github-actions[bot]"
