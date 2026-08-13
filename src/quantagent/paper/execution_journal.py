@@ -348,9 +348,8 @@ class PendingExecutionJournal:
                     normalized_details.get("operational_economic_reconstruction") or ""
                 )
                 assurance_contracts = {
-                    "operator_reconciled_legacy_terminal_v2": "matched_canonical",
                     "operator_bound_canonical_only_legacy_terminal_v1": (
-                        "not_present_canonical_is_record_of_account"
+                        "not_claimed_canonical_is_record_of_account"
                     ),
                 }
                 if assurance not in assurance_contracts:

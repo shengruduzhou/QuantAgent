@@ -119,7 +119,7 @@ def test_operator_legacy_binding_is_append_only_and_accepted_by_daily_gate(tmp_p
     assert binding["details"]["assurance"] == "operator_bound_canonical_only_legacy_terminal_v1"
     assert (
         binding["details"]["operational_economic_reconstruction"]
-        == "not_present_canonical_is_record_of_account"
+        == "not_claimed_canonical_is_record_of_account"
     )
     assert journal.terminal(prior.payload_sha256).record_sha256 == terminal.record_sha256
     _assert_prior_pending_signals_resolved(
@@ -251,3 +251,44 @@ def test_recovered_consistency_rejects_conflicting_operational_economics() -> No
         match="position reconciliation failed",
     ):
         continuous_execution._assert_recovered_account_consistent(canonical, operational)
+
+
+def test_legacy_binding_never_upgrades_to_state_only_operational_parity(tmp_path) -> None:
+    daily = _daily_config(tmp_path, "2026-08-12")
+    prior = _pending(daily, "2026-08-10")
+    journal = PendingExecutionJournal(daily.execution_journal_path)
+    journal.append(
+        pending_payload_sha256=prior.payload_sha256,
+        signal_date=prior.signal_date,
+        execution_date="2026-08-11",
+        status="execution_observed",
+        details={"target_weights_sha256": prior.target_weights_sha256},
+    )
+    binding = bind_legacy_terminal_account(
+        config=_continuous_config(tmp_path),
+        pending_payload_sha256=prior.payload_sha256,
+        as_of_date="2026-08-12",
+        reason="bind canonical record without historical parity overclaim",
+    )
+    assert binding["details"]["assurance"] == "operator_bound_canonical_only_legacy_terminal_v1"
+    assert (
+        binding["details"]["operational_economic_reconstruction"]
+        == "not_claimed_canonical_is_record_of_account"
+    )
+
+
+def test_custom_journal_path_canonicalizes_file_symlink_alias(tmp_path) -> None:
+    real = tmp_path / "real_custom.jsonl"
+    real.write_text("", encoding="utf-8")
+    alias = tmp_path / "different_alias.jsonl"
+    try:
+        alias.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    real_cfg = DailyPaperLoopConfig(
+        as_of_date="2026-08-11", canonical_ledger_path=str(real), execution_journal_path=None
+    )
+    alias_cfg = DailyPaperLoopConfig(
+        as_of_date="2026-08-11", canonical_ledger_path=str(alias), execution_journal_path=None
+    )
+    assert daily_loop._execution_journal_path(real_cfg) == daily_loop._execution_journal_path(alias_cfg)

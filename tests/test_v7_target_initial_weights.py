@@ -164,3 +164,28 @@ def test_explicit_empty_initial_weights_still_reconcile_age_tracker(monkeypatch)
         initial_weights=pd.Series(dtype=float),
     )
     assert calls == [{}]
+
+
+def test_all_dates_rejected_persists_cash_only_tracker_reconciliation(tmp_path) -> None:
+    predictions, market, timing = _two_session_inputs()
+    state_path = tmp_path / "position_age.parquet"
+    tracker = v7_target_weights.PositionAgeTracker(state_path=state_path)
+    tracker.begin_session({"STALE": 0.20}, {"STALE": 5})
+    tracker.persist()
+    assert not v7_target_weights.PositionAgeTracker.from_state(state_path).snapshot().empty
+
+    result = build_v7_target_weights(
+        predictions,
+        market,
+        config=_config(
+            holding_period_mode="hard",
+            max_turnover=1.0,
+        ),
+        timing_plan=timing,
+        position_state_path=state_path,
+        initial_weights=pd.Series(dtype=float),
+    )
+    assert result.target_weights.empty
+    assert result.diagnostics["status"] == "all_dates_rejected"
+    assert result.diagnostics["position_state_rows"] == 0
+    assert v7_target_weights.PositionAgeTracker.from_state(state_path).snapshot().empty

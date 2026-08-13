@@ -233,3 +233,31 @@ def test_artifact_write_failure_does_not_permanently_freeze_day(tmp_path, monkey
         daily_loop.run_once(config)
     journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
     assert journal.daily_decision(as_of) is None
+
+
+def test_no_target_stale_prediction_date_does_not_freeze_day(tmp_path, monkeypatch) -> None:
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=pd.DataFrame())
+    stale = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp("2026-08-06")],
+            "symbol": ["600000.SH"],
+            "prediction": [0.1],
+            "confidence": [0.9],
+        }
+    )
+    monkeypatch.setattr(
+        daily_loop,
+        "predict_v7_alpha",
+        lambda *args, **kwargs: SimpleNamespace(predictions=stale.copy()),
+    )
+    monkeypatch.setattr(
+        daily_loop,
+        "blend_multi_horizon_predictions",
+        lambda *args, **kwargs: SimpleNamespace(
+            blended=stale.copy(), diagnostics={"test": "stale-no-target"}
+        ),
+    )
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="no-target predictions must belong exactly"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None

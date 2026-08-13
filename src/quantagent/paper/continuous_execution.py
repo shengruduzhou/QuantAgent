@@ -642,9 +642,6 @@ def _bind_legacy_terminal_account_locked(
         portfolio_id=identity.portfolio_id,
         initial_cash=identity.initial_cash,
     )
-    operational_economics = _operational_has_reconstructable_economics(
-        operational_state
-    )
     _assert_recovered_account_consistent(canonical_state, operational_state)
     if canonical_state.open_orders() or operational_state.open_orders():
         raise ContinuousPaperExecutionBlocked(
@@ -669,15 +666,9 @@ def _bind_legacy_terminal_account_locked(
         "account_state_sha256": _account_state_sha256(canonical_state),
         "reconciled_as_of": as_of,
         "reason": binding_reason,
-        "assurance": (
-            "operator_reconciled_legacy_terminal_v2"
-            if operational_economics
-            else "operator_bound_canonical_only_legacy_terminal_v1"
-        ),
+        "assurance": "operator_bound_canonical_only_legacy_terminal_v1",
         "operational_economic_reconstruction": (
-            "matched_canonical"
-            if operational_economics
-            else "not_present_canonical_is_record_of_account"
+            "not_claimed_canonical_is_record_of_account"
         ),
     }
     existing = journal.legacy_binding(payload)

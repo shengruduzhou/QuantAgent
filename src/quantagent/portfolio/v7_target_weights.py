@@ -596,10 +596,17 @@ def build_v7_target_weights(
         )
 
     if not by_date_weights:
-        return V7TargetWeightsResult(
-            pd.DataFrame(),
-            {"status": "all_dates_rejected", "initial_weights": initial_state_diagnostics, **diagnostics},
-        )
+        diagnostics_payload = {
+            "status": "all_dates_rejected",
+            "initial_weights": initial_state_diagnostics,
+            **diagnostics,
+        }
+        if age_tracker is not None:
+            persisted = age_tracker.persist()
+            if persisted is not None:
+                diagnostics_payload["position_state_path"] = str(persisted)
+            diagnostics_payload["position_state_rows"] = int(len(age_tracker.snapshot()))
+        return V7TargetWeightsResult(pd.DataFrame(), diagnostics_payload)
 
     long_format = pd.concat(by_date_weights, ignore_index=True)
     pivot = long_format.pivot_table(index="trade_date", columns="symbol", values="weight", aggfunc="last").fillna(0.0)

@@ -264,6 +264,11 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             _assert_account_snapshot_unchanged(account_state, fresh_account_state)
             account_state = fresh_account_state
             account_evidence = account_state.evidence()
+            _assert_exact_signal_date(
+                predictions,
+                as_of,
+                evidence_name="no-target predictions",
+            )
             # Stage every fallible artifact before the irreversible no-target
             # marker. A failed writer leaves the date safely rerunnable.
             predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
@@ -438,13 +443,36 @@ def _assert_account_snapshot_unchanged(expected, observed) -> None:
         )
 
 
+def _assert_exact_signal_date(
+    frame: pd.DataFrame,
+    as_of: str,
+    *,
+    evidence_name: str,
+) -> None:
+    if "trade_date" not in frame.columns or frame.empty:
+        raise PaperAccountStateRefused(
+            f"{evidence_name} lacks a non-empty trade_date column for {as_of}"
+        )
+    parsed = pd.to_datetime(frame["trade_date"], errors="coerce")
+    if parsed.isna().any():
+        raise PaperAccountStateRefused(
+            f"{evidence_name} contains invalid trade_date values"
+        )
+    dates = {pd.Timestamp(value).date().isoformat() for value in parsed}
+    if dates != {str(as_of)}:
+        raise PaperAccountStateRefused(
+            f"{evidence_name} must belong exactly to signal_date={as_of}; "
+            f"observed_dates={sorted(dates)}"
+        )
+
+
 def _execution_journal_path(config: DailyPaperLoopConfig) -> str:
     if config.execution_journal_path is not None:
         return str(config.execution_journal_path)
 
-    canonical = Path(config.canonical_ledger_path)
+    canonical = Path(config.canonical_ledger_path).resolve(strict=False)
     runtime = paper_runtime_paths()
-    if canonical.resolve(strict=False) == runtime.canonical_ledger.resolve(strict=False):
+    if canonical == runtime.canonical_ledger.resolve(strict=False):
         return str(runtime.execution_journal)
 
     # A custom canonical account must never share the default account journal
