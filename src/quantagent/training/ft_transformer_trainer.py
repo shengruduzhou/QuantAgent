@@ -31,6 +31,10 @@ FTTransformerPredictionResult = _impl.FTTransformerPredictionResult
 predict_ft_transformer_artifact = _impl.predict_ft_transformer_artifact
 
 # Preserve private helper imports used by existing regression tests/research.
+# NOTE: the training loop below MUST call these module-level names (not
+# ``_impl.<name>``).  They are the documented monkeypatch seam; reaching through
+# to ``_impl`` makes a test's patch a no-op, which silently disarmed the
+# per-date rank-loss guard in tests/test_ft_transformer_multi_date_step.py.
 _auto_feature_columns = _impl._auto_feature_columns
 _prepare = _impl._prepare
 _resolve_device = _impl._resolve_device
@@ -326,7 +330,7 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
                             preds_s = model(xs)
                             loss_s = huber(preds_s, ys)
                             if self.config.rank_loss_weight > 0 and xs.shape[0] >= 2:
-                                rank_loss_s = _impl._softmax_listwise_loss(
+                                rank_loss_s = _softmax_listwise_loss(
                                     preds_s,
                                     ys,
                                     temperature=self.config.rank_loss_temperature,
@@ -359,7 +363,7 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
                                 for d in chunk:
                                     m = chunk_codes == d
                                     if int(m.sum()) >= 2:
-                                        rank_loss_acc = rank_loss_acc + _impl._softmax_listwise_loss(
+                                        rank_loss_acc = rank_loss_acc + _softmax_listwise_loss(
                                             preds[m],
                                             yb[m],
                                             temperature=self.config.rank_loss_temperature,
@@ -369,7 +373,7 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
                                     rank_loss = rank_loss_acc / float(n_groups)
                                     loss = loss + self.config.rank_loss_weight * rank_loss
                             else:
-                                rank_loss = _impl._softmax_listwise_loss(
+                                rank_loss = _softmax_listwise_loss(
                                     preds,
                                     yb,
                                     temperature=self.config.rank_loss_temperature,
