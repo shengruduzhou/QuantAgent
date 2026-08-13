@@ -12,11 +12,12 @@ from that same canonical executed account: recovered marked NAV drives
 liquidity capacity and recovered actual weights seed first-date timing,
 holding-period and turnover state. Before a non-empty target is frozen, the
 canonical account is recovered again while holding the cross-process account
-lock. Any ledger/state drift makes the stale target fail closed, and every older
+lock. Any ledger/state drift makes the stale target fail closed, every older
 pending signal must already have a canonically verified terminal execution
-outcome. Desired targets are never treated as holdings. The account genesis
-itself is immutable: every run must match the persisted portfolio_id/initial_cash
-identity before any target is produced.
+outcome, and same-date evidence files are written only inside that account-wide
+critical section. Desired targets are never treated as holdings. The account
+genesis itself is immutable: every run must match the persisted
+portfolio_id/initial_cash identity before any target is produced.
 """
 
 from __future__ import annotations
@@ -129,6 +130,10 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     continuous execution worker. Older pending signals must already be resolved
     with valid canonical evidence; a changed state/head/count invalidates the
     computed target instead of silently executing it against different holdings.
+
+    Prediction/target files that become pending-signal lineage are also written
+    inside that lock. Once one same-date pending signal is frozen, a second
+    writer is refused before it can overwrite those hash-bound evidence files.
     """
 
     as_of = _normalise_date(config.as_of_date)
@@ -187,7 +192,6 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         else prediction_result.predictions
     )
     day_dir = Path(config.output_root) / as_of
-    predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
     sector = read_frame(Path(config.sector_map_path)) if config.sector_map_path else None
     desired_weights = build_v7_target_weights(
         predictions,
@@ -220,11 +224,6 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     else:
         weights = desired_weights
 
-    weights_path = write_v7_target_weights(
-        weights,
-        day_dir / "target_weights.parquet",
-    )
-
     identity_evidence = {
         "schema_version": account_identity.schema_version,
         "account_instance_id": account_identity.account_instance_id,
@@ -236,6 +235,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     account_evidence = account_state.evidence()
 
     if weights.target_weights is None or weights.target_weights.empty:
+        with paper_account_lock(config.canonical_ledger_path):
+            _assert_current_signal_not_frozen(config, as_of)
+            predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
+            weights_path = write_v7_target_weights(
+                weights,
+                day_dir / "target_weights.parquet",
+            )
         warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
         summary = {
             "config": asdict(config),
@@ -279,18 +285,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             warnings=warnings,
         )
 
-    predictions_file = Path(predictions_path)
-    target_weights_file = Path(weights_path)
     with paper_account_lock(config.canonical_ledger_path):
-        try:
-            _assert_prior_pending_signals_resolved(
-                config,
-                as_of,
-                paper_account_identity_sha256=account_identity.payload_sha256,
-            )
-        except Exception:
-            target_weights_file.unlink(missing_ok=True)
-            raise
+        _assert_current_signal_not_frozen(config, as_of)
+        _assert_prior_pending_signals_resolved(
+            config,
+            as_of,
+            paper_account_identity_sha256=account_identity.payload_sha256,
+        )
         fresh_account_state = recover_paper_account_target_state(
             canonical_ledger_path=config.canonical_ledger_path,
             market_panel=market_panel,
@@ -303,7 +304,6 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             or fresh_account_state.canonical_records != account_state.canonical_records
             or fresh_account_state.canonical_head_hash != account_state.canonical_head_hash
         ):
-            target_weights_file.unlink(missing_ok=True)
             raise PaperAccountStateRefused(
                 "canonical paper account changed during target construction; "
                 "stale target was discarded before pending freeze. Rerun target "
@@ -311,6 +311,14 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             )
         account_state = fresh_account_state
         account_evidence = account_state.evidence()
+
+        predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
+        weights_path = write_v7_target_weights(
+            weights,
+            day_dir / "target_weights.parquet",
+        )
+        predictions_file = Path(predictions_path)
+        target_weights_file = Path(weights_path)
         pending, pending_path = PendingPaperSignalStore(config.pending_signal_dir).record(
             signal_date=as_of,
             target_weights=weights.target_weights,
@@ -380,6 +388,27 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         executed_fill_count=0,
         warnings=warnings,
     )
+
+
+def _assert_current_signal_not_frozen(
+    config: DailyPaperLoopConfig,
+    as_of: str,
+) -> None:
+    """Prevent a second same-date writer from mutating hash-bound evidence files.
+
+    The account lock must already be held. A frozen pending signal is immutable
+    economic evidence; its referenced prediction/target files must therefore be
+    immutable too. Re-running inference for the same signal date is allowed only
+    after an explicit operator workflow has dealt with the existing frozen
+    intent, rather than silently replacing its lineage artifacts.
+    """
+
+    existing = PendingPaperSignalStore(config.pending_signal_dir).read(as_of)
+    if existing is not None:
+        raise PaperAccountStateRefused(
+            "pending paper signal is already frozen for the current signal date; "
+            "refusing to overwrite its hash-bound predictions/target artifacts"
+        )
 
 
 def _valid_indeterminate_reconciliation(
@@ -452,16 +481,14 @@ def _assert_prior_pending_signals_resolved(
                 f"freeze: signal_date={signal.signal_date}, status=none; "
                 "run/reconcile the execution stage first"
             )
+        receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
         try:
-            verify_canonical_prefix_receipt(
-                dict(terminal.details or {}).get("canonical_prefix_receipt"),
+            verification = verify_canonical_prefix_receipt(
+                receipt,
                 prefix_index=prefix_index,
                 expected_target_weights_sha256=signal.target_weights_sha256,
                 expected_paper_account_identity_sha256=(
-                    paper_account_identity_sha256
-                    if dict(terminal.details or {}).get("canonical_prefix_receipt")
-                    is not None
-                    else None
+                    paper_account_identity_sha256 if receipt is not None else None
                 ),
             )
         except CanonicalPrefixReceiptError as exc:
@@ -469,6 +496,12 @@ def _assert_prior_pending_signals_resolved(
                 "prior pending terminal no longer matches the canonical account: "
                 f"signal_date={signal.signal_date}: {exc}"
             ) from exc
+        if not verification.bound:
+            raise PaperAccountStateRefused(
+                "prior pending terminal lacks a canonical-prefix/account-identity "
+                f"receipt: signal_date={signal.signal_date}; explicitly reconcile "
+                "legacy evidence before freezing a new target"
+            )
 
         if terminal.status in _RESOLVED_PRIOR_TERMINAL_STATUSES:
             continue
