@@ -12,7 +12,10 @@ The consumer is deliberately conservative:
 * an explicit append-only reconciliation record is the only way to clear an
   indeterminate freeze without rewriting history;
 * caller/observed session sets remain non-authoritative shadow-calendar evidence;
-* every non-terminal signal must match the immutable paper-account identity.
+* every non-terminal signal must match the immutable paper-account identity;
+* exported economic execution/reconciliation boundaries own the same canonical-
+  account cross-process lock used by target freezing, so non-CLI callers cannot
+  bypass serialization.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from quantagent.paper.account_identity import (
     PaperAccountIdentityError,
     ensure_paper_account_identity,
 )
+from quantagent.paper.account_lock import paper_account_lock
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
 from quantagent.paper.canonical_receipt import (
     CanonicalPrefixReceiptError,
@@ -526,9 +530,26 @@ def reconcile_indeterminate_account(
     as_of_date: str,
     reason: str,
 ) -> list[dict[str, object]]:
+    """Reconcile uncertain economics under the canonical-account lock."""
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _reconcile_indeterminate_account_locked(
+            config=config,
+            as_of_date=as_of_date,
+            reason=reason,
+        )
+
+
+def _reconcile_indeterminate_account_locked(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    as_of_date: str,
+    reason: str,
+) -> list[dict[str, object]]:
     """Explicitly reconcile and append evidence that can clear account freeze.
 
-    This function never deletes/replaces an indeterminate record. It first proves
+    The public wrapper owns the account-wide cross-process lock. This inner
+    function never deletes/replaces an indeterminate record. It first proves
     canonical and operational paper state agree and have no open orders. Any
     dangling ``execution_started`` is converted to ``execution_indeterminate``;
     each indeterminate terminal then receives one append-only
@@ -665,6 +686,29 @@ def reconcile_indeterminate_account(
 
 
 def execute_pending_for_session(
+    as_of_date: str,
+    market_panel: pd.DataFrame,
+    *,
+    config: ContinuousPaperExecutionConfig,
+    authoritative_sessions: Sequence[object] | None = None,
+) -> list[ContinuousPaperExecutionResult]:
+    """Execute one session under the canonical-account cross-process lock.
+
+    Lock ownership lives here rather than in a CLI adapter so direct library,
+    daemon or future API callers cannot mutate the economic account outside the
+    same critical section used by daily target freezing.
+    """
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _execute_pending_for_session_locked(
+            as_of_date,
+            market_panel,
+            config=config,
+            authoritative_sessions=authoritative_sessions,
+        )
+
+
+def _execute_pending_for_session_locked(
     as_of_date: str,
     market_panel: pd.DataFrame,
     *,
