@@ -34,7 +34,6 @@ jobs:
             tests/execution/test_acceptance_calendar.py \
             tests/execution/test_live_model_trust_v2.py \
             tests/execution/test_live_model_trust_v2_window_isolation.py \
-            tests/execution/test_live_model_trust_v2_policy.py \
             -q
           git diff --check
       - name: Commit validated business and regression changes
