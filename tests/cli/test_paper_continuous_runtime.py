@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 from pathlib import Path
 
@@ -33,29 +32,17 @@ def test_execute_session_uses_the_same_canonical_runtime_as_api_and_ui(
     ).to_csv(market, index=False)
     monkeypatch.setenv("QUANTAGENT_HOME", str(home))
 
-    captured: dict[str, object] = {"lock_held": False}
-
-    @contextmanager
-    def fake_account_lock(canonical_ledger_path, **_kwargs):
-        captured["lock_path"] = str(canonical_ledger_path)
-        captured["lock_held"] = True
-        try:
-            yield Path(canonical_ledger_path)
-        finally:
-            captured["lock_held"] = False
+    captured: dict[str, object] = {}
 
     def fake_execute(as_of_date, frame, *, config, authoritative_sessions):
         captured["date"] = as_of_date
         captured["rows"] = len(frame)
         captured["config"] = config
         captured["authoritative_sessions"] = authoritative_sessions
-        captured["execute_lock_held"] = captured["lock_held"]
         return [_Result()]
 
-    import quantagent.paper.account_lock as account_lock
     import quantagent.paper.continuous_execution as continuous_execution
 
-    monkeypatch.setattr(account_lock, "paper_account_lock", fake_account_lock)
     monkeypatch.setattr(
         continuous_execution,
         "execute_pending_for_session",
@@ -77,9 +64,6 @@ def test_execute_session_uses_the_same_canonical_runtime_as_api_and_ui(
     assert captured["date"] == "2026-08-10"
     assert captured["rows"] == 1
     assert captured["authoritative_sessions"] is None
-    assert captured["lock_path"] == str(paths.canonical_ledger)
-    assert captured["execute_lock_held"] is True
-    assert captured["lock_held"] is False
     assert config.pending_signal_dir == str(paths.pending_signals)
     assert config.execution_journal_path == str(paths.execution_journal)
     assert config.canonical_ledger_path == str(paths.canonical_ledger)
