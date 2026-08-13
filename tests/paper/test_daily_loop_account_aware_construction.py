@@ -13,6 +13,7 @@ from quantagent.paper.account_target_state import (
     PaperAccountStateRefused,
     PaperAccountTargetState,
 )
+from quantagent.paper.pending_signal import PendingPaperSignalStore
 from quantagent.portfolio.v7_target_weights import V7TargetWeightsResult
 
 
@@ -106,6 +107,35 @@ def _install_common_doubles(
     )
 
 
+def _desired(as_of: str) -> V7TargetWeightsResult:
+    return V7TargetWeightsResult(
+        pd.DataFrame(
+            {
+                "trade_date": [pd.Timestamp(as_of)],
+                "600000.SH": [0.30],
+            }
+        ),
+        {"status": "passed"},
+    )
+
+
+def _config(tmp_path, as_of: str, feature_path, market_path) -> daily_loop.DailyPaperLoopConfig:
+    return daily_loop.DailyPaperLoopConfig(
+        as_of_date=as_of,
+        model_dir=str(tmp_path / "model"),
+        feature_dataset_path=str(feature_path),
+        market_panel_path=str(market_path),
+        output_root=str(tmp_path / "reports"),
+        paper_book_path=str(tmp_path / "paper_book.parquet"),
+        pending_signal_dir=str(tmp_path / "pending"),
+        execution_journal_path=str(tmp_path / "execution.jsonl"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        account_identity_path=str(tmp_path / "identity.json"),
+        max_turnover=0.40,
+        dry_run_evidence=True,
+    )
+
+
 def test_daily_loop_uses_same_recovered_nav_and_weights_for_target_construction_and_reconciliation(
     tmp_path,
     monkeypatch,
@@ -164,15 +194,7 @@ def test_daily_loop_uses_same_recovered_nav_and_weights_for_target_construction_
     monkeypatch.setattr(daily_loop, "recover_paper_account_target_state", fake_recover)
 
     captured: dict[str, object] = {}
-    desired = V7TargetWeightsResult(
-        pd.DataFrame(
-            {
-                "trade_date": [pd.Timestamp(as_of)],
-                "600000.SH": [0.30],
-            }
-        ),
-        {"status": "passed"},
-    )
+    desired = _desired(as_of)
 
     def fake_build(*args, **kwargs):
         del args
@@ -189,11 +211,14 @@ def test_daily_loop_uses_same_recovered_nav_and_weights_for_target_construction_
     monkeypatch.setattr(daily_loop, "build_v7_target_weights", fake_build)
     monkeypatch.setattr(daily_loop, "reconcile_target_to_canonical_account", fake_reconcile)
 
-    real_store = daily_loop.PendingPaperSignalStore
+    real_store = PendingPaperSignalStore
 
     class LockCheckingStore:
         def __init__(self, root):
             self._delegate = real_store(root)
+
+        def read(self, signal_date):
+            return self._delegate.read(signal_date)
 
         def record(self, **kwargs):
             captured["record_lock_held"] = bool(lock_state["held"])
@@ -201,25 +226,28 @@ def test_daily_loop_uses_same_recovered_nav_and_weights_for_target_construction_
 
     monkeypatch.setattr(daily_loop, "PendingPaperSignalStore", LockCheckingStore)
 
-    config = daily_loop.DailyPaperLoopConfig(
-        as_of_date=as_of,
-        model_dir=str(tmp_path / "model"),
-        feature_dataset_path=str(feature_path),
-        market_panel_path=str(market_path),
-        output_root=str(tmp_path / "reports"),
-        paper_book_path=str(tmp_path / "paper_book.parquet"),
-        pending_signal_dir=str(tmp_path / "pending"),
-        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
-        account_identity_path=str(tmp_path / "identity.json"),
-        max_turnover=0.40,
-        dry_run_evidence=True,
-    )
+    real_write_frame = daily_loop.write_frame
+    real_write_target = daily_loop.write_v7_target_weights
 
+    def lock_checked_write_frame(frame, path):
+        captured["prediction_write_lock_held"] = bool(lock_state["held"])
+        return real_write_frame(frame, path)
+
+    def lock_checked_write_target(result, path):
+        captured["target_write_lock_held"] = bool(lock_state["held"])
+        return real_write_target(result, path)
+
+    monkeypatch.setattr(daily_loop, "write_frame", lock_checked_write_frame)
+    monkeypatch.setattr(daily_loop, "write_v7_target_weights", lock_checked_write_target)
+
+    config = _config(tmp_path, as_of, feature_path, market_path)
     result = daily_loop.run_once(config)
 
     assert result.status == "signal_recorded_pending_execution"
     assert recovered["count"] == 2
     assert recovered["fresh_under_lock"] is True
+    assert captured["prediction_write_lock_held"] is True
+    assert captured["target_write_lock_held"] is True
     assert captured["record_lock_held"] is True
     assert lock_state["enters"] == 1
     assert lock_state["path"] == config.canonical_ledger_path
@@ -290,15 +318,7 @@ def test_daily_loop_discards_target_if_canonical_account_changes_before_freeze(
         lambda **_kwargs: next(states),
     )
 
-    desired = V7TargetWeightsResult(
-        pd.DataFrame(
-            {
-                "trade_date": [pd.Timestamp(as_of)],
-                "600000.SH": [0.30],
-            }
-        ),
-        {"status": "passed"},
-    )
+    desired = _desired(as_of)
     monkeypatch.setattr(daily_loop, "build_v7_target_weights", lambda *args, **kwargs: desired)
     monkeypatch.setattr(
         daily_loop,
@@ -306,22 +326,78 @@ def test_daily_loop_discards_target_if_canonical_account_changes_before_freeze(
         lambda result, **_kwargs: result,
     )
 
-    config = daily_loop.DailyPaperLoopConfig(
-        as_of_date=as_of,
-        model_dir=str(tmp_path / "model"),
-        feature_dataset_path=str(feature_path),
-        market_panel_path=str(market_path),
-        output_root=str(tmp_path / "reports"),
-        paper_book_path=str(tmp_path / "paper_book.parquet"),
-        pending_signal_dir=str(tmp_path / "pending"),
-        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
-        account_identity_path=str(tmp_path / "identity.json"),
-        max_turnover=0.40,
-        dry_run_evidence=True,
-    )
-
+    config = _config(tmp_path, as_of, feature_path, market_path)
     with pytest.raises(PaperAccountStateRefused, match="changed during target construction"):
         daily_loop.run_once(config)
 
+    assert not (tmp_path / "written_predictions.csv").exists()
     assert not (tmp_path / "written_target_weights.csv").exists()
     assert not (tmp_path / "pending" / f"{as_of}.json").exists()
+
+
+def test_daily_loop_refuses_same_date_writer_before_overwriting_bound_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    as_of = "2026-08-07"
+    feature_path = tmp_path / "features.parquet"
+    market_path = tmp_path / "market.parquet"
+    feature_path.touch()
+    market_path.touch()
+    features, market, predictions = _frames(as_of)
+    account_state = PaperAccountTargetState(
+        as_of_date=as_of,
+        current_weights=pd.Series({"600000.SH": 0.20}),
+        quantities=pd.Series({"600000.SH": 100_000.0}),
+        cash=4_000_000.0,
+        nav=5_000_000.0,
+        canonical_records=7,
+        canonical_head_hash="b" * 64,
+        account_state_sha256="a" * 64,
+    )
+
+    _install_common_doubles(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        feature_path=feature_path,
+        market_path=market_path,
+        features=features,
+        market=market,
+        predictions=predictions,
+    )
+
+    @contextmanager
+    def fake_account_lock(path, **_kwargs):
+        yield path
+
+    monkeypatch.setattr(daily_loop, "paper_account_lock", fake_account_lock)
+    monkeypatch.setattr(
+        daily_loop,
+        "recover_paper_account_target_state",
+        lambda **_kwargs: account_state,
+    )
+    desired = _desired(as_of)
+    monkeypatch.setattr(daily_loop, "build_v7_target_weights", lambda *args, **kwargs: desired)
+    monkeypatch.setattr(
+        daily_loop,
+        "reconcile_target_to_canonical_account",
+        lambda result, **_kwargs: result,
+    )
+
+    config = _config(tmp_path, as_of, feature_path, market_path)
+    PendingPaperSignalStore(config.pending_signal_dir).record(
+        signal_date=as_of,
+        target_weights=desired.target_weights,
+        source_lineage={"test": "already-frozen"},
+        created_at="2026-08-13T00:00:00+00:00",
+    )
+    prediction_artifact = tmp_path / "written_predictions.csv"
+    target_artifact = tmp_path / "written_target_weights.csv"
+    prediction_artifact.write_text("original-predictions\n", encoding="utf-8")
+    target_artifact.write_text("original-target\n", encoding="utf-8")
+
+    with pytest.raises(PaperAccountStateRefused, match="already frozen"):
+        daily_loop.run_once(config)
+
+    assert prediction_artifact.read_text(encoding="utf-8") == "original-predictions\n"
+    assert target_artifact.read_text(encoding="utf-8") == "original-target\n"
