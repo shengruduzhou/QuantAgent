@@ -28,7 +28,7 @@ class FreshPredictionEvidence:
     end_date: str
     rows: int
     symbols: int
-    session_dates: tuple[str, ...]
+    session_dates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class StrictReturnEvidence:
     portfolio_total_return: float
     benchmark_total_return: float
     benchmark_excess_positive: bool
-    session_dates: tuple[str, ...]
+    session_dates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class StatisticalEvidence:
     rows: int
     start_date: str
     end_date: str
-    session_dates: tuple[str, ...]
+    session_dates: tuple[str, ...] = ()
 
 
 def validate_fresh_predictions(path: str | Path) -> FreshPredictionEvidence:
