@@ -10,6 +10,12 @@ reconciliation may append ``execution_reconciled`` after the indeterminate
 terminal. The reconciliation never edits or replaces the original outcome and
 must reference its record hash, so the audit trail remains append-only.
 
+Legacy terminal rows created before canonical-prefix receipts existed can be
+migrated without rewriting history. ``legacy_terminal_bound`` is a distinct,
+lower-assurance append-only attestation that binds the immutable terminal record
+hash to the current paper-account identity and a verified reconciled canonical
+prefix. It must never be reported as an original execution-time receipt.
+
 The hash-chain decision and append are protected by a sibling file lock on both
 POSIX and Windows. Without that critical section, two consumers can read the
 same tail, allocate the same sequence/previous hash, and both append internally
@@ -20,7 +26,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 import os
@@ -49,7 +55,14 @@ TERMINAL_OUTCOMES = frozenset(
     }
 )
 RECONCILIATION_STATUS = "execution_reconciled"
-_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {"execution_started", RECONCILIATION_STATUS}
+LEGACY_BINDING_STATUS = "legacy_terminal_bound"
+DAILY_DECISION_STATUS = "daily_decision_frozen"
+_ALLOWED_STATUSES = TERMINAL_OUTCOMES | {
+    "execution_started",
+    RECONCILIATION_STATUS,
+    LEGACY_BINDING_STATUS,
+    DAILY_DECISION_STATUS,
+}
 
 
 class ExecutionJournalCorruption(RuntimeError):
@@ -96,6 +109,18 @@ def _strict_object(pairs):
     return result
 
 
+def _normalise_economic_date(value: object, *, field: str) -> str:
+    text = str(value)
+    try:
+        parsed = date.fromisoformat(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite ISO date, got {value!r}") from exc
+    normalized = parsed.isoformat()
+    if text != normalized:
+        raise ValueError(f"{field} must be an exact ISO date, got {value!r}")
+    return normalized
+
+
 class PendingExecutionJournal:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -129,6 +154,13 @@ class PendingExecutionJournal:
         for record in self.records():
             if record.schema_version != JOURNAL_SCHEMA_VERSION:
                 return False
+            if record.status not in _ALLOWED_STATUSES:
+                return False
+            try:
+                _normalise_economic_date(record.signal_date, field="signal_date")
+                _normalise_economic_date(record.execution_date, field="execution_date")
+            except ValueError:
+                return False
             if record.sequence != expected_sequence:
                 return False
             if record.previous_record_sha256 != previous:
@@ -161,6 +193,28 @@ class PendingExecutionJournal:
         if len(rows) > 1:
             raise ExecutionJournalCorruption(
                 f"pending signal {pending_payload_sha256} has multiple reconciliation records"
+            )
+        return rows[0] if rows else None
+
+    def legacy_binding(self, pending_payload_sha256: str) -> PendingExecutionRecord | None:
+        history = self.history(pending_payload_sha256)
+        rows = [record for record in history if record.status == LEGACY_BINDING_STATUS]
+        if len(rows) > 1:
+            raise ExecutionJournalCorruption(
+                f"pending signal {pending_payload_sha256} has multiple legacy binding records"
+            )
+        return rows[0] if rows else None
+
+    def daily_decision(self, signal_date: str) -> PendingExecutionRecord | None:
+        rows = [
+            record
+            for record in self.records()
+            if record.status == DAILY_DECISION_STATUS
+            and record.signal_date == str(signal_date)
+        ]
+        if len(rows) > 1:
+            raise ExecutionJournalCorruption(
+                f"signal date {signal_date} has multiple daily decision freeze records"
             )
         return rows[0] if rows else None
 
@@ -216,6 +270,10 @@ class PendingExecutionJournal:
             raise ValueError(f"unsupported execution journal status {status!r}")
         if not str(pending_payload_sha256).strip():
             raise ValueError("pending_payload_sha256 must be non-empty")
+        signal_date = _normalise_economic_date(signal_date, field="signal_date")
+        execution_date = _normalise_economic_date(
+            execution_date, field="execution_date"
+        )
 
         normalized_details = dict(details or {})
         with self._thread_lock, self._exclusive_file_lock():
@@ -235,6 +293,9 @@ class PendingExecutionJournal:
             reconciliations = [
                 record for record in history if record.status == RECONCILIATION_STATUS
             ]
+            legacy_bindings = [
+                record for record in history if record.status == LEGACY_BINDING_STATUS
+            ]
             if len(terminals) > 1:
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} has multiple terminal outcomes"
@@ -243,8 +304,23 @@ class PendingExecutionJournal:
                 raise ExecutionJournalCorruption(
                     f"pending signal {pending_payload_sha256} has multiple reconciliation records"
                 )
+            if len(legacy_bindings) > 1:
+                raise ExecutionJournalCorruption(
+                    f"pending signal {pending_payload_sha256} has multiple legacy binding records"
+                )
             terminal = terminals[0] if terminals else None
             reconciliation = reconciliations[0] if reconciliations else None
+            legacy_binding = legacy_bindings[0] if legacy_bindings else None
+            same_date_decisions = [
+                record
+                for record in records
+                if record.status == DAILY_DECISION_STATUS
+                and record.signal_date == str(signal_date)
+            ]
+            if len(same_date_decisions) > 1:
+                raise ExecutionJournalCorruption(
+                    f"signal date {signal_date} has multiple daily decision freeze records"
+                )
 
             if status == RECONCILIATION_STATUS:
                 if terminal is None or terminal.status != "execution_indeterminate":
@@ -260,6 +336,101 @@ class PendingExecutionJournal:
                         return reconciliation
                     raise ExecutionJournalCorruption(
                         f"pending signal {pending_payload_sha256} is already reconciled"
+                    )
+            elif status == LEGACY_BINDING_STATUS:
+                if terminal is None:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires an existing terminal outcome"
+                    )
+                if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound is only valid for a terminal without an original receipt"
+                    )
+                if str(normalized_details.get("terminal_record_sha256") or "") != terminal.record_sha256:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound must bind the immutable terminal record hash"
+                    )
+                identity_sha = str(normalized_details.get("paper_account_identity_sha256") or "")
+                if len(identity_sha) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires paper_account_identity_sha256"
+                    )
+                try:
+                    canonical_records = int(normalized_details["canonical_records"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires canonical_records"
+                    ) from exc
+                canonical_head = str(normalized_details.get("canonical_head") or "")
+                if canonical_records < 0 or len(canonical_head) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound canonical prefix metadata is invalid"
+                    )
+                assurance = str(normalized_details.get("assurance") or "")
+                reconstruction = str(
+                    normalized_details.get("operational_economic_reconstruction") or ""
+                )
+                assurance_contracts = {
+                    "operator_bound_canonical_only_legacy_terminal_v1": (
+                        "not_claimed_canonical_is_record_of_account"
+                    ),
+                }
+                if assurance not in assurance_contracts:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires explicit unambiguous migration assurance"
+                    )
+                if reconstruction != assurance_contracts[assurance]:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound operational reconstruction marker mismatches assurance"
+                    )
+                account_state_sha = str(normalized_details.get("account_state_sha256") or "")
+                target_sha = str(normalized_details.get("target_weights_sha256") or "")
+                if len(account_state_sha) != 64 or len(target_sha) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires reconciled account-state and target digests"
+                    )
+                if legacy_binding is not None:
+                    if legacy_binding.details == normalized_details:
+                        return legacy_binding
+                    raise ExecutionJournalCorruption(
+                        f"pending signal {pending_payload_sha256} is already legacy-bound"
+                    )
+            elif status == DAILY_DECISION_STATUS:
+                decision_kind = str(normalized_details.get("decision_kind") or "")
+                if decision_kind not in {"target", "no_target"}:
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen requires decision_kind target|no_target"
+                    )
+                identity_sha = str(normalized_details.get("paper_account_identity_sha256") or "")
+                state_sha = str(normalized_details.get("canonical_account_state_sha256") or "")
+                canonical_head = str(normalized_details.get("canonical_head") or "")
+                try:
+                    canonical_records = int(normalized_details["canonical_records"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen requires canonical_records"
+                    ) from exc
+                if (
+                    len(identity_sha) != 64
+                    or len(state_sha) != 64
+                    or len(canonical_head) != 64
+                    or canonical_records < 0
+                    or str(normalized_details.get("assurance") or "")
+                    != "canonical_account_daily_decision_freeze_v1"
+                ):
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen canonical/account binding is invalid"
+                    )
+                if same_date_decisions:
+                    existing_decision = same_date_decisions[0]
+                    if (
+                        existing_decision.pending_payload_sha256
+                        == str(pending_payload_sha256)
+                        and existing_decision.details == normalized_details
+                    ):
+                        return existing_decision
+                    raise ExecutionJournalCorruption(
+                        f"signal date {signal_date} is already durably frozen"
                     )
             elif terminal is not None:
                 if status == terminal.status and normalized_details == terminal.details:
@@ -321,6 +492,8 @@ __all__ = [
     "JOURNAL_SCHEMA_VERSION",
     "TERMINAL_OUTCOMES",
     "RECONCILIATION_STATUS",
+    "LEGACY_BINDING_STATUS",
+    "DAILY_DECISION_STATUS",
     "ExecutionJournalCorruption",
     "PendingExecutionRecord",
     "PendingExecutionJournal",

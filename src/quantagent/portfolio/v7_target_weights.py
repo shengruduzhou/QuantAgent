@@ -124,6 +124,43 @@ def _effective_participation_rate(config: V7TargetWeightsConfig) -> float:
     return rate
 
 
+def _normalize_initial_weights(
+    initial_weights: pd.Series | None,
+    *,
+    long_short: bool,
+) -> pd.Series | None:
+    """Validate an externally recovered starting portfolio.
+
+    Historical multi-date research calls can omit this input and retain the
+    legacy in-call previous-day state. Paper/shadow callers use it to seed the
+    first date from canonical executed holdings instead of an implicit zero
+    portfolio. Duplicate symbols are aggregated only after every source row has
+    passed the long-only and finite-value checks, so opposing duplicate rows
+    cannot hide an invalid short position.
+    """
+
+    if initial_weights is None:
+        return None
+    if not isinstance(initial_weights, pd.Series):
+        raise TypeError("initial_weights must be a pandas Series indexed by symbol")
+    if initial_weights.index.isna().any():
+        raise ValueError("initial_weights contains a missing symbol")
+    weights = pd.to_numeric(initial_weights.copy(), errors="coerce")
+    weights.index = weights.index.astype(str).str.strip()
+    if bool((weights.index == "").any()):
+        raise ValueError("initial_weights contains a blank symbol")
+    raw_values = weights.to_numpy(dtype=float)
+    if not np.isfinite(raw_values).all():
+        raise ValueError("initial_weights contains missing or non-finite values")
+    if not long_short and bool((weights < -1e-12).any()):
+        raise ValueError("long-only target construction cannot start from negative weights")
+    weights = weights.groupby(level=0).sum().astype(float)
+    # Zero/near-zero entries are not holdings. Keeping them in the index would
+    # let the timing gate misclassify a fresh open as an existing position.
+    weights = weights[weights.abs() > 1e-12]
+    return weights.sort_index()
+
+
 def build_v7_target_weights(
     predictions: pd.DataFrame,
     market_panel: pd.DataFrame,
@@ -133,6 +170,7 @@ def build_v7_target_weights(
     theme_signals: pd.DataFrame | None = None,
     timing_plan: pd.DataFrame | None = None,
     position_state_path: Path | None = None,
+    initial_weights: pd.Series | None = None,
 ) -> V7TargetWeightsResult:
     """Convert per-symbol predictions into a daily target-weights panel.
 
@@ -149,6 +187,9 @@ def build_v7_target_weights(
     * ``position_state_path`` — parquet path the position-age tracker
       persists to. State survives walk-forward fold boundaries, so the
       holding-period constraint actually binds.
+    * ``initial_weights`` — optional externally recovered current weights used
+      as the first-date ``previous_weights``. Historical research can omit it;
+      paper/shadow target construction should bind it to canonical fills.
     """
 
     config = config or V7TargetWeightsConfig()
@@ -200,7 +241,19 @@ def build_v7_target_weights(
         "timing_gate_summary": [],
         "holding_period_locks": [],
     }
-    previous_weights: pd.Series | None = None
+    previous_weights = _normalize_initial_weights(
+        initial_weights,
+        long_short=bool(config.long_short),
+    )
+    starting_weights = (
+        previous_weights.copy() if previous_weights is not None else None
+    )
+    initial_state_diagnostics = {
+        "supplied": bool(initial_weights is not None),
+        "symbol_count": int(len(previous_weights)) if previous_weights is not None else 0,
+        "gross_exposure": float(previous_weights.abs().sum()) if previous_weights is not None else 0.0,
+        "net_exposure": float(previous_weights.sum()) if previous_weights is not None else 0.0,
+    }
 
     effective_participation = _effective_participation_rate(config)
 
@@ -225,6 +278,17 @@ def build_v7_target_weights(
             if position_state_path is not None
             else PositionAgeTracker()
         )
+        if previous_weights is not None:
+            # Explicitly empty initial weights are authoritative cash-only state and
+            # must clear stale persisted ages before first-date lock evaluation.
+            initial_expected_horizons: dict[str, int | None] = {}
+            if theme_frame is not None and not theme_frame.empty and "expected_horizon_days" in theme_frame.columns:
+                first_date = preds["trade_date"].min()
+                first_theme = theme_frame[theme_frame["trade_date"] == first_date]
+                for symbol, horizon in zip(first_theme["symbol"], first_theme["expected_horizon_days"]):
+                    if pd.notna(horizon):
+                        initial_expected_horizons[str(symbol)] = horizon
+            age_tracker.begin_session(previous_weights.to_dict(), initial_expected_horizons)
 
     dynamic_topk_cfg = DynamicTopKConfig(
         top_k_min=int(config.top_k_min),
@@ -233,6 +297,17 @@ def build_v7_target_weights(
     )
 
     for date, day in preds.groupby("trade_date", sort=True):
+        day_expected_horizons: dict[str, int | None] = {}
+        if age_tracker is not None and theme_frame is not None:
+            today_theme = theme_frame[theme_frame["trade_date"] == date]
+            if not today_theme.empty and "expected_horizon_days" in today_theme.columns:
+                for sym, eh in zip(
+                    today_theme["symbol"], today_theme["expected_horizon_days"]
+                ):
+                    if pd.notna(eh):
+                        day_expected_horizons[str(sym)] = eh
+            age_tracker.update_expected_horizons(day_expected_horizons)
+
         day_market = market[market["trade_date"] == date]
         merged = day.merge(day_market, on=["symbol", "trade_date"], how="left", suffixes=("", "_mkt"))
         rejected: list[dict[str, object]] = []
@@ -295,7 +370,15 @@ def build_v7_target_weights(
                 blocked = set(gate_today.loc[~gate_today["allow_open"].astype(bool), "symbol"].astype(str))
                 force_close_symbols = set(gate_today.loc[gate_today["force_close"].astype(bool), "symbol"].astype(str))
                 if blocked:
-                    held = set(previous_weights.index.astype(str)) if previous_weights is not None else set()
+                    held = (
+                        set(
+                            previous_weights[
+                                previous_weights.abs() > 1e-12
+                            ].index.astype(str)
+                        )
+                        if previous_weights is not None
+                        else set()
+                    )
                     new_only_blocked = blocked - held
                     if new_only_blocked:
                         eligible = eligible[~eligible["symbol"].astype(str).isin(new_only_blocked)]
@@ -471,13 +554,23 @@ def build_v7_target_weights(
             sign = np.sign(weights.replace(0.0, 1.0))
             weights = weights + redistribute * sign
 
-        # Holding-period lock (Phase 3.4): force ``|Δw| ≤ holding_period_max_delta``
-        # for names whose age < expected_horizon, unless timing-gate
-        # marks them force_close.
+        # Holding-period lock (Phase 3.4): apply to the union of desired and
+        # actually held names. A selected-only loop would allow a locked
+        # recovered holding to disappear simply because it fell out of Top-K.
+        if force_close_symbols:
+            if previous_weights is not None:
+                weights = weights.reindex(
+                    weights.index.union(previous_weights.index)
+                ).fillna(0.0)
+            for symbol in force_close_symbols:
+                if symbol in weights.index:
+                    weights.loc[symbol] = 0.0
         locked_symbols: list[str] = []
         if age_tracker is not None and previous_weights is not None:
-            prev_aligned = previous_weights.reindex(weights.index).fillna(0.0)
-            for symbol in list(weights.index.astype(str)):
+            union_symbols = weights.index.union(previous_weights.index)
+            weights = weights.reindex(union_symbols).fillna(0.0)
+            prev_aligned = previous_weights.reindex(union_symbols).fillna(0.0)
+            for symbol in list(union_symbols.astype(str)):
                 if symbol in force_close_symbols:
                     weights.loc[symbol] = 0.0
                     continue
@@ -493,21 +586,26 @@ def build_v7_target_weights(
                 {"trade_date": str(date), "locked_symbols": locked_symbols}
             )
 
-        # Apply turnover cap vs previous weights.
+        # Apply one coherent turnover projection over current ∪ desired. This
+        # counts exits of held names that disappeared from timing/selection and
+        # prevents a later account-aware reconciliation from discovering an
+        # additional, previously invisible leg of turnover.
         if previous_weights is not None and config.max_turnover > 0:
-            blended = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
-            weights = blended
-        previous_weights = weights.copy()
+            weights = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
+        if not config.long_short:
+            weights = _project_and_validate_long_only_target(
+                weights,
+                previous_weights=previous_weights,
+                per_name_cap=per_name_cap,
+                sector_lookup=sector_lookup,
+                config=config,
+            )
+        previous_weights = weights[weights.abs() > 1e-12].copy()
 
         if age_tracker is not None:
-            expected_horizons: dict[str, int | None] = {}
-            if theme_frame is not None:
-                today_theme = theme_frame[theme_frame["trade_date"] == date]
-                if not today_theme.empty and "expected_horizon_days" in today_theme.columns:
-                    for sym, eh in zip(today_theme["symbol"], today_theme["expected_horizon_days"]):
-                        if pd.notna(eh):
-                            expected_horizons[str(sym)] = int(eh)
-            age_tracker.record_session(date, weights.to_dict(), expected_horizons)
+            age_tracker.record_session(
+                date, weights.to_dict(), day_expected_horizons
+            )
 
         exposures_report: dict[str, float] = {}
         if sector_lookup:
@@ -531,10 +629,33 @@ def build_v7_target_weights(
         )
 
     if not by_date_weights:
-        return V7TargetWeightsResult(pd.DataFrame(), {"status": "all_dates_rejected", **diagnostics})
+        diagnostics_payload = {
+            "status": "all_dates_rejected",
+            "initial_weights": initial_state_diagnostics,
+            **diagnostics,
+        }
+        if age_tracker is not None:
+            persisted = age_tracker.persist()
+            if persisted is not None:
+                diagnostics_payload["position_state_path"] = str(persisted)
+            diagnostics_payload["position_state_rows"] = int(len(age_tracker.snapshot()))
+        return V7TargetWeightsResult(pd.DataFrame(), diagnostics_payload)
 
     long_format = pd.concat(by_date_weights, ignore_index=True)
     pivot = long_format.pivot_table(index="trade_date", columns="symbol", values="weight", aggfunc="last").fillna(0.0)
+    if starting_weights is not None:
+        initial_aligned = starting_weights.reindex(pivot.columns).fillna(0.0)
+        turnover_observations = [
+            float((pivot.iloc[0] - initial_aligned).abs().sum()),
+            *[
+                float(value)
+                for value in pivot.diff().abs().sum(axis=1).iloc[1:].tolist()
+            ],
+        ]
+        average_turnover = float(np.mean(turnover_observations))
+    else:
+        average_turnover = float(pivot.diff().abs().sum(axis=1).mean())
+
     diagnostics_payload = {
         "status": "passed",
         "raw_symbol_count": int(preds["symbol"].nunique()),
@@ -569,7 +690,7 @@ def build_v7_target_weights(
         "dates": int(pivot.shape[0]),
         "symbol_count": int(pivot.shape[1]),
         "average_gross_exposure": float(pivot.abs().sum(axis=1).mean()),
-        "average_turnover": float(pivot.diff().abs().sum(axis=1).mean()),
+        "average_turnover": average_turnover,
         "supported_objectives": list(_SUPPORTED_OBJECTIVES),
         "constraint_surface": {
             "sector_cap": config.max_sector_weight,
@@ -580,6 +701,7 @@ def build_v7_target_weights(
             "max_turnover": config.max_turnover,
             "weighting": config.weighting,
         },
+        "initial_weights": initial_state_diagnostics,
         "config": asdict(config),
         **diagnostics,
     }
@@ -655,13 +777,128 @@ def _alpha_distribution_stats(selected_alpha: pd.Series, unselected_alpha: pd.Se
 
 
 def _apply_turnover_cap(target: pd.Series, previous: pd.Series, cap: float) -> pd.Series:
-    aligned_prev = previous.reindex(target.index).fillna(0.0)
-    delta = target - aligned_prev
+    symbols = target.index.union(previous.index)
+    aligned_target = target.reindex(symbols).fillna(0.0)
+    aligned_prev = previous.reindex(symbols).fillna(0.0)
+    delta = aligned_target - aligned_prev
     turnover = float(delta.abs().sum())
     if turnover <= cap:
-        return target
+        return aligned_target
     scale = cap / max(turnover, 1e-9)
     return aligned_prev + delta * scale
+
+
+def _reduce_long_only_increases(
+    weights: pd.Series,
+    previous: pd.Series,
+    *,
+    symbols: pd.Index,
+    required_reduction: float,
+    constraint: str,
+) -> pd.Series:
+    """Reduce only additions, preserving holding locks and turnover feasibility."""
+
+    if required_reduction <= 1e-12:
+        return weights
+    selected = weights.index.intersection(symbols)
+    previous_aligned = previous.reindex(weights.index).fillna(0.0)
+    increases = (weights - previous_aligned).clip(lower=0.0).reindex(selected)
+    available = float(increases.sum())
+    if available + 1e-10 < required_reduction:
+        raise ValueError(
+            f"long-only {constraint} conflicts with locked/current holdings; "
+            "refusing to emit an infeasible target"
+        )
+    reduction = increases * min(1.0, required_reduction / max(available, 1e-12))
+    projected = weights.copy()
+    projected.loc[selected] = projected.loc[selected] - reduction
+    return projected.clip(lower=0.0)
+
+
+def _project_and_validate_long_only_target(
+    weights: pd.Series,
+    *,
+    previous_weights: pd.Series | None,
+    per_name_cap: pd.Series,
+    sector_lookup: dict[str, str],
+    config: V7TargetWeightsConfig,
+) -> pd.Series:
+    """Restore the final feasible set after holding and turnover constraints.
+
+    Holding-period reconciliation can reintroduce dropped current names after the
+    initial name/sector projection. We reserve those current holdings and reduce
+    only new/increased exposure. If current/locked exposure alone violates a hard
+    limit, there is no safe automatic projection and target construction fails.
+    """
+
+    tolerance = 1e-9
+    projected = pd.to_numeric(weights.copy(), errors="coerce").astype(float)
+    if not np.isfinite(projected.to_numpy(dtype=float)).all():
+        raise ValueError("long-only target contains non-finite weights")
+    if bool((projected < -tolerance).any()):
+        raise ValueError("long-only target contains negative weights")
+    projected = projected.clip(lower=0.0)
+    previous = (
+        previous_weights.reindex(projected.index).fillna(0.0).astype(float)
+        if previous_weights is not None
+        else pd.Series(0.0, index=projected.index, dtype=float)
+    )
+
+    effective_caps = per_name_cap.reindex(projected.index).fillna(
+        config.max_weight_per_name
+    )
+    effective_caps = effective_caps.clip(upper=float(config.max_weight_per_name))
+    for symbol in projected.index:
+        cap = float(effective_caps.loc[symbol])
+        if projected.loc[symbol] <= cap + tolerance:
+            continue
+        if previous.loc[symbol] <= cap + tolerance:
+            projected.loc[symbol] = cap
+            continue
+        raise ValueError(
+            "long-only single-name/liquidity cap conflicts with locked/current "
+            f"holding {symbol}; refusing to emit an infeasible target"
+        )
+
+    if sector_lookup:
+        sectors = projected.index.to_series().map(sector_lookup).fillna("__unknown__")
+        for sector in sorted(set(sectors)):
+            members = sectors[sectors == sector].index
+            exposure = float(projected.reindex(members).sum())
+            projected = _reduce_long_only_increases(
+                projected,
+                previous,
+                symbols=members,
+                required_reduction=exposure - float(config.max_sector_weight),
+                constraint=f"sector cap for {sector}",
+            )
+
+    stock_budget = 1.0 - float(config.cash_floor)
+    if not 0.0 <= stock_budget <= 1.0:
+        raise ValueError("cash_floor must be within [0, 1]")
+    projected = _reduce_long_only_increases(
+        projected,
+        previous,
+        symbols=projected.index,
+        required_reduction=float(projected.sum()) - stock_budget,
+        constraint="gross exposure/cash floor",
+    )
+
+    if float(projected.sum()) > stock_budget + tolerance:
+        raise ValueError("long-only target exceeds gross exposure/cash-floor budget")
+    if bool((projected - effective_caps > tolerance).any()):
+        raise ValueError("long-only target exceeds a single-name/liquidity cap")
+    if sector_lookup:
+        sectors = projected.index.to_series().map(sector_lookup).fillna("__unknown__")
+        exposures = projected.groupby(sectors).sum()
+        if bool((exposures > float(config.max_sector_weight) + tolerance).any()):
+            raise ValueError("long-only target exceeds a sector cap")
+    if previous_weights is not None and config.max_turnover > 0:
+        aligned_previous = previous_weights.reindex(projected.index).fillna(0.0)
+        turnover = float((projected - aligned_previous).abs().sum())
+        if turnover > float(config.max_turnover) + tolerance:
+            raise ValueError("long-only target exceeds the turnover cap")
+    return projected
 
 
 def _try_cvxpy_long_only(
@@ -705,7 +942,16 @@ def _try_cvxpy_long_only(
             idx = [i for i, symbol in enumerate(symbols) if sector_series.loc[symbol] == sector]
             constraints.append(cp.sum(w[idx]) <= config.max_sector_weight)
     if previous_weights is not None and config.max_turnover > 0:
-        constraints.append(cp.norm1(w - prev) <= config.max_turnover)
+        # A selected-only hard constraint is valid only when all current holdings
+        # are represented by CVXPY variables. A dropped holding may need a partial
+        # exit; charging its entire weight as a constant makes that feasible action
+        # impossible. In that case the final current∪desired projection below is
+        # the single authoritative hard turnover bound.
+        dropped_turnover = float(
+            previous_weights.loc[~previous_weights.index.isin(symbols)].abs().sum()
+        )
+        if dropped_turnover <= 1e-12:
+            constraints.append(cp.norm1(w - prev) <= config.max_turnover)
     problem = cp.Problem(objective, constraints)
     try:
         problem.solve(solver=cp.CLARABEL, verbose=False)

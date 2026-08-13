@@ -19,6 +19,9 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       recordCount: 2,
       terminalCount: 1,
       unresolvedCount: 0,
+      committedPendingCount: 0,
+      stagedUncommittedCount: 0,
+      missingCommittedPendingCount: 0,
       reason: null,
     },
     accountIdentity: {
@@ -35,8 +38,12 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       state: "valid",
       verified: true,
       boundTerminalCount: 1,
+      legacyBoundTerminalCount: 0,
       legacyUnboundTerminalCount: 0,
       latestTerminalBound: true,
+      latestTerminalBindingAssurance: "execution_time_receipt",
+      currentRecordCount: 1,
+      currentHeadHash: "abcdef1234567890",
       reason: null,
     },
     summary: {
@@ -56,6 +63,8 @@ function evidence(overrides: Partial<PaperExecutionEvidence> = {}): PaperExecuti
       navAfter: 1_001_200,
       accountIdentityVerified: true,
       latestTerminalCanonicalPrefixBound: true,
+      latestTerminalBindingAssurance: "execution_time_receipt",
+      executionEvidenceAvailable: true,
       statusCounts: { execution_started: 1, execution_observed: 1 },
     },
     records: [
@@ -112,7 +121,7 @@ describe("PaperExecutionEvidencePanel", () => {
     render(<PaperExecutionEvidencePanel />);
 
     const status = screen.getByRole("status");
-    expect(within(status).getByText("Paper 执行已观察")).toBeInTheDocument();
+    expect(within(status).getAllByText("Paper 执行已观察")).toHaveLength(2);
     expect(screen.getByText("Paper execution evidence").parentElement).toHaveTextContent("YES");
     expect(screen.getByText("Production pre-trade certified").parentElement).toHaveTextContent("NO");
     expect(screen.getByText("Authoritative calendar certified").parentElement).toHaveTextContent("NO");
@@ -123,6 +132,7 @@ describe("PaperExecutionEvidencePanel", () => {
   test("uses an assertive alert for indeterminate execution", () => {
     mockEvidence(evidence({
       journal: {
+        ...evidence().journal,
         state: "valid",
         verified: true,
         path: "runtime/paper/execution_journal.jsonl",
@@ -168,6 +178,7 @@ describe("PaperExecutionEvidencePanel", () => {
   test("fails closed when the journal is invalid", () => {
     mockEvidence(evidence({
       journal: {
+        ...evidence().journal,
         state: "invalid",
         verified: false,
         path: "runtime/paper/execution_journal.jsonl",
@@ -197,5 +208,79 @@ describe("PaperExecutionEvidencePanel", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("执行证据链校验失败");
     expect(screen.getByText("Production pre-trade certified").parentElement).toHaveTextContent("NO");
+  });
+
+  test("shows a frozen target as pending and not execution evidence", () => {
+    mockEvidence(evidence({
+      journal: {
+        ...evidence().journal,
+        recordCount: 1,
+        terminalCount: 0,
+        committedPendingCount: 1,
+      },
+      canonicalPrefix: {
+        ...evidence().canonicalPrefix,
+        state: "unavailable",
+        verified: false,
+        boundTerminalCount: 0,
+        latestTerminalBound: false,
+        latestTerminalBindingAssurance: "unavailable",
+      },
+      summary: {
+        ...evidence().summary,
+        attention: "pending",
+        latestStatus: "daily_decision_frozen",
+        latestDecisionKind: "target",
+        executionEvidenceAvailable: false,
+        latestTerminalCanonicalPrefixBound: false,
+      },
+      operatorTruth: {
+        ...evidence().operatorTruth,
+        paperExecutionEvidence: false,
+        canonicalExecutionPrefixCertified: false,
+        message: "The daily target is durably frozen and awaits execution.",
+      },
+    }));
+    render(<PaperExecutionEvidencePanel />);
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Target 已冻结，等待下一观察交易日");
+    expect(status).toHaveClass("tone-pending");
+    expect(screen.getByText("Paper execution evidence").parentElement).toHaveTextContent("NO");
+  });
+
+  test("labels no-target and legacy binding states explicitly", () => {
+    mockEvidence(evidence({
+      summary: {
+        ...evidence().summary,
+        latestStatus: "daily_decision_frozen",
+        latestDecisionKind: "no_target",
+        executionEvidenceAvailable: false,
+      },
+      operatorTruth: {
+        ...evidence().operatorTruth,
+        paperExecutionEvidence: false,
+      },
+    }));
+    const first = render(<PaperExecutionEvidencePanel />);
+    expect(screen.getByRole("status")).toHaveTextContent("当日无目标决策已冻结");
+    first.unmount();
+
+    mockEvidence(evidence({
+      canonicalPrefix: {
+        ...evidence().canonicalPrefix,
+        legacyBoundTerminalCount: 1,
+        latestTerminalBindingAssurance: "operator_bound_legacy",
+      },
+      summary: {
+        ...evidence().summary,
+        attention: "warning",
+        latestStatus: "legacy_terminal_bound",
+        latestTerminalBindingAssurance: "operator_bound_legacy",
+      },
+    }));
+    render(<PaperExecutionEvidencePanel />);
+    expect(screen.getByRole("status")).toHaveTextContent("Legacy terminal 已绑定（较低保证）");
+    expect(screen.getByText("Canonical terminal prefix").parentElement).toHaveTextContent("1 operator");
   });
 });

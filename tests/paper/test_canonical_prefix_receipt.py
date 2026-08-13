@@ -19,10 +19,14 @@ from quantagent.paper.continuous_execution import (
     reconcile_indeterminate_account,
 )
 from quantagent.paper.execution_journal import (
+    DAILY_DECISION_STATUS,
     RECONCILIATION_STATUS,
     PendingExecutionJournal,
 )
-from quantagent.paper.pending_signal import PendingPaperSignalStore
+from quantagent.paper.pending_signal import (
+    PENDING_COMMIT_PROTOCOL,
+    PendingPaperSignalStore,
+)
 
 
 FRIDAY = "2026-08-07"
@@ -153,15 +157,43 @@ def test_missed_session_terminal_is_bound_to_same_canonical_prefix(tmp_path) -> 
         identity_path=identity_path,
     )
     pending_dir = tmp_path / "pending"
+    summary_path = tmp_path / "daily_loop_summary.json"
+    summary_path.write_text('{"test":"committed-summary"}\n', encoding="utf-8")
+    summary_sha = __import__("hashlib").sha256(summary_path.read_bytes()).hexdigest()
     pending = PendingPaperSignalStore(pending_dir).record(
         signal_date=FRIDAY,
         target_weights=pd.DataFrame(
             {"trade_date": [pd.Timestamp(FRIDAY)], SYMBOL: [0.5]}
         ),
-        source_lineage={"paper_account_identity_sha256": identity.payload_sha256},
+        source_lineage={
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_ledger_head_hash": "0" * 64,
+            "canonical_ledger_records": "0",
+            "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
+        },
         created_at=f"{FRIDAY}T07:00:00+00:00",
     )[0]
     journal_path = tmp_path / "execution.jsonl"
+    PendingExecutionJournal(journal_path).append(
+        pending_payload_sha256=pending.payload_sha256,
+        signal_date=FRIDAY,
+        execution_date=FRIDAY,
+        status=DAILY_DECISION_STATUS,
+        details={
+            "decision_kind": "target",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_records": 0,
+            "canonical_head": "0" * 64,
+            "assurance": "canonical_account_daily_decision_freeze_v1",
+            "commit_protocol": PENDING_COMMIT_PROTOCOL,
+            "target_weights_sha256": pending.target_weights_sha256,
+            "daily_summary_path": str(summary_path.resolve()),
+            "daily_summary_sha256": summary_sha,
+            "daily_summary_commit_protocol": "daily_summary_bound_daily_decision_v1",
+        },
+    )
     config = _config(
         tmp_path,
         canonical=canonical,

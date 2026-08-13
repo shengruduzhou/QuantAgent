@@ -35,6 +35,10 @@ def test_windows_lock_backend_preserves_claim_once_protocol(tmp_path: Path, monk
     assert first.granted is True
     assert duplicate.granted is False
     assert [mode for _, mode, _ in fake.calls] == [
+        # Construction now folds durable evidence under the same file lock so
+        # a concurrent append cannot be misclassified as a torn tail.
+        fake.LK_LOCK,
+        fake.LK_UNLCK,
         fake.LK_LOCK,
         fake.LK_UNLCK,
         fake.LK_LOCK,

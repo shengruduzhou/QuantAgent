@@ -50,6 +50,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  optimization-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install optimization dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -e ".[test,optimization]"
+      - name: Explicit CVXPY account-state/turnover regressions
+        run: |
+          python -m pytest \
+            tests/test_v7_target_cvxpy_dropped_holding.py \
+            tests/test_v7_target_initial_weights.py \
+            -q
+
   # QMT/MiniQMT is a Windows-only client requiring a funded broker account, so
   # it cannot be genuinely exercised on a hosted Ubuntu runner. This job runs
   # the portable production contracts and always records that limitation.

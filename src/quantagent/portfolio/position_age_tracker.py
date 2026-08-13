@@ -6,9 +6,13 @@ not yet earned its keep, and unwinding it immediately throws away the
 information the alpha used to open it. The tracker exposes a small
 state machine:
 
-* ``begin_session(initial_weights)`` — seed the tracker with weights at
-  ``t0`` (or empty for a cold start). Each seeded name's ``entry_date``
-  becomes ``None`` until the first observed update sets it.
+* ``begin_session(initial_weights)`` — reconcile the persisted registry to an
+  authoritative current portfolio when weights are supplied, then seed missing
+  live holdings. A seeded holding whose historical age or expected horizon is
+  unavailable is conservatively locked until explicit horizon evidence arrives;
+  restart must never turn an existing holding into a free-to-trade new position,
+  but it must also never resurrect a symbol that the canonical account no longer
+  owns.
 * ``record_session(date, weights, expected_horizons)`` — update the
   registry: new names get an ``entry_date``; names whose weight drops to
   zero leave the registry; names whose weight is non-zero increment
@@ -24,12 +28,47 @@ would never bind.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+import math
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Mapping
 
-import numpy as np
 import pandas as pd
+
+
+# A seeded canonical holding with no trustworthy lifecycle horizon must be
+# treated as locked rather than silently unlocked. A real theme/lifecycle
+# horizon replaces this sentinel as soon as one is observed.
+UNKNOWN_INITIAL_HORIZON_DAYS = 2_147_483_647
+MAX_EXPECTED_HORIZON_DAYS = 126
+
+
+def _validated_horizon_days(
+    value: object,
+    *,
+    allow_unknown_sentinel: bool = False,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError("expected_horizon_days must be an integer trading-day count")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"expected_horizon_days must be numeric, got {value!r}"
+        ) from exc
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(
+            f"expected_horizon_days must be a finite integer, got {value!r}"
+        )
+    horizon = int(numeric)
+    if allow_unknown_sentinel and horizon == UNKNOWN_INITIAL_HORIZON_DAYS:
+        return horizon
+    if not 1 <= horizon <= MAX_EXPECTED_HORIZON_DAYS:
+        raise ValueError(
+            "expected_horizon_days must be within the governed theme contract "
+            f"[1, {MAX_EXPECTED_HORIZON_DAYS}], got {value!r}"
+        )
+    return horizon
 
 
 @dataclass
@@ -62,11 +101,112 @@ class PositionAgeTracker:
                     last_seen=pd.to_datetime(row["last_seen"]) if pd.notna(row.get("last_seen")) else None,
                     weight=float(row.get("weight", 0.0)),
                     expected_horizon_days=(
-                        int(row["expected_horizon_days"]) if pd.notna(row.get("expected_horizon_days")) else None
+                        _validated_horizon_days(
+                            row["expected_horizon_days"],
+                            allow_unknown_sentinel=True,
+                        )
+                        if pd.notna(row.get("expected_horizon_days"))
+                        else None
                     ),
                     days_held=int(row.get("days_held", 0)),
                 )
         return tracker
+
+    def begin_session(
+        self,
+        initial_weights: Mapping[str, float] | None,
+        expected_horizons: Mapping[str, int | None] | None = None,
+        *,
+        continuity_proven_symbols: set[str] | None = None,
+    ) -> None:
+        """Reconcile/seed live records from an externally recovered portfolio.
+
+        When ``initial_weights`` is supplied it is authoritative account state,
+        including an explicitly empty mapping. Persisted records for names that
+        are no longer non-zero canonical holdings are deleted *before* any
+        first-date holding-period lock is evaluated. Persisted age remains
+        authoritative only for symbols the recovered account still owns.
+
+        A non-zero canonical holding absent from persisted state is inserted with
+        unknown entry date and a conservative horizon sentinel unless explicit
+        lifecycle evidence is supplied. ``None`` retains the historical research
+        behaviour: no external account snapshot was provided, so persisted state
+        is not reconciled away.
+        """
+
+        expected_horizons = dict(expected_horizons or {})
+        supplied = initial_weights is not None
+        continuity_proven = {str(symbol) for symbol in (continuity_proven_symbols or set())}
+        normalized: dict[str, float] = {}
+        if supplied:
+            for raw_symbol, raw_weight in dict(initial_weights or {}).items():
+                symbol = str(raw_symbol)
+                weight = float(raw_weight)
+                if abs(weight) >= 1e-9:
+                    normalized[symbol] = weight
+            live_symbols = set(normalized)
+            for symbol in list(self._records):
+                if symbol not in live_symbols:
+                    self._records.pop(symbol, None)
+        else:
+            normalized = {
+                str(raw_symbol): float(raw_weight)
+                for raw_symbol, raw_weight in dict(initial_weights or {}).items()
+                if abs(float(raw_weight)) >= 1e-9
+            }
+
+        for symbol, weight in normalized.items():
+            existing = self._records.get(symbol)
+            if existing is not None:
+                existing.weight = weight
+                if supplied and symbol not in continuity_proven:
+                    # Symbol equality does not prove an uninterrupted lot. The
+                    # account may have sold and reacquired while this tracker was
+                    # offline, so restart conservatively at unknown age.
+                    supplied_horizon = expected_horizons.get(symbol)
+                    existing.entry_date = None
+                    existing.last_seen = None
+                    existing.days_held = 0
+                    existing.expected_horizon_days = (
+                        _validated_horizon_days(supplied_horizon)
+                        if supplied_horizon is not None
+                        else UNKNOWN_INITIAL_HORIZON_DAYS
+                    )
+                    continue
+                if (
+                    symbol in expected_horizons
+                    and expected_horizons[symbol] is not None
+                    and existing.expected_horizon_days
+                    in {None, UNKNOWN_INITIAL_HORIZON_DAYS}
+                ):
+                    existing.expected_horizon_days = _validated_horizon_days(
+                        expected_horizons[symbol]
+                    )
+                continue
+            supplied_horizon = expected_horizons.get(symbol)
+            self._records[symbol] = PositionRecord(
+                symbol=symbol,
+                entry_date=None,
+                last_seen=None,
+                weight=weight,
+                expected_horizon_days=(
+                    _validated_horizon_days(supplied_horizon)
+                    if supplied_horizon is not None
+                    else UNKNOWN_INITIAL_HORIZON_DAYS
+                ),
+                days_held=0,
+            )
+
+    def update_expected_horizons(
+        self, expected_horizons: Mapping[str, int | None] | None
+    ) -> None:
+        """Refresh known horizons before any holding-period lock decision."""
+        for raw_symbol, raw_horizon in dict(expected_horizons or {}).items():
+            if raw_horizon is None:
+                continue
+            record = self._records.get(str(raw_symbol))
+            if record is not None:
+                record.expected_horizon_days = _validated_horizon_days(raw_horizon)
 
     def persist(self) -> Path | None:
         if self._state_path is None:
@@ -96,7 +236,11 @@ class PositionAgeTracker:
                     entry_date=ts,
                     last_seen=ts,
                     weight=weight_f,
-                    expected_horizon_days=expected_horizons.get(symbol),
+                    expected_horizon_days=(
+                        _validated_horizon_days(expected_horizons[symbol])
+                        if expected_horizons.get(symbol) is not None
+                        else None
+                    ),
                     days_held=0,
                 )
                 self._records[str(symbol)] = record
@@ -105,13 +249,19 @@ class PositionAgeTracker:
                 # Position fully closed.
                 self._records.pop(str(symbol), None)
                 continue
+            # A recovered holding may have unknown historical entry date. The
+            # first observed session becomes a conservative age-zero anchor.
+            if record.entry_date is None:
+                record.entry_date = ts
             # Update existing — increment days_held only when calendar moves forward.
             if record.last_seen is None or ts > record.last_seen:
                 record.days_held += 1
             record.last_seen = ts
             record.weight = weight_f
             if symbol in expected_horizons and expected_horizons[symbol] is not None:
-                record.expected_horizon_days = int(expected_horizons[symbol])
+                record.expected_horizon_days = _validated_horizon_days(
+                    expected_horizons[symbol]
+                )
 
         # Names not seen on this date keep their entry_date but get a stale flag via last_seen.
         for symbol in list(self._records.keys()):
@@ -156,4 +306,9 @@ class PositionAgeTracker:
         self._records.clear()
 
 
-__all__ = ["PositionRecord", "PositionAgeTracker"]
+__all__ = [
+    "MAX_EXPECTED_HORIZON_DAYS",
+    "UNKNOWN_INITIAL_HORIZON_DAYS",
+    "PositionRecord",
+    "PositionAgeTracker",
+]

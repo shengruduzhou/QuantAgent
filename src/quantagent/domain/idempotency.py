@@ -66,6 +66,19 @@ class DuplicateAction(RuntimeError):
         self.existing = existing
 
 
+class IdempotencyStoreCorruption(RuntimeError):
+    """Durable claim evidence is torn, malformed, or from an unknown schema."""
+
+
+def _strict_object(pairs):
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise IdempotencyStoreCorruption(f"duplicate JSON key {key!r}")
+        payload[key] = value
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimRecord:
     """One claimed key and whatever the winning caller recorded against it."""
@@ -159,30 +172,50 @@ class IdempotencyStore:
         self._read_offset = 0
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._load()
+            with self._exclusive_file_lock():
+                self._load()
 
     # -- persistence --------------------------------------------------------
     def _load(self) -> None:
         """Fold any complete records appended since the previous read."""
         if self._path is None or not self._path.exists():
             return
-        with self._path.open("r", encoding="utf-8") as handle:
-            handle.seek(self._read_offset)
-            for line in handle:
-                if not line.endswith("\n"):
-                    # Torn trailing write: leave the offset before it so a later
-                    # complete append/recovery can be observed rather than
-                    # treating a partial record as evidence.
-                    break
-                stripped = line.strip()
-                self._read_offset += len(line.encode("utf-8"))
-                if not stripped:
-                    continue
-                try:
-                    record = ClaimRecord.from_dict(json.loads(stripped))
-                except (json.JSONDecodeError, KeyError):
-                    continue
-                self._claims[record.key] = record
+        payload = self._path.read_bytes()
+        if len(payload) < self._read_offset:
+            raise IdempotencyStoreCorruption(
+                "idempotency evidence was truncated after it was read"
+            )
+        unread = payload[self._read_offset :]
+        if unread and not unread.endswith(b"\n"):
+            raise IdempotencyStoreCorruption(
+                "idempotency evidence has a torn trailing record; explicit "
+                "operator reconciliation is required"
+            )
+        for raw_line in unread.splitlines(keepends=True):
+            self._read_offset += len(raw_line)
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                decoded = json.loads(
+                    stripped.decode("utf-8"), object_pairs_hook=_strict_object
+                )
+                if decoded.get("schemaVersion") != SCHEMA_VERSION:
+                    raise IdempotencyStoreCorruption(
+                        "idempotency evidence contains an unsupported schema"
+                    )
+                record = ClaimRecord.from_dict(decoded)
+            except IdempotencyStoreCorruption:
+                raise
+            except (AttributeError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise IdempotencyStoreCorruption(
+                    "idempotency evidence contains a malformed complete record"
+                ) from exc
+            if not record.key or not record.claimed_at:
+                raise IdempotencyStoreCorruption(
+                    "idempotency evidence contains an incomplete claim record"
+                )
+            self._claims[record.key] = record
 
     def _append(self, record: ClaimRecord) -> None:
         if self._path is None:
@@ -315,6 +348,7 @@ __all__ = [
     "ClaimRecord",
     "ClaimResult",
     "DuplicateAction",
+    "IdempotencyStoreCorruption",
     "IdempotencyStore",
     "SCHEMA_VERSION",
     "broker_callback_key",

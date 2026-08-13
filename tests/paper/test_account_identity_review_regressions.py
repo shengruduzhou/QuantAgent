@@ -9,6 +9,7 @@ from quantagent.paper.account_identity import (
     ensure_paper_account_identity,
 )
 from quantagent.paper.continuous_execution import (
+    ContinuousPaperExecutionBlocked,
     ContinuousPaperExecutionConfig,
     execute_pending_for_session,
 )
@@ -64,7 +65,7 @@ def test_daily_loop_custom_canonical_ledger_derives_sibling_identity(tmp_path, m
     assert identity.initial_cash == pytest.approx(config.initial_cash)
 
 
-def test_terminal_legacy_signal_without_identity_lineage_does_not_block_new_runtime(tmp_path) -> None:
+def test_terminal_legacy_signal_without_identity_lineage_requires_explicit_binding(tmp_path) -> None:
     canonical = tmp_path / "canonical.jsonl"
     identity_path = tmp_path / "account_identity.json"
     ensure_paper_account_identity(
@@ -108,10 +109,13 @@ def test_terminal_legacy_signal_without_identity_lineage_does_not_block_new_runt
     )
     market = pd.DataFrame({"trade_date": [MONDAY]})
 
-    result = execute_pending_for_session(
-        MONDAY,
-        market,
-        config=config,
-        authoritative_sessions=[FRIDAY, MONDAY],
-    )
-    assert result == []
+    with pytest.raises(
+        ContinuousPaperExecutionBlocked,
+        match="append-only operator binding",
+    ):
+        execute_pending_for_session(
+            MONDAY,
+            market,
+            config=config,
+            authoritative_sessions=[FRIDAY, MONDAY],
+        )

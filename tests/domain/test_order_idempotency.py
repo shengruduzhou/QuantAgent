@@ -19,6 +19,7 @@ import pytest
 from quantagent.domain.idempotency import (
     DuplicateAction,
     IdempotencyStore,
+    IdempotencyStoreCorruption,
     broker_callback_key,
     order_intent_key,
 )
@@ -191,10 +192,8 @@ def test_a_torn_trailing_write_does_not_destroy_earlier_claims(tmp_path):
     with path.open("a", encoding="utf-8") as handle:
         handle.write('{"key": "idem_partial", "claimed')
 
-    recovered = IdempotencyStore(path)
-
-    assert recovered.seen(good), "an intact earlier claim must survive a torn tail"
-    assert recovered.get(good).outcome == "ord_A"
+    with pytest.raises(IdempotencyStoreCorruption, match="torn trailing record"):
+        IdempotencyStore(path)
 
 
 def test_strict_mode_raises_so_unexpected_duplicates_are_not_swallowed(tmp_path):

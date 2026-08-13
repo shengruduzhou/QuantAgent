@@ -44,7 +44,11 @@ class PortfolioHardConstraints:
 @dataclass(frozen=True)
 class ParetoSearchConfig:
     risk_aversion_grid: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
-    turnover_penalty_grid: tuple[float, ...] = (0.05, 0.20, 0.50)
+    # Alpha and realised cost inputs are decimal returns. The historical
+    # 0.05/0.20/0.50 values were percentages entered as decimals, so every
+    # marginal trade was penalised more than a 1.5%-3% alpha and the optimiser
+    # selected an all-cash portfolio. Search 5/20/50 bps in matching units.
+    turnover_penalty_grid: tuple[float, ...] = (0.0005, 0.0020, 0.0050)
     cost_penalty_grid: tuple[float, ...] = (0.5, 1.0, 2.0)
     gross_scale_grid: tuple[float, ...] = (0.60, 0.80, 1.00)
     selection_policy: str = "balanced"

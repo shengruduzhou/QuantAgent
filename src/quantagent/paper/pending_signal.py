@@ -47,6 +47,7 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 
 PENDING_SIGNAL_SCHEMA_VERSION = "paper_pending_signal_v1"
 PENDING_SIGNAL_STATUS = "pending_next_observed_session"
+PENDING_COMMIT_PROTOCOL = "pending_bound_daily_decision_v1"
 
 
 class PendingSignalConflict(RuntimeError):
@@ -80,6 +81,16 @@ def _strict_object(pairs):
             raise PendingSignalCorruption(f"duplicate JSON key {key!r}")
         result[key] = value
     return result
+
+
+def _normalise_signal_date(value: object) -> str:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"signal_date must be a finite date, got {value!r}") from exc
+    if pd.isna(timestamp):
+        raise ValueError(f"signal_date must be a finite date, got {value!r}")
+    return timestamp.date().isoformat()
 
 
 def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, float]:
@@ -176,6 +187,12 @@ def verify_pending_signal(signal: PendingPaperSignal) -> None:
         raise PendingSignalCorruption(
             "pending signal timing semantics do not match strict execution contract"
         )
+    try:
+        normalized_date = _normalise_signal_date(signal.signal_date)
+    except ValueError as exc:
+        raise PendingSignalCorruption(str(exc)) from exc
+    if normalized_date != signal.signal_date:
+        raise PendingSignalCorruption("pending signal date is not canonical ISO format")
     if not signal.target_weights:
         raise PendingSignalCorruption("pending target-weight vector is empty")
     if _weights_sha(signal.target_weights) != signal.target_weights_sha256:
@@ -193,7 +210,7 @@ class PendingPaperSignalStore:
         self._thread_lock = RLock()
 
     def path_for(self, signal_date: str) -> Path:
-        safe = pd.Timestamp(signal_date).date().isoformat()
+        safe = _normalise_signal_date(signal_date)
         return self.root / f"{safe}.json"
 
     def read(self, signal_date: str) -> PendingPaperSignal | None:
@@ -288,7 +305,7 @@ class PendingPaperSignalStore:
         source_lineage: Mapping[str, str],
         created_at: str | None = None,
     ) -> tuple[PendingPaperSignal, Path]:
-        signal_date = pd.Timestamp(signal_date).date().isoformat()
+        signal_date = _normalise_signal_date(signal_date)
         canonical_weights = _normalised_weights(target_weights, signal_date)
         weights_digest = _weights_sha(canonical_weights)
         lineage = {
@@ -345,10 +362,43 @@ class PendingPaperSignalStore:
                 )
             return persisted, path
 
+    def discard_staged(
+        self,
+        signal_date: str,
+        *,
+        expected_payload_sha256: str,
+    ) -> bool:
+        """Delete one verified *uncommitted* staging artifact by exact identity.
+
+        Commit-state knowledge deliberately remains outside this store. Callers
+        must hold the account lock, prove the journal has no matching committed
+        daily decision, and pass the exact staged payload hash. This method only
+        makes the per-date deletion itself serialized and durable.
+        """
+        signal_date = pd.Timestamp(signal_date).date().isoformat()
+        path = self.path_for(signal_date)
+        with self._thread_lock, self._exclusive_signal_lock(signal_date):
+            existing = self.read(signal_date)
+            if existing is None:
+                return False
+            if existing.payload_sha256 != str(expected_payload_sha256):
+                raise PendingSignalConflict(
+                    "refusing to discard staged pending signal with mismatched payload identity"
+                )
+            path.unlink()
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            return True
+
 
 __all__ = [
     "PENDING_SIGNAL_SCHEMA_VERSION",
     "PENDING_SIGNAL_STATUS",
+    "PENDING_COMMIT_PROTOCOL",
     "PendingSignalConflict",
     "PendingSignalCorruption",
     "PendingPaperSignal",

@@ -206,3 +206,184 @@ def test_daily_loop_source_has_no_same_call_strict_execution_path() -> None:
     assert "simulate_ashare_target_weights" not in source
     assert "write_paper_report" not in source
     assert "_market_for_dates" not in source
+
+
+def test_target_date_validation_failure_does_not_permanently_freeze_day(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-06")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    with pytest.raises(ValueError, match="requires exactly the current signal date"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None
+
+
+def test_artifact_write_failure_does_not_permanently_freeze_day(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("simulated artifact write failure")
+
+    monkeypatch.setattr(daily_loop, "write_frame", fail_write)
+    with pytest.raises(OSError, match="simulated artifact write failure"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None
+
+
+def test_no_target_stale_prediction_date_does_not_freeze_day(tmp_path, monkeypatch) -> None:
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=pd.DataFrame())
+    stale = pd.DataFrame(
+        {
+            "trade_date": [pd.Timestamp("2026-08-06")],
+            "symbol": ["600000.SH"],
+            "prediction": [0.1],
+            "confidence": [0.9],
+        }
+    )
+    monkeypatch.setattr(
+        daily_loop,
+        "predict_v7_alpha",
+        lambda *args, **kwargs: SimpleNamespace(predictions=stale.copy()),
+    )
+    monkeypatch.setattr(
+        daily_loop,
+        "blend_multi_horizon_predictions",
+        lambda *args, **kwargs: SimpleNamespace(
+            blended=stale.copy(), diagnostics={"test": "stale-no-target"}
+        ),
+    )
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="no-target predictions must belong exactly"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None
+
+
+def test_freeze_failure_discards_uncommitted_current_protocol_staging(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    original_append = daily_loop.PendingExecutionJournal.append
+
+    def fail_daily_freeze(self, **kwargs):
+        if kwargs.get("status") == daily_loop.DAILY_DECISION_STATUS:
+            raise OSError("simulated freeze fsync failure")
+        return original_append(self, **kwargs)
+
+    monkeypatch.setattr(daily_loop.PendingExecutionJournal, "append", fail_daily_freeze)
+    with pytest.raises(OSError, match="freeze fsync failure"):
+        daily_loop.run_once(config)
+    assert not (tmp_path / "pending" / f"{as_of}.json").exists()
+    assert daily_loop.PendingExecutionJournal(
+        daily_loop._execution_journal_path(config)
+    ).daily_decision(as_of) is None
+
+
+def test_committed_target_marker_binds_primary_summary_digest(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    daily_loop.run_once(config)
+    summary_path = tmp_path / "reports" / as_of / "daily_loop_summary.json"
+    decision = daily_loop.PendingExecutionJournal(
+        daily_loop._execution_journal_path(config)
+    ).daily_decision(as_of)
+    assert decision is not None
+    assert decision.details["daily_summary_sha256"] == sha256(
+        summary_path.read_bytes()
+    ).hexdigest()
+    assert decision.details["daily_summary_commit_protocol"] == daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL
+
+
+def test_summary_write_failure_leaves_no_durable_decision(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+
+    def fail_summary(*_args, **_kwargs):
+        raise OSError("simulated summary fsync failure")
+
+    monkeypatch.setattr(daily_loop, "_write_daily_summary", fail_summary)
+    with pytest.raises(OSError, match="summary fsync failure"):
+        daily_loop.run_once(config)
+    assert daily_loop.PendingExecutionJournal(
+        daily_loop._execution_journal_path(config)
+    ).daily_decision(as_of) is None
+
+
+def test_uncommitted_current_protocol_summary_is_recoverable(tmp_path) -> None:
+    as_of = "2026-08-07"
+    day_dir = tmp_path / "reports" / as_of
+    config = daily_loop.DailyPaperLoopConfig(
+        as_of_date=as_of,
+        output_root=str(tmp_path / "reports"),
+        pending_signal_dir=str(tmp_path / "pending"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "execution.jsonl"),
+    )
+    summary = {
+        "daily_decision_commit_protocol": daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL,
+        "paper_account_owner": daily_loop._paper_account_owner(config, "f" * 64),
+        "status": "staged-before-crash",
+    }
+    summary_path = daily_loop._write_daily_summary(day_dir, summary)
+    daily_loop._assert_current_signal_not_frozen(
+        config, as_of, paper_account_identity_sha256="f" * 64
+    )
+    assert not summary_path.exists()
+
+
+def test_legacy_uncommitted_summary_remains_fail_closed(tmp_path) -> None:
+    as_of = "2026-08-07"
+    day_dir = tmp_path / "reports" / as_of
+    day_dir.mkdir(parents=True)
+    (day_dir / "daily_loop_summary.json").write_text(
+        '{"status":"legacy"}\n', encoding="utf-8"
+    )
+    config = daily_loop.DailyPaperLoopConfig(
+        as_of_date=as_of,
+        output_root=str(tmp_path / "reports"),
+        pending_signal_dir=str(tmp_path / "pending"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "execution.jsonl"),
+    )
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="legacy/ambiguous daily summary"):
+        daily_loop._assert_current_signal_not_frozen(
+            config, as_of, paper_account_identity_sha256="f" * 64
+        )
+
+
+def test_duplicate_summary_keys_are_preserved_and_fail_closed(tmp_path) -> None:
+    as_of = "2026-08-07"
+    config = daily_loop.DailyPaperLoopConfig(
+        as_of_date=as_of,
+        output_root=str(tmp_path / "reports"),
+        pending_signal_dir=str(tmp_path / "pending"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "execution.jsonl"),
+    )
+    summary_path = tmp_path / "reports" / as_of / "daily_loop_summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        '{"daily_decision_commit_protocol":"legacy",'
+        '"daily_decision_commit_protocol":"daily_summary_bound_daily_decision_v1"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="unreadable/ambiguous"):
+        daily_loop._assert_current_signal_not_frozen(
+            config, as_of, paper_account_identity_sha256="f" * 64
+        )
+    assert summary_path.exists()
+
+
+def test_nat_as_of_is_rejected_before_artifact_paths_are_derived() -> None:
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="finite date"):
+        daily_loop._normalise_date("NaT")

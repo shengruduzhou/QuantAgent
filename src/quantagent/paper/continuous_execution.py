@@ -12,12 +12,16 @@ The consumer is deliberately conservative:
 * an explicit append-only reconciliation record is the only way to clear an
   indeterminate freeze without rewriting history;
 * caller/observed session sets remain non-authoritative shadow-calendar evidence;
-* every non-terminal signal must match the immutable paper-account identity.
+* every non-terminal signal must match the immutable paper-account identity;
+* exported economic execution/reconciliation boundaries own the same canonical-
+  account cross-process lock used by target freezing, so non-CLI callers cannot
+  bypass serialization.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from hashlib import sha256
 import json
 from typing import Iterable, Sequence
@@ -31,6 +35,7 @@ from quantagent.data.intraday_sessions import (
     assert_raw_execution_prices,
 )
 from quantagent.domain.ledger import CanonicalLedger
+from quantagent.domain.idempotency import IdempotencyStoreCorruption
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
@@ -39,6 +44,7 @@ from quantagent.paper.account_identity import (
     PaperAccountIdentityError,
     ensure_paper_account_identity,
 )
+from quantagent.paper.account_lock import paper_account_lock
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
 from quantagent.paper.canonical_receipt import (
     CanonicalPrefixReceiptError,
@@ -48,12 +54,21 @@ from quantagent.paper.canonical_receipt import (
     verify_canonical_prefix_receipt,
 )
 from quantagent.paper.execution_journal import (
+    LEGACY_BINDING_STATUS,
     RECONCILIATION_STATUS,
     TERMINAL_OUTCOMES,
     PendingExecutionJournal,
 )
+from quantagent.paper.legacy_terminal_binding import (
+    LegacyTerminalBindingError,
+    verify_legacy_terminal_binding,
+)
 from quantagent.paper.ledger import EventLedger
-from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
+from quantagent.paper.pending_signal import (
+    PENDING_COMMIT_PROTOCOL,
+    PendingPaperSignal,
+    PendingPaperSignalStore,
+)
 from quantagent.paper.recovery import recover, recover_from_canonical
 from quantagent.quant_math.ashare import AshareRuleEngine
 
@@ -110,7 +125,16 @@ class ContinuousPaperExecutionBlocked(RuntimeError):
 
 
 def _normalise_sessions(values: Iterable[object]) -> tuple[str, ...]:
-    parsed = pd.to_datetime(pd.Series(list(values)), errors="coerce").dropna()
+    raw = list(values)
+    if not raw:
+        return ()
+    parsed = pd.to_datetime(pd.Series(raw), errors="coerce")
+    if parsed.isna().any():
+        invalid = [value for value, bad in zip(raw, parsed.isna()) if bool(bad)]
+        raise ContinuousPaperExecutionBlocked(
+            "session evidence contains invalid/non-finite dates: "
+            + ", ".join(repr(value) for value in invalid[:3])
+        )
     return tuple(sorted({pd.Timestamp(value).date().isoformat() for value in parsed}))
 
 
@@ -140,25 +164,41 @@ def _position_quantities(portfolio) -> dict[str, float]:
     }
 
 
+def _operational_has_reconstructable_economics(
+    operational_state,
+    *,
+    tolerance: float = 1e-6,
+) -> bool:
+    operational_positions = _position_quantities(operational_state.portfolio)
+    initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
+    cash = float(operational_state.portfolio.cash)
+    return bool(
+        operational_state.orders
+        or operational_state.fills
+        or operational_positions
+        or abs(cash - initial_cash) > tolerance
+    )
+
+
 def _assert_recovered_account_consistent(
     canonical_state,
     operational_state,
     *,
     tolerance: float = 1e-6,
 ) -> None:
-    operational_positions = _position_quantities(operational_state.portfolio)
-    initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
-    operational_cash = float(operational_state.portfolio.cash)
-    has_operational_economics = bool(
-        operational_state.orders
-        or operational_state.fills
-        or operational_positions
-        or abs(operational_cash - initial_cash) > tolerance
-    )
-    if not has_operational_economics:
+    # The canonical ledger is the economic record of account. The operational
+    # ledger may legitimately contain only session/control events. If it does
+    # reconstruct economics, however, those economics must agree exactly enough
+    # with canonical state; a conflicting second economic state fails closed.
+    if not _operational_has_reconstructable_economics(
+        operational_state, tolerance=tolerance
+    ):
         return
 
-    if abs(float(canonical_state.portfolio.cash) - operational_cash) > tolerance:
+    operational_positions = _position_quantities(operational_state.portfolio)
+    operational_cash = float(operational_state.portfolio.cash)
+    canonical_cash = float(canonical_state.portfolio.cash)
+    if abs(canonical_cash - operational_cash) > tolerance:
         raise ContinuousPaperExecutionBlocked(
             "canonical/operational paper cash reconciliation failed"
         )
@@ -413,13 +453,14 @@ def _execution_orders(
 def _verify_terminal_canonical_binding(
     *,
     terminal,
+    legacy_binding,
     canonical_ledger_path: str,
     expected_target_weights_sha256: str | None = None,
     expected_paper_account_identity_sha256: str | None = None,
 ):
     receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
     try:
-        return verify_canonical_prefix_receipt(
+        verification = verify_canonical_prefix_receipt(
             receipt,
             ledger_or_path=canonical_ledger_path,
             expected_target_weights_sha256=expected_target_weights_sha256,
@@ -430,6 +471,26 @@ def _verify_terminal_canonical_binding(
             "terminal paper execution evidence no longer matches the canonical "
             f"economic ledger: {exc}"
         ) from exc
+    if verification.bound:
+        return verification
+    if expected_paper_account_identity_sha256 is None:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal verification requires the immutable paper-account identity"
+        )
+    try:
+        verify_legacy_terminal_binding(
+            terminal,
+            legacy_binding,
+            prefix_index=build_canonical_prefix_index(canonical_ledger_path),
+            expected_paper_account_identity_sha256=expected_paper_account_identity_sha256,
+            expected_target_weights_sha256=expected_target_weights_sha256,
+        )
+    except LegacyTerminalBindingError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal is not covered by a valid append-only operator binding: "
+            f"{exc}"
+        ) from exc
+    return verification
 
 
 def _reconciliation_is_valid(
@@ -468,6 +529,10 @@ def _assert_account_execution_state_resolved(
     for record in records:
         by_payload.setdefault(record.pending_payload_sha256, []).append(record)
 
+    # Resolve account-wide uncertainty before lower-assurance lineage
+    # migration checks. Journal insertion order must not let an older unbound
+    # legacy terminal mask a later indeterminate account state.
+    terminals_by_payload: dict[str, object] = {}
     for payload, history in by_payload.items():
         starts = [row for row in history if row.status == "execution_started"]
         terminals = [row for row in history if row.status in TERMINAL_OUTCOMES]
@@ -484,24 +549,28 @@ def _assert_account_execution_state_resolved(
         if not terminals:
             continue
         terminal = terminals[0]
+        terminals_by_payload[payload] = terminal
+        if terminal.status == "execution_indeterminate":
+            reconciliation = journal.reconciliation(payload)
+            if not _reconciliation_is_valid(
+                terminal=terminal,
+                reconciliation=reconciliation,
+                canonical_ledger_path=canonical_ledger_path,
+                paper_account_identity_sha256=paper_account_identity_sha256,
+            ):
+                raise ContinuousPaperExecutionBlocked(
+                    "paper account has an unreconciled execution_indeterminate outcome; "
+                    "explicit canonical/operational reconciliation is required before "
+                    "any later signal can trade"
+                )
+
+    for payload, terminal in terminals_by_payload.items():
         _verify_terminal_canonical_binding(
             terminal=terminal,
+            legacy_binding=journal.legacy_binding(payload),
             canonical_ledger_path=canonical_ledger_path,
+            expected_paper_account_identity_sha256=paper_account_identity_sha256,
         )
-        if terminal.status != "execution_indeterminate":
-            continue
-        reconciliation = journal.reconciliation(payload)
-        if not _reconciliation_is_valid(
-            terminal=terminal,
-            reconciliation=reconciliation,
-            canonical_ledger_path=canonical_ledger_path,
-            paper_account_identity_sha256=paper_account_identity_sha256,
-        ):
-            raise ContinuousPaperExecutionBlocked(
-                "paper account has an unreconciled execution_indeterminate outcome; "
-                "explicit canonical/operational reconciliation is required before "
-                "any later signal can trade"
-            )
 
 
 def _same_prefix_receipt(
@@ -520,7 +589,155 @@ def _same_prefix_receipt(
     )
 
 
+def bind_legacy_terminal_account(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    pending_payload_sha256: str,
+    as_of_date: str,
+    reason: str,
+) -> dict[str, object]:
+    """Append a lower-assurance binding without rewriting the legacy terminal."""
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _bind_legacy_terminal_account_locked(
+            config=config,
+            pending_payload_sha256=pending_payload_sha256,
+            as_of_date=as_of_date,
+            reason=reason,
+        )
+
+
+def _bind_legacy_terminal_account_locked(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    pending_payload_sha256: str,
+    as_of_date: str,
+    reason: str,
+) -> dict[str, object]:
+    binding_reason = str(reason).strip()
+    if not binding_reason:
+        raise ContinuousPaperExecutionBlocked("legacy binding reason must be non-empty")
+    payload = str(pending_payload_sha256).strip()
+    if len(payload) != 64:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy binding requires a 64-character pending payload digest"
+        )
+    normalized_as_of = _normalise_sessions([as_of_date])
+    if len(normalized_as_of) != 1:
+        raise ContinuousPaperExecutionBlocked("as_of date is invalid or ambiguous")
+    as_of = normalized_as_of[0]
+    try:
+        identity = ensure_paper_account_identity(
+            canonical_ledger_path=config.canonical_ledger_path,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+            identity_path=config.account_identity_path,
+        )
+    except PaperAccountIdentityError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"paper account identity verification failed: {exc}"
+        ) from exc
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise ContinuousPaperExecutionBlocked("pending execution journal verification failed")
+    terminal = journal.terminal(payload)
+    if terminal is None:
+        raise ContinuousPaperExecutionBlocked(
+            f"no terminal execution evidence exists for pending payload {payload}"
+        )
+    if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None:
+        raise ContinuousPaperExecutionBlocked(
+            "terminal already carries an original execution-time canonical-prefix receipt"
+        )
+    terminal_identity = str(
+        dict(terminal.details or {}).get("paper_account_identity_sha256") or ""
+    )
+    if terminal_identity and terminal_identity != identity.payload_sha256:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal declares a conflicting paper-account identity and "
+            "cannot be rebound to the current account"
+        )
+    canonical_state = recover_from_canonical(
+        config.canonical_ledger_path,
+        portfolio_id=identity.portfolio_id,
+        initial_cash=identity.initial_cash,
+        as_of_session=as_of,
+    )
+    operational_state = recover(
+        EventLedger(config.operational_ledger_path),
+        portfolio_id=identity.portfolio_id,
+        initial_cash=identity.initial_cash,
+    )
+    _assert_recovered_account_consistent(canonical_state, operational_state)
+    if canonical_state.open_orders() or operational_state.open_orders():
+        raise ContinuousPaperExecutionBlocked(
+            "cannot bind legacy terminal while unresolved open orders remain"
+        )
+    target_sha = str(dict(terminal.details or {}).get("target_weights_sha256") or "")
+    if not target_sha:
+        pending = PendingPaperSignalStore(config.pending_signal_dir).read(terminal.signal_date)
+        if pending is not None and pending.payload_sha256 == payload:
+            target_sha = pending.target_weights_sha256
+    if len(target_sha) != 64:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal cannot be safely bound without its exact target digest"
+        )
+    prefix_index = build_canonical_prefix_index(config.canonical_ledger_path)
+    details = {
+        "terminal_record_sha256": terminal.record_sha256,
+        "paper_account_identity_sha256": identity.payload_sha256,
+        "target_weights_sha256": target_sha,
+        "canonical_records": prefix_index.record_count,
+        "canonical_head": prefix_index.current_head,
+        "account_state_sha256": _account_state_sha256(canonical_state),
+        "reconciled_as_of": as_of,
+        "reason": binding_reason,
+        "assurance": "operator_bound_canonical_only_legacy_terminal_v1",
+        "operational_economic_reconstruction": (
+            "not_claimed_canonical_is_record_of_account"
+        ),
+    }
+    existing = journal.legacy_binding(payload)
+    if existing is not None:
+        try:
+            verify_legacy_terminal_binding(
+                terminal,
+                existing,
+                prefix_index=prefix_index,
+                expected_paper_account_identity_sha256=identity.payload_sha256,
+                expected_target_weights_sha256=target_sha,
+            )
+        except LegacyTerminalBindingError as exc:
+            raise ContinuousPaperExecutionBlocked(
+                f"existing legacy terminal binding is invalid: {exc}"
+            ) from exc
+        return existing.to_dict()
+    return journal.append(
+        pending_payload_sha256=payload,
+        signal_date=terminal.signal_date,
+        execution_date=terminal.execution_date,
+        status=LEGACY_BINDING_STATUS,
+        details=details,
+    ).to_dict()
+
+
 def reconcile_indeterminate_account(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    as_of_date: str,
+    reason: str,
+) -> list[dict[str, object]]:
+    """Reconcile uncertain economics under the canonical-account lock."""
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _reconcile_indeterminate_account_locked(
+            config=config,
+            as_of_date=as_of_date,
+            reason=reason,
+        )
+
+
+def _reconcile_indeterminate_account_locked(
     *,
     config: ContinuousPaperExecutionConfig,
     as_of_date: str,
@@ -528,7 +745,8 @@ def reconcile_indeterminate_account(
 ) -> list[dict[str, object]]:
     """Explicitly reconcile and append evidence that can clear account freeze.
 
-    This function never deletes/replaces an indeterminate record. It first proves
+    The public wrapper owns the account-wide cross-process lock. This inner
+    function never deletes/replaces an indeterminate record. It first proves
     canonical and operational paper state agree and have no open orders. Any
     dangling ``execution_started`` is converted to ``execution_indeterminate``;
     each indeterminate terminal then receives one append-only
@@ -664,7 +882,115 @@ def reconcile_indeterminate_account(
     return appended
 
 
+def _verify_pending_daily_commit(
+    journal: PendingExecutionJournal,
+    pending: PendingPaperSignal,
+    *,
+    expected_paper_account_identity_sha256: str,
+    canonical_ledger_path: str | Path,
+) -> None:
+    if (
+        pending.source_lineage.get("daily_decision_commit_protocol")
+        != PENDING_COMMIT_PROTOCOL
+    ):
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal lacks the staged-intent commit protocol; explicit "
+            "regeneration/reconciliation is required before execution"
+        )
+    decision = journal.daily_decision(pending.signal_date)
+    if decision is None:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal is staged but not committed by a daily_decision_frozen record"
+        )
+    details = dict(decision.details or {})
+    checks = {
+        "decision_kind": (str(details.get("decision_kind") or ""), "target"),
+        "commit_protocol": (str(details.get("commit_protocol") or ""), PENDING_COMMIT_PROTOCOL),
+        "pending_payload_sha256": (decision.pending_payload_sha256, pending.payload_sha256),
+        "target_weights_sha256": (
+            str(details.get("target_weights_sha256") or ""),
+            pending.target_weights_sha256,
+        ),
+        "paper_account_identity_sha256": (
+            str(details.get("paper_account_identity_sha256") or ""),
+            expected_paper_account_identity_sha256,
+        ),
+        "canonical_account_state_sha256": (
+            str(details.get("canonical_account_state_sha256") or ""),
+            str(pending.source_lineage.get("canonical_account_state_sha256") or ""),
+        ),
+        "canonical_head": (
+            str(details.get("canonical_head") or ""),
+            str(pending.source_lineage.get("canonical_ledger_head_hash") or ""),
+        ),
+        "canonical_records": (
+            (
+                str(details.get("canonical_records"))
+                if details.get("canonical_records") is not None
+                else ""
+            ),
+            str(pending.source_lineage.get("canonical_ledger_records") or ""),
+        ),
+    }
+    mismatches = [name for name, (left, right) in checks.items() if left != right]
+    if mismatches:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal commit binding mismatch: " + ",".join(sorted(mismatches))
+        )
+    summary_path_text = str(details.get("daily_summary_path") or "").strip()
+    summary_sha = str(details.get("daily_summary_sha256") or "").strip()
+    if len(summary_sha) != 64 or not summary_path_text:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal commit lacks bound daily summary evidence"
+        )
+    summary_path = Path(summary_path_text)
+    if not summary_path.is_file():
+        raise ContinuousPaperExecutionBlocked(
+            "bound daily summary evidence is missing before pending execution"
+        )
+    if sha256(summary_path.read_bytes()).hexdigest() != summary_sha:
+        raise ContinuousPaperExecutionBlocked(
+            "bound daily summary evidence digest mismatch before pending execution"
+        )
+    try:
+        canonical_records, canonical_head = canonical_snapshot(canonical_ledger_path)
+        expected_records = int(details["canonical_records"])
+        expected_head = str(details["canonical_head"])
+    except (CanonicalPrefixReceiptError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"cannot revalidate frozen canonical account prefix: {exc}"
+        ) from exc
+    if canonical_records != expected_records or canonical_head != expected_head:
+        raise ContinuousPaperExecutionBlocked(
+            "canonical account changed after daily decision freeze; pending target "
+            "must be regenerated or explicitly reconciled before execution"
+        )
+
+
 def execute_pending_for_session(
+    as_of_date: str,
+    market_panel: pd.DataFrame,
+    *,
+    config: ContinuousPaperExecutionConfig,
+    authoritative_sessions: Sequence[object] | None = None,
+) -> list[ContinuousPaperExecutionResult]:
+    """Execute one session under the canonical-account cross-process lock.
+
+    Lock ownership lives here rather than in a CLI adapter so direct library,
+    daemon or future API callers cannot mutate the economic account outside the
+    same critical section used by daily target freezing.
+    """
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _execute_pending_for_session_locked(
+            as_of_date,
+            market_panel,
+            config=config,
+            authoritative_sessions=authoritative_sessions,
+        )
+
+
+def _execute_pending_for_session_locked(
     as_of_date: str,
     market_panel: pd.DataFrame,
     *,
@@ -722,15 +1048,19 @@ def execute_pending_for_session(
         if terminal is not None:
             _verify_terminal_canonical_binding(
                 terminal=terminal,
+                legacy_binding=journal.legacy_binding(pending.payload_sha256),
                 canonical_ledger_path=config.canonical_ledger_path,
                 expected_target_weights_sha256=pending.target_weights_sha256,
-                expected_paper_account_identity_sha256=(
-                    account_identity.payload_sha256
-                    if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None
-                    else None
-                ),
+                expected_paper_account_identity_sha256=account_identity.payload_sha256,
             )
             continue
+
+        _verify_pending_daily_commit(
+            journal,
+            pending,
+            expected_paper_account_identity_sha256=account_identity.payload_sha256,
+            canonical_ledger_path=config.canonical_ledger_path,
+        )
 
         pending_identity_sha = str(
             pending.source_lineage.get("paper_account_identity_sha256", "")
@@ -859,19 +1189,24 @@ def execute_pending_for_session(
         )
         market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
         adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)
-        manager = OrderManager(
-            broker=adapter,
-            lineage=lineage,
-            idempotency_path=config.idempotency_path,
-            canonical_ledger=canonical,
-            order_book=broker.book,
-            config=OrderManagerConfig(
-                lot_size=config.lot_size,
-                min_order_value_yuan=config.min_order_value_yuan,
-                max_participation_rate=config.max_participation_rate,
-                strategy_version=config.strategy_version,
-            ),
-        )
+        try:
+            manager = OrderManager(
+                broker=adapter,
+                lineage=lineage,
+                idempotency_path=config.idempotency_path,
+                canonical_ledger=canonical,
+                order_book=broker.book,
+                config=OrderManagerConfig(
+                    lot_size=config.lot_size,
+                    min_order_value_yuan=config.min_order_value_yuan,
+                    max_participation_rate=config.max_participation_rate,
+                    strategy_version=config.strategy_version,
+                ),
+            )
+        except IdempotencyStoreCorruption as exc:
+            raise ContinuousPaperExecutionBlocked(
+                f"durable idempotency evidence is corrupt: {exc}"
+            ) from exc
 
         target = pd.Series(pending.target_weights, dtype=float).reindex(prices.index).fillna(0.0)
         orders = _execution_orders(
@@ -978,6 +1313,7 @@ __all__ = [
     "ContinuousPaperExecutionConfig",
     "ContinuousPaperExecutionResult",
     "ContinuousPaperExecutionBlocked",
+    "bind_legacy_terminal_account",
     "execute_pending_for_session",
     "reconcile_indeterminate_account",
 ]

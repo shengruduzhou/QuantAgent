@@ -95,6 +95,25 @@ def test_default_identity_path_is_sibling_of_canonical_ledger(tmp_path) -> None:
     assert identity.initial_cash == pytest.approx(100_000.0)
 
 
+def test_custom_ledgers_in_one_directory_get_distinct_identity_files(tmp_path) -> None:
+    first = tmp_path / "paper-a.jsonl"
+    second = tmp_path / "paper-b.jsonl"
+    assert account_identity_path_for_canonical(first) == tmp_path / "paper-a.account_identity.json"
+    assert account_identity_path_for_canonical(second) == tmp_path / "paper-b.account_identity.json"
+    assert account_identity_path_for_canonical(first) != account_identity_path_for_canonical(second)
+
+
+def test_identity_path_canonicalizes_symlink_alias(tmp_path) -> None:
+    real = tmp_path / "real.jsonl"
+    real.write_text("", encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    try:
+        alias.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    assert account_identity_path_for_canonical(alias) == account_identity_path_for_canonical(real)
+
+
 def test_nonempty_legacy_canonical_ledger_requires_explicit_identity_migration(tmp_path) -> None:
     canonical = tmp_path / "canonical_ledger.jsonl"
     ledger = CanonicalLedger(canonical)
