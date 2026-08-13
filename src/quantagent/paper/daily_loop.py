@@ -10,9 +10,9 @@ A later execution stage will consume the durable pending artifact against a
 continuous recovered PaperBroker account. Target construction itself starts
 from that same canonical executed account: recovered marked NAV drives
 liquidity capacity and recovered actual weights seed first-date timing,
-holding-period and turnover state. Before a non-empty target is frozen, the
+holding-period and turnover state. Before any daily decision is persisted, the
 canonical account is recovered again while holding the cross-process account
-lock. Any ledger/state drift makes the stale target fail closed, every older
+lock. Any ledger/state drift makes the stale decision fail closed, every older
 pending signal must already have a canonically verified terminal execution
 outcome, and same-date evidence files are written only inside that account-wide
 critical section. Desired targets are never treated as holdings. The account
@@ -125,11 +125,12 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
 
     The immutable paper account identity is verified before evidence refresh or
     prediction. The canonical account is recovered and marked before target
-    construction. Immediately before a non-empty pending intent is frozen, the
-    account is recovered again under the same cross-process lock used by the
-    continuous execution worker. Older pending signals must already be resolved
-    with valid canonical evidence; a changed state/head/count invalidates the
-    computed target instead of silently executing it against different holdings.
+    construction. Immediately before either a target or a no-target decision is
+    persisted, the account is recovered again under the same cross-process lock
+    used by the continuous execution worker. Older pending signals must already
+    be resolved with valid canonical evidence; a changed state/head/count
+    invalidates the computed decision instead of silently applying it to
+    different holdings.
 
     Prediction/target files that become pending-signal lineage are also written
     inside that lock. Once one same-date pending signal is frozen, a second
@@ -237,6 +238,21 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     if weights.target_weights is None or weights.target_weights.empty:
         with paper_account_lock(config.canonical_ledger_path):
             _assert_current_signal_not_frozen(config, as_of)
+            _assert_prior_pending_signals_resolved(
+                config,
+                as_of,
+                paper_account_identity_sha256=account_identity.payload_sha256,
+            )
+            fresh_account_state = recover_paper_account_target_state(
+                canonical_ledger_path=config.canonical_ledger_path,
+                market_panel=market_panel,
+                as_of_date=as_of,
+                portfolio_id=account_identity.portfolio_id,
+                initial_cash=account_identity.initial_cash,
+            )
+            _assert_account_snapshot_unchanged(account_state, fresh_account_state)
+            account_state = fresh_account_state
+            account_evidence = account_state.evidence()
             predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
             weights_path = write_v7_target_weights(
                 weights,
@@ -299,16 +315,7 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             portfolio_id=account_identity.portfolio_id,
             initial_cash=account_identity.initial_cash,
         )
-        if (
-            fresh_account_state.account_state_sha256 != account_state.account_state_sha256
-            or fresh_account_state.canonical_records != account_state.canonical_records
-            or fresh_account_state.canonical_head_hash != account_state.canonical_head_hash
-        ):
-            raise PaperAccountStateRefused(
-                "canonical paper account changed during target construction; "
-                "stale target was discarded before pending freeze. Rerun target "
-                "generation from the freshly executed account state"
-            )
+        _assert_account_snapshot_unchanged(account_state, fresh_account_state)
         account_state = fresh_account_state
         account_evidence = account_state.evidence()
 
@@ -390,6 +397,19 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     )
 
 
+def _assert_account_snapshot_unchanged(expected, observed) -> None:
+    if (
+        observed.account_state_sha256 != expected.account_state_sha256
+        or observed.canonical_records != expected.canonical_records
+        or observed.canonical_head_hash != expected.canonical_head_hash
+    ):
+        raise PaperAccountStateRefused(
+            "canonical paper account changed during target construction; stale "
+            "daily decision was discarded before persistence. Rerun target "
+            "generation from the freshly executed account state"
+        )
+
+
 def _assert_current_signal_not_frozen(
     config: DailyPaperLoopConfig,
     as_of: str,
@@ -446,9 +466,9 @@ def _assert_prior_pending_signals_resolved(
     The cross-process account lock must already be held by the caller. This turns
     the operational ordering contract into a fail-closed invariant: on session T,
     a T-1 pending signal cannot still be waiting for execution while a new T
-    target is frozen from the pre-execution account. Terminals and indeterminate
-    reconciliations are independently bound back to the canonical ledger before
-    they are accepted as resolved.
+    decision is persisted from the pre-execution account. Terminals and
+    indeterminate reconciliations are independently bound back to the canonical
+    ledger before they are accepted as resolved.
     """
 
     root = Path(config.pending_signal_dir)
