@@ -12,9 +12,10 @@ from that same canonical executed account: recovered marked NAV drives
 liquidity capacity and recovered actual weights seed first-date timing,
 holding-period and turnover state. Before a non-empty target is frozen, the
 canonical account is recovered again while holding the cross-process account
-lock. Any ledger/state drift makes the stale target fail closed. Desired targets
-are never treated as holdings. The account genesis itself is immutable: every
-run must match the persisted portfolio_id/initial_cash identity before any
+lock. Any ledger/state drift makes the stale target fail closed, and every older
+pending signal must already have a resolved terminal execution outcome. Desired
+targets are never treated as holdings. The account genesis itself is immutable:
+every run must match the persisted portfolio_id/initial_cash identity before any
 target is produced.
 """
 
@@ -42,11 +43,25 @@ from quantagent.paper.account_target_state import (
     recover_paper_account_target_state,
     reconcile_target_to_canonical_account,
 )
+from quantagent.paper.execution_journal import (
+    PendingExecutionJournal,
+    replay_terminal_status,
+)
 from quantagent.paper.pending_signal import PendingPaperSignalStore
 from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
 from quantagent.portfolio.v7_target_weights import V7TargetWeightsConfig, build_v7_target_weights, write_v7_target_weights
 from quantagent.training.v7_predictor import predict_v7_alpha
+
+
+_RESOLVED_PRIOR_EXECUTION_STATUSES = frozenset(
+    {
+        "execution_observed",
+        "execution_blocked",
+        "missed_execution_session",
+        "execution_reconciled",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +74,7 @@ class DailyPaperLoopConfig:
     output_root: str = field(default_factory=lambda: str(quant_paths().reports / "v7" / "paper"))
     paper_book_path: str = field(default_factory=lambda: str(paper_runtime_paths().paper_book))
     pending_signal_dir: str = field(default_factory=lambda: str(paper_runtime_paths().pending_signals))
+    execution_journal_path: str = field(default_factory=lambda: str(paper_runtime_paths().execution_journal))
     canonical_ledger_path: str = field(default_factory=lambda: str(paper_runtime_paths().canonical_ledger))
     account_identity_path: str | None = None
     portfolio_id: str = "v7-paper"
@@ -109,8 +125,9 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     prediction. The canonical account is recovered and marked before target
     construction. Immediately before a non-empty pending intent is frozen, the
     account is recovered again under the same cross-process lock used by the
-    continuous execution worker. A changed state/head/count invalidates the
-    computed target instead of silently executing it against different holdings.
+    continuous execution worker. Older pending signals must already be resolved;
+    a changed state/head/count invalidates the computed target instead of
+    silently executing it against different holdings.
     """
 
     as_of = _normalise_date(config.as_of_date)
@@ -264,6 +281,11 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     predictions_file = Path(predictions_path)
     target_weights_file = Path(weights_path)
     with paper_account_lock(config.canonical_ledger_path):
+        try:
+            _assert_prior_pending_signals_resolved(config, as_of)
+        except Exception:
+            target_weights_file.unlink(missing_ok=True)
+            raise
         fresh_account_state = recover_paper_account_target_state(
             canonical_ledger_path=config.canonical_ledger_path,
             market_panel=market_panel,
@@ -353,6 +375,50 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         executed_fill_count=0,
         warnings=warnings,
     )
+
+
+def _assert_prior_pending_signals_resolved(
+    config: DailyPaperLoopConfig,
+    as_of: str,
+) -> None:
+    """Require previous signal dates to reach a durable terminal before freeze.
+
+    The cross-process account lock must already be held by the caller. This turns
+    the operational ordering contract into a fail-closed invariant: on session T,
+    a T-1 pending signal cannot still be waiting for execution while a new T
+    target is frozen from the pre-execution account.
+    """
+
+    root = Path(config.pending_signal_dir)
+    if not root.exists():
+        return
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise PaperAccountStateRefused(
+            "pending execution journal verification failed before target freeze"
+        )
+    statuses = replay_terminal_status(journal.records())
+    store = PendingPaperSignalStore(root)
+    cutoff = pd.Timestamp(as_of).date()
+    for path in sorted(root.glob("*.json")):
+        try:
+            signal_date = pd.Timestamp(path.stem).date()
+        except (TypeError, ValueError) as exc:
+            raise PaperAccountStateRefused(
+                f"unexpected pending-signal filename before target freeze: {path.name}"
+            ) from exc
+        if signal_date >= cutoff:
+            continue
+        signal = store.read(signal_date.isoformat())
+        if signal is None:
+            continue
+        status = statuses.get(signal.payload_sha256)
+        if status not in _RESOLVED_PRIOR_EXECUTION_STATUSES:
+            raise PaperAccountStateRefused(
+                "prior pending paper signal is unresolved before current target "
+                f"freeze: signal_date={signal.signal_date}, status={status or 'none'}; "
+                "run/reconcile the execution stage first"
+            )
 
 
 def _file_sha256(path: Path) -> str:
