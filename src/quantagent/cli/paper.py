@@ -137,6 +137,45 @@ def paper_execute_session(
     )
 
 
+@paper_app.command("bind-legacy-terminal")
+@app.command("paper-bind-legacy-terminal")
+def paper_bind_legacy_terminal(
+    pending_payload_sha256: str = typer.Option(..., "--pending-payload-sha256"),
+    date: str = typer.Option("today", "--date"),
+    reason: str = typer.Option(..., "--reason"),
+    initial_cash: float = typer.Option(1_000_000.0, "--initial-cash", min=0.01),
+    portfolio_id: str = typer.Option("v7-paper", "--portfolio-id"),
+) -> None:
+    """Append an audited lower-assurance binding for one legacy terminal."""
+    from quantagent.paper.continuous_execution import (
+        ContinuousPaperExecutionConfig,
+        bind_legacy_terminal_account,
+    )
+    from quantagent.paper.runtime_paths import paper_runtime_paths
+
+    paths = paper_runtime_paths().ensure()
+    config = ContinuousPaperExecutionConfig(
+        pending_signal_dir=str(paths.pending_signals),
+        execution_journal_path=str(paths.execution_journal),
+        canonical_ledger_path=str(paths.canonical_ledger),
+        operational_ledger_path=str(paths.operational_ledger),
+        idempotency_path=str(paths.idempotency),
+        account_identity_path=str(paths.account_identity),
+        portfolio_id=portfolio_id,
+        initial_cash=initial_cash,
+    )
+    typer.echo(
+        json_dump(
+            bind_legacy_terminal_account(
+                config=config,
+                pending_payload_sha256=pending_payload_sha256,
+                as_of_date=date,
+                reason=reason,
+            )
+        )
+    )
+
+
 @paper_app.command("run-loop")
 @app.command("paper-run-loop")
 def paper_run_loop(

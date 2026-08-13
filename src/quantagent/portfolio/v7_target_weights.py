@@ -774,14 +774,16 @@ def _try_cvxpy_long_only(
             idx = [i for i, symbol in enumerate(symbols) if sector_series.loc[symbol] == sector]
             constraints.append(cp.sum(w[idx]) <= config.max_sector_weight)
     if previous_weights is not None and config.max_turnover > 0:
-        # Selected-variable turnover alone is not sufficient when a held name
-        # has fallen out of the candidate set. Reserve the dropped-name exit
-        # budget here; the deterministic union projection below remains the
-        # final hard bound and can retain part of the dropped holding.
+        # A selected-only hard constraint is valid only when all current holdings
+        # are represented by CVXPY variables. A dropped holding may need a partial
+        # exit; charging its entire weight as a constant makes that feasible action
+        # impossible. In that case the final current∪desired projection below is
+        # the single authoritative hard turnover bound.
         dropped_turnover = float(
             previous_weights.loc[~previous_weights.index.isin(symbols)].abs().sum()
         )
-        constraints.append(cp.norm1(w - prev) + dropped_turnover <= config.max_turnover)
+        if dropped_turnover <= 1e-12:
+            constraints.append(cp.norm1(w - prev) <= config.max_turnover)
     problem = cp.Problem(objective, constraints)
     try:
         problem.solve(solver=cp.CLARABEL, verbose=False)

@@ -56,10 +56,12 @@ TERMINAL_OUTCOMES = frozenset(
 )
 RECONCILIATION_STATUS = "execution_reconciled"
 LEGACY_BINDING_STATUS = "legacy_terminal_bound"
+DAILY_DECISION_STATUS = "daily_decision_frozen"
 _ALLOWED_STATUSES = TERMINAL_OUTCOMES | {
     "execution_started",
     RECONCILIATION_STATUS,
     LEGACY_BINDING_STATUS,
+    DAILY_DECISION_STATUS,
 }
 
 
@@ -184,6 +186,19 @@ class PendingExecutionJournal:
             )
         return rows[0] if rows else None
 
+    def daily_decision(self, signal_date: str) -> PendingExecutionRecord | None:
+        rows = [
+            record
+            for record in self.records()
+            if record.status == DAILY_DECISION_STATUS
+            and record.signal_date == str(signal_date)
+        ]
+        if len(rows) > 1:
+            raise ExecutionJournalCorruption(
+                f"signal date {signal_date} has multiple daily decision freeze records"
+            )
+        return rows[0] if rows else None
+
     def has_unresolved_start(self, pending_payload_sha256: str) -> bool:
         history = self.history(pending_payload_sha256)
         return any(record.status == "execution_started" for record in history) and not any(
@@ -273,6 +288,16 @@ class PendingExecutionJournal:
             terminal = terminals[0] if terminals else None
             reconciliation = reconciliations[0] if reconciliations else None
             legacy_binding = legacy_bindings[0] if legacy_bindings else None
+            same_date_decisions = [
+                record
+                for record in records
+                if record.status == DAILY_DECISION_STATUS
+                and record.signal_date == str(signal_date)
+            ]
+            if len(same_date_decisions) > 1:
+                raise ExecutionJournalCorruption(
+                    f"signal date {signal_date} has multiple daily decision freeze records"
+                )
 
             if status == RECONCILIATION_STATUS:
                 if terminal is None or terminal.status != "execution_indeterminate":
@@ -323,11 +348,54 @@ class PendingExecutionJournal:
                     raise ExecutionJournalCorruption(
                         "legacy_terminal_bound requires explicit migration assurance"
                     )
+                account_state_sha = str(normalized_details.get("account_state_sha256") or "")
+                target_sha = str(normalized_details.get("target_weights_sha256") or "")
+                if len(account_state_sha) != 64 or len(target_sha) != 64:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound requires reconciled account-state and target digests"
+                    )
                 if legacy_binding is not None:
                     if legacy_binding.details == normalized_details:
                         return legacy_binding
                     raise ExecutionJournalCorruption(
                         f"pending signal {pending_payload_sha256} is already legacy-bound"
+                    )
+            elif status == DAILY_DECISION_STATUS:
+                decision_kind = str(normalized_details.get("decision_kind") or "")
+                if decision_kind not in {"target", "no_target"}:
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen requires decision_kind target|no_target"
+                    )
+                identity_sha = str(normalized_details.get("paper_account_identity_sha256") or "")
+                state_sha = str(normalized_details.get("canonical_account_state_sha256") or "")
+                canonical_head = str(normalized_details.get("canonical_head") or "")
+                try:
+                    canonical_records = int(normalized_details["canonical_records"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen requires canonical_records"
+                    ) from exc
+                if (
+                    len(identity_sha) != 64
+                    or len(state_sha) != 64
+                    or len(canonical_head) != 64
+                    or canonical_records < 0
+                    or str(normalized_details.get("assurance") or "")
+                    != "canonical_account_daily_decision_freeze_v1"
+                ):
+                    raise ExecutionJournalCorruption(
+                        "daily_decision_frozen canonical/account binding is invalid"
+                    )
+                if same_date_decisions:
+                    existing_decision = same_date_decisions[0]
+                    if (
+                        existing_decision.pending_payload_sha256
+                        == str(pending_payload_sha256)
+                        and existing_decision.details == normalized_details
+                    ):
+                        return existing_decision
+                    raise ExecutionJournalCorruption(
+                        f"signal date {signal_date} is already durably frozen"
                     )
             elif terminal is not None:
                 if status == terminal.status and normalized_details == terminal.details:
@@ -390,6 +458,7 @@ __all__ = [
     "TERMINAL_OUTCOMES",
     "RECONCILIATION_STATUS",
     "LEGACY_BINDING_STATUS",
+    "DAILY_DECISION_STATUS",
     "ExecutionJournalCorruption",
     "PendingExecutionRecord",
     "PendingExecutionJournal",

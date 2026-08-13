@@ -52,9 +52,14 @@ from quantagent.paper.canonical_receipt import (
     verify_canonical_prefix_receipt,
 )
 from quantagent.paper.execution_journal import (
+    LEGACY_BINDING_STATUS,
     RECONCILIATION_STATUS,
     TERMINAL_OUTCOMES,
     PendingExecutionJournal,
+)
+from quantagent.paper.legacy_terminal_binding import (
+    LegacyTerminalBindingError,
+    verify_legacy_terminal_binding,
 )
 from quantagent.paper.ledger import EventLedger
 from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
@@ -417,13 +422,14 @@ def _execution_orders(
 def _verify_terminal_canonical_binding(
     *,
     terminal,
+    legacy_binding,
     canonical_ledger_path: str,
     expected_target_weights_sha256: str | None = None,
     expected_paper_account_identity_sha256: str | None = None,
 ):
     receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
     try:
-        return verify_canonical_prefix_receipt(
+        verification = verify_canonical_prefix_receipt(
             receipt,
             ledger_or_path=canonical_ledger_path,
             expected_target_weights_sha256=expected_target_weights_sha256,
@@ -434,6 +440,26 @@ def _verify_terminal_canonical_binding(
             "terminal paper execution evidence no longer matches the canonical "
             f"economic ledger: {exc}"
         ) from exc
+    if verification.bound:
+        return verification
+    if expected_paper_account_identity_sha256 is None:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal verification requires the immutable paper-account identity"
+        )
+    try:
+        verify_legacy_terminal_binding(
+            terminal,
+            legacy_binding,
+            prefix_index=build_canonical_prefix_index(canonical_ledger_path),
+            expected_paper_account_identity_sha256=expected_paper_account_identity_sha256,
+            expected_target_weights_sha256=expected_target_weights_sha256,
+        )
+    except LegacyTerminalBindingError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal is not covered by a valid append-only operator binding: "
+            f"{exc}"
+        ) from exc
+    return verification
 
 
 def _reconciliation_is_valid(
@@ -490,7 +516,9 @@ def _assert_account_execution_state_resolved(
         terminal = terminals[0]
         _verify_terminal_canonical_binding(
             terminal=terminal,
+            legacy_binding=journal.legacy_binding(payload),
             canonical_ledger_path=canonical_ledger_path,
+            expected_paper_account_identity_sha256=paper_account_identity_sha256,
         )
         if terminal.status != "execution_indeterminate":
             continue
@@ -522,6 +550,124 @@ def _same_prefix_receipt(
         target_weights_sha256=target_weights_sha256,
         paper_account_identity_sha256=paper_account_identity_sha256,
     )
+
+
+def bind_legacy_terminal_account(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    pending_payload_sha256: str,
+    as_of_date: str,
+    reason: str,
+) -> dict[str, object]:
+    """Append a lower-assurance binding without rewriting the legacy terminal."""
+
+    with paper_account_lock(config.canonical_ledger_path):
+        return _bind_legacy_terminal_account_locked(
+            config=config,
+            pending_payload_sha256=pending_payload_sha256,
+            as_of_date=as_of_date,
+            reason=reason,
+        )
+
+
+def _bind_legacy_terminal_account_locked(
+    *,
+    config: ContinuousPaperExecutionConfig,
+    pending_payload_sha256: str,
+    as_of_date: str,
+    reason: str,
+) -> dict[str, object]:
+    binding_reason = str(reason).strip()
+    if not binding_reason:
+        raise ContinuousPaperExecutionBlocked("legacy binding reason must be non-empty")
+    payload = str(pending_payload_sha256).strip()
+    if len(payload) != 64:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy binding requires a 64-character pending payload digest"
+        )
+    as_of = pd.Timestamp(as_of_date).date().isoformat()
+    try:
+        identity = ensure_paper_account_identity(
+            canonical_ledger_path=config.canonical_ledger_path,
+            portfolio_id=config.portfolio_id,
+            initial_cash=config.initial_cash,
+            identity_path=config.account_identity_path,
+        )
+    except PaperAccountIdentityError as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"paper account identity verification failed: {exc}"
+        ) from exc
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise ContinuousPaperExecutionBlocked("pending execution journal verification failed")
+    terminal = journal.terminal(payload)
+    if terminal is None:
+        raise ContinuousPaperExecutionBlocked(
+            f"no terminal execution evidence exists for pending payload {payload}"
+        )
+    if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None:
+        raise ContinuousPaperExecutionBlocked(
+            "terminal already carries an original execution-time canonical-prefix receipt"
+        )
+    canonical_state = recover_from_canonical(
+        config.canonical_ledger_path,
+        portfolio_id=identity.portfolio_id,
+        initial_cash=identity.initial_cash,
+        as_of_session=as_of,
+    )
+    operational_state = recover(
+        EventLedger(config.operational_ledger_path),
+        portfolio_id=identity.portfolio_id,
+        initial_cash=identity.initial_cash,
+    )
+    _assert_recovered_account_consistent(canonical_state, operational_state)
+    if canonical_state.open_orders() or operational_state.open_orders():
+        raise ContinuousPaperExecutionBlocked(
+            "cannot bind legacy terminal while unresolved open orders remain"
+        )
+    target_sha = str(dict(terminal.details or {}).get("target_weights_sha256") or "")
+    if not target_sha:
+        pending = PendingPaperSignalStore(config.pending_signal_dir).read(terminal.signal_date)
+        if pending is not None and pending.payload_sha256 == payload:
+            target_sha = pending.target_weights_sha256
+    if len(target_sha) != 64:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal cannot be safely bound without its exact target digest"
+        )
+    prefix_index = build_canonical_prefix_index(config.canonical_ledger_path)
+    details = {
+        "terminal_record_sha256": terminal.record_sha256,
+        "paper_account_identity_sha256": identity.payload_sha256,
+        "target_weights_sha256": target_sha,
+        "canonical_records": prefix_index.record_count,
+        "canonical_head": prefix_index.current_head,
+        "account_state_sha256": _account_state_sha256(canonical_state),
+        "reconciled_as_of": as_of,
+        "reason": binding_reason,
+        "assurance": "operator_reconciled_legacy_terminal_v1",
+    }
+    existing = journal.legacy_binding(payload)
+    if existing is not None:
+        try:
+            verify_legacy_terminal_binding(
+                terminal,
+                existing,
+                prefix_index=prefix_index,
+                expected_paper_account_identity_sha256=identity.payload_sha256,
+                expected_target_weights_sha256=target_sha,
+            )
+        except LegacyTerminalBindingError as exc:
+            raise ContinuousPaperExecutionBlocked(
+                f"existing legacy terminal binding is invalid: {exc}"
+            ) from exc
+        return existing.to_dict()
+    return journal.append(
+        pending_payload_sha256=payload,
+        signal_date=terminal.signal_date,
+        execution_date=terminal.execution_date,
+        status=LEGACY_BINDING_STATUS,
+        details=details,
+    ).to_dict()
 
 
 def reconcile_indeterminate_account(
@@ -766,13 +912,10 @@ def _execute_pending_for_session_locked(
         if terminal is not None:
             _verify_terminal_canonical_binding(
                 terminal=terminal,
+                legacy_binding=journal.legacy_binding(pending.payload_sha256),
                 canonical_ledger_path=config.canonical_ledger_path,
                 expected_target_weights_sha256=pending.target_weights_sha256,
-                expected_paper_account_identity_sha256=(
-                    account_identity.payload_sha256
-                    if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None
-                    else None
-                ),
+                expected_paper_account_identity_sha256=account_identity.payload_sha256,
             )
             continue
 
@@ -1022,6 +1165,7 @@ __all__ = [
     "ContinuousPaperExecutionConfig",
     "ContinuousPaperExecutionResult",
     "ContinuousPaperExecutionBlocked",
+    "bind_legacy_terminal_account",
     "execute_pending_for_session",
     "reconcile_indeterminate_account",
 ]

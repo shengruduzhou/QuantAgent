@@ -50,7 +50,15 @@ from quantagent.paper.canonical_receipt import (
     build_canonical_prefix_index,
     verify_canonical_prefix_receipt,
 )
-from quantagent.paper.execution_journal import TERMINAL_OUTCOMES, PendingExecutionJournal
+from quantagent.paper.execution_journal import (
+    DAILY_DECISION_STATUS,
+    TERMINAL_OUTCOMES,
+    PendingExecutionJournal,
+)
+from quantagent.paper.legacy_terminal_binding import (
+    LegacyTerminalBindingError,
+    verify_legacy_terminal_binding,
+)
 from quantagent.paper.pending_signal import PendingPaperSignalStore
 from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
@@ -256,6 +264,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             _assert_account_snapshot_unchanged(account_state, fresh_account_state)
             account_state = fresh_account_state
             account_evidence = account_state.evidence()
+            _freeze_daily_decision(
+                config,
+                as_of,
+                decision_kind="no_target",
+                paper_account_identity_sha256=account_identity.payload_sha256,
+                account_evidence=account_evidence,
+            )
             predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
             weights_path = write_v7_target_weights(
                 weights,
@@ -321,6 +336,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         _assert_account_snapshot_unchanged(account_state, fresh_account_state)
         account_state = fresh_account_state
         account_evidence = account_state.evidence()
+        _freeze_daily_decision(
+            config,
+            as_of,
+            decision_kind="target",
+            paper_account_identity_sha256=account_identity.payload_sha256,
+            account_evidence=account_evidence,
+        )
 
         predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
         weights_path = write_v7_target_weights(
@@ -417,14 +439,7 @@ def _assert_current_signal_not_frozen(
     config: DailyPaperLoopConfig,
     as_of: str,
 ) -> None:
-    """Prevent a second same-date writer from mutating hash-bound evidence files.
-
-    The account lock must already be held. A frozen pending signal is immutable
-    economic evidence; its referenced prediction/target files must therefore be
-    immutable too. Re-running inference for the same signal date is allowed only
-    after an explicit operator workflow has dealt with the existing frozen
-    intent, rather than silently replacing its lineage artifacts.
-    """
+    """Fail closed if any durable evidence already owns this signal date."""
 
     existing = PendingPaperSignalStore(config.pending_signal_dir).read(as_of)
     if existing is not None:
@@ -432,6 +447,67 @@ def _assert_current_signal_not_frozen(
             "pending paper signal is already frozen for the current signal date; "
             "refusing to overwrite its hash-bound predictions/target artifacts"
         )
+    summary_path = Path(config.output_root) / as_of / "daily_loop_summary.json"
+    if summary_path.exists():
+        raise PaperAccountStateRefused(
+            "daily paper decision evidence already exists for the current signal date; "
+            "refusing to overwrite its summary/prediction/target lineage"
+        )
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise PaperAccountStateRefused(
+            "pending execution journal verification failed before same-date freeze check"
+        )
+    if journal.daily_decision(as_of) is not None:
+        raise PaperAccountStateRefused(
+            "daily paper decision is already durably frozen for the current signal date"
+        )
+    same_date_economic = [
+        record
+        for record in journal.records()
+        if record.signal_date == as_of
+        and (record.status == "execution_started" or record.status in TERMINAL_OUTCOMES)
+    ]
+    if same_date_economic:
+        raise PaperAccountStateRefused(
+            "legacy same-date execution evidence already exists; refusing to reuse "
+            "the signal date without rewriting append-only history"
+        )
+
+
+def _freeze_daily_decision(
+    config: DailyPaperLoopConfig,
+    as_of: str,
+    *,
+    decision_kind: str,
+    paper_account_identity_sha256: str,
+    account_evidence: dict[str, object],
+) -> None:
+    """Append an irreversible same-date marker before writing decision artifacts."""
+
+    material = (
+        "quantagent.paper.daily_decision.v1|"
+        f"{as_of}|{paper_account_identity_sha256}"
+    ).encode("utf-8")
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    if not journal.verify():
+        raise PaperAccountStateRefused(
+            "pending execution journal verification failed before daily decision freeze"
+        )
+    journal.append(
+        pending_payload_sha256=sha256(material).hexdigest(),
+        signal_date=as_of,
+        execution_date=as_of,
+        status=DAILY_DECISION_STATUS,
+        details={
+            "decision_kind": str(decision_kind),
+            "paper_account_identity_sha256": str(paper_account_identity_sha256),
+            "canonical_account_state_sha256": str(account_evidence["account_state_sha256"]),
+            "canonical_records": int(account_evidence["canonical_records"]),
+            "canonical_head": str(account_evidence["canonical_head_hash"]),
+            "assurance": "canonical_account_daily_decision_freeze_v1",
+        },
+    )
 
 
 def _valid_indeterminate_reconciliation(
@@ -461,6 +537,7 @@ def _valid_indeterminate_reconciliation(
 def _assert_terminal_bound_to_account(
     *,
     terminal,
+    legacy_binding,
     prefix_index,
     paper_account_identity_sha256: str,
     expected_target_weights_sha256: str | None = None,
@@ -482,13 +559,22 @@ def _assert_terminal_bound_to_account(
             "paper execution terminal no longer matches the canonical account: "
             f"{location}{exc}"
         ) from exc
-    if not verification.bound:
+    if verification.bound:
+        return
+    try:
+        verify_legacy_terminal_binding(
+            terminal,
+            legacy_binding,
+            prefix_index=prefix_index,
+            expected_paper_account_identity_sha256=paper_account_identity_sha256,
+            expected_target_weights_sha256=expected_target_weights_sha256,
+        )
+    except LegacyTerminalBindingError as exc:
         location = f"signal_date={signal_date}; " if signal_date else ""
         raise PaperAccountStateRefused(
-            "paper execution terminal lacks a canonical-prefix/account-identity "
-            f"receipt: {location}explicitly reconcile legacy evidence before "
-            "freezing a new target"
-        )
+            "paper execution terminal lacks valid execution-time receipt or "
+            f"operator-reconciled legacy binding: {location}{exc}"
+        ) from exc
 
 
 def _assert_execution_journal_resolved(
@@ -527,6 +613,7 @@ def _assert_execution_journal_resolved(
         terminal = terminals[0]
         _assert_terminal_bound_to_account(
             terminal=terminal,
+            legacy_binding=journal.legacy_binding(payload),
             prefix_index=prefix_index,
             paper_account_identity_sha256=paper_account_identity_sha256,
         )
@@ -598,6 +685,7 @@ def _assert_prior_pending_signals_resolved(
             )
         _assert_terminal_bound_to_account(
             terminal=terminal,
+            legacy_binding=journal.legacy_binding(signal.payload_sha256),
             prefix_index=prefix_index,
             paper_account_identity_sha256=paper_account_identity_sha256,
             expected_target_weights_sha256=signal.target_weights_sha256,
