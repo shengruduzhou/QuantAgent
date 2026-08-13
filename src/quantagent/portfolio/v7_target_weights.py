@@ -275,7 +275,9 @@ def build_v7_target_weights(
             if position_state_path is not None
             else PositionAgeTracker()
         )
-        if previous_weights is not None and not previous_weights.empty:
+        if previous_weights is not None:
+            # Explicitly empty initial weights are authoritative cash-only state and
+            # must clear stale persisted ages before first-date lock evaluation.
             initial_expected_horizons: dict[str, int | None] = {}
             if theme_frame is not None and not theme_frame.empty and "expected_horizon_days" in theme_frame.columns:
                 first_date = preds["trade_date"].min()

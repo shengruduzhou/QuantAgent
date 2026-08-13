@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pandas as pd
+
+import quantagent.portfolio.v7_target_weights as v7_target_weights
 import pytest
 
 from quantagent.portfolio.v7_target_weights import (
@@ -141,3 +143,24 @@ def test_liquidity_capacity_changes_with_account_nav():
     assert one_weight > five_weight
     assert one_weight == pytest.approx(0.10)
     assert five_weight == pytest.approx(0.02)
+
+
+def test_explicit_empty_initial_weights_still_reconcile_age_tracker(monkeypatch) -> None:
+    predictions, market, _ = _two_session_inputs()
+    calls: list[dict[str, float]] = []
+    original = v7_target_weights.PositionAgeTracker.begin_session
+
+    def spy(self, initial_weights, expected_horizons=None):
+        calls.append(dict(initial_weights or {}))
+        return original(self, initial_weights, expected_horizons)
+
+    monkeypatch.setattr(v7_target_weights.PositionAgeTracker, "begin_session", spy)
+    build_v7_target_weights(
+        predictions,
+        market,
+        config=_config(
+            timing_gate_enabled=False, holding_period_mode="hard", max_turnover=1.0
+        ),
+        initial_weights=pd.Series(dtype=float),
+    )
+    assert calls == [{}]

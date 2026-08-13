@@ -124,7 +124,8 @@ class PositionAgeTracker:
                 if (
                     symbol in expected_horizons
                     and expected_horizons[symbol] is not None
-                    and existing.expected_horizon_days is None
+                    and existing.expected_horizon_days
+                    in {None, UNKNOWN_INITIAL_HORIZON_DAYS}
                 ):
                     existing.expected_horizon_days = int(expected_horizons[symbol])
                 continue

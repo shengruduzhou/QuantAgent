@@ -30,7 +30,10 @@ class PaperAccountLockTimeout(RuntimeError):
 
 
 def paper_account_lock_path(canonical_ledger_path: str | os.PathLike[str]) -> Path:
-    path = Path(canonical_ledger_path)
+    # Lock identity follows filesystem identity, not a caller's spelling of the
+    # ledger path. ``strict=False`` resolves existing symlink/junction components
+    # while still supporting a first-run ledger file that does not yet exist.
+    path = Path(canonical_ledger_path).resolve(strict=False)
     return path.with_name(f"{path.name}.account.lock")
 
 

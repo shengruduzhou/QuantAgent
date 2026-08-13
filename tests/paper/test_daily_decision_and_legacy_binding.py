@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pandas as pd
+
+import quantagent.paper.continuous_execution as continuous_execution
+import quantagent.paper.daily_loop as daily_loop
 import pytest
 
 from quantagent.paper.account_target_state import PaperAccountStateRefused
@@ -149,3 +155,72 @@ def test_legacy_indeterminate_binding_does_not_clear_uncertainty(tmp_path) -> No
     _assert_prior_pending_signals_resolved(
         daily, "2026-08-12", paper_account_identity_sha256=identity_sha
     )
+
+
+def test_custom_canonical_ledger_derives_ledger_specific_journal(tmp_path) -> None:
+    canonical = tmp_path / "paper" / "custom.jsonl"
+    config = DailyPaperLoopConfig(
+        as_of_date="2026-08-11",
+        canonical_ledger_path=str(canonical),
+        execution_journal_path=None,
+    )
+    resolved = Path(daily_loop._execution_journal_path(config))
+    assert resolved == canonical.with_name("custom.execution_journal.jsonl")
+    assert resolved != canonical.with_name("execution_journal.jsonl")
+
+
+def test_indeterminate_account_prepass_outranks_legacy_binding_order(tmp_path) -> None:
+    daily = _daily_config(tmp_path, "2026-08-12")
+    journal = PendingExecutionJournal(daily.execution_journal_path)
+    journal.append(
+        pending_payload_sha256="a" * 64,
+        signal_date="2026-08-08",
+        execution_date="2026-08-09",
+        status="execution_observed",
+        details={"target_weights_sha256": "c" * 64},
+    )
+    journal.append(
+        pending_payload_sha256="b" * 64,
+        signal_date="2026-08-10",
+        execution_date="2026-08-11",
+        status="execution_indeterminate",
+        details={"target_weights_sha256": "d" * 64},
+    )
+    identity_sha = "f" * 64
+
+    with pytest.raises(PaperAccountStateRefused, match="unreconciled execution_indeterminate"):
+        daily_loop._assert_execution_journal_resolved(
+            journal,
+            prefix_index=build_canonical_prefix_index(daily.canonical_ledger_path),
+            paper_account_identity_sha256=identity_sha,
+        )
+    with pytest.raises(
+        continuous_execution.ContinuousPaperExecutionBlocked,
+        match="unreconciled execution_indeterminate",
+    ):
+        continuous_execution._assert_account_execution_state_resolved(
+            journal,
+            canonical_ledger_path=daily.canonical_ledger_path,
+            paper_account_identity_sha256=identity_sha,
+        )
+
+
+def test_recovered_consistency_refuses_empty_operational_history_with_canonical_economics() -> None:
+    held = SimpleNamespace(total=100.0, is_flat=False)
+    canonical = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            positions={"600000.SH": held}, cash=99_000.0, initial_cash=100_000.0
+        ),
+        orders={},
+        fills=[],
+    )
+    operational = SimpleNamespace(
+        portfolio=SimpleNamespace(positions={}, cash=100_000.0, initial_cash=100_000.0),
+        orders={},
+        fills=[],
+    )
+    with pytest.raises(
+        continuous_execution.ContinuousPaperExecutionBlocked,
+        match="operational paper ledger has no reconstructable economics",
+    ):
+        continuous_execution._assert_recovered_account_consistent(canonical, operational)

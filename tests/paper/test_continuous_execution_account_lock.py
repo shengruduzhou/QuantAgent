@@ -3,6 +3,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pandas as pd
+import pytest
+
+import quantagent.paper.account_lock as account_lock
 
 import quantagent.paper.continuous_execution as continuous_execution
 from quantagent.paper.continuous_execution import ContinuousPaperExecutionConfig
@@ -89,3 +92,19 @@ def test_reconcile_indeterminate_account_owns_account_lock(tmp_path, monkeypatch
         reason="operator reconciliation",
     ) == [{"status": "execution_reconciled"}]
     assert state == {"held": False, "enters": 1}
+
+
+def test_account_lock_path_canonicalizes_symlink_alias(tmp_path) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    ledger = real_dir / "canonical.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    alias_dir = tmp_path / "alias"
+    try:
+        alias_dir.symlink_to(real_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    assert account_lock.paper_account_lock_path(ledger) == account_lock.paper_account_lock_path(
+        alias_dir / "canonical.jsonl"
+    )

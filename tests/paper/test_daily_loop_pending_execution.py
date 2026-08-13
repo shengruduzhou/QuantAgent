@@ -206,3 +206,30 @@ def test_daily_loop_source_has_no_same_call_strict_execution_path() -> None:
     assert "simulate_ashare_target_weights" not in source
     assert "write_paper_report" not in source
     assert "_market_for_dates" not in source
+
+
+def test_target_date_validation_failure_does_not_permanently_freeze_day(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-06")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    with pytest.raises(ValueError, match="requires exactly the current signal date"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None
+
+
+def test_artifact_write_failure_does_not_permanently_freeze_day(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("simulated artifact write failure")
+
+    monkeypatch.setattr(daily_loop, "write_frame", fail_write)
+    with pytest.raises(OSError, match="simulated artifact write failure"):
+        daily_loop.run_once(config)
+    journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
+    assert journal.daily_decision(as_of) is None

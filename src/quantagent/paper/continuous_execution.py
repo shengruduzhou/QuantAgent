@@ -156,18 +156,38 @@ def _assert_recovered_account_consistent(
     tolerance: float = 1e-6,
 ) -> None:
     operational_positions = _position_quantities(operational_state.portfolio)
-    initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
+    operational_initial_cash = float(
+        getattr(operational_state.portfolio, "initial_cash", 0.0)
+    )
     operational_cash = float(operational_state.portfolio.cash)
     has_operational_economics = bool(
         operational_state.orders
         or operational_state.fills
         or operational_positions
-        or abs(operational_cash - initial_cash) > tolerance
+        or abs(operational_cash - operational_initial_cash) > tolerance
+    )
+
+    canonical_positions = _position_quantities(canonical_state.portfolio)
+    canonical_initial_cash = float(
+        getattr(canonical_state.portfolio, "initial_cash", 0.0)
+    )
+    canonical_cash = float(canonical_state.portfolio.cash)
+    has_canonical_economics = bool(
+        canonical_state.orders
+        or canonical_state.fills
+        or canonical_positions
+        or abs(canonical_cash - canonical_initial_cash) > tolerance
     )
     if not has_operational_economics:
+        if has_canonical_economics:
+            raise ContinuousPaperExecutionBlocked(
+                "operational paper ledger has no reconstructable economics while "
+                "the canonical ledger contains account history; refusing to claim "
+                "canonical/operational parity"
+            )
         return
 
-    if abs(float(canonical_state.portfolio.cash) - operational_cash) > tolerance:
+    if abs(canonical_cash - operational_cash) > tolerance:
         raise ContinuousPaperExecutionBlocked(
             "canonical/operational paper cash reconciliation failed"
         )
@@ -498,6 +518,10 @@ def _assert_account_execution_state_resolved(
     for record in records:
         by_payload.setdefault(record.pending_payload_sha256, []).append(record)
 
+    # Resolve account-wide uncertainty before lower-assurance lineage
+    # migration checks. Journal insertion order must not let an older unbound
+    # legacy terminal mask a later indeterminate account state.
+    terminals_by_payload: dict[str, object] = {}
     for payload, history in by_payload.items():
         starts = [row for row in history if row.status == "execution_started"]
         terminals = [row for row in history if row.status in TERMINAL_OUTCOMES]
@@ -514,6 +538,7 @@ def _assert_account_execution_state_resolved(
         if not terminals:
             continue
         terminal = terminals[0]
+        terminals_by_payload[payload] = terminal
         if terminal.status == "execution_indeterminate":
             reconciliation = journal.reconciliation(payload)
             if not _reconciliation_is_valid(
@@ -527,6 +552,8 @@ def _assert_account_execution_state_resolved(
                     "explicit canonical/operational reconciliation is required before "
                     "any later signal can trade"
                 )
+
+    for payload, terminal in terminals_by_payload.items():
         _verify_terminal_canonical_binding(
             terminal=terminal,
             legacy_binding=journal.legacy_binding(payload),

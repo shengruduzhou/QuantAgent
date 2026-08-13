@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quantagent.portfolio.position_age_tracker import PositionAgeTracker
+from quantagent.portfolio.position_age_tracker import (
+    UNKNOWN_INITIAL_HORIZON_DAYS,
+    PositionAgeTracker,
+)
 
 
 def test_begin_session_drops_persisted_symbol_absent_from_authoritative_holdings(tmp_path) -> None:
@@ -60,3 +63,17 @@ def test_explicit_empty_authoritative_holdings_clear_all_persisted_records(tmp_p
     restarted.begin_session({})
 
     assert restarted.snapshot().empty
+
+
+def test_real_horizon_replaces_unknown_restart_sentinel_before_lock(tmp_path) -> None:
+    state_path = tmp_path / "position_age.parquet"
+    tracker = PositionAgeTracker(state_path=state_path)
+    tracker.begin_session({"HELD": 0.25})
+    first = tracker.snapshot().set_index("symbol")
+    assert int(first.loc["HELD", "expected_horizon_days"]) == UNKNOWN_INITIAL_HORIZON_DAYS
+    tracker.persist()
+
+    restarted = PositionAgeTracker.from_state(state_path)
+    restarted.begin_session({"HELD": 0.25}, {"HELD": 5})
+    updated = restarted.snapshot().set_index("symbol")
+    assert int(updated.loc["HELD", "expected_horizon_days"]) == 5

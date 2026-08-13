@@ -264,17 +264,19 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             _assert_account_snapshot_unchanged(account_state, fresh_account_state)
             account_state = fresh_account_state
             account_evidence = account_state.evidence()
+            # Stage every fallible artifact before the irreversible no-target
+            # marker. A failed writer leaves the date safely rerunnable.
+            predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
+            weights_path = write_v7_target_weights(
+                weights,
+                day_dir / "target_weights.parquet",
+            )
             _freeze_daily_decision(
                 config,
                 as_of,
                 decision_kind="no_target",
                 paper_account_identity_sha256=account_identity.payload_sha256,
                 account_evidence=account_evidence,
-            )
-            predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
-            weights_path = write_v7_target_weights(
-                weights,
-                day_dir / "target_weights.parquet",
             )
         warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
         summary = {
@@ -336,14 +338,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         _assert_account_snapshot_unchanged(account_state, fresh_account_state)
         account_state = fresh_account_state
         account_evidence = account_state.evidence()
-        _freeze_daily_decision(
-            config,
-            as_of,
-            decision_kind="target",
-            paper_account_identity_sha256=account_identity.payload_sha256,
-            account_evidence=account_evidence,
-        )
-
+        # Persist and read-verify every fallible artifact, including pending
+        # target date/weight validation, before the append-only daily freeze.
         predictions_path = write_frame(predictions, day_dir / "predictions.parquet")
         weights_path = write_v7_target_weights(
             weights,
@@ -369,6 +365,13 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 "canonical_ledger_records": str(account_evidence["canonical_records"]),
                 "canonical_account_nav": str(account_evidence["nav"]),
             },
+        )
+        _freeze_daily_decision(
+            config,
+            as_of,
+            decision_kind="target",
+            paper_account_identity_sha256=account_identity.payload_sha256,
+            account_evidence=account_evidence,
         )
 
     warnings = tuple(
@@ -438,7 +441,17 @@ def _assert_account_snapshot_unchanged(expected, observed) -> None:
 def _execution_journal_path(config: DailyPaperLoopConfig) -> str:
     if config.execution_journal_path is not None:
         return str(config.execution_journal_path)
-    return str(Path(config.canonical_ledger_path).with_name("execution_journal.jsonl"))
+
+    canonical = Path(config.canonical_ledger_path)
+    runtime = paper_runtime_paths()
+    if canonical.resolve(strict=False) == runtime.canonical_ledger.resolve(strict=False):
+        return str(runtime.execution_journal)
+
+    # A custom canonical account must never share the default account journal
+    # merely because both ledgers live in the same runtime directory.
+    suffix = canonical.suffix or ".jsonl"
+    stem = canonical.stem if canonical.suffix else canonical.name
+    return str(canonical.with_name(f"{stem}.execution_journal{suffix}"))
 
 
 def _assert_current_signal_not_frozen(
@@ -601,6 +614,10 @@ def _assert_execution_journal_resolved(
     for record in journal.records():
         by_payload.setdefault(record.pending_payload_sha256, []).append(record)
 
+    # Resolve account-wide uncertainty before lower-assurance lineage
+    # migration checks. Journal insertion order must not let an older unbound
+    # legacy terminal mask a later indeterminate account state.
+    terminals_by_payload: dict[str, object] = {}
     for payload, history in by_payload.items():
         starts = [row for row in history if row.status == "execution_started"]
         terminals = [row for row in history if row.status in TERMINAL_OUTCOMES]
@@ -617,6 +634,7 @@ def _assert_execution_journal_resolved(
         if not terminals:
             continue
         terminal = terminals[0]
+        terminals_by_payload[payload] = terminal
         if terminal.status == "execution_indeterminate":
             reconciliation = journal.reconciliation(payload)
             if not _valid_indeterminate_reconciliation(
@@ -630,6 +648,8 @@ def _assert_execution_journal_resolved(
                     "explicit canonical/operational reconciliation is required before "
                     "a new target can freeze"
                 )
+
+    for payload, terminal in terminals_by_payload.items():
         _assert_terminal_bound_to_account(
             terminal=terminal,
             legacy_binding=journal.legacy_binding(payload),
