@@ -28,6 +28,7 @@ class FreshPredictionEvidence:
     end_date: str
     rows: int
     symbols: int
+    session_dates: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class StrictReturnEvidence:
     portfolio_total_return: float
     benchmark_total_return: float
     benchmark_excess_positive: bool
+    session_dates: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class StatisticalEvidence:
     rows: int
     start_date: str
     end_date: str
+    session_dates: tuple[str, ...]
 
 
 def validate_fresh_predictions(path: str | Path) -> FreshPredictionEvidence:
@@ -70,12 +73,14 @@ def validate_fresh_predictions(path: str | Path) -> FreshPredictionEvidence:
     if keys.duplicated(["trade_date", "symbol"]).any():
         raise ValueError("fresh_predictions_duplicate_symbol_date")
     unique_dates = pd.DatetimeIndex(dates.unique()).sort_values()
+    sessions = tuple(value.date().isoformat() for value in unique_dates)
     return FreshPredictionEvidence(
         trading_days=int(len(unique_dates)),
-        start_date=unique_dates.min().date().isoformat(),
-        end_date=unique_dates.max().date().isoformat(),
+        start_date=sessions[0],
+        end_date=sessions[-1],
         rows=int(len(frame)),
         symbols=int(symbols.nunique()),
+        session_dates=sessions,
     )
 
 
@@ -102,20 +107,20 @@ def validate_strict_backtest_returns(path: str | Path) -> StrictReturnEvidence:
     values = numeric.to_numpy(dtype=float)
     if np.isnan(values).any() or not np.isfinite(values).all():
         raise ValueError("strict_returns_not_finite")
-    # Returns below -100% are mechanically impossible for a long-only cash
-    # account and make geometric compounding nonsensical.
     if (values < -1.0).any():
         raise ValueError("strict_returns_below_minus_one")
 
     portfolio_total = float(np.prod(1.0 + numeric["portfolio_return"].to_numpy(dtype=float)) - 1.0)
     benchmark_total = float(np.prod(1.0 + numeric["benchmark_return"].to_numpy(dtype=float)) - 1.0)
+    sessions = tuple(value.date().isoformat() for value in dates)
     return StrictReturnEvidence(
         trading_days=int(len(frame)),
-        start_date=dates.iloc[0].date().isoformat(),
-        end_date=dates.iloc[-1].date().isoformat(),
+        start_date=sessions[0],
+        end_date=sessions[-1],
         portfolio_total_return=portfolio_total,
         benchmark_total_return=benchmark_total,
         benchmark_excess_positive=portfolio_total > benchmark_total,
+        session_dates=sessions,
     )
 
 
@@ -176,11 +181,13 @@ def recompute_statistical_evidence(
         cumulative_trials=int(cumulative_trials),
         minimum_observed_days=int(minimum_observed_days),
     )
+    sessions = tuple(value.date().isoformat() for value in index)
     return StatisticalEvidence(
         report=report,
         rows=int(len(frame)),
-        start_date=index.min().date().isoformat(),
-        end_date=index.max().date().isoformat(),
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        session_dates=sessions,
     )
 
 
