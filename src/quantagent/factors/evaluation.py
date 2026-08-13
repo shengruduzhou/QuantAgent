@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import warnings
 from dataclasses import dataclass
 from typing import Literal
 
@@ -99,12 +101,56 @@ def excess_forward_returns(
     return data
 
 
+_HORIZON_PATTERNS = (
+    re.compile(r"(?:forward|future|exec)_return_(\d+)d$"),
+    re.compile(r"(?:forward|future|exec)_(\d+)d_return$"),
+    re.compile(r"_(\d+)d$"),
+)
+
+
+def infer_horizon_days(return_column: str) -> int | None:
+    """Recover the label horizon from a return-column name, or None if unnamed.
+
+    Every in-repo label column embeds its horizon (``forward_return_20d``,
+    ``future_20d_return``, ``exec_return_10d``).  Returning None rather than
+    defaulting to 1 is deliberate: silently assuming a 1-day horizon would
+    reinstate the under-corrected t-stat this inference exists to prevent.
+    """
+    for pattern in _HORIZON_PATTERNS:
+        match = pattern.search(return_column)
+        if match:
+            horizon = int(match.group(1))
+            if horizon >= 1:
+                return horizon
+    return None
+
+
 def information_coefficient(
     frame: pd.DataFrame,
     factor_column: str,
     return_column: str,
     date_column: str = "trade_date",
+    *,
+    horizon_days: int | None = None,
 ) -> ICResult:
+    """Cross-sectional IC per date, summarised with horizon-aware HAC t-stats.
+
+    An h-day forward-return label makes the per-date IC series overlap on h-1
+    days.  The horizon is taken from ``horizon_days`` when given and otherwise
+    inferred from ``return_column``; it sets the HAC truncation-lag floor so the
+    t-stat is not inflated by the label's own construction.  When the horizon
+    cannot be determined the estimator falls back to its sample-size bandwidth
+    and a warning is emitted -- the t-stat is then NOT overlap-corrected.
+    """
+    horizon = horizon_days if horizon_days is not None else infer_horizon_days(return_column)
+    if horizon is None:
+        warnings.warn(
+            f"could not infer label horizon from return column {return_column!r}; "
+            "the Newey-West t-stat is not corrected for label overlap and will be "
+            "inflated for multi-day labels. Pass horizon_days= explicitly.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     ic = _corr_by_date(frame, factor_column, return_column, date_column, method="pearson")
     rank_ic = _corr_by_date(frame, factor_column, return_column, date_column, method="spearman")
     summary = ICSummary(
@@ -112,8 +158,8 @@ def information_coefficient(
         mean_rank_ic=_safe_mean(rank_ic),
         icir=_icir(ic),
         rank_icir=_icir(rank_ic),
-        t_stat=newey_west_t_stat(ic),
-        rank_t_stat=newey_west_t_stat(rank_ic),
+        t_stat=newey_west_t_stat(ic, horizon_days=horizon),
+        rank_t_stat=newey_west_t_stat(rank_ic, horizon_days=horizon),
         positive_ratio=float((rank_ic.dropna() > 0).mean()) if rank_ic.dropna().shape[0] else np.nan,
     )
     return ICResult(ic_by_date=ic, rank_ic_by_date=rank_ic, summary=summary)
