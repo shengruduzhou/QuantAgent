@@ -514,26 +514,25 @@ def _assert_account_execution_state_resolved(
         if not terminals:
             continue
         terminal = terminals[0]
+        if terminal.status == "execution_indeterminate":
+            reconciliation = journal.reconciliation(payload)
+            if not _reconciliation_is_valid(
+                terminal=terminal,
+                reconciliation=reconciliation,
+                canonical_ledger_path=canonical_ledger_path,
+                paper_account_identity_sha256=paper_account_identity_sha256,
+            ):
+                raise ContinuousPaperExecutionBlocked(
+                    "paper account has an unreconciled execution_indeterminate outcome; "
+                    "explicit canonical/operational reconciliation is required before "
+                    "any later signal can trade"
+                )
         _verify_terminal_canonical_binding(
             terminal=terminal,
             legacy_binding=journal.legacy_binding(payload),
             canonical_ledger_path=canonical_ledger_path,
             expected_paper_account_identity_sha256=paper_account_identity_sha256,
         )
-        if terminal.status != "execution_indeterminate":
-            continue
-        reconciliation = journal.reconciliation(payload)
-        if not _reconciliation_is_valid(
-            terminal=terminal,
-            reconciliation=reconciliation,
-            canonical_ledger_path=canonical_ledger_path,
-            paper_account_identity_sha256=paper_account_identity_sha256,
-        ):
-            raise ContinuousPaperExecutionBlocked(
-                "paper account has an unreconciled execution_indeterminate outcome; "
-                "explicit canonical/operational reconciliation is required before "
-                "any later signal can trade"
-            )
 
 
 def _same_prefix_receipt(

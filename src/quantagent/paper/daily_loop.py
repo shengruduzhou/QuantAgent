@@ -104,7 +104,7 @@ class DailyPaperLoopConfig:
     dry_run_evidence: bool = True
     # Appended after the historical public positional fields so introducing the
     # journal gate cannot silently reinterpret existing positional callers.
-    execution_journal_path: str = field(default_factory=lambda: str(paper_runtime_paths().execution_journal))
+    execution_journal_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -435,6 +435,12 @@ def _assert_account_snapshot_unchanged(expected, observed) -> None:
         )
 
 
+def _execution_journal_path(config: DailyPaperLoopConfig) -> str:
+    if config.execution_journal_path is not None:
+        return str(config.execution_journal_path)
+    return str(Path(config.canonical_ledger_path).with_name("execution_journal.jsonl"))
+
+
 def _assert_current_signal_not_frozen(
     config: DailyPaperLoopConfig,
     as_of: str,
@@ -453,7 +459,7 @@ def _assert_current_signal_not_frozen(
             "daily paper decision evidence already exists for the current signal date; "
             "refusing to overwrite its summary/prediction/target lineage"
         )
-    journal = PendingExecutionJournal(config.execution_journal_path)
+    journal = PendingExecutionJournal(_execution_journal_path(config))
     if not journal.verify():
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before same-date freeze check"
@@ -489,7 +495,7 @@ def _freeze_daily_decision(
         "quantagent.paper.daily_decision.v1|"
         f"{as_of}|{paper_account_identity_sha256}"
     ).encode("utf-8")
-    journal = PendingExecutionJournal(config.execution_journal_path)
+    journal = PendingExecutionJournal(_execution_journal_path(config))
     if not journal.verify():
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before daily decision freeze"
@@ -611,26 +617,25 @@ def _assert_execution_journal_resolved(
         if not terminals:
             continue
         terminal = terminals[0]
+        if terminal.status == "execution_indeterminate":
+            reconciliation = journal.reconciliation(payload)
+            if not _valid_indeterminate_reconciliation(
+                terminal=terminal,
+                reconciliation=reconciliation,
+                prefix_index=prefix_index,
+                paper_account_identity_sha256=paper_account_identity_sha256,
+            ):
+                raise PaperAccountStateRefused(
+                    "paper account has an unreconciled execution_indeterminate outcome; "
+                    "explicit canonical/operational reconciliation is required before "
+                    "a new target can freeze"
+                )
         _assert_terminal_bound_to_account(
             terminal=terminal,
             legacy_binding=journal.legacy_binding(payload),
             prefix_index=prefix_index,
             paper_account_identity_sha256=paper_account_identity_sha256,
         )
-        if terminal.status != "execution_indeterminate":
-            continue
-        reconciliation = journal.reconciliation(payload)
-        if not _valid_indeterminate_reconciliation(
-            terminal=terminal,
-            reconciliation=reconciliation,
-            prefix_index=prefix_index,
-            paper_account_identity_sha256=paper_account_identity_sha256,
-        ):
-            raise PaperAccountStateRefused(
-                "paper account has an unreconciled execution_indeterminate outcome; "
-                "explicit canonical/operational reconciliation is required before "
-                "a new target can freeze"
-            )
 
 
 def _assert_prior_pending_signals_resolved(
@@ -647,7 +652,7 @@ def _assert_prior_pending_signals_resolved(
     their exact target digest, terminal receipt and reconciliation evidence.
     """
 
-    journal = PendingExecutionJournal(config.execution_journal_path)
+    journal = PendingExecutionJournal(_execution_journal_path(config))
     if not journal.verify():
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before target freeze"
