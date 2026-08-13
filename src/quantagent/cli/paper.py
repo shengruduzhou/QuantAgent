@@ -77,22 +77,17 @@ def paper_execute_session(
     """Consume frozen targets on one observed session using the canonical paper account.
 
     This command intentionally does **not** accept a hand-written session list as
-    authoritative evidence.  It consumes only sessions actually present in the
+    authoritative evidence. It consumes only sessions actually present in the
     supplied market panel and writes every account/journal/idempotency artifact
     under ``QUANTAGENT_HOME/paper`` so the execution worker, API and UI share the
-    same source of truth.  An observed panel remains non-certifying calendar
+    same source of truth. An observed panel remains non-certifying calendar
     evidence until the authoritative-calendar gate is implemented.
 
     The requested ``portfolio_id``/``initial_cash`` must exactly match the
-    immutable account identity created by the target worker.
-
-    The whole continuous-execution call is serialized on the canonical-account
-    lock. This is intentionally broader than individual ledger appends: target
-    generation must never freeze a new signal from a snapshot taken while this
-    worker is between recovery, order submission, canonical append and terminal
-    journal sealing.
+    immutable account identity created by the target worker. Cross-process
+    serialization is owned by ``execute_pending_for_session`` itself, not by this
+    CLI adapter, so direct service callers cannot bypass the account boundary.
     """
-    from quantagent.paper.account_lock import paper_account_lock
     from quantagent.paper.continuous_execution import (
         ContinuousPaperExecutionConfig,
         execute_pending_for_session,
@@ -117,13 +112,12 @@ def paper_execute_session(
         max_participation_rate=max_participation_rate,
         execution_clock=execution_clock,
     )
-    with paper_account_lock(config.canonical_ledger_path):
-        results = execute_pending_for_session(
-            date,
-            frame,
-            config=config,
-            authoritative_sessions=None,
-        )
+    results = execute_pending_for_session(
+        date,
+        frame,
+        config=config,
+        authoritative_sessions=None,
+    )
     typer.echo(
         json_dump(
             {
@@ -154,9 +148,9 @@ def paper_run_loop(
     """Minimal restartable target-generation loop.
 
     Use an external scheduler/systemd for exact market-time execution on
-    production servers.  This command freezes targets; ``execute-session`` is
+    production servers. This command freezes targets; ``execute-session`` is
     the separate next-session consumer so target construction can never be
-    mistaken for a completed paper fill.  Account genesis values are immutable
+    mistaken for a completed paper fill. Account genesis values are immutable
     and must match the same values used by ``execute-session``.
     """
     from quantagent.paper.daily_loop import DailyPaperLoopConfig, run_once
