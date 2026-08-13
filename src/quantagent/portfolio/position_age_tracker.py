@@ -6,11 +6,13 @@ not yet earned its keep, and unwinding it immediately throws away the
 information the alpha used to open it. The tracker exposes a small
 state machine:
 
-* ``begin_session(initial_weights)`` — seed the tracker with weights at
-  ``t0`` (or empty for a cold start). A seeded holding whose historical age or
-  expected horizon is unavailable is conservatively locked until explicit
-  horizon evidence arrives; restart must never turn an existing holding into a
-  free-to-trade new position.
+* ``begin_session(initial_weights)`` — reconcile the persisted registry to an
+  authoritative current portfolio when weights are supplied, then seed missing
+  live holdings. A seeded holding whose historical age or expected horizon is
+  unavailable is conservatively locked until explicit horizon evidence arrives;
+  restart must never turn an existing holding into a free-to-trade new position,
+  but it must also never resurrect a symbol that the canonical account no longer
+  owns.
 * ``record_session(date, weights, expected_horizons)`` — update the
   registry: new names get an ``entry_date``; names whose weight drops to
   zero leave the registry; names whose weight is non-zero increment
@@ -80,20 +82,42 @@ class PositionAgeTracker:
         initial_weights: Mapping[str, float] | None,
         expected_horizons: Mapping[str, int | None] | None = None,
     ) -> None:
-        """Seed missing live records from an externally recovered portfolio.
+        """Reconcile/seed live records from an externally recovered portfolio.
 
-        Persisted records take precedence because they contain observed age. A
-        non-zero canonical holding absent from persisted state is inserted with
+        When ``initial_weights`` is supplied it is authoritative account state,
+        including an explicitly empty mapping. Persisted records for names that
+        are no longer non-zero canonical holdings are deleted *before* any
+        first-date holding-period lock is evaluated. Persisted age remains
+        authoritative only for symbols the recovered account still owns.
+
+        A non-zero canonical holding absent from persisted state is inserted with
         unknown entry date and a conservative horizon sentinel unless explicit
-        lifecycle evidence is supplied. Zero weights are not holdings.
+        lifecycle evidence is supplied. ``None`` retains the historical research
+        behaviour: no external account snapshot was provided, so persisted state
+        is not reconciled away.
         """
 
         expected_horizons = dict(expected_horizons or {})
-        for raw_symbol, raw_weight in dict(initial_weights or {}).items():
-            symbol = str(raw_symbol)
-            weight = float(raw_weight)
-            if abs(weight) < 1e-9:
-                continue
+        supplied = initial_weights is not None
+        normalized: dict[str, float] = {}
+        if supplied:
+            for raw_symbol, raw_weight in dict(initial_weights or {}).items():
+                symbol = str(raw_symbol)
+                weight = float(raw_weight)
+                if abs(weight) >= 1e-9:
+                    normalized[symbol] = weight
+            live_symbols = set(normalized)
+            for symbol in list(self._records):
+                if symbol not in live_symbols:
+                    self._records.pop(symbol, None)
+        else:
+            normalized = {
+                str(raw_symbol): float(raw_weight)
+                for raw_symbol, raw_weight in dict(initial_weights or {}).items()
+                if abs(float(raw_weight)) >= 1e-9
+            }
+
+        for symbol, weight in normalized.items():
             existing = self._records.get(symbol)
             if existing is not None:
                 existing.weight = weight
