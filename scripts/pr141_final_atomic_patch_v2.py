@@ -11,7 +11,7 @@ patch.main()
 p = Path("src/quantagent/paper/continuous_execution.py")
 text = p.read_text(encoding="utf-8")
 if "from pathlib import Path\n" not in text:
-    anchor = "from dataclasses import dataclass\n"
+    anchor = "from dataclasses import dataclass, replace\n"
     if text.count(anchor) != 1:
         raise RuntimeError(f"continuous Path import anchor count={text.count(anchor)}")
     text = text.replace(anchor, anchor + "from pathlib import Path\n", 1)
