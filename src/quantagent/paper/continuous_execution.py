@@ -149,44 +149,40 @@ def _position_quantities(portfolio) -> dict[str, float]:
     }
 
 
+def _operational_has_reconstructable_economics(
+    operational_state,
+    *,
+    tolerance: float = 1e-6,
+) -> bool:
+    operational_positions = _position_quantities(operational_state.portfolio)
+    initial_cash = float(getattr(operational_state.portfolio, "initial_cash", 0.0))
+    cash = float(operational_state.portfolio.cash)
+    return bool(
+        operational_state.orders
+        or operational_state.fills
+        or operational_positions
+        or abs(cash - initial_cash) > tolerance
+    )
+
+
 def _assert_recovered_account_consistent(
     canonical_state,
     operational_state,
     *,
     tolerance: float = 1e-6,
 ) -> None:
-    operational_positions = _position_quantities(operational_state.portfolio)
-    operational_initial_cash = float(
-        getattr(operational_state.portfolio, "initial_cash", 0.0)
-    )
-    operational_cash = float(operational_state.portfolio.cash)
-    has_operational_economics = bool(
-        operational_state.orders
-        or operational_state.fills
-        or operational_positions
-        or abs(operational_cash - operational_initial_cash) > tolerance
-    )
-
-    canonical_positions = _position_quantities(canonical_state.portfolio)
-    canonical_initial_cash = float(
-        getattr(canonical_state.portfolio, "initial_cash", 0.0)
-    )
-    canonical_cash = float(canonical_state.portfolio.cash)
-    has_canonical_economics = bool(
-        canonical_state.orders
-        or canonical_state.fills
-        or canonical_positions
-        or abs(canonical_cash - canonical_initial_cash) > tolerance
-    )
-    if not has_operational_economics:
-        if has_canonical_economics:
-            raise ContinuousPaperExecutionBlocked(
-                "operational paper ledger has no reconstructable economics while "
-                "the canonical ledger contains account history; refusing to claim "
-                "canonical/operational parity"
-            )
+    # The canonical ledger is the economic record of account. The operational
+    # ledger may legitimately contain only session/control events. If it does
+    # reconstruct economics, however, those economics must agree exactly enough
+    # with canonical state; a conflicting second economic state fails closed.
+    if not _operational_has_reconstructable_economics(
+        operational_state, tolerance=tolerance
+    ):
         return
 
+    operational_positions = _position_quantities(operational_state.portfolio)
+    operational_cash = float(operational_state.portfolio.cash)
+    canonical_cash = float(canonical_state.portfolio.cash)
     if abs(canonical_cash - operational_cash) > tolerance:
         raise ContinuousPaperExecutionBlocked(
             "canonical/operational paper cash reconciliation failed"
@@ -646,6 +642,9 @@ def _bind_legacy_terminal_account_locked(
         portfolio_id=identity.portfolio_id,
         initial_cash=identity.initial_cash,
     )
+    operational_economics = _operational_has_reconstructable_economics(
+        operational_state
+    )
     _assert_recovered_account_consistent(canonical_state, operational_state)
     if canonical_state.open_orders() or operational_state.open_orders():
         raise ContinuousPaperExecutionBlocked(
@@ -670,7 +669,16 @@ def _bind_legacy_terminal_account_locked(
         "account_state_sha256": _account_state_sha256(canonical_state),
         "reconciled_as_of": as_of,
         "reason": binding_reason,
-        "assurance": "operator_reconciled_legacy_terminal_v1",
+        "assurance": (
+            "operator_reconciled_legacy_terminal_v2"
+            if operational_economics
+            else "operator_bound_canonical_only_legacy_terminal_v1"
+        ),
+        "operational_economic_reconstruction": (
+            "matched_canonical"
+            if operational_economics
+            else "not_present_canonical_is_record_of_account"
+        ),
     }
     existing = journal.legacy_binding(payload)
     if existing is not None:

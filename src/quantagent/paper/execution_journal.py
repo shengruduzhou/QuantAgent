@@ -344,9 +344,22 @@ class PendingExecutionJournal:
                         "legacy_terminal_bound canonical prefix metadata is invalid"
                     )
                 assurance = str(normalized_details.get("assurance") or "")
-                if assurance != "operator_reconciled_legacy_terminal_v1":
+                reconstruction = str(
+                    normalized_details.get("operational_economic_reconstruction") or ""
+                )
+                assurance_contracts = {
+                    "operator_reconciled_legacy_terminal_v2": "matched_canonical",
+                    "operator_bound_canonical_only_legacy_terminal_v1": (
+                        "not_present_canonical_is_record_of_account"
+                    ),
+                }
+                if assurance not in assurance_contracts:
                     raise ExecutionJournalCorruption(
-                        "legacy_terminal_bound requires explicit migration assurance"
+                        "legacy_terminal_bound requires explicit unambiguous migration assurance"
+                    )
+                if reconstruction != assurance_contracts[assurance]:
+                    raise ExecutionJournalCorruption(
+                        "legacy_terminal_bound operational reconstruction marker mismatches assurance"
                     )
                 account_state_sha = str(normalized_details.get("account_state_sha256") or "")
                 target_sha = str(normalized_details.get("target_weights_sha256") or "")

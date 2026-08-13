@@ -43,7 +43,22 @@ def verify_legacy_terminal_binding(
         raise LegacyTerminalBindingError(
             "legacy terminal binding paper-account identity mismatch"
         )
-    if str(details.get("assurance") or "") != "operator_reconciled_legacy_terminal_v1":
+    assurance = str(details.get("assurance") or "")
+    reconstruction = str(details.get("operational_economic_reconstruction") or "")
+    if assurance == "operator_reconciled_legacy_terminal_v2":
+        if reconstruction != "matched_canonical":
+            raise LegacyTerminalBindingError(
+                "legacy terminal parity assurance lacks matched operational reconstruction"
+            )
+    elif assurance == "operator_bound_canonical_only_legacy_terminal_v1":
+        if reconstruction != "not_present_canonical_is_record_of_account":
+            raise LegacyTerminalBindingError(
+                "legacy terminal canonical-only assurance marker is invalid"
+            )
+    else:
+        # The historical v1 wording was ambiguous: it could claim reconciliation
+        # even when the operational ledger contained no economic reconstruction.
+        # Never silently upgrade that lower-quality evidence.
         raise LegacyTerminalBindingError("legacy terminal binding assurance is invalid")
     account_state_sha = str(details.get("account_state_sha256") or "")
     if len(account_state_sha) != 64:

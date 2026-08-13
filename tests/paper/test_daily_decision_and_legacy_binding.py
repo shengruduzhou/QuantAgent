@@ -116,6 +116,11 @@ def test_operator_legacy_binding_is_append_only_and_accepted_by_daily_gate(tmp_p
     )
     identity_sha = str(binding["details"]["paper_account_identity_sha256"])
     assert binding["status"] == "legacy_terminal_bound"
+    assert binding["details"]["assurance"] == "operator_bound_canonical_only_legacy_terminal_v1"
+    assert (
+        binding["details"]["operational_economic_reconstruction"]
+        == "not_present_canonical_is_record_of_account"
+    )
     assert journal.terminal(prior.payload_sha256).record_sha256 == terminal.record_sha256
     _assert_prior_pending_signals_resolved(
         daily, "2026-08-12", paper_account_identity_sha256=identity_sha
@@ -205,7 +210,7 @@ def test_indeterminate_account_prepass_outranks_legacy_binding_order(tmp_path) -
         )
 
 
-def test_recovered_consistency_refuses_empty_operational_history_with_canonical_economics() -> None:
+def test_recovered_consistency_allows_operational_lifecycle_only_state() -> None:
     held = SimpleNamespace(total=100.0, is_flat=False)
     canonical = SimpleNamespace(
         portfolio=SimpleNamespace(
@@ -219,8 +224,30 @@ def test_recovered_consistency_refuses_empty_operational_history_with_canonical_
         orders={},
         fills=[],
     )
+    assert continuous_execution._operational_has_reconstructable_economics(operational) is False
+    continuous_execution._assert_recovered_account_consistent(canonical, operational)
+
+
+def test_recovered_consistency_rejects_conflicting_operational_economics() -> None:
+    held = SimpleNamespace(total=100.0, is_flat=False)
+    wrong = SimpleNamespace(total=50.0, is_flat=False)
+    canonical = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            positions={"600000.SH": held}, cash=99_000.0, initial_cash=100_000.0
+        ),
+        orders={},
+        fills=[],
+    )
+    operational = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            positions={"600000.SH": wrong}, cash=99_000.0, initial_cash=100_000.0
+        ),
+        orders={},
+        fills=[],
+    )
+    assert continuous_execution._operational_has_reconstructable_economics(operational) is True
     with pytest.raises(
         continuous_execution.ContinuousPaperExecutionBlocked,
-        match="operational paper ledger has no reconstructable economics",
+        match="position reconciliation failed",
     ):
         continuous_execution._assert_recovered_account_consistent(canonical, operational)
