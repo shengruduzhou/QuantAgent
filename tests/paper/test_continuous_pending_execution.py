@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -93,6 +94,9 @@ def _record(tmp_path, signal_date: str, weight: float):
         },
         created_at=f"{signal_date}T07:00:00+00:00",
     )[0]
+    summary_path = tmp_path / f"summary-{signal_date}.json"
+    summary_path.write_text('{"committed":true}\n', encoding="utf-8")
+    summary_sha = __import__("hashlib").sha256(summary_path.read_bytes()).hexdigest()
     PendingExecutionJournal(tmp_path / "execution.jsonl").append(
         pending_payload_sha256=pending.payload_sha256,
         signal_date=signal_date,
@@ -107,6 +111,9 @@ def _record(tmp_path, signal_date: str, weight: float):
             "assurance": "canonical_account_daily_decision_freeze_v1",
             "commit_protocol": PENDING_COMMIT_PROTOCOL,
             "target_weights_sha256": pending.target_weights_sha256,
+            "daily_summary_path": str(summary_path.resolve()),
+            "daily_summary_sha256": summary_sha,
+            "daily_summary_commit_protocol": "daily_summary_bound_daily_decision_v1",
         },
     )
     return pending
@@ -518,3 +525,20 @@ def test_mismatched_daily_commit_cannot_execute_pending(tmp_path) -> None:
         execute_pending_for_session(
             MONDAY, _market(), config=config, authoritative_sessions=SESSIONS
         )
+
+
+def test_committed_pending_refuses_missing_bound_summary(tmp_path) -> None:
+    config = _config(tmp_path)
+    pending = _record(tmp_path, FRIDAY, 0.50)
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    decision = journal.daily_decision(FRIDAY)
+    assert decision is not None
+    # Retrofit summary binding for the legacy helper's marker, then remove it.
+    # The helper is updated below to bind a real file on all new records.
+    summary_path = Path(decision.details["daily_summary_path"])
+    summary_path.unlink()
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="summary evidence is missing"):
+        execute_pending_for_session(
+            MONDAY, _market(), config=config, authoritative_sessions=SESSIONS
+        )
+    assert journal.terminal(pending.payload_sha256) is None

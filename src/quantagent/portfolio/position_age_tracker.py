@@ -160,6 +160,17 @@ class PositionAgeTracker:
                 days_held=0,
             )
 
+    def update_expected_horizons(
+        self, expected_horizons: Mapping[str, int | None] | None
+    ) -> None:
+        """Refresh known horizons before any holding-period lock decision."""
+        for raw_symbol, raw_horizon in dict(expected_horizons or {}).items():
+            if raw_horizon is None:
+                continue
+            record = self._records.get(str(raw_symbol))
+            if record is not None:
+                record.expected_horizon_days = int(raw_horizon)
+
     def persist(self) -> Path | None:
         if self._state_path is None:
             return None

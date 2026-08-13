@@ -27,7 +27,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -35,6 +37,7 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.cli._utils import read_frame, write_frame
 from quantagent.config.paths import quant_paths
 from quantagent.data.ingestion.daily_evidence_job import DailyEvidenceJob, DailyEvidenceJobConfig
+from quantagent.domain.ledger import CanonicalLedger
 from quantagent.paper.account_identity import (
     account_identity_path_for_canonical,
     ensure_paper_account_identity,
@@ -67,6 +70,9 @@ from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
 from quantagent.portfolio.v7_target_weights import V7TargetWeightsConfig, build_v7_target_weights, write_v7_target_weights
 from quantagent.training.v7_predictor import predict_v7_alpha
+
+
+DAILY_SUMMARY_COMMIT_PROTOCOL = "daily_summary_bound_daily_decision_v1"
 
 
 _RESOLVED_PRIOR_TERMINAL_STATUSES = frozenset(
@@ -279,14 +285,56 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 weights,
                 day_dir / "target_weights.parquet",
             )
-            _freeze_daily_decision(
-                config,
-                as_of,
-                decision_kind="no_target",
-                paper_account_identity_sha256=account_identity.payload_sha256,
-                account_evidence=account_evidence,
-            )
-        warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
+            warnings = tuple([*evidence.warnings, "paper_no_target_generated"])
+            summary = {
+                "daily_decision_commit_protocol": DAILY_SUMMARY_COMMIT_PROTOCOL,
+                "config": asdict(config),
+                "status": "no_target_generated",
+                "evidence_rows": int(len(evidence.frame)),
+                "evidence_warnings": list(evidence.warnings),
+                "account_identity": identity_evidence,
+                "account_state": account_evidence,
+                "blend_diagnostics": blend_result.diagnostics,
+                "target_weight_diagnostics": weights.diagnostics,
+                "execution": {
+                    "status": "no_target_generated",
+                    "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+                    "signal_date": as_of,
+                    "pending_signal_path": "",
+                    "executed_fill_count": 0,
+                    "paper_report_written": False,
+                    "paper_book_appended": False,
+                    "paper_account_identity_sha256": account_identity.payload_sha256,
+                    "canonical_account_state_sha256": account_state.account_state_sha256,
+                    "reason": (
+                        "portfolio construction produced no target; absence of a target "
+                        "is not reinterpreted as an all-zero liquidation instruction"
+                    ),
+                },
+                "paper_report": None,
+                "paper_book_path": str(config.paper_book_path),
+            }
+            summary_path = _write_daily_summary(day_dir, summary)
+            summary_sha = _file_sha256(summary_path)
+            try:
+                _freeze_daily_decision(
+                    config,
+                    as_of,
+                    decision_kind="no_target",
+                    paper_account_identity_sha256=account_identity.payload_sha256,
+                    account_evidence=account_evidence,
+                    daily_summary_path=summary_path,
+                    daily_summary_sha256=summary_sha,
+                )
+            except Exception:
+                decision = PendingExecutionJournal(
+                    _execution_journal_path(config)
+                ).daily_decision(as_of)
+                if decision is None:
+                    _discard_staged_daily_summary(
+                        summary_path, expected_sha256=summary_sha
+                    )
+                raise
         summary = {
             "config": asdict(config),
             "status": "no_target_generated",
@@ -314,7 +362,6 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             "paper_report": None,
             "paper_book_path": str(config.paper_book_path),
         }
-        _write_daily_summary(day_dir, summary)
         return DailyPaperLoopResult(
             status="no_target_generated",
             as_of_date=as_of,
@@ -375,6 +422,44 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
             },
         )
+        warnings = tuple(
+            [*evidence.warnings, "paper_signal_pending_next_observed_session"]
+        )
+        summary = {
+            "daily_decision_commit_protocol": DAILY_SUMMARY_COMMIT_PROTOCOL,
+            "config": asdict(config),
+            "status": "signal_recorded_pending_execution",
+            "evidence_rows": int(len(evidence.frame)),
+            "evidence_warnings": list(evidence.warnings),
+            "account_identity": identity_evidence,
+            "blend_diagnostics": blend_result.diagnostics,
+            "target_weight_diagnostics": weights.diagnostics,
+            "account_state": account_evidence,
+            "execution": {
+                "status": "pending_next_observed_session",
+                "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
+                "signal_date": as_of,
+                "pending_signal_path": str(pending_path),
+                "pending_payload_sha256": pending.payload_sha256,
+                "target_weights_sha256": pending.target_weights_sha256,
+                "predictions_file_sha256": pending.source_lineage["predictions_file_sha256"],
+                "target_weights_file_sha256": pending.source_lineage["target_weights_file_sha256"],
+                "paper_account_identity_sha256": pending.source_lineage["paper_account_identity_sha256"],
+                "canonical_account_state_sha256": pending.source_lineage["canonical_account_state_sha256"],
+                "canonical_ledger_head_hash": pending.source_lineage["canonical_ledger_head_hash"],
+                "executed_fill_count": 0,
+                "paper_report_written": False,
+                "paper_book_appended": False,
+                "reason": (
+                    "T-close target is an intent only; no next observed market session "
+                    "has been executed by this signal-generation call"
+                ),
+            },
+            "paper_report": None,
+            "paper_book_path": str(config.paper_book_path),
+        }
+        summary_path = _write_daily_summary(day_dir, summary)
+        summary_sha = _file_sha256(summary_path)
         try:
             _freeze_daily_decision(
                 config,
@@ -384,6 +469,8 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 account_evidence=account_evidence,
                 pending_payload_sha256=pending.payload_sha256,
                 target_weights_sha256=pending.target_weights_sha256,
+                daily_summary_path=summary_path,
+                daily_summary_sha256=summary_sha,
             )
         except Exception:
             # If append definitively did not commit, remove the current-protocol
@@ -395,6 +482,9 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
             if decision is None:
                 PendingPaperSignalStore(config.pending_signal_dir).discard_staged(
                     as_of, expected_payload_sha256=pending.payload_sha256
+                )
+                _discard_staged_daily_summary(
+                    summary_path, expected_sha256=summary_sha
                 )
             raise
 
@@ -433,7 +523,6 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
         "paper_report": None,
         "paper_book_path": str(config.paper_book_path),
     }
-    _write_daily_summary(day_dir, summary)
     return DailyPaperLoopResult(
         status="signal_recorded_pending_execution",
         as_of_date=as_of,
@@ -519,10 +608,26 @@ def _assert_current_signal_not_frozen(
         )
     summary_path = Path(config.output_root) / as_of / "daily_loop_summary.json"
     if summary_path.exists():
-        raise PaperAccountStateRefused(
-            "daily paper decision evidence already exists for the current signal date; "
-            "refusing to overwrite its summary/prediction/target lineage"
-        )
+        try:
+            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise PaperAccountStateRefused(
+                "uncommitted daily summary is unreadable/ambiguous; operator "
+                "reconciliation is required before same-date reuse"
+            ) from exc
+        if (
+            isinstance(summary_payload, dict)
+            and summary_payload.get("daily_decision_commit_protocol")
+            == DAILY_SUMMARY_COMMIT_PROTOCOL
+        ):
+            _discard_staged_daily_summary(
+                summary_path, expected_sha256=_file_sha256(summary_path)
+            )
+        else:
+            raise PaperAccountStateRefused(
+                "legacy/ambiguous daily summary exists without a committed marker; "
+                "refusing same-date overwrite"
+            )
     existing = store.read(as_of)
     if existing is not None:
         if (
@@ -562,8 +667,23 @@ def _freeze_daily_decision(
     account_evidence: dict[str, object],
     pending_payload_sha256: str | None = None,
     target_weights_sha256: str | None = None,
+    daily_summary_path: Path | None = None,
+    daily_summary_sha256: str | None = None,
 ) -> None:
     """Append the irreversible commit marker for one validated daily decision."""
+
+    if daily_summary_path is None or not Path(daily_summary_path).is_file():
+        raise PaperAccountStateRefused(
+            "daily decision requires a durable pre-freeze summary artifact"
+        )
+    if len(str(daily_summary_sha256 or "")) != 64:
+        raise PaperAccountStateRefused(
+            "daily decision requires exact summary digest binding"
+        )
+    if _file_sha256(Path(daily_summary_path)) != str(daily_summary_sha256):
+        raise PaperAccountStateRefused(
+            "daily summary changed before decision freeze"
+        )
 
     if decision_kind == "target":
         if len(str(pending_payload_sha256 or "")) != 64:
@@ -605,6 +725,9 @@ def _freeze_daily_decision(
             "target_weights_sha256": (
                 str(target_weights_sha256) if decision_kind == "target" else ""
             ),
+            "daily_summary_path": str(Path(daily_summary_path).resolve(strict=False)),
+            "daily_summary_sha256": str(daily_summary_sha256),
+            "daily_summary_commit_protocol": DAILY_SUMMARY_COMMIT_PROTOCOL,
         },
     )
 
@@ -761,19 +884,53 @@ def _assert_prior_pending_signals_resolved(
     later_records = []
     for record in journal.records():
         try:
-            record_date = pd.Timestamp(record.signal_date).date()
+            signal_date = pd.Timestamp(record.signal_date).date()
+            execution_date = pd.Timestamp(record.execution_date).date()
         except (TypeError, ValueError) as exc:
             raise PaperAccountStateRefused(
-                f"invalid journal signal_date during chronology check: {record.signal_date!r}"
+                "invalid journal signal/execution date during chronology check: "
+                f"signal={record.signal_date!r}, execution={record.execution_date!r}"
             ) from exc
-        if record_date > cutoff:
+        if signal_date > cutoff or execution_date > cutoff:
             later_records.append(record)
     if later_records:
-        first = min(later_records, key=lambda row: row.signal_date)
+        first = min(
+            later_records,
+            key=lambda row: max(
+                pd.Timestamp(row.signal_date).date(),
+                pd.Timestamp(row.execution_date).date(),
+            ),
+        )
         raise PaperAccountStateRefused(
             "paper decision chronology regression refused: later durable journal "
-            f"evidence already exists for signal_date={first.signal_date}"
+            "evidence already exists for "
+            f"signal_date={first.signal_date}, execution_date={first.execution_date}"
         )
+
+    canonical = CanonicalLedger(config.canonical_ledger_path)
+    canonical_verification = canonical.verify()
+    if (
+        not bool(canonical_verification.get("valid"))
+        or bool(canonical_verification.get("tornTail"))
+    ):
+        raise PaperAccountStateRefused(
+            "canonical ledger chronology cannot be certified because the chain/tail "
+            "is not fully verifiable"
+        )
+    for record in canonical.read():
+        if record.trade_date is None:
+            continue
+        try:
+            trade_date = pd.Timestamp(record.trade_date).date()
+        except (TypeError, ValueError) as exc:
+            raise PaperAccountStateRefused(
+                f"invalid canonical ledger trade_date during chronology check: {record.trade_date!r}"
+            ) from exc
+        if trade_date > cutoff:
+            raise PaperAccountStateRefused(
+                "paper decision chronology regression refused: canonical economic "
+                f"history already reached trade_date={trade_date.isoformat()}"
+            )
 
     prefix_index = build_canonical_prefix_index(config.canonical_ledger_path)
     _assert_execution_journal_resolved(
@@ -843,12 +1000,73 @@ def _file_sha256(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
 
 
-def _write_daily_summary(day_dir: Path, summary: dict[str, object]) -> None:
+def _write_daily_summary(day_dir: Path, summary: dict[str, object]) -> Path:
     day_dir.mkdir(parents=True, exist_ok=True)
-    (day_dir / "daily_loop_summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
+    target = day_dir / "daily_loop_summary.json"
+    tmp = day_dir / f".{target.name}.{uuid4().hex}.tmp"
+    payload = (
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        + "\n"
     )
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        if os.name != "nt":
+            directory_fd = os.open(day_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        try:
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+        except OSError:
+            pass
+    return target
+
+
+def _discard_staged_daily_summary(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> None:
+    if not path.exists():
+        return
+    if _file_sha256(path) != str(expected_sha256):
+        raise PaperAccountStateRefused(
+            "refusing to discard staged daily summary with mismatched digest"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PaperAccountStateRefused(
+            "refusing to discard unreadable staged daily summary"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("daily_decision_commit_protocol")
+        != DAILY_SUMMARY_COMMIT_PROTOCOL
+    ):
+        raise PaperAccountStateRefused(
+            "refusing to discard legacy/ambiguous daily summary staging"
+        )
+    path.unlink()
+    if os.name != "nt":
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def _normalise_date(value: str) -> str:

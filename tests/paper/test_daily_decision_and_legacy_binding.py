@@ -62,6 +62,14 @@ def _pending(config: DailyPaperLoopConfig, signal_date: str):
 def test_daily_decision_marker_survives_without_pending_json(tmp_path) -> None:
     config = _daily_config(tmp_path)
     prefix = build_canonical_prefix_index(config.canonical_ledger_path)
+    summary_path = daily_loop._write_daily_summary(
+        Path(config.output_root) / "2026-08-11",
+        {
+            "daily_decision_commit_protocol": daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL,
+            "status": "no_target_generated",
+        },
+    )
+    summary_sha = daily_loop._file_sha256(summary_path)
     _freeze_daily_decision(
         config,
         "2026-08-11",
@@ -72,6 +80,8 @@ def test_daily_decision_marker_survives_without_pending_json(tmp_path) -> None:
             "canonical_records": prefix.record_count,
             "canonical_head_hash": prefix.current_head,
         },
+        daily_summary_path=summary_path,
+        daily_summary_sha256=summary_sha,
     )
     assert not (tmp_path / "pending").exists()
     with pytest.raises(PaperAccountStateRefused, match="already durably frozen"):

@@ -294,6 +294,17 @@ def build_v7_target_weights(
     )
 
     for date, day in preds.groupby("trade_date", sort=True):
+        day_expected_horizons: dict[str, int | None] = {}
+        if age_tracker is not None and theme_frame is not None:
+            today_theme = theme_frame[theme_frame["trade_date"] == date]
+            if not today_theme.empty and "expected_horizon_days" in today_theme.columns:
+                for sym, eh in zip(
+                    today_theme["symbol"], today_theme["expected_horizon_days"]
+                ):
+                    if pd.notna(eh):
+                        day_expected_horizons[str(sym)] = int(eh)
+            age_tracker.update_expected_horizons(day_expected_horizons)
+
         day_market = market[market["trade_date"] == date]
         merged = day.merge(day_market, on=["symbol", "trade_date"], how="left", suffixes=("", "_mkt"))
         rejected: list[dict[str, object]] = []
@@ -565,14 +576,9 @@ def build_v7_target_weights(
         previous_weights = weights.copy()
 
         if age_tracker is not None:
-            expected_horizons: dict[str, int | None] = {}
-            if theme_frame is not None:
-                today_theme = theme_frame[theme_frame["trade_date"] == date]
-                if not today_theme.empty and "expected_horizon_days" in today_theme.columns:
-                    for sym, eh in zip(today_theme["symbol"], today_theme["expected_horizon_days"]):
-                        if pd.notna(eh):
-                            expected_horizons[str(sym)] = int(eh)
-            age_tracker.record_session(date, weights.to_dict(), expected_horizons)
+            age_tracker.record_session(
+                date, weights.to_dict(), day_expected_horizons
+            )
 
         exposures_report: dict[str, float] = {}
         if sector_lookup:

@@ -21,6 +21,7 @@ The consumer is deliberately conservative:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from hashlib import sha256
 import json
 from typing import Iterable, Sequence
@@ -914,6 +915,21 @@ def _verify_pending_daily_commit(
     if mismatches:
         raise ContinuousPaperExecutionBlocked(
             "pending signal commit binding mismatch: " + ",".join(sorted(mismatches))
+        )
+    summary_path_text = str(details.get("daily_summary_path") or "").strip()
+    summary_sha = str(details.get("daily_summary_sha256") or "").strip()
+    if len(summary_sha) != 64 or not summary_path_text:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal commit lacks bound daily summary evidence"
+        )
+    summary_path = Path(summary_path_text)
+    if not summary_path.is_file():
+        raise ContinuousPaperExecutionBlocked(
+            "bound daily summary evidence is missing before pending execution"
+        )
+    if sha256(summary_path.read_bytes()).hexdigest() != summary_sha:
+        raise ContinuousPaperExecutionBlocked(
+            "bound daily summary evidence digest mismatch before pending execution"
         )
 
 

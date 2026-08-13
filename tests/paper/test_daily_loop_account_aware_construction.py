@@ -396,7 +396,7 @@ def test_daily_loop_refuses_same_date_writer_before_overwriting_bound_artifacts(
     prediction_artifact.write_text("original-predictions\n", encoding="utf-8")
     target_artifact.write_text("original-target\n", encoding="utf-8")
 
-    with pytest.raises(PaperAccountStateRefused, match="already frozen"):
+    with pytest.raises(PaperAccountStateRefused, match="legacy/ambiguous pending"):
         daily_loop.run_once(config)
 
     assert prediction_artifact.read_text(encoding="utf-8") == "original-predictions\n"

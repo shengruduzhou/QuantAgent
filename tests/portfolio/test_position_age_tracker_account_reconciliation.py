@@ -108,3 +108,12 @@ def test_explicit_continuity_proof_preserves_persisted_age(tmp_path) -> None:
         continuity_proven_symbols={"A"},
     )
     assert restarted.age_for("A", pd.Timestamp("2026-08-05")) == before
+
+
+def test_late_real_horizon_refreshes_before_next_lock(tmp_path) -> None:
+    tracker = PositionAgeTracker(state_path=tmp_path / "state.parquet")
+    tracker.begin_session({"A": 0.2})
+    assert tracker.is_locked("A", pd.Timestamp("2026-08-05"))
+    tracker.update_expected_horizons({"A": 1})
+    snapshot = tracker.snapshot().set_index("symbol")
+    assert int(snapshot.loc["A", "expected_horizon_days"]) == 1

@@ -226,3 +226,32 @@ def test_backdated_decision_refuses_later_durable_journal_record(tmp_path) -> No
             "2026-08-11",
             paper_account_identity_sha256=_IDENTITY_SHA,
         )
+
+
+def test_backdated_decision_refuses_later_execution_date(tmp_path) -> None:
+    config = _config(tmp_path, "2026-08-11")
+    PendingExecutionJournal(config.execution_journal_path).append(
+        pending_payload_sha256="e" * 64,
+        signal_date="2026-08-10",
+        execution_date="2026-08-12",
+        status="execution_started",
+        details={"paper_account_identity_sha256": _IDENTITY_SHA},
+    )
+    with pytest.raises(PaperAccountStateRefused, match="chronology regression.*execution_date=2026-08-12"):
+        _assert_prior_pending_signals_resolved(
+            config,
+            "2026-08-11",
+            paper_account_identity_sha256=_IDENTITY_SHA,
+        )
+
+
+def test_backdated_decision_refuses_later_canonical_trade_date(tmp_path) -> None:
+    config = _config(tmp_path, "2026-08-11")
+    from quantagent.domain.ledger import CanonicalLedger
+    CanonicalLedger(config.canonical_ledger_path).append(None, trade_date="2026-08-12")
+    with pytest.raises(PaperAccountStateRefused, match="canonical economic history.*2026-08-12"):
+        _assert_prior_pending_signals_resolved(
+            config,
+            "2026-08-11",
+            paper_account_identity_sha256=_IDENTITY_SHA,
+        )
