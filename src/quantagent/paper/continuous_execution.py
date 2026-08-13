@@ -35,6 +35,7 @@ from quantagent.data.intraday_sessions import (
     assert_raw_execution_prices,
 )
 from quantagent.domain.ledger import CanonicalLedger
+from quantagent.domain.idempotency import IdempotencyStoreCorruption
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.broker_base import Order as ExecutionOrder, OrderType
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
@@ -53,7 +54,6 @@ from quantagent.paper.canonical_receipt import (
     verify_canonical_prefix_receipt,
 )
 from quantagent.paper.execution_journal import (
-    DAILY_DECISION_STATUS,
     LEGACY_BINDING_STATUS,
     RECONCILIATION_STATUS,
     TERMINAL_OUTCOMES,
@@ -125,7 +125,16 @@ class ContinuousPaperExecutionBlocked(RuntimeError):
 
 
 def _normalise_sessions(values: Iterable[object]) -> tuple[str, ...]:
-    parsed = pd.to_datetime(pd.Series(list(values)), errors="coerce").dropna()
+    raw = list(values)
+    if not raw:
+        return ()
+    parsed = pd.to_datetime(pd.Series(raw), errors="coerce")
+    if parsed.isna().any():
+        invalid = [value for value, bad in zip(raw, parsed.isna()) if bool(bad)]
+        raise ContinuousPaperExecutionBlocked(
+            "session evidence contains invalid/non-finite dates: "
+            + ", ".join(repr(value) for value in invalid[:3])
+        )
     return tuple(sorted({pd.Timestamp(value).date().isoformat() for value in parsed}))
 
 
@@ -613,7 +622,10 @@ def _bind_legacy_terminal_account_locked(
         raise ContinuousPaperExecutionBlocked(
             "legacy binding requires a 64-character pending payload digest"
         )
-    as_of = pd.Timestamp(as_of_date).date().isoformat()
+    normalized_as_of = _normalise_sessions([as_of_date])
+    if len(normalized_as_of) != 1:
+        raise ContinuousPaperExecutionBlocked("as_of date is invalid or ambiguous")
+    as_of = normalized_as_of[0]
     try:
         identity = ensure_paper_account_identity(
             canonical_ledger_path=config.canonical_ledger_path,
@@ -636,6 +648,14 @@ def _bind_legacy_terminal_account_locked(
     if dict(terminal.details or {}).get("canonical_prefix_receipt") is not None:
         raise ContinuousPaperExecutionBlocked(
             "terminal already carries an original execution-time canonical-prefix receipt"
+        )
+    terminal_identity = str(
+        dict(terminal.details or {}).get("paper_account_identity_sha256") or ""
+    )
+    if terminal_identity and terminal_identity != identity.payload_sha256:
+        raise ContinuousPaperExecutionBlocked(
+            "legacy terminal declares a conflicting paper-account identity and "
+            "cannot be rebound to the current account"
         )
     canonical_state = recover_from_canonical(
         config.canonical_ledger_path,
@@ -867,6 +887,7 @@ def _verify_pending_daily_commit(
     pending: PendingPaperSignal,
     *,
     expected_paper_account_identity_sha256: str,
+    canonical_ledger_path: str | Path,
 ) -> None:
     if (
         pending.source_lineage.get("daily_decision_commit_protocol")
@@ -930,6 +951,19 @@ def _verify_pending_daily_commit(
     if sha256(summary_path.read_bytes()).hexdigest() != summary_sha:
         raise ContinuousPaperExecutionBlocked(
             "bound daily summary evidence digest mismatch before pending execution"
+        )
+    try:
+        canonical_records, canonical_head = canonical_snapshot(canonical_ledger_path)
+        expected_records = int(details["canonical_records"])
+        expected_head = str(details["canonical_head"])
+    except (CanonicalPrefixReceiptError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise ContinuousPaperExecutionBlocked(
+            f"cannot revalidate frozen canonical account prefix: {exc}"
+        ) from exc
+    if canonical_records != expected_records or canonical_head != expected_head:
+        raise ContinuousPaperExecutionBlocked(
+            "canonical account changed after daily decision freeze; pending target "
+            "must be regenerated or explicitly reconciled before execution"
         )
 
 
@@ -1025,6 +1059,7 @@ def _execute_pending_for_session_locked(
             journal,
             pending,
             expected_paper_account_identity_sha256=account_identity.payload_sha256,
+            canonical_ledger_path=config.canonical_ledger_path,
         )
 
         pending_identity_sha = str(
@@ -1154,19 +1189,24 @@ def _execute_pending_for_session_locked(
         )
         market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
         adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)
-        manager = OrderManager(
-            broker=adapter,
-            lineage=lineage,
-            idempotency_path=config.idempotency_path,
-            canonical_ledger=canonical,
-            order_book=broker.book,
-            config=OrderManagerConfig(
-                lot_size=config.lot_size,
-                min_order_value_yuan=config.min_order_value_yuan,
-                max_participation_rate=config.max_participation_rate,
-                strategy_version=config.strategy_version,
-            ),
-        )
+        try:
+            manager = OrderManager(
+                broker=adapter,
+                lineage=lineage,
+                idempotency_path=config.idempotency_path,
+                canonical_ledger=canonical,
+                order_book=broker.book,
+                config=OrderManagerConfig(
+                    lot_size=config.lot_size,
+                    min_order_value_yuan=config.min_order_value_yuan,
+                    max_participation_rate=config.max_participation_rate,
+                    strategy_version=config.strategy_version,
+                ),
+            )
+        except IdempotencyStoreCorruption as exc:
+            raise ContinuousPaperExecutionBlocked(
+                f"durable idempotency evidence is corrupt: {exc}"
+            ) from exc
 
         target = pd.Series(pending.target_weights, dtype=float).reindex(prices.index).fillna(0.0)
         orders = _execution_orders(

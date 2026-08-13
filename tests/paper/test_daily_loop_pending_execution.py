@@ -321,11 +321,6 @@ def test_summary_write_failure_leaves_no_durable_decision(tmp_path, monkeypatch)
 def test_uncommitted_current_protocol_summary_is_recoverable(tmp_path) -> None:
     as_of = "2026-08-07"
     day_dir = tmp_path / "reports" / as_of
-    summary = {
-        "daily_decision_commit_protocol": daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL,
-        "status": "staged-before-crash",
-    }
-    summary_path = daily_loop._write_daily_summary(day_dir, summary)
     config = daily_loop.DailyPaperLoopConfig(
         as_of_date=as_of,
         output_root=str(tmp_path / "reports"),
@@ -333,7 +328,15 @@ def test_uncommitted_current_protocol_summary_is_recoverable(tmp_path) -> None:
         canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
         execution_journal_path=str(tmp_path / "execution.jsonl"),
     )
-    daily_loop._assert_current_signal_not_frozen(config, as_of)
+    summary = {
+        "daily_decision_commit_protocol": daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL,
+        "paper_account_owner": daily_loop._paper_account_owner(config, "f" * 64),
+        "status": "staged-before-crash",
+    }
+    summary_path = daily_loop._write_daily_summary(day_dir, summary)
+    daily_loop._assert_current_signal_not_frozen(
+        config, as_of, paper_account_identity_sha256="f" * 64
+    )
     assert not summary_path.exists()
 
 
@@ -352,4 +355,35 @@ def test_legacy_uncommitted_summary_remains_fail_closed(tmp_path) -> None:
         execution_journal_path=str(tmp_path / "execution.jsonl"),
     )
     with pytest.raises(daily_loop.PaperAccountStateRefused, match="legacy/ambiguous daily summary"):
-        daily_loop._assert_current_signal_not_frozen(config, as_of)
+        daily_loop._assert_current_signal_not_frozen(
+            config, as_of, paper_account_identity_sha256="f" * 64
+        )
+
+
+def test_duplicate_summary_keys_are_preserved_and_fail_closed(tmp_path) -> None:
+    as_of = "2026-08-07"
+    config = daily_loop.DailyPaperLoopConfig(
+        as_of_date=as_of,
+        output_root=str(tmp_path / "reports"),
+        pending_signal_dir=str(tmp_path / "pending"),
+        canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "execution.jsonl"),
+    )
+    summary_path = tmp_path / "reports" / as_of / "daily_loop_summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        '{"daily_decision_commit_protocol":"legacy",'
+        '"daily_decision_commit_protocol":"daily_summary_bound_daily_decision_v1"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="unreadable/ambiguous"):
+        daily_loop._assert_current_signal_not_frozen(
+            config, as_of, paper_account_identity_sha256="f" * 64
+        )
+    assert summary_path.exists()
+
+
+def test_nat_as_of_is_rejected_before_artifact_paths_are_derived() -> None:
+    with pytest.raises(daily_loop.PaperAccountStateRefused, match="finite date"):
+        daily_loop._normalise_date("NaT")

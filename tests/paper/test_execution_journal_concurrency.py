@@ -57,3 +57,16 @@ def test_unknown_status_is_rejected_before_it_can_enter_hash_chain(tmp_path) -> 
             execution_date="2026-08-10",
             status="looks_good_to_me",
         )
+
+
+@pytest.mark.parametrize("invalid", ["NaT", "not-a-date", "2026-13-40"])
+def test_non_finite_or_invalid_dates_cannot_enter_journal(tmp_path, invalid) -> None:
+    journal = PendingExecutionJournal(tmp_path / "execution.jsonl")
+    with pytest.raises(ValueError, match="finite ISO date"):
+        journal.append(
+            pending_payload_sha256="payload",
+            signal_date=invalid,
+            execution_date="2026-08-10",
+            status="execution_started",
+        )
+    assert not journal.path.exists()

@@ -183,6 +183,20 @@ def terminate_tree(pid: int, *, was_paused: bool, timeout: float = 5.0) -> None:
     """
     import signal as signal_module
 
+    # Every managed job starts a new session. On POSIX, signalling that process
+    # group reaches both the durable supervisor and its worker tree. Traversing
+    # downward from workerPid alone misses the supervisor parent and can leave
+    # the job stuck in "cancelling" after a paused worker is terminated.
+    if os.name != "nt":
+        try:
+            process_group = os.getpgid(pid)
+            if process_group != os.getpgrp():
+                if was_paused:
+                    os.killpg(process_group, signal_module.SIGCONT)
+                os.killpg(process_group, signal_module.SIGTERM)
+        except OSError:
+            pass
+
     try:
         import psutil
     except ImportError:
@@ -226,6 +240,14 @@ def terminate_tree(pid: int, *, was_paused: bool, timeout: float = 5.0) -> None:
 
 def signal_tree(pid: int, sig: int) -> None:
     """Send a signal to a job process and its descendants."""
+    if os.name != "nt":
+        try:
+            process_group = os.getpgid(pid)
+            if process_group != os.getpgrp():
+                os.killpg(process_group, sig)
+                return
+        except OSError:
+            pass
     try:
         import psutil
 

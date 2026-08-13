@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 import os
@@ -109,6 +109,18 @@ def _strict_object(pairs):
     return result
 
 
+def _normalise_economic_date(value: object, *, field: str) -> str:
+    text = str(value)
+    try:
+        parsed = date.fromisoformat(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite ISO date, got {value!r}") from exc
+    normalized = parsed.isoformat()
+    if text != normalized:
+        raise ValueError(f"{field} must be an exact ISO date, got {value!r}")
+    return normalized
+
+
 class PendingExecutionJournal:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -141,6 +153,13 @@ class PendingExecutionJournal:
         expected_sequence = 1
         for record in self.records():
             if record.schema_version != JOURNAL_SCHEMA_VERSION:
+                return False
+            if record.status not in _ALLOWED_STATUSES:
+                return False
+            try:
+                _normalise_economic_date(record.signal_date, field="signal_date")
+                _normalise_economic_date(record.execution_date, field="execution_date")
+            except ValueError:
                 return False
             if record.sequence != expected_sequence:
                 return False
@@ -251,6 +270,10 @@ class PendingExecutionJournal:
             raise ValueError(f"unsupported execution journal status {status!r}")
         if not str(pending_payload_sha256).strip():
             raise ValueError("pending_payload_sha256 must be non-empty")
+        signal_date = _normalise_economic_date(signal_date, field="signal_date")
+        execution_date = _normalise_economic_date(
+            execution_date, field="execution_date"
+        )
 
         normalized_details = dict(details or {})
         with self._thread_lock, self._exclusive_file_lock():

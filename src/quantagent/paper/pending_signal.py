@@ -83,6 +83,16 @@ def _strict_object(pairs):
     return result
 
 
+def _normalise_signal_date(value: object) -> str:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"signal_date must be a finite date, got {value!r}") from exc
+    if pd.isna(timestamp):
+        raise ValueError(f"signal_date must be a finite date, got {value!r}")
+    return timestamp.date().isoformat()
+
+
 def _normalised_weights(weights: pd.DataFrame, signal_date: str) -> dict[str, float]:
     """Return one deterministic signal-date target vector.
 
@@ -177,6 +187,12 @@ def verify_pending_signal(signal: PendingPaperSignal) -> None:
         raise PendingSignalCorruption(
             "pending signal timing semantics do not match strict execution contract"
         )
+    try:
+        normalized_date = _normalise_signal_date(signal.signal_date)
+    except ValueError as exc:
+        raise PendingSignalCorruption(str(exc)) from exc
+    if normalized_date != signal.signal_date:
+        raise PendingSignalCorruption("pending signal date is not canonical ISO format")
     if not signal.target_weights:
         raise PendingSignalCorruption("pending target-weight vector is empty")
     if _weights_sha(signal.target_weights) != signal.target_weights_sha256:
@@ -194,7 +210,7 @@ class PendingPaperSignalStore:
         self._thread_lock = RLock()
 
     def path_for(self, signal_date: str) -> Path:
-        safe = pd.Timestamp(signal_date).date().isoformat()
+        safe = _normalise_signal_date(signal_date)
         return self.root / f"{safe}.json"
 
     def read(self, signal_date: str) -> PendingPaperSignal | None:
@@ -289,7 +305,7 @@ class PendingPaperSignalStore:
         source_lineage: Mapping[str, str],
         created_at: str | None = None,
     ) -> tuple[PendingPaperSignal, Path]:
-        signal_date = pd.Timestamp(signal_date).date().isoformat()
+        signal_date = _normalise_signal_date(signal_date)
         canonical_weights = _normalised_weights(target_weights, signal_date)
         weights_digest = _weights_sha(canonical_weights)
         lineage = {

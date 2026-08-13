@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 from threading import RLock
 from typing import Any, Iterator, Mapping
 
@@ -293,6 +294,19 @@ class CanonicalLedger:
             record = self._record_from_dict(payload)
             if self._path is not None:
                 try:
+                    # Honour an explicitly read-only ledger even when the
+                    # service happens to run as root. Root can bypass POSIX
+                    # mode bits, but doing so would defeat the operator's
+                    # fail-closed storage control and makes fault injection lie.
+                    if (
+                        self._path.exists()
+                        and stat.S_IMODE(self._path.stat().st_mode) & 0o222 == 0
+                    ):
+                        raise PermissionError(
+                            13,
+                            "canonical ledger is explicitly read-only",
+                            str(self._path),
+                        )
                     with self._path.open("a", encoding="utf-8") as handle:
                         handle.write(
                             json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n"

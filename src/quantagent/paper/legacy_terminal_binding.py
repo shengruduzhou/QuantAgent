@@ -43,6 +43,18 @@ def verify_legacy_terminal_binding(
         raise LegacyTerminalBindingError(
             "legacy terminal binding paper-account identity mismatch"
         )
+    terminal_identity = str(
+        dict(getattr(terminal, "details", {}) or {}).get(
+            "paper_account_identity_sha256"
+        )
+        or ""
+    )
+    if terminal_identity and terminal_identity != str(
+        expected_paper_account_identity_sha256
+    ):
+        raise LegacyTerminalBindingError(
+            "legacy terminal declared a conflicting paper-account identity"
+        )
     assurance = str(details.get("assurance") or "")
     reconstruction = str(details.get("operational_economic_reconstruction") or "")
     if assurance != "operator_bound_canonical_only_legacy_terminal_v1":

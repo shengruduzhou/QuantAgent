@@ -245,6 +245,9 @@ def build_v7_target_weights(
         initial_weights,
         long_short=bool(config.long_short),
     )
+    starting_weights = (
+        previous_weights.copy() if previous_weights is not None else None
+    )
     initial_state_diagnostics = {
         "supplied": bool(initial_weights is not None),
         "symbol_count": int(len(previous_weights)) if previous_weights is not None else 0,
@@ -284,7 +287,7 @@ def build_v7_target_weights(
                 first_theme = theme_frame[theme_frame["trade_date"] == first_date]
                 for symbol, horizon in zip(first_theme["symbol"], first_theme["expected_horizon_days"]):
                     if pd.notna(horizon):
-                        initial_expected_horizons[str(symbol)] = int(horizon)
+                        initial_expected_horizons[str(symbol)] = horizon
             age_tracker.begin_session(previous_weights.to_dict(), initial_expected_horizons)
 
     dynamic_topk_cfg = DynamicTopKConfig(
@@ -302,7 +305,7 @@ def build_v7_target_weights(
                     today_theme["symbol"], today_theme["expected_horizon_days"]
                 ):
                     if pd.notna(eh):
-                        day_expected_horizons[str(sym)] = int(eh)
+                        day_expected_horizons[str(sym)] = eh
             age_tracker.update_expected_horizons(day_expected_horizons)
 
         day_market = market[market["trade_date"] == date]
@@ -367,7 +370,15 @@ def build_v7_target_weights(
                 blocked = set(gate_today.loc[~gate_today["allow_open"].astype(bool), "symbol"].astype(str))
                 force_close_symbols = set(gate_today.loc[gate_today["force_close"].astype(bool), "symbol"].astype(str))
                 if blocked:
-                    held = set(previous_weights.index.astype(str)) if previous_weights is not None else set()
+                    held = (
+                        set(
+                            previous_weights[
+                                previous_weights.abs() > 1e-12
+                            ].index.astype(str)
+                        )
+                        if previous_weights is not None
+                        else set()
+                    )
                     new_only_blocked = blocked - held
                     if new_only_blocked:
                         eligible = eligible[~eligible["symbol"].astype(str).isin(new_only_blocked)]
@@ -546,6 +557,14 @@ def build_v7_target_weights(
         # Holding-period lock (Phase 3.4): apply to the union of desired and
         # actually held names. A selected-only loop would allow a locked
         # recovered holding to disappear simply because it fell out of Top-K.
+        if force_close_symbols:
+            if previous_weights is not None:
+                weights = weights.reindex(
+                    weights.index.union(previous_weights.index)
+                ).fillna(0.0)
+            for symbol in force_close_symbols:
+                if symbol in weights.index:
+                    weights.loc[symbol] = 0.0
         locked_symbols: list[str] = []
         if age_tracker is not None and previous_weights is not None:
             union_symbols = weights.index.union(previous_weights.index)
@@ -573,7 +592,15 @@ def build_v7_target_weights(
         # additional, previously invisible leg of turnover.
         if previous_weights is not None and config.max_turnover > 0:
             weights = _apply_turnover_cap(weights, previous_weights, config.max_turnover)
-        previous_weights = weights.copy()
+        if not config.long_short:
+            weights = _project_and_validate_long_only_target(
+                weights,
+                previous_weights=previous_weights,
+                per_name_cap=per_name_cap,
+                sector_lookup=sector_lookup,
+                config=config,
+            )
+        previous_weights = weights[weights.abs() > 1e-12].copy()
 
         if age_tracker is not None:
             age_tracker.record_session(
@@ -616,6 +643,19 @@ def build_v7_target_weights(
 
     long_format = pd.concat(by_date_weights, ignore_index=True)
     pivot = long_format.pivot_table(index="trade_date", columns="symbol", values="weight", aggfunc="last").fillna(0.0)
+    if starting_weights is not None:
+        initial_aligned = starting_weights.reindex(pivot.columns).fillna(0.0)
+        turnover_observations = [
+            float((pivot.iloc[0] - initial_aligned).abs().sum()),
+            *[
+                float(value)
+                for value in pivot.diff().abs().sum(axis=1).iloc[1:].tolist()
+            ],
+        ]
+        average_turnover = float(np.mean(turnover_observations))
+    else:
+        average_turnover = float(pivot.diff().abs().sum(axis=1).mean())
+
     diagnostics_payload = {
         "status": "passed",
         "raw_symbol_count": int(preds["symbol"].nunique()),
@@ -650,7 +690,7 @@ def build_v7_target_weights(
         "dates": int(pivot.shape[0]),
         "symbol_count": int(pivot.shape[1]),
         "average_gross_exposure": float(pivot.abs().sum(axis=1).mean()),
-        "average_turnover": float(pivot.diff().abs().sum(axis=1).mean()),
+        "average_turnover": average_turnover,
         "supported_objectives": list(_SUPPORTED_OBJECTIVES),
         "constraint_surface": {
             "sector_cap": config.max_sector_weight,
@@ -746,6 +786,119 @@ def _apply_turnover_cap(target: pd.Series, previous: pd.Series, cap: float) -> p
         return aligned_target
     scale = cap / max(turnover, 1e-9)
     return aligned_prev + delta * scale
+
+
+def _reduce_long_only_increases(
+    weights: pd.Series,
+    previous: pd.Series,
+    *,
+    symbols: pd.Index,
+    required_reduction: float,
+    constraint: str,
+) -> pd.Series:
+    """Reduce only additions, preserving holding locks and turnover feasibility."""
+
+    if required_reduction <= 1e-12:
+        return weights
+    selected = weights.index.intersection(symbols)
+    previous_aligned = previous.reindex(weights.index).fillna(0.0)
+    increases = (weights - previous_aligned).clip(lower=0.0).reindex(selected)
+    available = float(increases.sum())
+    if available + 1e-10 < required_reduction:
+        raise ValueError(
+            f"long-only {constraint} conflicts with locked/current holdings; "
+            "refusing to emit an infeasible target"
+        )
+    reduction = increases * min(1.0, required_reduction / max(available, 1e-12))
+    projected = weights.copy()
+    projected.loc[selected] = projected.loc[selected] - reduction
+    return projected.clip(lower=0.0)
+
+
+def _project_and_validate_long_only_target(
+    weights: pd.Series,
+    *,
+    previous_weights: pd.Series | None,
+    per_name_cap: pd.Series,
+    sector_lookup: dict[str, str],
+    config: V7TargetWeightsConfig,
+) -> pd.Series:
+    """Restore the final feasible set after holding and turnover constraints.
+
+    Holding-period reconciliation can reintroduce dropped current names after the
+    initial name/sector projection. We reserve those current holdings and reduce
+    only new/increased exposure. If current/locked exposure alone violates a hard
+    limit, there is no safe automatic projection and target construction fails.
+    """
+
+    tolerance = 1e-9
+    projected = pd.to_numeric(weights.copy(), errors="coerce").astype(float)
+    if not np.isfinite(projected.to_numpy(dtype=float)).all():
+        raise ValueError("long-only target contains non-finite weights")
+    if bool((projected < -tolerance).any()):
+        raise ValueError("long-only target contains negative weights")
+    projected = projected.clip(lower=0.0)
+    previous = (
+        previous_weights.reindex(projected.index).fillna(0.0).astype(float)
+        if previous_weights is not None
+        else pd.Series(0.0, index=projected.index, dtype=float)
+    )
+
+    effective_caps = per_name_cap.reindex(projected.index).fillna(
+        config.max_weight_per_name
+    )
+    effective_caps = effective_caps.clip(upper=float(config.max_weight_per_name))
+    for symbol in projected.index:
+        cap = float(effective_caps.loc[symbol])
+        if projected.loc[symbol] <= cap + tolerance:
+            continue
+        if previous.loc[symbol] <= cap + tolerance:
+            projected.loc[symbol] = cap
+            continue
+        raise ValueError(
+            "long-only single-name/liquidity cap conflicts with locked/current "
+            f"holding {symbol}; refusing to emit an infeasible target"
+        )
+
+    if sector_lookup:
+        sectors = projected.index.to_series().map(sector_lookup).fillna("__unknown__")
+        for sector in sorted(set(sectors)):
+            members = sectors[sectors == sector].index
+            exposure = float(projected.reindex(members).sum())
+            projected = _reduce_long_only_increases(
+                projected,
+                previous,
+                symbols=members,
+                required_reduction=exposure - float(config.max_sector_weight),
+                constraint=f"sector cap for {sector}",
+            )
+
+    stock_budget = 1.0 - float(config.cash_floor)
+    if not 0.0 <= stock_budget <= 1.0:
+        raise ValueError("cash_floor must be within [0, 1]")
+    projected = _reduce_long_only_increases(
+        projected,
+        previous,
+        symbols=projected.index,
+        required_reduction=float(projected.sum()) - stock_budget,
+        constraint="gross exposure/cash floor",
+    )
+
+    if float(projected.sum()) > stock_budget + tolerance:
+        raise ValueError("long-only target exceeds gross exposure/cash-floor budget")
+    if bool((projected - effective_caps > tolerance).any()):
+        raise ValueError("long-only target exceeds a single-name/liquidity cap")
+    if sector_lookup:
+        sectors = projected.index.to_series().map(sector_lookup).fillna("__unknown__")
+        exposures = projected.groupby(sectors).sum()
+        if bool((exposures > float(config.max_sector_weight) + tolerance).any()):
+            raise ValueError("long-only target exceeds a sector cap")
+    if previous_weights is not None and config.max_turnover > 0:
+        aligned_previous = previous_weights.reindex(projected.index).fillna(0.0)
+        turnover = float((projected - aligned_previous).abs().sum())
+        if turnover > float(config.max_turnover) + tolerance:
+            raise ValueError("long-only target exceeds the turnover cap")
+    return projected
 
 
 def _try_cvxpy_long_only(

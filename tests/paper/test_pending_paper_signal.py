@@ -175,3 +175,17 @@ def test_duplicate_json_keys_are_rejected_as_corrupt_evidence(tmp_path) -> None:
     )
     with pytest.raises(PendingSignalCorruption, match="duplicate JSON key"):
         store.read("2026-08-07")
+
+
+@pytest.mark.parametrize("invalid", ["NaT", None, float("nan"), "not-a-date"])
+def test_invalid_signal_date_never_becomes_a_pending_filename(
+    tmp_path, invalid
+) -> None:
+    store = PendingPaperSignalStore(tmp_path / "pending")
+    with pytest.raises(ValueError, match="finite date"):
+        store.record(
+            signal_date=invalid,
+            target_weights=_weights(),
+            source_lineage={"model": "v1"},
+        )
+    assert not (tmp_path / "pending" / "NaT.json").exists()

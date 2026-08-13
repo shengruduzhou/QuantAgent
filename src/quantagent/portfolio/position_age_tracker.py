@@ -29,6 +29,7 @@ would never bind.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Mapping
 
@@ -39,6 +40,35 @@ import pandas as pd
 # treated as locked rather than silently unlocked. A real theme/lifecycle
 # horizon replaces this sentinel as soon as one is observed.
 UNKNOWN_INITIAL_HORIZON_DAYS = 2_147_483_647
+MAX_EXPECTED_HORIZON_DAYS = 126
+
+
+def _validated_horizon_days(
+    value: object,
+    *,
+    allow_unknown_sentinel: bool = False,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError("expected_horizon_days must be an integer trading-day count")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"expected_horizon_days must be numeric, got {value!r}"
+        ) from exc
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(
+            f"expected_horizon_days must be a finite integer, got {value!r}"
+        )
+    horizon = int(numeric)
+    if allow_unknown_sentinel and horizon == UNKNOWN_INITIAL_HORIZON_DAYS:
+        return horizon
+    if not 1 <= horizon <= MAX_EXPECTED_HORIZON_DAYS:
+        raise ValueError(
+            "expected_horizon_days must be within the governed theme contract "
+            f"[1, {MAX_EXPECTED_HORIZON_DAYS}], got {value!r}"
+        )
+    return horizon
 
 
 @dataclass
@@ -71,7 +101,12 @@ class PositionAgeTracker:
                     last_seen=pd.to_datetime(row["last_seen"]) if pd.notna(row.get("last_seen")) else None,
                     weight=float(row.get("weight", 0.0)),
                     expected_horizon_days=(
-                        int(row["expected_horizon_days"]) if pd.notna(row.get("expected_horizon_days")) else None
+                        _validated_horizon_days(
+                            row["expected_horizon_days"],
+                            allow_unknown_sentinel=True,
+                        )
+                        if pd.notna(row.get("expected_horizon_days"))
+                        else None
                     ),
                     days_held=int(row.get("days_held", 0)),
                 )
@@ -133,7 +168,7 @@ class PositionAgeTracker:
                     existing.last_seen = None
                     existing.days_held = 0
                     existing.expected_horizon_days = (
-                        int(supplied_horizon)
+                        _validated_horizon_days(supplied_horizon)
                         if supplied_horizon is not None
                         else UNKNOWN_INITIAL_HORIZON_DAYS
                     )
@@ -144,7 +179,9 @@ class PositionAgeTracker:
                     and existing.expected_horizon_days
                     in {None, UNKNOWN_INITIAL_HORIZON_DAYS}
                 ):
-                    existing.expected_horizon_days = int(expected_horizons[symbol])
+                    existing.expected_horizon_days = _validated_horizon_days(
+                        expected_horizons[symbol]
+                    )
                 continue
             supplied_horizon = expected_horizons.get(symbol)
             self._records[symbol] = PositionRecord(
@@ -153,7 +190,7 @@ class PositionAgeTracker:
                 last_seen=None,
                 weight=weight,
                 expected_horizon_days=(
-                    int(supplied_horizon)
+                    _validated_horizon_days(supplied_horizon)
                     if supplied_horizon is not None
                     else UNKNOWN_INITIAL_HORIZON_DAYS
                 ),
@@ -169,7 +206,7 @@ class PositionAgeTracker:
                 continue
             record = self._records.get(str(raw_symbol))
             if record is not None:
-                record.expected_horizon_days = int(raw_horizon)
+                record.expected_horizon_days = _validated_horizon_days(raw_horizon)
 
     def persist(self) -> Path | None:
         if self._state_path is None:
@@ -199,7 +236,11 @@ class PositionAgeTracker:
                     entry_date=ts,
                     last_seen=ts,
                     weight=weight_f,
-                    expected_horizon_days=expected_horizons.get(symbol),
+                    expected_horizon_days=(
+                        _validated_horizon_days(expected_horizons[symbol])
+                        if expected_horizons.get(symbol) is not None
+                        else None
+                    ),
                     days_held=0,
                 )
                 self._records[str(symbol)] = record
@@ -218,7 +259,9 @@ class PositionAgeTracker:
             record.last_seen = ts
             record.weight = weight_f
             if symbol in expected_horizons and expected_horizons[symbol] is not None:
-                record.expected_horizon_days = int(expected_horizons[symbol])
+                record.expected_horizon_days = _validated_horizon_days(
+                    expected_horizons[symbol]
+                )
 
         # Names not seen on this date keep their entry_date but get a stale flag via last_seen.
         for symbol in list(self._records.keys()):
@@ -264,6 +307,7 @@ class PositionAgeTracker:
 
 
 __all__ = [
+    "MAX_EXPECTED_HORIZON_DAYS",
     "UNKNOWN_INITIAL_HORIZON_DAYS",
     "PositionRecord",
     "PositionAgeTracker",

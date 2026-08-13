@@ -108,3 +108,20 @@ def test_account_lock_path_canonicalizes_symlink_alias(tmp_path) -> None:
     assert account_lock.paper_account_lock_path(ledger) == account_lock.paper_account_lock_path(
         alias_dir / "canonical.jsonl"
     )
+
+
+def test_account_lock_path_collapses_hardlink_aliases(tmp_path) -> None:
+    ledger = tmp_path / "canonical.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    alias = tmp_path / "canonical-hardlink.jsonl"
+    try:
+        alias.hardlink_to(ledger)
+    except OSError as exc:
+        pytest.skip(f"hardlink creation unavailable: {exc}")
+
+    assert ledger.stat().st_ino == alias.stat().st_ino
+    assert account_lock.paper_account_lock_path(ledger) == account_lock.paper_account_lock_path(alias)
+    with account_lock.paper_account_lock(ledger):
+        with pytest.raises(account_lock.PaperAccountLockTimeout):
+            with account_lock.paper_account_lock(alias, timeout_seconds=0.0):
+                pytest.fail("hardlink alias acquired a second account lock")

@@ -34,6 +34,10 @@ export interface PaperExecutionEvidence {
     recordCount: number;
     terminalCount: number;
     unresolvedCount: number;
+    unreconciledIndeterminateCount?: number;
+    committedPendingCount: number;
+    stagedUncommittedCount: number;
+    missingCommittedPendingCount: number;
     reason?: string | null;
   };
   accountIdentity: {
@@ -50,13 +54,18 @@ export interface PaperExecutionEvidence {
     state: "valid" | "invalid" | "unavailable";
     verified: boolean;
     boundTerminalCount: number;
+    legacyBoundTerminalCount: number;
     legacyUnboundTerminalCount: number;
     latestTerminalBound: boolean;
+    latestTerminalBindingAssurance: string;
+    currentRecordCount?: number | null;
+    currentHeadHash?: string | null;
     reason?: string | null;
   };
   summary: {
     attention: "ok" | "warning" | "critical" | "pending" | "unavailable";
     latestStatus?: string | null;
+    latestDecisionKind?: string | null;
     latestSignalDate?: string | null;
     latestExecutionDate?: string | null;
     latestRecordedAt?: string | null;
@@ -65,6 +74,10 @@ export interface PaperExecutionEvidence {
     productionPretradeRiskCertified: boolean;
     accountIdentityVerified: boolean;
     latestTerminalCanonicalPrefixBound: boolean;
+    latestTerminalBindingAssurance: string;
+    frozenCanonicalRecordCount?: number | null;
+    frozenCanonicalHead?: string | null;
+    executionEvidenceAvailable: boolean;
     riskScope?: string | null;
     sessionClosed?: boolean | null;
     orderCount?: number | null;
@@ -90,6 +103,10 @@ const STATUS_LABEL: Record<string, string> = {
   execution_blocked: "执行被风控/市场条件阻止",
   missed_execution_session: "错过精确下一交易会话",
   execution_indeterminate: "执行结果不确定 / 账户冻结",
+  execution_reconciled: "不确定执行已由操作员对账",
+  legacy_terminal_bound: "Legacy terminal 已绑定（较低保证）",
+  daily_decision_frozen: "当日决策已冻结",
+  staged_uncommitted: "Target 已暂存 / 尚未提交",
 };
 
 const STATUS_TONE: Record<string, string> = {
@@ -98,6 +115,10 @@ const STATUS_TONE: Record<string, string> = {
   execution_blocked: "warning",
   missed_execution_session: "warning",
   execution_indeterminate: "danger",
+  execution_reconciled: "warning",
+  legacy_terminal_bound: "warning",
+  daily_decision_frozen: "pending",
+  staged_uncommitted: "warning",
 };
 
 function statusLabel(status?: string | null): string {
@@ -178,6 +199,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
   const identityVerified = evidence.operatorTruth.accountIdentityVerified;
   const prefixCertified = evidence.operatorTruth.canonicalExecutionPrefixCertified;
   const latestStatus = evidence.summary.latestStatus;
+  const latestDecisionKind = evidence.summary.latestDecisionKind;
   const latestRecords = evidence.records.slice(0, 6);
   const leadTitle = identityInvalid
     ? "Paper 账户身份校验失败"
@@ -189,7 +211,11 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
           ? "存在未闭合执行尝试"
           : evidence.journal.state === "unavailable"
             ? "尚无连续执行 journal"
-            : statusLabel(latestStatus);
+            : latestStatus === "daily_decision_frozen"
+              ? latestDecisionKind === "no_target"
+                ? "当日无目标决策已冻结"
+                : "Target 已冻结，等待下一观察交易日"
+              : statusLabel(latestStatus);
   const leadMessage = unresolved && evidence.journal.state === "valid"
     ? `${evidence.journal.unresolvedCount} 个 execution_started 尚无 terminal outcome；禁止把最新成功记录解释为账户整体健康。`
     : identityInvalid
@@ -213,7 +239,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
             <strong>{leadTitle}</strong>
             <span>{leadMessage}</span>
           </div>
-          <span className={`paper-evidence-status status-${STATUS_TONE[latestStatus ?? ""] ?? "neutral"}`}>{latestStatus ?? evidence.journal.state}</span>
+          <span className={`paper-evidence-status status-${STATUS_TONE[latestStatus ?? ""] ?? "neutral"}`}>{statusLabel(latestStatus ?? evidence.journal.state)}</span>
         </div>
       </div>
 
@@ -231,7 +257,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
         <article className={prefixCertified ? "certified" : "locked"}>
           <span>Canonical terminal prefix</span>
           <strong>{yesNo(prefixCertified)}</strong>
-          <small>{evidence.canonicalPrefix.boundTerminalCount} bound · {evidence.canonicalPrefix.legacyUnboundTerminalCount} legacy</small>
+          <small>{evidence.canonicalPrefix.boundTerminalCount} bound · {evidence.canonicalPrefix.legacyBoundTerminalCount} operator · {evidence.canonicalPrefix.legacyUnboundTerminalCount} unbound</small>
         </article>
         <article className={liveCertified ? "certified" : "locked"}>
           <span>Production pre-trade certified</span>
@@ -246,7 +272,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
         <article className={unresolved ? "locked" : ""}>
           <span>Unresolved attempts</span>
           <strong>{evidence.journal.unresolvedCount}</strong>
-          <small>{evidence.journal.recordCount} journal records</small>
+          <small>{evidence.journal.committedPendingCount} pending · {evidence.journal.stagedUncommittedCount} staged</small>
         </article>
       </div>
 
@@ -289,6 +315,7 @@ export function PaperExecutionEvidencePanel(): JSX.Element {
             <span><small>Orders / fills</small><strong>{evidence.summary.orderCount ?? "—"} / {evidence.summary.fillCount ?? "—"}</strong></span>
             <span><small>NAV Δ</small><strong>{navDelta(evidence.summary.navBefore, evidence.summary.navAfter)}</strong></span>
             <span><small>Session closed</small><strong>{evidence.summary.sessionClosed == null ? "—" : yesNo(evidence.summary.sessionClosed)}</strong></span>
+            <span><small>Canonical head / records</small><strong title={evidence.canonicalPrefix.currentHeadHash ?? undefined}>{shortHash(evidence.canonicalPrefix.currentHeadHash)} / {evidence.canonicalPrefix.currentRecordCount ?? "—"}</strong></span>
             <span><small>Recorded</small><strong>{recordedAt(evidence.summary.latestRecordedAt)}</strong></span>
           </div>
 

@@ -19,8 +19,10 @@ serialized by an operational safety primitive.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from hashlib import sha256
 import os
 from pathlib import Path
+import tempfile
 import time
 from typing import Iterator
 
@@ -34,7 +36,17 @@ def paper_account_lock_path(canonical_ledger_path: str | os.PathLike[str]) -> Pa
     # ledger path. ``strict=False`` resolves existing symlink/junction components
     # while still supporting a first-run ledger file that does not yet exist.
     path = Path(canonical_ledger_path).resolve(strict=False)
-    return path.with_name(f"{path.name}.account.lock")
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return path.with_name(f"{path.name}.account.lock")
+    identity = f"{stat.st_dev}:{stat.st_ino}".encode("ascii")
+    digest = sha256(identity).hexdigest()
+    return (
+        Path(tempfile.gettempdir())
+        / "quantagent-paper-account-locks"
+        / f"{digest}.lock"
+    )
 
 
 @contextmanager
@@ -51,7 +63,8 @@ def paper_account_lock(
     unlocked snapshot.
     """
 
-    lock_path = paper_account_lock_path(canonical_ledger_path)
+    canonical_path = Path(canonical_ledger_path).resolve(strict=False)
+    lock_path = paper_account_lock_path(canonical_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     with lock_path.open("a+b") as handle:

@@ -12,6 +12,7 @@ import pytest
 from quantagent.paper.account_target_state import PaperAccountStateRefused
 from quantagent.paper.canonical_receipt import build_canonical_prefix_index
 from quantagent.paper.continuous_execution import (
+    ContinuousPaperExecutionBlocked,
     ContinuousPaperExecutionConfig,
     bind_legacy_terminal_account,
     reconcile_indeterminate_account,
@@ -85,7 +86,11 @@ def test_daily_decision_marker_survives_without_pending_json(tmp_path) -> None:
     )
     assert not (tmp_path / "pending").exists()
     with pytest.raises(PaperAccountStateRefused, match="already durably frozen"):
-        _assert_current_signal_not_frozen(config, "2026-08-11")
+        _assert_current_signal_not_frozen(
+            config,
+            "2026-08-11",
+            paper_account_identity_sha256="f" * 64,
+        )
 
 
 def test_legacy_same_date_terminal_blocks_artifact_reuse_after_pending_deleted(tmp_path) -> None:
@@ -99,7 +104,11 @@ def test_legacy_same_date_terminal_blocks_artifact_reuse_after_pending_deleted(t
         recorded_at="2026-08-13T00:00:00+00:00",
     )
     with pytest.raises(PaperAccountStateRefused, match="legacy same-date execution evidence"):
-        _assert_current_signal_not_frozen(config, "2026-08-11")
+        _assert_current_signal_not_frozen(
+            config,
+            "2026-08-11",
+            paper_account_identity_sha256="f" * 64,
+        )
 
 
 def test_operator_legacy_binding_is_append_only_and_accepted_by_daily_gate(tmp_path) -> None:
@@ -302,3 +311,109 @@ def test_custom_journal_path_canonicalizes_file_symlink_alias(tmp_path) -> None:
         as_of_date="2026-08-11", canonical_ledger_path=str(alias), execution_journal_path=None
     )
     assert daily_loop._execution_journal_path(real_cfg) == daily_loop._execution_journal_path(alias_cfg)
+
+
+def test_legacy_binding_rejects_terminal_with_conflicting_explicit_identity(
+    tmp_path,
+) -> None:
+    daily = _daily_config(tmp_path, "2026-08-12")
+    prior = _pending(daily, "2026-08-10")
+    PendingExecutionJournal(daily.execution_journal_path).append(
+        pending_payload_sha256=prior.payload_sha256,
+        signal_date=prior.signal_date,
+        execution_date="2026-08-11",
+        status="execution_observed",
+        details={
+            "target_weights_sha256": prior.target_weights_sha256,
+            "paper_account_identity_sha256": "0" * 64,
+        },
+    )
+
+    with pytest.raises(
+        ContinuousPaperExecutionBlocked, match="conflicting paper-account identity"
+    ):
+        bind_legacy_terminal_account(
+            config=_continuous_config(tmp_path),
+            pending_payload_sha256=prior.payload_sha256,
+            as_of_date="2026-08-12",
+            reason="must not rebind another account",
+        )
+
+
+def test_other_account_staged_summary_is_preserved_and_refused(tmp_path) -> None:
+    shared_reports = tmp_path / "reports"
+    shared_pending = tmp_path / "pending"
+    first = DailyPaperLoopConfig(
+        as_of_date="2026-08-11",
+        output_root=str(shared_reports),
+        pending_signal_dir=str(shared_pending),
+        canonical_ledger_path=str(tmp_path / "first-canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "first-journal.jsonl"),
+    )
+    second = DailyPaperLoopConfig(
+        as_of_date="2026-08-11",
+        output_root=str(shared_reports),
+        pending_signal_dir=str(shared_pending),
+        canonical_ledger_path=str(tmp_path / "second-canonical.jsonl"),
+        execution_journal_path=str(tmp_path / "second-journal.jsonl"),
+    )
+    summary_path = daily_loop._write_daily_summary(
+        shared_reports / "2026-08-11",
+        {
+            "daily_decision_commit_protocol": daily_loop.DAILY_SUMMARY_COMMIT_PROTOCOL,
+            "paper_account_owner": daily_loop._paper_account_owner(first, "a" * 64),
+        },
+    )
+
+    with pytest.raises(PaperAccountStateRefused, match="legacy/ambiguous daily summary"):
+        _assert_current_signal_not_frozen(
+            second,
+            "2026-08-11",
+            paper_account_identity_sha256="b" * 64,
+        )
+    assert summary_path.exists()
+
+
+def test_other_account_staged_pending_is_preserved_and_refused(tmp_path) -> None:
+    shared_pending = tmp_path / "pending"
+    first = _daily_config(tmp_path / "first")
+    second = _daily_config(tmp_path / "second")
+    second = DailyPaperLoopConfig(
+        **{
+            **daily_loop.asdict(second),
+            "pending_signal_dir": str(shared_pending),
+            "output_root": str(tmp_path / "shared-reports"),
+        }
+    )
+    first = DailyPaperLoopConfig(
+        **{
+            **daily_loop.asdict(first),
+            "pending_signal_dir": str(shared_pending),
+            "output_root": str(tmp_path / "shared-reports"),
+        }
+    )
+    pending, pending_path = PendingPaperSignalStore(shared_pending).record(
+        signal_date="2026-08-11",
+        target_weights=pd.DataFrame(
+            [{"trade_date": pd.Timestamp("2026-08-11"), "600000.SH": 0.25}]
+        ),
+        source_lineage={
+            "daily_decision_commit_protocol": daily_loop.PENDING_COMMIT_PROTOCOL,
+            "paper_account_identity_sha256": "a" * 64,
+            "canonical_ledger_path": str(
+                Path(first.canonical_ledger_path).resolve(strict=False)
+            ),
+            "execution_journal_path": str(
+                Path(daily_loop._execution_journal_path(first)).resolve(strict=False)
+            ),
+        },
+    )
+
+    with pytest.raises(PaperAccountStateRefused, match="legacy/ambiguous pending"):
+        _assert_current_signal_not_frozen(
+            second,
+            "2026-08-11",
+            paper_account_identity_sha256="b" * 64,
+        )
+    assert pending_path.exists()
+    assert PendingPaperSignalStore(shared_pending).read("2026-08-11") == pending

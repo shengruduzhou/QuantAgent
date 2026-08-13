@@ -276,7 +276,12 @@ class PaperAccountIdentityStore:
 
 
 def account_identity_path_for_canonical(canonical_ledger_path: str | Path) -> Path:
-    return Path(canonical_ledger_path).with_name("account_identity.json")
+    canonical = Path(canonical_ledger_path).resolve(strict=False)
+    if canonical.name == "canonical_ledger.jsonl":
+        return canonical.with_name("account_identity.json")
+    suffix = canonical.suffix
+    stem = canonical.stem if suffix else canonical.name
+    return canonical.with_name(f"{stem}.account_identity.json")
 
 
 def _assert_identity_creation_is_safe(
