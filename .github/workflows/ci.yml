@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   remediate-pr141-edge:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'chore(ci): run deterministic PR141 edge patch'
+    if: "github.event_name == 'push' && github.event.head_commit.message == 'chore(ci): execute PR141 edge patch'"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact branch head
