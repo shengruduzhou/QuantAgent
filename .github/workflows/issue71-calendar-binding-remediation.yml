@@ -1,0 +1,50 @@
+name: Issue71 Authoritative Calendar Binding Integration
+
+on:
+  push:
+    branches:
+      - agent/authoritative-acceptance-calendar
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: "github.event.head_commit.message == 'chore(ci): execute authoritative calendar binding integration'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/authoritative-acceptance-calendar
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Apply deterministic integration patch
+        run: python scripts/issue71_calendar_binding_patch.py
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -e ".[test]"
+      - name: Compile and focused governance tests
+        run: |
+          python -m compileall -q src
+          python -m pytest \
+            tests/execution/test_acceptance_calendar.py \
+            tests/execution/test_live_model_trust_v2.py \
+            tests/execution/test_live_model_trust_v2_window_isolation.py \
+            tests/execution/test_live_model_trust_v2_policy.py \
+            -q
+          git diff --check
+      - name: Commit validated business and regression changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src/quantagent/execution/live_model_trust_v2.py \
+            src/quantagent/execution/live_model_trust_v2_policy.py \
+            tests/execution/test_live_model_trust_v2.py
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(governance): bind authoritative acceptance calendar"
+          git push origin HEAD:agent/authoritative-acceptance-calendar
