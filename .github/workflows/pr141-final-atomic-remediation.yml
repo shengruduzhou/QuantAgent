@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   remediate:
-    if: "github.event.head_commit.message == 'chore(ci): execute final PR141 atomic evidence remediation'"
+    if: "github.event.head_commit.message == 'chore(ci): diagnose final PR141 atomic evidence remediation'"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact branch head
@@ -30,7 +30,9 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -e ".[test]"
       - name: Compile and focused adversarial regressions
+        shell: bash
         run: |
+          set -o pipefail
           python -m compileall -q src
           python -m pytest \
             tests/paper/test_continuous_pending_execution.py \
@@ -44,8 +46,18 @@ jobs:
             tests/test_v7_target_initial_weights.py \
             tests/test_v7_phase3_dynamic_portfolio.py \
             tests/test_v7_target_cvxpy_dropped_holding.py \
-            -q
+            -q --junitxml=focused-results.xml 2>&1 | tee focused.log
           git diff --check
+      - name: Upload focused diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr141-final-atomic-focused
+          path: |
+            focused.log
+            focused-results.xml
+          if-no-files-found: warn
+          retention-days: 7
       - name: Commit validated business and regression changes
         run: |
           git config user.name "github-actions[bot]"
