@@ -100,7 +100,7 @@ def test_prior_indeterminate_signal_requires_explicit_bound_reconciliation(tmp_p
         recorded_at="2026-08-13T00:01:00+00:00",
     )
 
-    with pytest.raises(PaperAccountStateRefused, match="status=execution_indeterminate"):
+    with pytest.raises(PaperAccountStateRefused, match="unreconciled execution_indeterminate"):
         _assert_resolved(config, "2026-08-11")
 
     prefix = build_canonical_prefix_index(config.canonical_ledger_path)
@@ -121,8 +121,79 @@ def test_prior_indeterminate_signal_requires_explicit_bound_reconciliation(tmp_p
     _assert_resolved(config, "2026-08-11")
 
 
+def test_orphan_execution_started_blocks_even_after_pending_artifact_deleted(tmp_path) -> None:
+    config = _config(tmp_path, "2026-08-11")
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    journal.append(
+        pending_payload_sha256="a" * 64,
+        signal_date="2026-08-10",
+        execution_date="2026-08-11",
+        status="execution_started",
+        details={
+            "paper_account_identity_sha256": _IDENTITY_SHA,
+            "target_weights_sha256": "b" * 64,
+            "canonical_records_before": 0,
+            "canonical_head_before": "0" * 64,
+        },
+        recorded_at="2026-08-13T00:01:00+00:00",
+    )
+    assert not (tmp_path / "pending").exists()
+
+    with pytest.raises(PaperAccountStateRefused, match="unresolved execution_started"):
+        _assert_resolved(config, "2026-08-11")
+
+
+def test_orphan_indeterminate_blocks_even_after_pending_artifact_deleted(tmp_path) -> None:
+    config = _config(tmp_path, "2026-08-11")
+    prefix = build_canonical_prefix_index(config.canonical_ledger_path)
+    receipt = build_canonical_prefix_receipt(
+        ledger=config.canonical_ledger_path,
+        canonical_before_records=prefix.record_count,
+        canonical_before_head=prefix.current_head,
+        target_weights_sha256="b" * 64,
+        paper_account_identity_sha256=_IDENTITY_SHA,
+    )
+    journal = PendingExecutionJournal(config.execution_journal_path)
+    journal.append(
+        pending_payload_sha256="a" * 64,
+        signal_date="2026-08-10",
+        execution_date="2026-08-11",
+        status="execution_indeterminate",
+        details={
+            "paper_account_identity_sha256": _IDENTITY_SHA,
+            "target_weights_sha256": "b" * 64,
+            "canonical_prefix_receipt": receipt,
+        },
+        recorded_at="2026-08-13T00:01:00+00:00",
+    )
+    assert not (tmp_path / "pending").exists()
+
+    with pytest.raises(PaperAccountStateRefused, match="unreconciled execution_indeterminate"):
+        _assert_resolved(config, "2026-08-11")
+
+
 def test_current_date_pending_signal_is_not_treated_as_prior_execution(tmp_path) -> None:
     config = _config(tmp_path, "2026-08-11")
     _record(PendingPaperSignalStore(config.pending_signal_dir), "2026-08-11")
 
     _assert_resolved(config, "2026-08-11")
+
+
+def test_execution_journal_field_preserves_legacy_positional_config_order() -> None:
+    config = DailyPaperLoopConfig(
+        "2026-08-11",
+        "model",
+        "features",
+        "market",
+        "sector",
+        "output",
+        "book",
+        "pending",
+        "canonical",
+        "identity",
+    )
+
+    assert config.pending_signal_dir == "pending"
+    assert config.canonical_ledger_path == "canonical"
+    assert config.account_identity_path == "identity"
+    assert config.execution_journal_path not in {"canonical", "identity"}
