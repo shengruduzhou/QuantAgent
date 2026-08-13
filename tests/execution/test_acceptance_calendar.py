@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timezone
 import json
 
 import pytest
@@ -119,10 +117,23 @@ def test_duplicate_unordered_weekend_and_out_of_window_sessions_fail() -> None:
 
 
 def test_repacked_or_interior_session_change_cannot_keep_original_digest() -> None:
-    payload = _payload()
+    payload = build_acceptance_calendar_payload(
+        model_id=MODEL_ID,
+        source_commit=SOURCE_COMMIT,
+        acceptance_window_id="fresh-2026-03-02_2026-03-09",
+        window_start_date="2026-03-02",
+        window_end_date="2026-03-09",
+        sessions=["2026-03-02", "2026-03-03", "2026-03-05", "2026-03-06", "2026-03-09"],
+        source_provider="SSE_SZSE_OFFICIAL_ARCHIVE",
+        source_identity="sse-szse-2026-session-calendar",
+        source_version="2026.rules+holiday-notices.v1",
+        source_retrieved_at="2026-08-13T08:00:00+00:00",
+        source_as_of="2026-08-13T08:00:00+00:00",
+        source_locators=["official-source"],
+    )
     original_digest = payload["session_set_sha256"]
-    # Same count and same boundary dates, but a different interior date.
-    payload["sessions"][2] = "2026-03-01"
+    # Same count, same boundaries and still-valid weekdays; only the interior set changed.
+    payload["sessions"][2] = "2026-03-04"
     assert payload["session_set_sha256"] == original_digest
     with pytest.raises(ValueError, match="session_set_sha256_mismatch"):
         validate_acceptance_calendar_payload(payload)
