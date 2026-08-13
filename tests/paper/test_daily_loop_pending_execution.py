@@ -261,3 +261,24 @@ def test_no_target_stale_prediction_date_does_not_freeze_day(tmp_path, monkeypat
         daily_loop.run_once(config)
     journal = daily_loop.PendingExecutionJournal(daily_loop._execution_journal_path(config))
     assert journal.daily_decision(as_of) is None
+
+
+def test_freeze_failure_discards_uncommitted_current_protocol_staging(tmp_path, monkeypatch) -> None:
+    targets = pd.DataFrame(
+        {"trade_date": [pd.Timestamp("2026-08-07")], "600000.SH": [0.5]}
+    )
+    as_of, config, _ = _install_common_mocks(tmp_path, monkeypatch, targets=targets)
+    original_append = daily_loop.PendingExecutionJournal.append
+
+    def fail_daily_freeze(self, **kwargs):
+        if kwargs.get("status") == daily_loop.DAILY_DECISION_STATUS:
+            raise OSError("simulated freeze fsync failure")
+        return original_append(self, **kwargs)
+
+    monkeypatch.setattr(daily_loop.PendingExecutionJournal, "append", fail_daily_freeze)
+    with pytest.raises(OSError, match="freeze fsync failure"):
+        daily_loop.run_once(config)
+    assert not (tmp_path / "pending" / f"{as_of}.json").exists()
+    assert daily_loop.PendingExecutionJournal(
+        daily_loop._execution_journal_path(config)
+    ).daily_decision(as_of) is None

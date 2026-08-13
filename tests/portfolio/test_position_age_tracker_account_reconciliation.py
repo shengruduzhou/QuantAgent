@@ -26,15 +26,15 @@ def test_begin_session_drops_persisted_symbol_absent_from_authoritative_holdings
     restarted = PositionAgeTracker.from_state(state_path)
     assert restarted.is_locked("SOLD", pd.Timestamp("2026-08-05"))
 
-    # Canonical account recovery is authoritative: SOLD was actually liquidated
-    # before restart, so its persisted lifecycle history must not survive into
-    # the first-date lock calculation. HELD keeps its historical age/horizon.
+    # Canonical account recovery proves current holdings, but symbol equality
+    # alone does not prove HELD was continuously held while the tracker was offline.
     restarted.begin_session({"HELD": 0.30})
     snapshot = restarted.snapshot().set_index("symbol")
 
     assert "SOLD" not in snapshot.index
     assert "HELD" in snapshot.index
-    assert int(snapshot.loc["HELD", "expected_horizon_days"]) == 60
+    assert int(snapshot.loc["HELD", "expected_horizon_days"]) == UNKNOWN_INITIAL_HORIZON_DAYS
+    assert restarted.age_for("HELD", pd.Timestamp("2026-08-05")) == 0
     assert not restarted.is_locked("SOLD", pd.Timestamp("2026-08-05"))
     assert restarted.is_locked("HELD", pd.Timestamp("2026-08-05"))
 
@@ -77,3 +77,34 @@ def test_real_horizon_replaces_unknown_restart_sentinel_before_lock(tmp_path) ->
     restarted.begin_session({"HELD": 0.25}, {"HELD": 5})
     updated = restarted.snapshot().set_index("symbol")
     assert int(updated.loc["HELD", "expected_horizon_days"]) == 5
+
+
+def test_matching_symbol_restart_resets_age_without_continuity_proof(tmp_path) -> None:
+    state_path = tmp_path / "position_age.parquet"
+    tracker = PositionAgeTracker(state_path=state_path)
+    tracker.record_session(pd.Timestamp("2026-08-01"), {"A": 0.2}, {"A": 5})
+    tracker.record_session(pd.Timestamp("2026-08-02"), {"A": 0.2}, {"A": 5})
+    tracker.persist()
+
+    restarted = PositionAgeTracker.from_state(state_path)
+    assert restarted.age_for("A", pd.Timestamp("2026-08-05")) >= 2
+    restarted.begin_session({"A": 0.2}, {"A": 5})
+    assert restarted.age_for("A", pd.Timestamp("2026-08-05")) == 0
+    assert restarted.is_locked("A", pd.Timestamp("2026-08-05"))
+
+
+def test_explicit_continuity_proof_preserves_persisted_age(tmp_path) -> None:
+    state_path = tmp_path / "position_age.parquet"
+    tracker = PositionAgeTracker(state_path=state_path)
+    tracker.record_session(pd.Timestamp("2026-08-01"), {"A": 0.2}, {"A": 5})
+    tracker.record_session(pd.Timestamp("2026-08-02"), {"A": 0.2}, {"A": 5})
+    tracker.persist()
+
+    restarted = PositionAgeTracker.from_state(state_path)
+    before = restarted.age_for("A", pd.Timestamp("2026-08-05"))
+    restarted.begin_session(
+        {"A": 0.2},
+        {"A": 5},
+        continuity_proven_symbols={"A"},
+    )
+    assert restarted.age_for("A", pd.Timestamp("2026-08-05")) == before

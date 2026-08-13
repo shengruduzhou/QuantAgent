@@ -59,7 +59,10 @@ from quantagent.paper.legacy_terminal_binding import (
     LegacyTerminalBindingError,
     verify_legacy_terminal_binding,
 )
-from quantagent.paper.pending_signal import PendingPaperSignalStore
+from quantagent.paper.pending_signal import (
+    PENDING_COMMIT_PROTOCOL,
+    PendingPaperSignalStore,
+)
 from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
 from quantagent.portfolio.v7_target_weights import V7TargetWeightsConfig, build_v7_target_weights, write_v7_target_weights
@@ -369,15 +372,31 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
                 "canonical_ledger_head_hash": str(account_evidence["canonical_head_hash"]),
                 "canonical_ledger_records": str(account_evidence["canonical_records"]),
                 "canonical_account_nav": str(account_evidence["nav"]),
+                "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
             },
         )
-        _freeze_daily_decision(
-            config,
-            as_of,
-            decision_kind="target",
-            paper_account_identity_sha256=account_identity.payload_sha256,
-            account_evidence=account_evidence,
-        )
+        try:
+            _freeze_daily_decision(
+                config,
+                as_of,
+                decision_kind="target",
+                paper_account_identity_sha256=account_identity.payload_sha256,
+                account_evidence=account_evidence,
+                pending_payload_sha256=pending.payload_sha256,
+                target_weights_sha256=pending.target_weights_sha256,
+            )
+        except Exception:
+            # If append definitively did not commit, remove the current-protocol
+            # staging artifact. If a marker is visible, the transaction committed
+            # even if the caller did not receive success; preserve it.
+            decision = PendingExecutionJournal(
+                _execution_journal_path(config)
+            ).daily_decision(as_of)
+            if decision is None:
+                PendingPaperSignalStore(config.pending_signal_dir).discard_staged(
+                    as_of, expected_payload_sha256=pending.payload_sha256
+                )
+            raise
 
     warnings = tuple(
         [*evidence.warnings, "paper_signal_pending_next_observed_session"]
@@ -488,18 +507,7 @@ def _assert_current_signal_not_frozen(
 ) -> None:
     """Fail closed if any durable evidence already owns this signal date."""
 
-    existing = PendingPaperSignalStore(config.pending_signal_dir).read(as_of)
-    if existing is not None:
-        raise PaperAccountStateRefused(
-            "pending paper signal is already frozen for the current signal date; "
-            "refusing to overwrite its hash-bound predictions/target artifacts"
-        )
-    summary_path = Path(config.output_root) / as_of / "daily_loop_summary.json"
-    if summary_path.exists():
-        raise PaperAccountStateRefused(
-            "daily paper decision evidence already exists for the current signal date; "
-            "refusing to overwrite its summary/prediction/target lineage"
-        )
+    store = PendingPaperSignalStore(config.pending_signal_dir)
     journal = PendingExecutionJournal(_execution_journal_path(config))
     if not journal.verify():
         raise PaperAccountStateRefused(
@@ -509,6 +517,29 @@ def _assert_current_signal_not_frozen(
         raise PaperAccountStateRefused(
             "daily paper decision is already durably frozen for the current signal date"
         )
+    summary_path = Path(config.output_root) / as_of / "daily_loop_summary.json"
+    if summary_path.exists():
+        raise PaperAccountStateRefused(
+            "daily paper decision evidence already exists for the current signal date; "
+            "refusing to overwrite its summary/prediction/target lineage"
+        )
+    existing = store.read(as_of)
+    if existing is not None:
+        if (
+            existing.source_lineage.get("daily_decision_commit_protocol")
+            == PENDING_COMMIT_PROTOCOL
+        ):
+            # Current-protocol pending without a freeze is staging left by a
+            # crash before commit. The execution consumer rejects it, so under
+            # the same account lock it is safe to remove and recompute.
+            store.discard_staged(
+                as_of, expected_payload_sha256=existing.payload_sha256
+            )
+        else:
+            raise PaperAccountStateRefused(
+                "legacy/ambiguous pending paper signal exists without a committed "
+                "daily-decision marker; operator reconciliation is required"
+            )
     same_date_economic = [
         record
         for record in journal.records()
@@ -529,20 +560,35 @@ def _freeze_daily_decision(
     decision_kind: str,
     paper_account_identity_sha256: str,
     account_evidence: dict[str, object],
+    pending_payload_sha256: str | None = None,
+    target_weights_sha256: str | None = None,
 ) -> None:
-    """Append an irreversible same-date marker before writing decision artifacts."""
+    """Append the irreversible commit marker for one validated daily decision."""
 
-    material = (
-        "quantagent.paper.daily_decision.v1|"
-        f"{as_of}|{paper_account_identity_sha256}"
-    ).encode("utf-8")
+    if decision_kind == "target":
+        if len(str(pending_payload_sha256 or "")) != 64:
+            raise PaperAccountStateRefused(
+                "target daily decision requires exact pending payload binding"
+            )
+        if len(str(target_weights_sha256 or "")) != 64:
+            raise PaperAccountStateRefused(
+                "target daily decision requires exact target-weight binding"
+            )
+        marker_identity = str(pending_payload_sha256)
+    else:
+        material = (
+            "quantagent.paper.daily_decision.v1|"
+            f"{as_of}|{paper_account_identity_sha256}"
+        ).encode("utf-8")
+        marker_identity = sha256(material).hexdigest()
+
     journal = PendingExecutionJournal(_execution_journal_path(config))
     if not journal.verify():
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before daily decision freeze"
         )
     journal.append(
-        pending_payload_sha256=sha256(material).hexdigest(),
+        pending_payload_sha256=marker_identity,
         signal_date=as_of,
         execution_date=as_of,
         status=DAILY_DECISION_STATUS,
@@ -553,6 +599,12 @@ def _freeze_daily_decision(
             "canonical_records": int(account_evidence["canonical_records"]),
             "canonical_head": str(account_evidence["canonical_head_hash"]),
             "assurance": "canonical_account_daily_decision_freeze_v1",
+            "commit_protocol": (
+                PENDING_COMMIT_PROTOCOL if decision_kind == "target" else "no_target_v1"
+            ),
+            "target_weights_sha256": (
+                str(target_weights_sha256) if decision_kind == "target" else ""
+            ),
         },
     )
 
@@ -705,6 +757,24 @@ def _assert_prior_pending_signals_resolved(
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before target freeze"
         )
+    cutoff = pd.Timestamp(as_of).date()
+    later_records = []
+    for record in journal.records():
+        try:
+            record_date = pd.Timestamp(record.signal_date).date()
+        except (TypeError, ValueError) as exc:
+            raise PaperAccountStateRefused(
+                f"invalid journal signal_date during chronology check: {record.signal_date!r}"
+            ) from exc
+        if record_date > cutoff:
+            later_records.append(record)
+    if later_records:
+        first = min(later_records, key=lambda row: row.signal_date)
+        raise PaperAccountStateRefused(
+            "paper decision chronology regression refused: later durable journal "
+            f"evidence already exists for signal_date={first.signal_date}"
+        )
+
     prefix_index = build_canonical_prefix_index(config.canonical_ledger_path)
     _assert_execution_journal_resolved(
         journal,
@@ -716,7 +786,6 @@ def _assert_prior_pending_signals_resolved(
     if not root.exists():
         return
     store = PendingPaperSignalStore(root)
-    cutoff = pd.Timestamp(as_of).date()
     for path in sorted(root.glob("*.json")):
         try:
             signal_date = pd.Timestamp(path.stem).date()
@@ -724,7 +793,12 @@ def _assert_prior_pending_signals_resolved(
             raise PaperAccountStateRefused(
                 f"unexpected pending-signal filename before target freeze: {path.name}"
             ) from exc
-        if signal_date >= cutoff:
+        if signal_date > cutoff:
+            raise PaperAccountStateRefused(
+                "paper decision chronology regression refused: later pending signal "
+                f"already exists for signal_date={signal_date.isoformat()}"
+            )
+        if signal_date == cutoff:
             continue
         signal = store.read(signal_date.isoformat())
         if signal is None:

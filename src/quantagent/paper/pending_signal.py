@@ -47,6 +47,7 @@ from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 
 PENDING_SIGNAL_SCHEMA_VERSION = "paper_pending_signal_v1"
 PENDING_SIGNAL_STATUS = "pending_next_observed_session"
+PENDING_COMMIT_PROTOCOL = "pending_bound_daily_decision_v1"
 
 
 class PendingSignalConflict(RuntimeError):
@@ -345,10 +346,43 @@ class PendingPaperSignalStore:
                 )
             return persisted, path
 
+    def discard_staged(
+        self,
+        signal_date: str,
+        *,
+        expected_payload_sha256: str,
+    ) -> bool:
+        """Delete one verified *uncommitted* staging artifact by exact identity.
+
+        Commit-state knowledge deliberately remains outside this store. Callers
+        must hold the account lock, prove the journal has no matching committed
+        daily decision, and pass the exact staged payload hash. This method only
+        makes the per-date deletion itself serialized and durable.
+        """
+        signal_date = pd.Timestamp(signal_date).date().isoformat()
+        path = self.path_for(signal_date)
+        with self._thread_lock, self._exclusive_signal_lock(signal_date):
+            existing = self.read(signal_date)
+            if existing is None:
+                return False
+            if existing.payload_sha256 != str(expected_payload_sha256):
+                raise PendingSignalConflict(
+                    "refusing to discard staged pending signal with mismatched payload identity"
+                )
+            path.unlink()
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            return True
+
 
 __all__ = [
     "PENDING_SIGNAL_SCHEMA_VERSION",
     "PENDING_SIGNAL_STATUS",
+    "PENDING_COMMIT_PROTOCOL",
     "PendingSignalConflict",
     "PendingSignalCorruption",
     "PendingPaperSignal",

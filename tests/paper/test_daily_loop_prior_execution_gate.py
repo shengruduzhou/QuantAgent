@@ -197,3 +197,32 @@ def test_execution_journal_field_preserves_legacy_positional_config_order() -> N
     assert config.canonical_ledger_path == "canonical"
     assert config.account_identity_path == "identity"
     assert config.execution_journal_path not in {"canonical", "identity"}
+
+
+def test_backdated_decision_refuses_later_pending_signal(tmp_path) -> None:
+    later = _config(tmp_path, "2026-08-12")
+    _record(PendingPaperSignalStore(later.pending_signal_dir), "2026-08-12")
+    earlier = _config(tmp_path, "2026-08-11")
+    with pytest.raises(PaperAccountStateRefused, match="chronology regression.*later pending"):
+        _assert_prior_pending_signals_resolved(
+            earlier,
+            "2026-08-11",
+            paper_account_identity_sha256=_IDENTITY_SHA,
+        )
+
+
+def test_backdated_decision_refuses_later_durable_journal_record(tmp_path) -> None:
+    earlier = _config(tmp_path, "2026-08-11")
+    PendingExecutionJournal(earlier.execution_journal_path).append(
+        pending_payload_sha256="f" * 64,
+        signal_date="2026-08-12",
+        execution_date="2026-08-12",
+        status="execution_started",
+        details={"paper_account_identity_sha256": _IDENTITY_SHA},
+    )
+    with pytest.raises(PaperAccountStateRefused, match="chronology regression.*later durable"):
+        _assert_prior_pending_signals_resolved(
+            earlier,
+            "2026-08-11",
+            paper_account_identity_sha256=_IDENTITY_SHA,
+        )

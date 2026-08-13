@@ -81,6 +81,8 @@ class PositionAgeTracker:
         self,
         initial_weights: Mapping[str, float] | None,
         expected_horizons: Mapping[str, int | None] | None = None,
+        *,
+        continuity_proven_symbols: set[str] | None = None,
     ) -> None:
         """Reconcile/seed live records from an externally recovered portfolio.
 
@@ -99,6 +101,7 @@ class PositionAgeTracker:
 
         expected_horizons = dict(expected_horizons or {})
         supplied = initial_weights is not None
+        continuity_proven = {str(symbol) for symbol in (continuity_proven_symbols or set())}
         normalized: dict[str, float] = {}
         if supplied:
             for raw_symbol, raw_weight in dict(initial_weights or {}).items():
@@ -121,6 +124,20 @@ class PositionAgeTracker:
             existing = self._records.get(symbol)
             if existing is not None:
                 existing.weight = weight
+                if supplied and symbol not in continuity_proven:
+                    # Symbol equality does not prove an uninterrupted lot. The
+                    # account may have sold and reacquired while this tracker was
+                    # offline, so restart conservatively at unknown age.
+                    supplied_horizon = expected_horizons.get(symbol)
+                    existing.entry_date = None
+                    existing.last_seen = None
+                    existing.days_held = 0
+                    existing.expected_horizon_days = (
+                        int(supplied_horizon)
+                        if supplied_horizon is not None
+                        else UNKNOWN_INITIAL_HORIZON_DAYS
+                    )
+                    continue
                 if (
                     symbol in expected_horizons
                     and expected_horizons[symbol] is not None

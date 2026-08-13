@@ -52,6 +52,7 @@ from quantagent.paper.canonical_receipt import (
     verify_canonical_prefix_receipt,
 )
 from quantagent.paper.execution_journal import (
+    DAILY_DECISION_STATUS,
     LEGACY_BINDING_STATUS,
     RECONCILIATION_STATUS,
     TERMINAL_OUTCOMES,
@@ -62,7 +63,11 @@ from quantagent.paper.legacy_terminal_binding import (
     verify_legacy_terminal_binding,
 )
 from quantagent.paper.ledger import EventLedger
-from quantagent.paper.pending_signal import PendingPaperSignal, PendingPaperSignalStore
+from quantagent.paper.pending_signal import (
+    PENDING_COMMIT_PROTOCOL,
+    PendingPaperSignal,
+    PendingPaperSignalStore,
+)
 from quantagent.paper.recovery import recover, recover_from_canonical
 from quantagent.quant_math.ashare import AshareRuleEngine
 
@@ -856,6 +861,62 @@ def _reconcile_indeterminate_account_locked(
     return appended
 
 
+def _verify_pending_daily_commit(
+    journal: PendingExecutionJournal,
+    pending: PendingPaperSignal,
+    *,
+    expected_paper_account_identity_sha256: str,
+) -> None:
+    if (
+        pending.source_lineage.get("daily_decision_commit_protocol")
+        != PENDING_COMMIT_PROTOCOL
+    ):
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal lacks the staged-intent commit protocol; explicit "
+            "regeneration/reconciliation is required before execution"
+        )
+    decision = journal.daily_decision(pending.signal_date)
+    if decision is None:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal is staged but not committed by a daily_decision_frozen record"
+        )
+    details = dict(decision.details or {})
+    checks = {
+        "decision_kind": (str(details.get("decision_kind") or ""), "target"),
+        "commit_protocol": (str(details.get("commit_protocol") or ""), PENDING_COMMIT_PROTOCOL),
+        "pending_payload_sha256": (decision.pending_payload_sha256, pending.payload_sha256),
+        "target_weights_sha256": (
+            str(details.get("target_weights_sha256") or ""),
+            pending.target_weights_sha256,
+        ),
+        "paper_account_identity_sha256": (
+            str(details.get("paper_account_identity_sha256") or ""),
+            expected_paper_account_identity_sha256,
+        ),
+        "canonical_account_state_sha256": (
+            str(details.get("canonical_account_state_sha256") or ""),
+            str(pending.source_lineage.get("canonical_account_state_sha256") or ""),
+        ),
+        "canonical_head": (
+            str(details.get("canonical_head") or ""),
+            str(pending.source_lineage.get("canonical_ledger_head_hash") or ""),
+        ),
+        "canonical_records": (
+            (
+                str(details.get("canonical_records"))
+                if details.get("canonical_records") is not None
+                else ""
+            ),
+            str(pending.source_lineage.get("canonical_ledger_records") or ""),
+        ),
+    }
+    mismatches = [name for name, (left, right) in checks.items() if left != right]
+    if mismatches:
+        raise ContinuousPaperExecutionBlocked(
+            "pending signal commit binding mismatch: " + ",".join(sorted(mismatches))
+        )
+
+
 def execute_pending_for_session(
     as_of_date: str,
     market_panel: pd.DataFrame,
@@ -943,6 +1004,12 @@ def _execute_pending_for_session_locked(
                 expected_paper_account_identity_sha256=account_identity.payload_sha256,
             )
             continue
+
+        _verify_pending_daily_commit(
+            journal,
+            pending,
+            expected_paper_account_identity_sha256=account_identity.payload_sha256,
+        )
 
         pending_identity_sha = str(
             pending.source_lineage.get("paper_account_identity_sha256", "")

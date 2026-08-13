@@ -12,8 +12,8 @@ from quantagent.paper.continuous_execution import (
     ContinuousPaperExecutionConfig,
     execute_pending_for_session,
 )
-from quantagent.paper.execution_journal import PendingExecutionJournal
-from quantagent.paper.pending_signal import PendingPaperSignalStore
+from quantagent.paper.execution_journal import DAILY_DECISION_STATUS, PendingExecutionJournal
+from quantagent.paper.pending_signal import PENDING_COMMIT_PROTOCOL, PendingPaperSignalStore
 from quantagent.paper.recovery import recover_from_canonical
 
 
@@ -79,16 +79,37 @@ def _identity(tmp_path):
 
 def _record(tmp_path, signal_date: str, weight: float):
     identity = _identity(tmp_path)
-    return PendingPaperSignalStore(tmp_path / "pending").record(
+    pending = PendingPaperSignalStore(tmp_path / "pending").record(
         signal_date=signal_date,
         target_weights=_target(signal_date, weight),
         source_lineage={
             "model": "test-model",
             "target_weights_file_sha256": f"sha-{signal_date}-{weight}",
             "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_ledger_head_hash": "0" * 64,
+            "canonical_ledger_records": "0",
+            "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
         },
         created_at=f"{signal_date}T07:00:00+00:00",
     )[0]
+    PendingExecutionJournal(tmp_path / "execution.jsonl").append(
+        pending_payload_sha256=pending.payload_sha256,
+        signal_date=signal_date,
+        execution_date=signal_date,
+        status=DAILY_DECISION_STATUS,
+        details={
+            "decision_kind": "target",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_records": 0,
+            "canonical_head": "0" * 64,
+            "assurance": "canonical_account_daily_decision_freeze_v1",
+            "commit_protocol": PENDING_COMMIT_PROTOCOL,
+            "target_weights_sha256": pending.target_weights_sha256,
+        },
+    )
+    return pending
 
 
 def test_friday_signal_executes_monday_once_on_persistent_account(tmp_path) -> None:
@@ -400,10 +421,30 @@ def test_pending_signal_from_other_account_identity_is_rejected(tmp_path) -> Non
         source_lineage={
             "model": "test-model",
             "paper_account_identity_sha256": "0" * 64,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_ledger_head_hash": "0" * 64,
+            "canonical_ledger_records": "0",
+            "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
         },
         created_at=f"{FRIDAY}T07:00:00+00:00",
     )[0]
-    with pytest.raises(ContinuousPaperExecutionBlocked, match="mismatched paper-account identity"):
+    PendingExecutionJournal(config.execution_journal_path).append(
+        pending_payload_sha256=pending.payload_sha256,
+        signal_date=FRIDAY,
+        execution_date=FRIDAY,
+        status=DAILY_DECISION_STATUS,
+        details={
+            "decision_kind": "target",
+            "paper_account_identity_sha256": "0" * 64,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_records": 0,
+            "canonical_head": "0" * 64,
+            "assurance": "canonical_account_daily_decision_freeze_v1",
+            "commit_protocol": PENDING_COMMIT_PROTOCOL,
+            "target_weights_sha256": pending.target_weights_sha256,
+        },
+    )
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="paper_account_identity_sha256"):
         execute_pending_for_session(
             MONDAY,
             _market(),
@@ -413,3 +454,67 @@ def test_pending_signal_from_other_account_identity_is_rejected(tmp_path) -> Non
     assert PendingExecutionJournal(config.execution_journal_path).terminal(
         pending.payload_sha256
     ) is None
+
+
+def test_uncommitted_staged_pending_is_never_executed(tmp_path) -> None:
+    config = _config(tmp_path)
+    identity = _identity(tmp_path)
+    pending = PendingPaperSignalStore(tmp_path / "pending").record(
+        signal_date=FRIDAY,
+        target_weights=_target(FRIDAY, 0.50),
+        source_lineage={
+            "model": "test-model",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_ledger_head_hash": "0" * 64,
+            "canonical_ledger_records": "0",
+            "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
+        },
+        created_at=f"{FRIDAY}T07:00:00+00:00",
+    )[0]
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="staged but not committed"):
+        execute_pending_for_session(
+            MONDAY, _market(), config=config, authoritative_sessions=SESSIONS
+        )
+    assert PendingExecutionJournal(config.execution_journal_path).terminal(
+        pending.payload_sha256
+    ) is None
+    assert not (tmp_path / "canonical.jsonl").exists()
+
+
+def test_mismatched_daily_commit_cannot_execute_pending(tmp_path) -> None:
+    config = _config(tmp_path)
+    identity = _identity(tmp_path)
+    pending = PendingPaperSignalStore(tmp_path / "pending").record(
+        signal_date=FRIDAY,
+        target_weights=_target(FRIDAY, 0.50),
+        source_lineage={
+            "model": "test-model",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_ledger_head_hash": "0" * 64,
+            "canonical_ledger_records": "0",
+            "daily_decision_commit_protocol": PENDING_COMMIT_PROTOCOL,
+        },
+        created_at=f"{FRIDAY}T07:00:00+00:00",
+    )[0]
+    PendingExecutionJournal(config.execution_journal_path).append(
+        pending_payload_sha256="f" * 64,
+        signal_date=FRIDAY,
+        execution_date=FRIDAY,
+        status=DAILY_DECISION_STATUS,
+        details={
+            "decision_kind": "target",
+            "paper_account_identity_sha256": identity.payload_sha256,
+            "canonical_account_state_sha256": "1" * 64,
+            "canonical_records": 0,
+            "canonical_head": "0" * 64,
+            "assurance": "canonical_account_daily_decision_freeze_v1",
+            "commit_protocol": PENDING_COMMIT_PROTOCOL,
+            "target_weights_sha256": pending.target_weights_sha256,
+        },
+    )
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="pending_payload_sha256"):
+        execute_pending_for_session(
+            MONDAY, _market(), config=config, authoritative_sessions=SESSIONS
+        )
