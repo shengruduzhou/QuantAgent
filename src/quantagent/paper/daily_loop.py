@@ -13,11 +13,12 @@ liquidity capacity and recovered actual weights seed first-date timing,
 holding-period and turnover state. Before any daily decision is persisted, the
 canonical account is recovered again while holding the cross-process account
 lock. Any ledger/state drift makes the stale decision fail closed, every older
-pending signal must already have a canonically verified terminal execution
-outcome, and same-date evidence files are written only inside that account-wide
-critical section. Desired targets are never treated as holdings. The account
-genesis itself is immutable: every run must match the persisted
-portfolio_id/initial_cash identity before any target is produced.
+pending signal and account-wide execution history must already have a
+canonically verified terminal/reconciliation outcome, and same-date evidence
+files are written only inside that account-wide critical section. Desired
+targets are never treated as holdings. The account genesis itself is immutable:
+every run must match the persisted portfolio_id/initial_cash identity before any
+target is produced.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from quantagent.paper.canonical_receipt import (
     build_canonical_prefix_index,
     verify_canonical_prefix_receipt,
 )
-from quantagent.paper.execution_journal import PendingExecutionJournal
+from quantagent.paper.execution_journal import TERMINAL_OUTCOMES, PendingExecutionJournal
 from quantagent.paper.pending_signal import PendingPaperSignalStore
 from quantagent.paper.runtime_paths import paper_runtime_paths
 from quantagent.portfolio.multi_horizon_blender import MultiHorizonBlendConfig, blend_multi_horizon_predictions
@@ -76,7 +77,6 @@ class DailyPaperLoopConfig:
     output_root: str = field(default_factory=lambda: str(quant_paths().reports / "v7" / "paper"))
     paper_book_path: str = field(default_factory=lambda: str(paper_runtime_paths().paper_book))
     pending_signal_dir: str = field(default_factory=lambda: str(paper_runtime_paths().pending_signals))
-    execution_journal_path: str = field(default_factory=lambda: str(paper_runtime_paths().execution_journal))
     canonical_ledger_path: str = field(default_factory=lambda: str(paper_runtime_paths().canonical_ledger))
     account_identity_path: str | None = None
     portfolio_id: str = "v7-paper"
@@ -94,6 +94,9 @@ class DailyPaperLoopConfig:
     initial_cash: float = 1_000_000.0
     min_order_value_yuan: float = 100.0
     dry_run_evidence: bool = True
+    # Appended after the historical public positional fields so introducing the
+    # journal gate cannot silently reinterpret existing positional callers.
+    execution_journal_path: str = field(default_factory=lambda: str(paper_runtime_paths().execution_journal))
 
 
 @dataclass(frozen=True)
@@ -127,10 +130,10 @@ def run_once(config: DailyPaperLoopConfig) -> DailyPaperLoopResult:
     prediction. The canonical account is recovered and marked before target
     construction. Immediately before either a target or a no-target decision is
     persisted, the account is recovered again under the same cross-process lock
-    used by the continuous execution worker. Older pending signals must already
-    be resolved with valid canonical evidence; a changed state/head/count
-    invalidates the computed decision instead of silently applying it to
-    different holdings.
+    used by the continuous execution worker. Older pending signals and orphaned
+    journal attempts must already be resolved with valid canonical evidence; a
+    changed state/head/count invalidates the computed decision instead of
+    silently applying it to different holdings.
 
     Prediction/target files that become pending-signal lineage are also written
     inside that lock. Once one same-date pending signal is frozen, a second
@@ -455,31 +458,123 @@ def _valid_indeterminate_reconciliation(
         return False
 
 
+def _assert_terminal_bound_to_account(
+    *,
+    terminal,
+    prefix_index,
+    paper_account_identity_sha256: str,
+    expected_target_weights_sha256: str | None = None,
+    signal_date: str | None = None,
+) -> None:
+    receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
+    try:
+        verification = verify_canonical_prefix_receipt(
+            receipt,
+            prefix_index=prefix_index,
+            expected_target_weights_sha256=expected_target_weights_sha256,
+            expected_paper_account_identity_sha256=(
+                paper_account_identity_sha256 if receipt is not None else None
+            ),
+        )
+    except CanonicalPrefixReceiptError as exc:
+        location = f"signal_date={signal_date}: " if signal_date else ""
+        raise PaperAccountStateRefused(
+            "paper execution terminal no longer matches the canonical account: "
+            f"{location}{exc}"
+        ) from exc
+    if not verification.bound:
+        location = f"signal_date={signal_date}; " if signal_date else ""
+        raise PaperAccountStateRefused(
+            "paper execution terminal lacks a canonical-prefix/account-identity "
+            f"receipt: {location}explicitly reconcile legacy evidence before "
+            "freezing a new target"
+        )
+
+
+def _assert_execution_journal_resolved(
+    journal: PendingExecutionJournal,
+    *,
+    prefix_index,
+    paper_account_identity_sha256: str,
+) -> None:
+    """Freeze target construction on unresolved account-wide journal economics.
+
+    Pending JSON files are not authoritative lifecycle state. A missing/deleted
+    artifact must not erase an ``execution_started`` or uncertain terminal from
+    the append-only journal, so this scan deliberately runs before looking at
+    the pending directory.
+    """
+
+    by_payload: dict[str, list[object]] = {}
+    for record in journal.records():
+        by_payload.setdefault(record.pending_payload_sha256, []).append(record)
+
+    for payload, history in by_payload.items():
+        starts = [row for row in history if row.status == "execution_started"]
+        terminals = [row for row in history if row.status in TERMINAL_OUTCOMES]
+        if starts and not terminals:
+            raise PaperAccountStateRefused(
+                "paper account has an unresolved execution_started record for "
+                f"{payload}; pending artifact presence is irrelevant. Explicit "
+                "account reconciliation is required before a new target can freeze"
+            )
+        if len(terminals) > 1:
+            raise PaperAccountStateRefused(
+                f"paper account has multiple terminal outcomes for {payload}"
+            )
+        if not terminals:
+            continue
+        terminal = terminals[0]
+        _assert_terminal_bound_to_account(
+            terminal=terminal,
+            prefix_index=prefix_index,
+            paper_account_identity_sha256=paper_account_identity_sha256,
+        )
+        if terminal.status != "execution_indeterminate":
+            continue
+        reconciliation = journal.reconciliation(payload)
+        if not _valid_indeterminate_reconciliation(
+            terminal=terminal,
+            reconciliation=reconciliation,
+            prefix_index=prefix_index,
+            paper_account_identity_sha256=paper_account_identity_sha256,
+        ):
+            raise PaperAccountStateRefused(
+                "paper account has an unreconciled execution_indeterminate outcome; "
+                "explicit canonical/operational reconciliation is required before "
+                "a new target can freeze"
+            )
+
+
 def _assert_prior_pending_signals_resolved(
     config: DailyPaperLoopConfig,
     as_of: str,
     *,
     paper_account_identity_sha256: str,
 ) -> None:
-    """Require previous signal dates to reach a durable terminal before freeze.
+    """Require previous economic attempts to resolve before a new daily decision.
 
-    The cross-process account lock must already be held by the caller. This turns
-    the operational ordering contract into a fail-closed invariant: on session T,
-    a T-1 pending signal cannot still be waiting for execution while a new T
-    decision is persisted from the pre-execution account. Terminals and
-    indeterminate reconciliations are independently bound back to the canonical
-    ledger before they are accepted as resolved.
+    The cross-process account lock must already be held by the caller. The
+    append-only execution journal is scanned first, independently of pending
+    artifact presence. Then surviving prior pending signals are cross-bound to
+    their exact target digest, terminal receipt and reconciliation evidence.
     """
 
-    root = Path(config.pending_signal_dir)
-    if not root.exists():
-        return
     journal = PendingExecutionJournal(config.execution_journal_path)
     if not journal.verify():
         raise PaperAccountStateRefused(
             "pending execution journal verification failed before target freeze"
         )
     prefix_index = build_canonical_prefix_index(config.canonical_ledger_path)
+    _assert_execution_journal_resolved(
+        journal,
+        prefix_index=prefix_index,
+        paper_account_identity_sha256=paper_account_identity_sha256,
+    )
+
+    root = Path(config.pending_signal_dir)
+    if not root.exists():
+        return
     store = PendingPaperSignalStore(root)
     cutoff = pd.Timestamp(as_of).date()
     for path in sorted(root.glob("*.json")):
@@ -501,27 +596,13 @@ def _assert_prior_pending_signals_resolved(
                 f"freeze: signal_date={signal.signal_date}, status=none; "
                 "run/reconcile the execution stage first"
             )
-        receipt = dict(terminal.details or {}).get("canonical_prefix_receipt")
-        try:
-            verification = verify_canonical_prefix_receipt(
-                receipt,
-                prefix_index=prefix_index,
-                expected_target_weights_sha256=signal.target_weights_sha256,
-                expected_paper_account_identity_sha256=(
-                    paper_account_identity_sha256 if receipt is not None else None
-                ),
-            )
-        except CanonicalPrefixReceiptError as exc:
-            raise PaperAccountStateRefused(
-                "prior pending terminal no longer matches the canonical account: "
-                f"signal_date={signal.signal_date}: {exc}"
-            ) from exc
-        if not verification.bound:
-            raise PaperAccountStateRefused(
-                "prior pending terminal lacks a canonical-prefix/account-identity "
-                f"receipt: signal_date={signal.signal_date}; explicitly reconcile "
-                "legacy evidence before freezing a new target"
-            )
+        _assert_terminal_bound_to_account(
+            terminal=terminal,
+            prefix_index=prefix_index,
+            paper_account_identity_sha256=paper_account_identity_sha256,
+            expected_target_weights_sha256=signal.target_weights_sha256,
+            signal_date=signal.signal_date,
+        )
 
         if terminal.status in _RESOLVED_PRIOR_TERMINAL_STATUSES:
             continue
