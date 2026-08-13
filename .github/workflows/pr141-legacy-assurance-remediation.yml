@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Apply deterministic reviewed patch
-        run: python scripts/pr141_legacy_assurance_patch.py
+        run: python scripts/pr141_legacy_assurance_patch_v2.py
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip wheel setuptools
