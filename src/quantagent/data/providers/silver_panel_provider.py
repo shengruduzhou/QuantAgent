@@ -25,6 +25,7 @@ from quantagent.data.providers.base import (
     ProviderResult,
     ProviderUnavailable,
 )
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 @dataclass
@@ -67,9 +68,7 @@ class SilverPanelProvider:
             )
         # ensure flags are present (the silver panel may not have them
         # populated; downstream backtest expects bool columns).
-        for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-            if col not in slice_df.columns:
-                slice_df[col] = False
+        slice_df, _unverified_tradability = ensure_tradability_flags(slice_df)
         return ProviderResult(
             slice_df,
             source="silver_panel_provider",

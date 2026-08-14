@@ -37,6 +37,7 @@ import typer
 
 from quantagent.cli._utils import app, default_reports_root
 from quantagent.factors.core_policy import CORE_FEATURE_COLUMNS, core_feature_columns
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 # ---------------------------------------------------------------------------
@@ -693,9 +694,7 @@ def train_v8_deep(
     panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
     panel = panel[(panel["trade_date"] >= bt_oos_start) & (panel["trade_date"] <= bt_oos_end)]
     panel = panel[panel["symbol"].isin(target_weights.columns)].reset_index(drop=True)
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in panel.columns:
-            panel[col] = False
+    panel, _unverified_tradability = ensure_tradability_flags(panel)
     bt_result = run_strict_backtest_v8(
         target_weights, panel,
         config=AShareExecutionSimulationConfig(slippage_bps=8.0, initial_cash=1_000_000.0),

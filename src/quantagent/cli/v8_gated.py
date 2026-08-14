@@ -30,6 +30,7 @@ import pandas as pd
 import typer
 
 from quantagent.cli._utils import app
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 def _build_fundamental_quality(panel: pd.DataFrame, metrics_path: Path | None) -> pd.DataFrame:
@@ -566,9 +567,7 @@ def run_gated_backtest_v8(
     panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
     bt_panel = panel[(panel["trade_date"] >= bt_start) & (panel["trade_date"] <= bt_end)]
     bt_panel = bt_panel[bt_panel["symbol"].isin(dc.target_weights.columns)].reset_index(drop=True)
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in bt_panel.columns:
-            bt_panel[col] = False
+    bt_panel, _unverified_tradability = ensure_tradability_flags(bt_panel)
     cfg_bt = AShareExecutionSimulationConfig(
         initial_cash=initial_cash, slippage_bps=slippage_bps,
     )

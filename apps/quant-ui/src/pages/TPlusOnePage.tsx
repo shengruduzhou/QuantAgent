@@ -11,6 +11,7 @@ import { formatCompact, formatNumber, formatPercent } from "../utils/format";
 import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
 import { useVNextChartPalette } from "../vnext/theme";
 import { TTradingResearchPanel } from "../vnext/tplusone/TTradingResearchPanel";
+import { isAffirmative, verdictTone } from "../utils/verdictTone";
 
 interface DoTSource {
   id: string;
@@ -172,7 +173,9 @@ export function TPlusOnePage(): JSX.Element {
             <FailureControl label="回撤控制贡献" value={data?.summary.drawdownContribution} threshold={0} />
           </div>
           <div className="t1-verdict">
-            {data?.verdict?.includes("ENABLE") ? <CheckCircle size={23} className="tone-positive" /> : <WarningCircle size={23} className="tone-warning" />}
+            {/* verdictTone, not includes(): "DO_NOT_ENABLE".includes("ENABLE") is true,
+                which painted a hard refusal green while PAPER_ONLY got the warning. */}
+            {isAffirmative(data?.verdict) ? <CheckCircle size={23} className="tone-positive" /> : <WarningCircle size={23} className={verdictTone(data?.verdict) === "danger" ? "tone-negative" : "tone-warning"} />}
             <div><strong>{data?.verdict ?? "暂无 verdict"}</strong><span>{data?.reason ?? "严格遵循 runtime report，不从收益猜测结论。"}</span></div>
           </div>
         </Panel>
