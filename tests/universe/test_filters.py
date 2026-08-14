@@ -391,3 +391,100 @@ def test_st_top_passes_only_when_not_also_suspended():
     # B.SZ has the highest prediction in the ST cohort but is suspended
     assert bool(b_row["universe_pass"]) is False
     assert b_row["universe_reason"] == "suspended"
+
+
+def test_unavailable_amount_is_rejected_but_not_labelled_illiquid():
+    """A missing turnover field must not be reported as "below_min_amount".
+
+    Both are excluded -- an unmeasurable liquidity screen fails closed -- but the
+    recorded reason must say which happened. Calling an unpublished field
+    "illiquid" points an operator at the strategy when the fault is in the feed.
+    Reachable in bulk: the AKShare Tencent failover publishes no CNY turnover.
+    """
+    from quantagent.universe.filters import UniverseFilterConfig, apply_universe_filter
+
+    predictions = pd.DataFrame(
+        {
+            "trade_date": ["2026-07-01"] * 3,
+            "symbol": ["600000.SH", "600001.SH", "600002.SH"],
+            "prediction": [0.3, 0.2, 0.1],
+        }
+    )
+    # amount deliberately lives ONLY on the market panel, as in production
+    market_panel = pd.DataFrame(
+        {
+            "trade_date": ["2026-07-01"] * 3,
+            "symbol": ["600000.SH", "600001.SH", "600002.SH"],
+            "open": [10.0] * 3,
+            "high": [10.2] * 3,
+            "low": [9.8] * 3,
+            "close": [10.0] * 3,
+            "prev_close": [10.0] * 3,
+            "volume": [100_000.0] * 3,
+            "amount": [5_000_000.0, 1_000.0, float("nan")],
+        }
+    )
+    config = UniverseFilterConfig(require_amount_above=1_000_000.0)
+    result = apply_universe_filter(predictions, market_panel=market_panel, config=config)
+
+    audit = result.audit
+    reasons = dict(zip(audit["symbol"], audit["reason"]))
+    assert reasons.get("600001.SH") == "below_min_amount"
+    assert reasons.get("600002.SH") == "amount_unavailable", (
+        f"unpublished turnover must not be labelled illiquid; got {reasons}"
+    )
+
+
+def test_amount_floor_is_sourced_from_the_market_panel():
+    """A configured liquidity floor must not silently no-op.
+
+    ``amount`` belongs to the OHLCV panel, not to model predictions, so reading
+    it only from the predictions frame disarmed the control for every realistic
+    caller: the operator sets require_amount_above, gets no floor, and is told
+    nothing. Production passes predictions and market_panel separately.
+    """
+    from quantagent.universe.filters import UniverseFilterConfig, apply_universe_filter
+
+    predictions = pd.DataFrame(
+        {
+            "trade_date": ["2026-07-01"] * 2,
+            "symbol": ["600000.SH", "600001.SH"],
+            "prediction": [0.3, 0.2],
+        }
+    )
+    market_panel = pd.DataFrame(
+        {
+            "trade_date": ["2026-07-01"] * 2,
+            "symbol": ["600000.SH", "600001.SH"],
+            "open": [10.0] * 2,
+            "high": [10.2] * 2,
+            "low": [9.8] * 2,
+            "close": [10.0] * 2,
+            "prev_close": [10.0] * 2,
+            "volume": [100_000.0] * 2,
+            "amount": [5_000_000.0, 1_000.0],
+        }
+    )
+    result = apply_universe_filter(
+        predictions,
+        market_panel=market_panel,
+        config=UniverseFilterConfig(require_amount_above=1_000_000.0),
+    )
+    passed = dict(zip(result.filtered_predictions["symbol"], result.filtered_predictions["universe_pass"]))
+    assert passed["600000.SH"] is True or passed["600000.SH"]
+    assert not passed["600001.SH"], "the liquidity floor silently failed to apply"
+
+
+def test_amount_floor_absent_everywhere_is_reported_not_swallowed():
+    from quantagent.universe.filters import UniverseFilterConfig, apply_universe_filter
+
+    predictions = pd.DataFrame(
+        {"trade_date": ["2026-07-01"], "symbol": ["600000.SH"], "prediction": [0.3]}
+    )
+    result = apply_universe_filter(
+        predictions, market_panel=None, config=UniverseFilterConfig(require_amount_above=1_000_000.0)
+    )
+    assert any(
+        "require_amount_above_set_but_amount_column_absent" in w
+        for w in result.summary["warnings"]
+    ), f"expected an explicit warning, got {result.summary['warnings']}"

@@ -374,10 +374,39 @@ def apply_universe_filter(
             rejected_reasons[int(idx)] = "limit_up_at_close"
         keep_mask &= ~is_limit_up
 
+    if config.require_amount_above > 0 and "amount" not in work.columns:
+        # ``amount`` naturally lives on the OHLCV panel, not on model
+        # predictions, so a configured liquidity floor used to skip silently and
+        # leave no trace: the operator sets a floor, gets none, and is told
+        # nothing. Source it from the panel, and if it is nowhere to be found say
+        # so out loud rather than quietly disarming the control.
+        if market_panel is not None and not market_panel.empty and "amount" in market_panel.columns:
+            panel_amount = market_panel[["trade_date", "symbol", "amount"]].copy()
+            panel_amount["trade_date"] = pd.to_datetime(panel_amount["trade_date"], errors="coerce")
+            panel_amount["symbol"] = panel_amount["symbol"].astype(str)
+            panel_amount = panel_amount.drop_duplicates(["trade_date", "symbol"], keep="last")
+            work = work.merge(panel_amount, on=["trade_date", "symbol"], how="left")
+        else:
+            warnings_collected.append(
+                "require_amount_above_set_but_amount_column_absent — "
+                "liquidity floor could not be applied"
+            )
+
     if config.require_amount_above > 0 and "amount" in work.columns:
-        below_min = pd.to_numeric(work["amount"], errors="coerce").fillna(0.0) < config.require_amount_above
+        amount = pd.to_numeric(work["amount"], errors="coerce")
+        # Both cases are excluded -- an unmeasurable liquidity screen must fail
+        # closed -- but they are recorded apart. Reporting an unpublished turnover
+        # as "below_min_amount" tells an operator the universe is illiquid when
+        # the truth is that the data source stopped supplying the field, which
+        # sends debugging at the strategy instead of at the feed. The AKShare
+        # Tencent failover publishes no CNY turnover at all, so this is reachable
+        # for an entire session's panel at once.
+        amount_missing = amount.isna()
+        below_min = amount.fillna(0.0) < config.require_amount_above
         for idx in work.index[below_min & keep_mask]:
-            rejected_reasons[int(idx)] = "below_min_amount"
+            rejected_reasons[int(idx)] = (
+                "amount_unavailable" if bool(amount_missing.loc[idx]) else "below_min_amount"
+            )
         keep_mask &= ~below_min
 
     # High-chase penalty (user spec §10): block stocks that have rallied
