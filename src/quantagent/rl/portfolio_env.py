@@ -4,6 +4,26 @@ The environment consumes PIT alpha predictions and a market panel, then
 lets an RL policy propose daily weight deltas. Deltas are projected back
 into A-share-safe portfolio constraints before reward calculation. It is
 for paper/backtest research only and never creates order intents.
+
+**This environment's reward is NOT executable.** It pays
+``close(T+1)/close(T) - 1`` where ``T`` is the *signal* date -- i.e. the return
+from the close that produced the signal to the next close. A policy cannot
+transact at ``close(T)`` on information contained in ``close(T)``, so the reward
+credits a position that could never have been opened. Measured with a two-name
+panel where the two candidate intervals give different numbers, row 0 of
+``_forward_return_matrix`` is ``[0.0, 0.10]``, the ``close(T) -> close(T+1)``
+answer, not the ``close(T+1) -> close(T+2)`` one.
+
+Use :class:`quantagent.rl.pit_portfolio_env.PITPortfolioEnv` for anything whose
+result will be believed. That environment signals at ``close(T)``, executes at
+``close(T+1)`` and rewards over ``close(T+1) -> close(T+2)``, and it fails closed
+on missing/NaN/zero prices instead of scoring them as flat days.
+
+Constructing this class therefore requires
+``PortfolioEnvConfig(acknowledge_untradable_reward=True)``. The flag exists
+because this env was the one exported from ``quantagent.rl`` and the one
+``train_ppo`` imported, while the PIT-safe environment sat beside it unused --
+so the default training path silently optimised an unachievable objective.
 """
 
 from __future__ import annotations
@@ -32,6 +52,12 @@ class PortfolioEnvConfig:
     drawdown_limit: float = 0.20
     kill_switch_drawdown: float = 0.30
     initial_nav: float = 1.0
+    #: Must be set True to construct :class:`PortfolioEnv`. Its reward is the
+    #: close(T)->close(T+1) return on the signal date, which no policy could have
+    #: traded. Defaulting to False makes the unachievable objective impossible to
+    #: select by accident; use PITPortfolioEnv unless you specifically want the
+    #: legacy behaviour for comparison.
+    acknowledge_untradable_reward: bool = False
 
 
 class PortfolioEnv(gym.Env if gym is not None else object):
@@ -52,6 +78,16 @@ class PortfolioEnv(gym.Env if gym is not None else object):
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ImportError("PortfolioEnv requires gymnasium") from exc
         self.config = config or PortfolioEnvConfig()
+        if not self.config.acknowledge_untradable_reward:
+            raise ValueError(
+                "PortfolioEnv rewards close(T)->close(T+1) on the signal date, which "
+                "is not executable: a policy cannot trade at close(T) on information "
+                "from close(T). Use quantagent.rl.pit_portfolio_env.PITPortfolioEnv "
+                "(signal close(T), execute close(T+1), reward close(T+1)->close(T+2), "
+                "fail-closed on missing prices). To run this legacy environment "
+                "anyway for comparison, set "
+                "PortfolioEnvConfig(acknowledge_untradable_reward=True)."
+            )
         self.predictions = _prepare_predictions(predictions)
         self.market = _prepare_market(market_panel)
         self.dates = sorted(set(self.predictions["trade_date"]).intersection(set(self.market["trade_date"])))
@@ -231,4 +267,6 @@ def _project_weights(
     return target.astype(np.float32)
 
 
-__all__ = ["PortfolioEnv", "PortfolioEnvConfig"]
+REWARD_CLOCK_SEMANTICS = "signal_t_close_reward_t_to_t_plus_1_close_UNTRADABLE_v0"
+
+__all__ = ["PortfolioEnv", "PortfolioEnvConfig", "REWARD_CLOCK_SEMANTICS"]
