@@ -1,25 +1,21 @@
 """PPO training entry point for the V7 portfolio environment.
 
-**Currently fails closed.** This trainer builds :class:`PortfolioEnv`, whose
-reward is the ``close(T) -> close(T+1)`` return on the *signal* date -- a return
-no policy could have captured, because it cannot trade at ``close(T)`` on
-information contained in ``close(T)``. Verified numerically: on a panel where
-the two candidate intervals differ, this environment reports ``[0.0, 0.10]``
-where the executable interval gives ``[0.20, 0.0]``.
-
-Constructing that environment now requires
-``PortfolioEnvConfig(acknowledge_untradable_reward=True)``, which this module
-deliberately does NOT set. Training here therefore raises until the trainer is
-rewired to :class:`quantagent.rl.pit_portfolio_env.PITPortfolioEnv`, which
+Trains against :class:`quantagent.rl.pit_portfolio_env.PITPortfolioEnv`, which
 signals at ``close(T)``, executes at ``close(T+1)``, rewards over
 ``close(T+1) -> close(T+2)`` and fails closed on missing prices.
 
-That rewiring is not a rename: ``PITPortfolioEnv`` also takes a passive/benchmark
-weight book, so the call sites in ``cli/v7_train.py`` and
-``scripts/rl_train_eval_2026.py`` must decide what that book is. Until someone
-makes that decision explicitly, a loud failure is the correct behaviour -- any
-policy trained here optimised an objective that does not exist, so its results
-must not be cited.
+It previously used :class:`~quantagent.rl.portfolio_env.PortfolioEnv`, whose
+reward is the ``close(T) -> close(T+1)`` return on the *signal* date -- a return
+no policy could have captured, because it cannot trade at ``close(T)`` on
+information contained in ``close(T)``. Measured on a panel where the two
+candidate intervals differ, that environment reports ``[0.0, 0.10]`` where the
+executable interval gives ``[0.20, 0.0]``. **Any RL result produced before this
+change optimised an objective that does not exist and must not be cited.**
+
+``book_weights`` is a required keyword argument rather than a defaulted one: the
+reward is value-add over that passive book, so it fixes the benchmark the result
+is quoted against, and choosing it silently would be choosing the caller's
+benchmark for them.
 """
 
 from __future__ import annotations
@@ -31,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 
 from quantagent.config.paths import quant_paths
-from quantagent.rl.portfolio_env import PortfolioEnv, PortfolioEnvConfig
+from quantagent.rl.pit_portfolio_env import PITPortfolioEnv, PITPortfolioEnvConfig
 from quantagent.cuda_runtime import configure_cuda_environment, cuda_runtime_probe, format_cuda_diagnostic
 
 configure_cuda_environment()
@@ -44,16 +40,64 @@ class PPOTrainingConfig:
     n_envs: int = 8
     output_dir: str = field(default_factory=lambda: str(quant_paths().models / "v7_rl_policy"))
     tensorboard_log: str = field(default_factory=lambda: str(quant_paths().logs / "tb" / "rl"))
-    env: PortfolioEnvConfig = field(default_factory=PortfolioEnvConfig)
+    env: PITPortfolioEnvConfig = field(default_factory=PITPortfolioEnvConfig)
     seed: int = 1729
     require_gpu: bool = True
+
+
+def equal_weight_book_from_predictions(
+    predictions: pd.DataFrame,
+    *,
+    top_k: int,
+    score_column: str = "alpha_score",
+    date_column: str = "trade_date",
+    symbol_column: str = "symbol",
+) -> pd.DataFrame:
+    """Build a naive equal-weight top-k passive book from alpha scores.
+
+    This is a *baseline you are choosing*, not a neutral default, which is why
+    ``train_ppo_policy`` will not construct one for you. The reward is the
+    policy's value-add over this book, so the book defines what "no skill" means:
+    a policy that merely reproduces it scores zero. Pick it deliberately -- an
+    equal-weight top-k book is a much weaker opponent than the live target
+    weights, and beating it is correspondingly less meaningful.
+    """
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    frame = predictions[[date_column, symbol_column, score_column]].copy()
+    frame[date_column] = pd.to_datetime(frame[date_column], errors="coerce")
+    frame = frame.dropna(subset=[date_column, symbol_column, score_column])
+    if frame.empty:
+        raise ValueError("cannot build a passive book from empty predictions")
+
+    rows: dict[pd.Timestamp, dict[str, float]] = {}
+    for date, group in frame.groupby(date_column, sort=True):
+        chosen = group.nlargest(top_k, score_column)[symbol_column].astype(str)
+        if chosen.empty:
+            continue
+        weight = 1.0 / float(len(chosen))
+        rows[date] = {symbol: weight for symbol in chosen}
+    if not rows:
+        raise ValueError("passive book construction selected no names on any date")
+    return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0).sort_index()
 
 
 def train_ppo_policy(
     predictions: pd.DataFrame,
     market_panel: pd.DataFrame,
     config: PPOTrainingConfig | None = None,
+    *,
+    book_weights: pd.DataFrame,
 ) -> dict[str, object]:
+    """Train a PPO policy on the PIT-safe environment.
+
+    ``book_weights`` is required and keyword-only on purpose. The reward is the
+    policy's value-add over this passive book, so it defines the benchmark the
+    result will be quoted against; defaulting it would silently pick the
+    benchmark on the caller's behalf. Use
+    :func:`equal_weight_book_from_predictions` for a naive baseline, or supply
+    the live target weights to measure improvement over what is actually held.
+    """
     cfg = config or PPOTrainingConfig()
     try:
         import torch
@@ -72,7 +116,7 @@ def train_ppo_policy(
 
     def make_env(rank: int):
         def _factory():
-            env = PortfolioEnv(predictions, market_panel, cfg.env)
+            env = PITPortfolioEnv(book_weights, predictions, market_panel, cfg.env)
             env.reset(seed=cfg.seed + rank)
             return env
 
@@ -103,4 +147,8 @@ def train_ppo_policy(
     return summary
 
 
-__all__ = ["PPOTrainingConfig", "train_ppo_policy"]
+__all__ = [
+    "PPOTrainingConfig",
+    "equal_weight_book_from_predictions",
+    "train_ppo_policy",
+]

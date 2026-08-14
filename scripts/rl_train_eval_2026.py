@@ -26,8 +26,12 @@ ANN = 244
 
 
 def main() -> int:
-    from quantagent.rl.portfolio_env import PortfolioEnv, PortfolioEnvConfig
-    from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
+    from quantagent.rl.pit_portfolio_env import PITPortfolioEnv, PITPortfolioEnvConfig
+    from quantagent.rl.train_ppo import (
+        PPOTrainingConfig,
+        equal_weight_book_from_predictions,
+        train_ppo_policy,
+    )
 
     preds = pd.read_parquet(PREDS).rename(columns={"composite_score": "alpha_score"})
     preds["trade_date"] = pd.to_datetime(preds["trade_date"])
@@ -41,7 +45,7 @@ def main() -> int:
     train_panel = panel[(panel["trade_date"] >= "2024-08-20") & (panel["trade_date"] <= "2026-01-10")]
     eval_panel = panel[panel["trade_date"] >= "2025-11-20"]
 
-    env_cfg = PortfolioEnvConfig(top_n=80, max_turnover=0.30, cost_bps=12.0)
+    env_cfg = PITPortfolioEnvConfig(max_book=80, max_turnover=0.30, cost_bps=12.0)
     cfg = PPOTrainingConfig(
         timesteps=1_000_000,
         n_envs=4,
@@ -51,7 +55,10 @@ def main() -> int:
         seed=1729,
     )
     OUT.mkdir(parents=True, exist_ok=True)
-    summary = train_ppo_policy(train_preds, train_panel, cfg)
+    # Explicit benchmark: reward is value-add over this passive book, so it is
+    # the yardstick the reported result is measured against.
+    train_book = equal_weight_book_from_predictions(train_preds, top_k=env_cfg.max_book)
+    summary = train_ppo_policy(train_preds, train_panel, cfg, book_weights=train_book)
     print(json.dumps({k: summary[k] for k in ("status", "policy_path", "timesteps", "gpu_name")},
                      ensure_ascii=False))
 
@@ -59,7 +66,8 @@ def main() -> int:
     from stable_baselines3 import PPO
 
     model = PPO.load(summary["policy_path"], device="cuda")
-    env = PortfolioEnv(eval_preds, eval_panel, env_cfg)
+    eval_book = equal_weight_book_from_predictions(eval_preds, top_k=env_cfg.max_book)
+    env = PITPortfolioEnv(eval_book, eval_preds, eval_panel, env_cfg)
     obs, _ = env.reset(seed=7)
     navs, dates_used = [], []
     done = False

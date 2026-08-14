@@ -159,3 +159,83 @@ class TestPackageExports:
 
         assert "PITPortfolioEnv" in rl.__all__
         assert hasattr(rl, "PITPortfolioEnv")
+
+
+class TestTrainerIsWiredToTheExecutableEnvironment:
+    """train_ppo must build the PIT env, and must not pick the benchmark itself."""
+
+    def test_trainer_imports_the_pit_environment(self):
+        import quantagent.rl.train_ppo as mod
+
+        assert hasattr(mod, "PITPortfolioEnv")
+        assert not hasattr(mod, "PortfolioEnv"), (
+            "train_ppo must not reference the untradable environment"
+        )
+
+    def test_book_weights_is_required_and_keyword_only(self):
+        import inspect
+
+        from quantagent.rl.train_ppo import train_ppo_policy
+
+        param = inspect.signature(train_ppo_policy).parameters["book_weights"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty, (
+            "book_weights fixes the benchmark the result is quoted against; "
+            "defaulting it would choose the caller's benchmark for them"
+        )
+
+
+class TestEqualWeightBook:
+    def test_selects_top_k_and_weights_them_equally(self):
+        from quantagent.rl.train_ppo import equal_weight_book_from_predictions
+
+        preds = pd.DataFrame(
+            [
+                {"trade_date": DATES[0], "symbol": s, "alpha_score": score}
+                for s, score in [("A", 3.0), ("B", 2.0), ("C", 1.0), ("D", 0.0)]
+            ]
+        )
+        book = equal_weight_book_from_predictions(preds, top_k=2)
+        assert list(book.columns) == ["A", "B"] or set(book.columns) == {"A", "B"}
+        row = book.iloc[0]
+        assert row["A"] == pytest.approx(0.5)
+        assert row["B"] == pytest.approx(0.5)
+
+    def test_weights_sum_to_one_per_date(self):
+        from quantagent.rl.train_ppo import equal_weight_book_from_predictions
+
+        preds = pd.DataFrame(
+            [
+                {"trade_date": d, "symbol": s, "alpha_score": float(i)}
+                for d in DATES[:3]
+                for i, s in enumerate(["A", "B", "C"])
+            ]
+        )
+        book = equal_weight_book_from_predictions(preds, top_k=3)
+        np.testing.assert_allclose(book.sum(axis=1).to_numpy(), 1.0, atol=1e-9)
+
+    def test_empty_predictions_raise_rather_than_returning_an_empty_book(self):
+        from quantagent.rl.train_ppo import equal_weight_book_from_predictions
+
+        empty = pd.DataFrame(columns=["trade_date", "symbol", "alpha_score"])
+        with pytest.raises(ValueError):
+            equal_weight_book_from_predictions(empty, top_k=5)
+
+    def test_non_positive_top_k_raises(self):
+        from quantagent.rl.train_ppo import equal_weight_book_from_predictions
+
+        preds = pd.DataFrame(
+            [{"trade_date": DATES[0], "symbol": "A", "alpha_score": 1.0}]
+        )
+        with pytest.raises(ValueError, match="top_k"):
+            equal_weight_book_from_predictions(preds, top_k=0)
+
+    def test_book_feeds_the_pit_env_without_error(self):
+        """End-to-end: the helper's output is a valid passive book."""
+        from quantagent.rl.train_ppo import equal_weight_book_from_predictions
+
+        book = equal_weight_book_from_predictions(_preds(), top_k=2)
+        env = PITPortfolioEnv(book, _preds(), _panel(), PITPortfolioEnvConfig(max_book=4))
+        env.reset()
+        _, reward, _, _, _ = env.step(np.array([1.0, -1.0, 0.0, 0.0, 0.0]))
+        assert np.isfinite(reward)

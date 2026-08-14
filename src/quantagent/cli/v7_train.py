@@ -2400,21 +2400,34 @@ def train_rl_agent(
     require_gpu: bool = typer.Option(True, "--require-gpu/--no-require-gpu"),
 ) -> None:
     """Layer C: train a PPO portfolio delta policy on paper/backtest data."""
-    from quantagent.rl.portfolio_env import PortfolioEnvConfig
-    from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
+    from quantagent.rl.pit_portfolio_env import PITPortfolioEnvConfig
+    from quantagent.rl.train_ppo import (
+        PPOTrainingConfig,
+        equal_weight_book_from_predictions,
+        train_ppo_policy,
+    )
 
     resolved_predictions = predictions_path or (quant_paths().predictions / "predictions.parquet")
     resolved_market = market_panel_path or (quant_paths().data_root / "v7" / "silver" / "market_panel" / "market_panel.parquet")
     env_kwargs = _load_env_config(env_config)
+    env_cfg = PITPortfolioEnvConfig(**env_kwargs)
+    rl_predictions = read_frame(resolved_predictions)
+    # The reward is value-add over this passive book, so it IS the benchmark the
+    # result gets quoted against. Stated here rather than defaulted inside the
+    # trainer: an equal-weight top-k book is a weak opponent, and beating it is
+    # correspondingly less meaningful than beating the live target weights.
     result = train_ppo_policy(
-        read_frame(resolved_predictions),
+        rl_predictions,
         read_frame(resolved_market),
         PPOTrainingConfig(
             timesteps=timesteps,
             device=device,
             n_envs=n_envs,
             require_gpu=require_gpu,
-            env=PortfolioEnvConfig(**env_kwargs),
+            env=env_cfg,
+        ),
+        book_weights=equal_weight_book_from_predictions(
+            rl_predictions, top_k=env_cfg.max_book
         ),
     )
     typer.echo(json_dump(result))
@@ -2704,7 +2717,11 @@ def _run_autopilot_impl(
 
     from quantagent.optimization.factor_evolution import FactorEvolutionConfig, run_factor_evolution
     from quantagent.optimization.optuna_search import OptunaSearchConfig, run_optuna_hp_search
-    from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
+    from quantagent.rl.train_ppo import (
+        PPOTrainingConfig,
+        equal_weight_book_from_predictions,
+        train_ppo_policy,
+    )
 
     dataset = read_frame(dataset_path)
     stages: dict[str, object] = {"dataset": str(dataset_path)}
@@ -2731,10 +2748,20 @@ def _run_autopilot_impl(
     resolved_predictions = predictions_path or (quant_paths().predictions / "predictions.parquet")
     resolved_market = market_panel_path or (quant_paths().data_root / "v7" / "silver" / "market_panel" / "market_panel.parquet")
     if Path(resolved_predictions).exists() and Path(resolved_market).exists() and timesteps > 0:
+        rl_predictions = read_frame(Path(resolved_predictions))
+        rl_cfg = PPOTrainingConfig(
+            timesteps=timesteps,
+            require_gpu=require_gpu,
+            device="cuda" if require_gpu else "auto",
+        )
         rl_status = train_ppo_policy(
-            read_frame(Path(resolved_predictions)),
+            rl_predictions,
             read_frame(Path(resolved_market)),
-            PPOTrainingConfig(timesteps=timesteps, require_gpu=require_gpu, device="cuda" if require_gpu else "auto"),
+            rl_cfg,
+            # Explicit benchmark: see the note at the other call site.
+            book_weights=equal_weight_book_from_predictions(
+                rl_predictions, top_k=rl_cfg.env.max_book
+            ),
         )
     else:
         rl_status = {
@@ -3010,7 +3037,7 @@ def _load_env_config(path: Path | None) -> dict[str, object]:
     env = payload.get("rl_env", payload.get("env", payload))
     if not isinstance(env, dict):
         raise typer.BadParameter("env config must contain an object")
-    allowed = set(PortfolioEnvConfig.__dataclass_fields__) if "PortfolioEnvConfig" in globals() else {
+    allowed = set(PITPortfolioEnvConfig.__dataclass_fields__) if "PITPortfolioEnvConfig" in globals() else {
         "top_n",
         "max_delta",
         "max_weight_per_name",
