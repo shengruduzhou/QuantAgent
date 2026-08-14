@@ -29,7 +29,8 @@ def main() -> int:
 
     from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig
     from quantagent.backtest.strict_v8 import run_strict_backtest_v8
-    from quantagent.rl.portfolio_env import PortfolioEnv, PortfolioEnvConfig
+    from quantagent.rl.pit_portfolio_env import PITPortfolioEnv, PITPortfolioEnvConfig
+    from quantagent.rl.train_ppo import equal_weight_book_from_predictions
 
     preds = pd.read_parquet(PREDS).rename(columns={"composite_score": "alpha_score"})
     preds["trade_date"] = pd.to_datetime(preds["trade_date"])
@@ -40,8 +41,10 @@ def main() -> int:
 
     eval_preds = preds[preds["trade_date"] >= "2025-12-01"]
     eval_panel = panel[panel["trade_date"] >= "2025-11-20"]
-    env_cfg = PortfolioEnvConfig(top_n=80, max_turnover=0.30, cost_bps=12.0)
-    env = PortfolioEnv(eval_preds, eval_panel, env_cfg)
+    env_cfg = PITPortfolioEnvConfig(max_book=80, max_turnover=0.30, cost_bps=12.0)
+    # Explicit benchmark: reward is value-add over this passive book.
+    eval_book = equal_weight_book_from_predictions(eval_preds, top_k=env_cfg.max_book)
+    env = PITPortfolioEnv(eval_book, eval_preds, eval_panel, env_cfg)
     model = PPO.load(POLICY, device="cpu")
 
     obs, _ = env.reset(seed=7)
