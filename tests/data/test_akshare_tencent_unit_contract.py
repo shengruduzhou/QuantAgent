@@ -207,3 +207,42 @@ class TestSmokeProbeToleratesMissingColumns:
         assert module._nonnegative_column(frame, "volume") is None
         assert module._nonnegative_column(frame, "amount") is True
         assert module._nonnegative_column(frame, "other") is False
+
+
+class TestEmptyVolumeColumnCannotDefeatDetection:
+    """A present-but-empty `volume` header is not evidence of the legacy shape.
+
+    Adversarial review found the original fix was structural only: adding an
+    all-NaN `volume` column to the lots-shaped payload routed it down the legacy
+    branch, passing the lot count through as CNY turnover and stamping
+    amount_unit="CNY" -- reproducing the defect the fix existed to remove.
+    """
+
+    @staticmethod
+    def _lots_payload_with_empty_volume(filler):
+        frame = TENCENT_RAW.copy()
+        frame["volume"] = filler
+        return frame
+
+    @pytest.mark.parametrize("filler", [float("nan"), None])
+    def test_all_nan_volume_still_detects_the_lots_shape(self, filler):
+        frame = self._lots_payload_with_empty_volume(filler)
+        out = _normalize_akshare_daily(frame, "600519.SH", source="tencent", adjust="")
+        assert out["amount"].isna().all(), "lot count must not survive as turnover"
+        assert out["amount_unit"].iloc[0] == _UNIT_UNAVAILABLE
+        assert out["volume"].iloc[0] == pytest.approx(4_247_400.0)
+
+    def test_the_lot_count_never_appears_as_amount_even_with_a_volume_header(self):
+        frame = self._lots_payload_with_empty_volume(float("nan"))
+        out = _normalize_akshare_daily(frame, "600519.SH", source="tencent", adjust="")
+        assert not (out["amount"] == 42474.0).any()
+
+    def test_a_usable_volume_column_still_selects_the_legacy_shape(self):
+        """Guard the fix against over-reach: real volume must be believed."""
+        frame = TENCENT_RAW.copy()
+        frame["volume"] = [4_247_381.0, 5_087_015.0, 3_426_755.0]
+        frame["amount"] = [5.07e9, 6.12e9, 4.09e9]
+        out = _normalize_akshare_daily(frame, "600519.SH", source="tencent", adjust="")
+        assert out["amount"].iloc[0] == pytest.approx(5.07e9)
+        assert out["amount_unit"].iloc[0] == _CANONICAL_AMOUNT_UNIT
+        assert out["volume"].iloc[0] == pytest.approx(4_247_381.0)
