@@ -26,15 +26,21 @@ AKSHARE_MARKET_REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 
 # EastMoney remains the preferred documented A-share daily endpoint. The
-# Tencent endpoint is the default failover because the current AKShare 1.18.84
-# implementation normalises its volume to shares and amount to CNY, and the
+# Tencent endpoint is the default failover. Under AKShare 1.18.60 it supplies
+# volume (as lots, in a column it calls "amount") but NO CNY turnover; the
+# normaliser detects that shape, converts it, and marks amount unavailable. The
 # repository live source smoke can reach it when EastMoney/Sina are remote-
 # closing GitHub Actions connections. Sina stays explicit opt-in only.
 _DEFAULT_SOURCE_ORDER: tuple[str, ...] = ("east_money", "tencent")
 _CANONICAL_VOLUME_UNIT = "shares"
 _CANONICAL_AMOUNT_UNIT = "CNY"
+#: Emitted instead of a canonical unit when a source does not supply the
+#: column at all. Never reuse a real unit name for a missing measurement.
+_UNIT_UNAVAILABLE = "unavailable"
 _RAW_VOLUME_UNIT_BY_SOURCE: dict[str, str] = {
     "east_money": "lots_100_shares",
+    # Tencent has shipped two shapes; _normalize_akshare_daily detects which
+    # arrived and overrides this default. Kept as the legacy shape's unit.
     "tencent": "shares",
     "sina": "shares",
 }
@@ -59,9 +65,14 @@ class AkShareLiveProvider:
     factors that were knowable at a historical decision time.
 
     The upstream endpoints do not share one raw unit contract. EastMoney daily
-    ``成交量`` is lots (手), while current AKShare Tencent and Sina daily output
-    volume in shares. The canonical QuantAgent output is always **shares** and
-    amount is **CNY**; the original source unit is retained per row.
+    ``成交量`` is lots (手) and Sina daily volume is shares. Tencent has shipped
+    two shapes and is therefore detected per payload, not looked up: the current
+    one omits volume entirely and puts volume-in-lots in a column it calls
+    ``amount`` (publishing no CNY turnover at all), while the legacy one carries
+    real shares and real CNY. The canonical QuantAgent output is always **shares**
+    and amount is **CNY**; the original source unit is retained per row, and a
+    column a source does not supply is marked ``unavailable`` rather than being
+    given a canonical unit label it has not earned.
 
     A daily bar is research-PIT valid only when it is raw and its next-session
     availability resolves from an explicit trading calendar. Missing calendar
@@ -329,10 +340,22 @@ def _normalize_akshare_daily(
 ) -> pd.DataFrame:
     """Normalise EastMoney/Tencent/Sina output to one economic schema.
 
-    Canonical ``volume`` is shares and ``amount`` is CNY. EastMoney daily raw
-    volume is lots and therefore scales by 100. Current AKShare Tencent already
-    performs its source-specific lot/share and amount-unit conversions inside
-    ``stock_zh_a_hist_tx``; Sina daily volume is shares.
+    Canonical ``volume`` is shares and ``amount`` is CNY turnover.
+
+    Per-source raw semantics, each MEASURED against Sina (which reports volume in
+    shares and amount in CNY) rather than assumed:
+
+    * EastMoney ``成交量`` is lots, so it scales by 100; ``成交额`` is CNY.
+    * Sina daily ``volume`` is already shares and ``amount`` is CNY.
+    * Tencent ``stock_zh_a_hist_tx`` returns NO volume column, and the column it
+      names ``amount`` is **volume in 100-share lots, not CNY turnover**.
+      Verified 2026-08-14 on 600519/000001/601398 across ``adjust`` in
+      ``{"", "qfq"}``: median(tencent.amount / (sina.volume/100)) == 1.000000
+      exactly, while amount/(shares*close) varied with price level (8e-6 to
+      1.4e-3), which a genuine CNY turnover could not do. Tencent therefore
+      yields volume but NO turnover, and its amount is set NaN rather than
+      relabelled -- fabricating a CNY figure 1.2e5x too small is how a liquidity
+      or capacity filter silently inverts.
     """
     rename_map = {
         "日期": "trade_date",
@@ -345,6 +368,19 @@ def _normalize_akshare_daily(
         "date": "trade_date",
     }
     data = frame.rename(columns=rename_map)
+    source_raw_volume_unit: str | None = None
+    if source == "tencent":
+        # Tencent has shipped two payload shapes. Detect which one arrived rather
+        # than trusting a static table: guessing wrong scales volume by 100x or
+        # turnover by 1e5x, and both self-certify as clean.
+        if "volume" not in data.columns and "amount" in data.columns:
+            # Current shape: no volume column, and "amount" is volume in lots.
+            data = data.rename(columns={"amount": "volume"})
+            data["amount"] = float("nan")
+            source_raw_volume_unit = "lots_100_shares"
+        else:
+            # Legacy shape: volume already in shares, amount already in CNY.
+            source_raw_volume_unit = "shares"
     keep = [
         c
         for c in ("trade_date", "open", "high", "low", "close", "volume", "amount")
@@ -360,12 +396,19 @@ def _normalize_akshare_daily(
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    raw_volume_unit = _RAW_VOLUME_UNIT_BY_SOURCE.get(source, "unknown")
-    if "volume" in data.columns and source == "east_money":
+    raw_volume_unit = source_raw_volume_unit or _RAW_VOLUME_UNIT_BY_SOURCE.get(
+        source, "unknown"
+    )
+    if "volume" in data.columns and raw_volume_unit == "lots_100_shares":
         data["volume"] = data["volume"] * 100.0
-    data["volume_unit"] = _CANONICAL_VOLUME_UNIT
-    data["raw_volume_unit"] = raw_volume_unit
-    data["amount_unit"] = _CANONICAL_AMOUNT_UNIT
+    # Label only what is actually present and converted. Stamping a unit onto an
+    # absent or unconvertible column is how "unknown" becomes "fine": it is the
+    # label, not the number, that downstream consumers trust.
+    has_volume = "volume" in data.columns and data["volume"].notna().any()
+    has_amount = "amount" in data.columns and data["amount"].notna().any()
+    data["volume_unit"] = _CANONICAL_VOLUME_UNIT if has_volume else _UNIT_UNAVAILABLE
+    data["raw_volume_unit"] = raw_volume_unit if has_volume else _UNIT_UNAVAILABLE
+    data["amount_unit"] = _CANONICAL_AMOUNT_UNIT if has_amount else _UNIT_UNAVAILABLE
 
     calendar_ok = trading_calendar is not None and not trading_calendar.empty
     if calendar_ok:
