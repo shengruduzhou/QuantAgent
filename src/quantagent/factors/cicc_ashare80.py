@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors.registry import FactorMeta, default_registry
+from quantagent.factors.vwap import vwap_or_unknown
 
 
 REQUIRED_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "amount")
@@ -99,7 +100,7 @@ def _base(frame: pd.DataFrame) -> pd.DataFrame:
     data["prev_close"] = _delay(data, data["close"], 1)
     data["return_1d"] = data["close"] / data["prev_close"].replace(0.0, np.nan) - 1.0
     data["intraday_return"] = data["close"] / data["open"].replace(0.0, np.nan) - 1.0
-    data["vwap"] = (data["amount"] / data["volume"].replace(0.0, np.nan)).fillna(data["close"])
+    data["vwap"] = vwap_or_unknown(data)
     data["volume_change"] = data.groupby("symbol", sort=False)["volume"].pct_change()
     data["amount_change"] = data.groupby("symbol", sort=False)["amount"].pct_change()
     data["range_pct"] = (data["high"] - data["low"]) / data["prev_close"].replace(0.0, np.nan)

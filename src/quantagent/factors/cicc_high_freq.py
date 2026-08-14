@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors.registry import FactorMeta, default_registry
+from quantagent.factors.vwap import vwap_or_unknown
 
 DAILY_SCHEMA = ("trade_date", "symbol", "open", "high", "low", "close", "volume", "amount")
 INTRADAY_SCHEMA = ("trade_date", "datetime", "symbol", "open", "high", "low", "close", "volume", "amount")
@@ -99,7 +100,7 @@ def _compute_daily(data: pd.DataFrame, window: int) -> pd.DataFrame:
     data = data.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     prev_close = data.groupby("symbol", sort=False)["close"].shift(1)
     returns = data["close"] / prev_close - 1.0
-    vwap = (data["amount"] / data["volume"].replace(0.0, np.nan)).fillna(data["close"])
+    vwap = vwap_or_unknown(data)
     volume_change = data.groupby("symbol", sort=False)["volume"].pct_change()
     amount_mean = data.groupby("symbol", sort=False)["amount"].rolling(window, min_periods=window).mean().reset_index(level=0, drop=True)
     volume_sum = data.groupby("symbol", sort=False)["volume"].rolling(window, min_periods=window).sum().reset_index(level=0, drop=True)
