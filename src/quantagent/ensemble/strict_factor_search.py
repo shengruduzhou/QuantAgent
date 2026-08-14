@@ -20,6 +20,7 @@ from quantagent.ensemble.strict_policy_search import (
 )
 from quantagent.risk.decision_chain import DecisionChainConfig, run_decision_chain
 from quantagent.risk.regime_family import compute_regime_family
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 IDENTIFIER_COLUMNS = {
@@ -371,9 +372,7 @@ def evaluate_strict_factor_subset(
         & (panel["trade_date"] <= bt_end)
         & (panel["symbol"].astype(str).isin(target.columns.astype(str)))
     ].reset_index(drop=True)
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in bt_panel.columns:
-            bt_panel[col] = False
+    bt_panel, _unverified_tradability = ensure_tradability_flags(bt_panel)
     bt = run_strict_backtest_v8(
         target,
         bt_panel,
@@ -569,18 +568,35 @@ def _score_factor_metrics(metrics: Mapping[str, object], config: StrictFactorSea
     return _score_metrics(metrics, proxy)
 
 
+#: Marks a trial whose target book was empty, so no backtest ever ran.
+#: Read by :func:`_score_metrics`, which refuses to rank such a trial.
+NOT_EVALUATED_KEY = "evaluated"
+
+
 def _empty_metrics() -> dict[str, float]:
+    """Metrics for a trial that produced no positions, hence no backtest.
+
+    Every performance figure is NaN, not 0.0. Zeros here are not neutral
+    placeholders -- they are false claims that happen to score well. Holding no
+    position while the benchmark returns +18% has an annual excess of -0.18, not
+    0.0, and `max_drawdown=0.0` reads as a flawless risk profile rather than an
+    absent one. With the repo's default weights that fabrication scored a
+    do-nothing trial at 0.0 against -0.026 for a real +12%/yr policy, so the
+    argmax preferred trading nothing -- and since these models are documented as
+    underperforming their own universe, a negative score is the normal case.
+    """
     return {
-        "total_return": 0.0,
-        "annualized_return": 0.0,
-        "max_drawdown": 0.0,
-        "sharpe": 0.0,
-        "calmar": 0.0,
-        "turnover": 0.0,
-        "total_cost": 0.0,
-        "benchmark_equal_weight_ann": 0.0,
-        "benchmark_equal_weight_total": 0.0,
-        "excess_return_ann": 0.0,
+        "total_return": float("nan"),
+        "annualized_return": float("nan"),
+        "max_drawdown": float("nan"),
+        "sharpe": float("nan"),
+        "calmar": float("nan"),
+        "turnover": float("nan"),
+        "total_cost": float("nan"),
+        "benchmark_equal_weight_ann": float("nan"),
+        "benchmark_equal_weight_total": float("nan"),
+        "excess_return_ann": float("nan"),
+        NOT_EVALUATED_KEY: 0.0,
     }
 
 

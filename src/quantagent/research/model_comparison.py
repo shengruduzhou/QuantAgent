@@ -924,7 +924,9 @@ def _incremental_test(
             reasons=("fewer than 20 paired observation dates",),
         )
     delta = (joined["arm"] - joined["baseline"]).astype(float)
-    t_stat = newey_west_t_stat(delta)
+    # The IC *difference* inherits the label's overlap just as the levels do, and
+    # this t-stat gates arm promotion via min_incremental_t.
+    t_stat = newey_west_t_stat(delta, horizon_days=int(config.horizon_days))
     wins = [
         1.0 if arm.fold_ic.get(fold, float("-inf")) > baseline.fold_ic.get(fold, float("inf")) else 0.0
         for fold in sorted(set(arm.fold_ic) & set(baseline.fold_ic))

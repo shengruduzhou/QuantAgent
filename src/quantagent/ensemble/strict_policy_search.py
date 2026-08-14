@@ -22,6 +22,7 @@ from quantagent.backtest.strict_v8 import StrictBacktestArtifactSet, run_strict_
 from quantagent.ensemble.blend_optimizer import HORIZONS, _apply_weights, _simplex_grid
 from quantagent.risk.decision_chain import DecisionChainConfig, run_decision_chain
 from quantagent.risk.decision_chain import _compute_avg_amount, _compute_trend_quality, _ensure_state_flags
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 REGIME_ORDER = ("bull", "neutral_up", "neutral_down", "bear", "crisis")
@@ -286,9 +287,7 @@ def evaluate_strict_policy(
         & (panel["trade_date"] <= bt_end)
         & (panel["symbol"].isin(target.columns))
     ].reset_index(drop=True)
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in bt_panel.columns:
-            bt_panel[col] = False
+    bt_panel, _unverified_tradability = ensure_tradability_flags(bt_panel)
     bt = run_strict_backtest_v8(
         target,
         bt_panel,
@@ -505,6 +504,20 @@ def equal_weight_benchmark(panel: pd.DataFrame, start, end) -> dict[str, float]:
 
 
 def _score_metrics(metrics: Mapping[str, object], config: StrictPolicySearchConfig) -> float:
+    """Rank a trial, refusing to rank one that never ran.
+
+    A trial whose target book was empty carries ``evaluated == 0``. It scores
+    ``-inf`` so it can never win the argmax. NaN would not do: `x > nan` is
+    False, so a NaN-scoring first trial would become the incumbent and then
+    never be displaced by a real one -- the same bug facing the other way.
+    """
+    try:
+        evaluated = float(metrics.get("evaluated", 1.0))
+    except (TypeError, ValueError):
+        evaluated = 1.0
+    if evaluated <= 0.0:
+        return float("-inf")
+
     ann = _float_metric(metrics, "annualized_return")
     excess = _float_metric(metrics, "excess_return_ann")
     drawdown = _float_metric(metrics, "max_drawdown")

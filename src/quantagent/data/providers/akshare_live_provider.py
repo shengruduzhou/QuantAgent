@@ -373,8 +373,20 @@ def _normalize_akshare_daily(
         # Tencent has shipped two payload shapes. Detect which one arrived rather
         # than trusting a static table: guessing wrong scales volume by 100x or
         # turnover by 1e5x, and both self-certify as clean.
-        if "volume" not in data.columns and "amount" in data.columns:
-            # Current shape: no volume column, and "amount" is volume in lots.
+        #
+        # Structural presence of a `volume` column is NOT sufficient evidence of
+        # the legacy shape. A column that is present but entirely empty carries
+        # no measurement, and treating it as the legacy shape passes the lot
+        # count straight through as CNY turnover -- reproducing the original
+        # defect byte for byte. Require a usable value, not just a header.
+        volume_usable = (
+            "volume" in data.columns
+            and pd.to_numeric(data["volume"], errors="coerce").notna().any()
+        )
+        if not volume_usable and "amount" in data.columns:
+            # Current shape: no usable volume, and "amount" is volume in lots.
+            if "volume" in data.columns:
+                data = data.drop(columns=["volume"])
             data = data.rename(columns={"amount": "volume"})
             data["amount"] = float("nan")
             source_raw_volume_unit = "lots_100_shares"

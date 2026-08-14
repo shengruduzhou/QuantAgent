@@ -321,7 +321,18 @@ def evaluate_factor_candidate(
     ic = _rank_ic_by_date(eligible, factor_name, target_return_col)
     mean_ic = float(ic.mean()) if not ic.empty else float("nan")
     icir = _ic_ir(ic)
-    rank_t_stat = float(newey_west_t_stat(ic)) if not ic.empty else float("nan")
+    # target_horizon_days is a required parameter of this function and was
+    # being discarded here. The per-date IC series from an h-day label
+    # overlaps on h-1 days, so a sample-size-only HAC lag leaves the t-stat
+    # inflated -- and this is the gate that actually promotes factors
+    # (min_newey_west_rank_t_stat below). Measured under a true null at
+    # h=20, n=120: 21.1% of noise factors cleared t>2.0 as shipped, 10.9%
+    # with the horizon passed, against a ~2.5% nominal rate.
+    rank_t_stat = (
+        float(newey_west_t_stat(ic, horizon_days=int(target_horizon_days)))
+        if not ic.empty
+        else float("nan")
+    )
     positive_ratio = float((ic > 0).mean()) if not ic.empty else float("nan")
     losing_rate = _period_losing_rate(ic)
     predictive_drift = _recent_predictive_drift_z(ic)

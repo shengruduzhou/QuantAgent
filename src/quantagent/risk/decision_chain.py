@@ -50,6 +50,7 @@ import pandas as pd
 
 from quantagent.risk.kill_switch import KillSwitch
 from quantagent.risk.risk_limits import V6RiskLimits
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 GATE_NAMES: tuple[str, ...] = (
@@ -131,11 +132,7 @@ class DecisionChainResult:
 
 def _ensure_state_flags(panel: pd.DataFrame) -> pd.DataFrame:
     out = panel.copy()
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in out.columns:
-            out[col] = False
-        else:
-            out[col] = out[col].fillna(False).astype(bool)
+    out, _unverified_tradability = ensure_tradability_flags(out)
     if "amount" not in out.columns:
         out["amount"] = np.nan
     return out

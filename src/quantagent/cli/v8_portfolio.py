@@ -23,6 +23,7 @@ import pandas as pd
 import typer
 
 from quantagent.cli._utils import app
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 def _equal_weight_benchmark(panel: pd.DataFrame, start, end) -> dict:
@@ -148,9 +149,7 @@ def build_alpha_portfolio_v8(
     bt_start, bt_end = target_weights.index.min(), target_weights.index.max()
     bt_panel = panel[(panel["trade_date"] >= bt_start) & (panel["trade_date"] <= bt_end)]
     bt_panel = bt_panel[bt_panel["symbol"].isin(target_weights.columns)].reset_index(drop=True)
-    for col in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if col not in bt_panel.columns:
-            bt_panel[col] = False
+    bt_panel, _unverified_tradability = ensure_tradability_flags(bt_panel)
 
     bt = run_strict_backtest_v8(
         target_weights, bt_panel,
