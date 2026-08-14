@@ -222,6 +222,14 @@ class RiskGate:
             for sector_name, value in sector_weights.items():
                 if value > self.limits.max_sector_weight:
                     violations.append(f"max_sector_weight:{sector_name}")
+        elif risk_snapshot is None and sector is None and len(weights):
+            # Neither a snapshot nor a sector series: concentration was never
+            # evaluated. Record that as `unknown` rather than returning
+            # status="pass", which would assert a check that did not run. The
+            # live path passes production_mode=True and is blocked outright by
+            # portfolio_risk_snapshot_missing; this branch exists so research
+            # callers cannot read "risk passed" off an unevaluated book.
+            unknowns.append("sector_concentration_not_evaluated")
 
         if current_weights is not None:
             current = pd.to_numeric(current_weights, errors="coerce").reindex(weights.index).fillna(0.0)
