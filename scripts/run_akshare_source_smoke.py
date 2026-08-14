@@ -127,6 +127,20 @@ def _economic_scale_evidence(raw: pd.DataFrame) -> dict[str, object]:
     }
 
 
+def _nonnegative_column(frame: pd.DataFrame, column: str) -> bool | None:
+    """True/False if the column exists and is numeric, None when it is absent.
+
+    None, not False: "the source does not publish this" and "the source
+    published a negative value" are different facts and must not collapse.
+    """
+    if column not in frame.columns:
+        return None
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return bool(values.ge(0).all())
+
+
 def _tencent_probe(
     ak, symbol: str, start_date: str, end_date: str
 ) -> dict[str, object]:
@@ -173,12 +187,14 @@ def _tencent_probe(
         # economic scale invariant above passes.
         "current_source_volume_unit": "shares" if observed else "unverified",
         "current_source_amount_unit": "CNY" if observed else "unverified",
-        "nonnegative_volume": bool(
-            pd.to_numeric(raw.get("volume"), errors="coerce").dropna().ge(0).all()
-        ),
-        "nonnegative_amount": bool(
-            pd.to_numeric(raw.get("amount"), errors="coerce").dropna().ge(0).all()
-        ),
+        # Must tolerate an absent column: DataFrame.get returns None, which
+        # pd.to_numeric turns into a bare float nan with no .dropna(). Evaluating
+        # it unconditionally raised AttributeError and killed the whole smoke run
+        # *in the very branch that had correctly detected the missing column*, so
+        # the schema_failed verdict this function computes could never be
+        # reported. A schema check that crashes on schema failure is not a check.
+        "nonnegative_volume": _nonnegative_column(raw, "volume"),
+        "nonnegative_amount": _nonnegative_column(raw, "amount"),
         "first_date": str(raw["date"].iloc[0]) if "date" in raw.columns else None,
         "last_date": str(raw["date"].iloc[-1]) if "date" in raw.columns else None,
         **scale,
