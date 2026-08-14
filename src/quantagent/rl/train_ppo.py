@@ -1,4 +1,26 @@
-"""PPO training entry point for the V7 portfolio environment."""
+"""PPO training entry point for the V7 portfolio environment.
+
+**Currently fails closed.** This trainer builds :class:`PortfolioEnv`, whose
+reward is the ``close(T) -> close(T+1)`` return on the *signal* date -- a return
+no policy could have captured, because it cannot trade at ``close(T)`` on
+information contained in ``close(T)``. Verified numerically: on a panel where
+the two candidate intervals differ, this environment reports ``[0.0, 0.10]``
+where the executable interval gives ``[0.20, 0.0]``.
+
+Constructing that environment now requires
+``PortfolioEnvConfig(acknowledge_untradable_reward=True)``, which this module
+deliberately does NOT set. Training here therefore raises until the trainer is
+rewired to :class:`quantagent.rl.pit_portfolio_env.PITPortfolioEnv`, which
+signals at ``close(T)``, executes at ``close(T+1)``, rewards over
+``close(T+1) -> close(T+2)`` and fails closed on missing prices.
+
+That rewiring is not a rename: ``PITPortfolioEnv`` also takes a passive/benchmark
+weight book, so the call sites in ``cli/v7_train.py`` and
+``scripts/rl_train_eval_2026.py`` must decide what that book is. Until someone
+makes that decision explicitly, a loud failure is the correct behaviour -- any
+policy trained here optimised an objective that does not exist, so its results
+must not be cited.
+"""
 
 from __future__ import annotations
 

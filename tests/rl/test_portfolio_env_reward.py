@@ -28,7 +28,18 @@ def test_portfolio_env_reward_reports_equal_weight_excess():
     env = PortfolioEnv(
         predictions,
         market,
-        PortfolioEnvConfig(top_n=2, max_delta=1.0, max_weight_per_name=1.0, max_turnover=1.0, cost_bps=0.0),
+        PortfolioEnvConfig(
+            top_n=2,
+            max_delta=1.0,
+            max_weight_per_name=1.0,
+            max_turnover=1.0,
+            cost_bps=0.0,
+            # Deliberate: this case covers the LEGACY environment, whose reward
+            # is the untradable close(T)->close(T+1) return. Kept so historical
+            # runs stay reproducible. New work belongs in PITPortfolioEnv --
+            # see tests/rl/test_reward_clock_intervals.py.
+            acknowledge_untradable_reward=True,
+        ),
     )
     env.reset()
     action = [0.0, 0.0]
