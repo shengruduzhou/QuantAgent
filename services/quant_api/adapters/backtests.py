@@ -359,12 +359,23 @@ class BacktestAdapter:
                 "detail": row,
                 "sourcePath": source,
             })
+        has_next = len(events) == page_size
+        # `total` used to be `start + len(events) + (1 if full_page else 0)` -- a
+        # has-next probe, not a count. On a full page it evaluates to
+        # `pageSize + 1` (measured: 1->2, 5->6, 100->101, 200->201), and the UI
+        # printed that as an exact figure: "201 alerts", "201 persisted events".
+        # The number tracked the page size, not the data.
+        #
+        # We only know the true total once a page comes back short. Report it
+        # then, and say so explicitly otherwise rather than inventing one.
         return {
             "items": events,
-            "total": start + len(events) + (1 if len(events) == page_size else 0),
+            "total": None if has_next else start + len(events),
+            "totalIsExact": not has_next,
+            "loadedCount": start + len(events),
             "page": page,
             "pageSize": page_size,
-            "hasNext": len(events) == page_size,
+            "hasNext": has_next,
         }
 
     def stock_replay(self, backtest_id: str, symbol: str) -> dict[str, Any]:

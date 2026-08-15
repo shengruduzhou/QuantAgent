@@ -50,7 +50,14 @@ export function RiskCenterPage(): JSX.Element {
   const risk = overview.data?.data;
   const eventPage = events.data?.data;
   const eventItems = eventPage?.items ?? [];
-  const eventTotal = eventPage?.total ?? 0;
+  // The server reports `total` only once a page comes back short. While more
+  // pages remain it is null, and we must not print a number that tracks the page
+  // size rather than the data -- the old `total` evaluated to pageSize + 1 and
+  // was rendered as an exact "201 alerts".
+  const eventTotal = eventPage?.total ?? null;
+  const eventLoaded = eventPage?.loadedCount ?? eventPage?.items.length ?? 0;
+  const eventCountLabel = eventTotal !== null ? String(eventTotal) : `≥${eventLoaded}`;
+  const eventCountValue = eventTotal ?? eventLoaded;
 
   const eventOption = useMemo<EChartsOption>(() => {
     const entries = Object.entries(risk?.eventCounts ?? {}).sort((left, right) => right[1] - left[1]).slice(0, 12);
@@ -118,14 +125,14 @@ export function RiskCenterPage(): JSX.Element {
 
   return (
     <div className="page institutional-workbench risk-page">
-      <WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="硬约束、阈值、风险事件和人工处置队列共享同一证据链；雷达图仅作辅助。" asOf={eventItems[0]?.datetime?.slice(0, 10) ?? "as-of unavailable"} context={`${eventTotal} persisted events`} actions={<><span className="status-badge status-warning"><WarningCircle size={12} />{eventTotal} alerts</span><span className="status-badge status-success"><ShieldCheck size={12} />KILL LOCKED</span></>} />
+      <WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="硬约束、阈值、风险事件和人工处置队列共享同一证据链；雷达图仅作辅助。" asOf={eventItems[0]?.datetime?.slice(0, 10) ?? "as-of unavailable"} context={`${eventCountLabel} persisted events`} actions={<><span className="status-badge status-warning"><WarningCircle size={12} />{eventCountLabel} alerts</span><span className="status-badge status-success"><ShieldCheck size={12} />KILL LOCKED</span></>} />
       <WorkbenchMetricStrip metrics={[
         { label: "最大回撤", value: formatPercent(risk.maxDrawdown), detail: "portfolio NAV", tone: "danger", icon: ChartLineDown },
         { label: "单票最大亏损", value: formatNumber(risk.maxSingleStockLoss), detail: "realized PnL", tone: "danger", icon: TrendDown },
         { label: "单日最大亏损", value: formatPercent(risk.maxDailyLoss), detail: "daily threshold", tone: "danger", icon: TrendDown },
         { label: "连续亏损", value: formatCompact(risk.consecutiveLossDays), detail: "trading days", tone: "warning", icon: WarningCircle },
         { label: "流动性风险", value: formatPercent(risk.liquidityRisk), detail: `跌停 ${formatPercent(risk.limitDownRisk)} · 停牌 ${formatPercent(risk.suspensionRisk)}`, tone: "warning", icon: Drop },
-        { label: "风险事件", value: formatCompact(eventTotal), detail: "persisted evidence", tone: eventTotal ? "warning" : "positive", icon: ShieldWarning },
+        { label: "风险事件", value: eventTotal !== null ? formatCompact(eventTotal) : `≥${formatCompact(eventLoaded)}`, detail: "persisted evidence", tone: eventCountValue ? "warning" : "positive", icon: ShieldWarning },
       ]} />
 
       <section className="risk-grid">
@@ -159,7 +166,7 @@ export function RiskCenterPage(): JSX.Element {
             emptyDetail="profit_by_stock.csv 不存在。"
           />
         </Panel>
-        <Panel title="风控事件时间线" eyebrow={`${eventTotal} indexed events`} className="risk-timeline-panel">
+        <Panel title="风控事件时间线" eyebrow={`${eventCountLabel} indexed events`} className="risk-timeline-panel">
           {eventItems.length ? (
             <div className="risk-timeline">
               {eventItems.slice(0, 60).map((event) => (
