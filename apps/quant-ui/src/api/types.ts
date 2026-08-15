@@ -19,7 +19,12 @@ export interface ApiResponse<T> {
 
 export interface Page<T> {
   items: T[];
-  total: number;
+  /** Exact count, or null when more pages remain and the true total is unknown. */
+  total: number | null;
+  /** False means `total` is null and only `loadedCount` is known. */
+  totalIsExact?: boolean;
+  /** Rows fetched so far; a lower bound on the true total. */
+  loadedCount?: number;
   page: number;
   pageSize: number;
   hasNext: boolean;

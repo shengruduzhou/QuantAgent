@@ -764,12 +764,33 @@ def _build_feature_blocks(
     return blocks
 
 
+class MissingFeatureBlock(KeyError):
+    """A requested feature block was never built."""
+
+
 def _stack_blocks(
     blocks: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
     names: Sequence[str],
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    train_parts = [blocks[name][0] for name in names if name in blocks]
-    test_parts = [blocks[name][1] for name in names if name in blocks]
+    """Assemble the requested blocks, refusing to silently drop any of them.
+
+    `if name in blocks` used to skip a block that had not been built. That turned
+    an arm which could not represent its own hypothesis into one that quietly
+    became the baseline: with no regime series, `linear_regime_interaction` was
+    fitted on exactly the baseline's features and reported bit-identical fold IC,
+    while still labelling itself `modelClass=regime_interaction,
+    representsInteraction=True`. An arm that cannot be built must fail, not
+    impersonate the control it was meant to beat.
+    """
+    missing = [name for name in names if name not in blocks]
+    if missing:
+        raise MissingFeatureBlock(
+            f"feature block(s) {missing} were requested but never built; "
+            "the arm cannot represent its hypothesis and must not be scored as "
+            "though it did (a regime arm needs regime_by_date supplied)"
+        )
+    train_parts = [blocks[name][0] for name in names]
+    test_parts = [blocks[name][1] for name in names]
     train_frame = pd.concat(train_parts, axis=1)
     test_frame = pd.concat(test_parts, axis=1)
     train_values = np.nan_to_num(train_frame.to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)

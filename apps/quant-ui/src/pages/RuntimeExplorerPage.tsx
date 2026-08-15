@@ -168,7 +168,7 @@ export function RuntimeExplorerPage(): JSX.Element {
                       </tr>
                     ))}</tbody>
                   </table></div>
-                  <div className="pagination"><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>{page} / {Math.max(1, Math.ceil(data.total / data.pageSize))}</span><button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button></div>
+                  <div className="pagination"><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>{page} / {data.total !== null ? Math.max(1, Math.ceil(data.total / data.pageSize)) : "?"}</span><button disabled={!data.hasNext} onClick={() => setPage((value) => value + 1)}>下一页</button></div>
                 </>
               ) : artifacts.isLoading ? <StateView state="loading" /> : <ActionableState title={artifacts.isError ? "Runtime 索引读取失败" : "当前过滤没有产物"} detail={artifacts.error?.message ?? "清除过滤或重建索引；系统不会把未声明文件猜测成生产产物。"} icon={artifacts.isError ? WarningCircle : Database} tone={artifacts.isError ? "danger" : "neutral"} primary={{ label: "重建索引", onClick: rebuildIndex }} />}
             </Panel>

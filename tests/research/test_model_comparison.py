@@ -358,3 +358,42 @@ class TestReporting:
 def test_config_rejects_a_holdout_that_consumes_every_fold():
     with pytest.raises(ValueError, match="n_folds must exceed holdout_folds"):
         ComparisonConfig(n_folds=2, holdout_folds=2)
+
+
+class TestArmsCannotImpersonateTheBaseline:
+    """An arm that cannot build its own features must fail, not become the control.
+
+    `_stack_blocks` used to drop a requested block with `if name in blocks`. With
+    no regime series the regime arm was therefore fitted on exactly the
+    baseline's features, produced bit-identical fold IC, and still reported
+    `modelClass=regime_interaction, representsInteraction=True`. The shipped CLI
+    (`cli/nonlinear.py`) never passes `regime_by_date`, so that was the only
+    behaviour anyone saw through it.
+    """
+
+    def test_regime_arm_fails_when_no_regime_series_is_supplied(self):
+        panel, _ = _panel("interaction", seed=1)
+        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config())
+
+        regime_arms = [a for a in report.arms if "regime" in a.name]
+        assert regime_arms, "expected a regime arm in the roster"
+        for arm in regime_arms:
+            assert arm.status == "failed", (
+                f"{arm.name} was scored as measured without a regime series"
+            )
+            assert "regime" in arm.error.lower()
+
+    def test_regime_arm_is_measured_when_the_series_is_supplied(self):
+        """Guard against over-reach: the arm must still work when it can."""
+        panel, regime = _panel("interaction", seed=1)
+        report = run_model_comparison(
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+        )
+        regime_arms = [a for a in report.arms if "regime" in a.name]
+        assert any(a.status == "measured" for a in regime_arms)
+
+    def test_a_failed_arm_never_becomes_the_champion(self):
+        panel, _ = _panel("interaction", seed=1)
+        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config())
+        failed = {a.name for a in report.arms if a.status == "failed"}
+        assert report.champion not in failed
