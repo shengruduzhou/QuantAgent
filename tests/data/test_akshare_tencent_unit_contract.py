@@ -246,3 +246,36 @@ class TestEmptyVolumeColumnCannotDefeatDetection:
         assert out["amount"].iloc[0] == pytest.approx(5.07e9)
         assert out["amount_unit"].iloc[0] == _CANONICAL_AMOUNT_UNIT
         assert out["volume"].iloc[0] == pytest.approx(4_247_381.0)
+
+
+class TestDefaultSourceOrderPrefersCompleteData:
+    """Sina must be tried before Tencent, because Tencent has no turnover.
+
+    Measured 2026-08-15 (akshare 1.18.60, 5 symbols x 44 sessions, through the
+    provider): sina returns 220/220 volume AND 220/220 amount with
+    amount/(volume*close) median 0.9986; tencent returns 220/220 volume and
+    0/220 amount, because the source publishes no CNY turnover at all.
+
+    With tencent ahead of sina, any EastMoney outage silently cost the pipeline
+    turnover entirely -- which disables every ADV, liquidity and capacity screen
+    downstream. EastMoney was in fact unreachable throughout that session.
+    """
+
+    def test_sina_is_attempted_before_tencent(self):
+        from quantagent.data.providers.akshare_live_provider import _DEFAULT_SOURCE_ORDER
+
+        assert "sina" in _DEFAULT_SOURCE_ORDER, "the only default source with turnover"
+        assert _DEFAULT_SOURCE_ORDER.index("sina") < _DEFAULT_SOURCE_ORDER.index("tencent")
+
+    def test_east_money_remains_the_documented_primary(self):
+        from quantagent.data.providers.akshare_live_provider import _DEFAULT_SOURCE_ORDER
+
+        assert _DEFAULT_SOURCE_ORDER[0] == "east_money"
+
+    def test_every_default_source_is_routable(self):
+        from quantagent.data.providers.akshare_live_provider import (
+            _DEFAULT_SOURCE_ORDER,
+            _SOURCE_FUNCTIONS,
+        )
+
+        assert set(_DEFAULT_SOURCE_ORDER) <= set(_SOURCE_FUNCTIONS)

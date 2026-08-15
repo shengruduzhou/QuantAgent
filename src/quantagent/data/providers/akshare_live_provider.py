@@ -25,13 +25,26 @@ AKSHARE_MARKET_REQUIRED_COLUMNS: tuple[str, ...] = (
     "quality_status",
 )
 
-# EastMoney remains the preferred documented A-share daily endpoint. The
-# Tencent endpoint is the default failover. Under AKShare 1.18.60 it supplies
-# volume (as lots, in a column it calls "amount") but NO CNY turnover; the
-# normaliser detects that shape, converts it, and marks amount unavailable. The
-# repository live source smoke can reach it when EastMoney/Sina are remote-
-# closing GitHub Actions connections. Sina stays explicit opt-in only.
-_DEFAULT_SOURCE_ORDER: tuple[str, ...] = ("east_money", "tencent")
+# EastMoney remains the preferred documented A-share daily endpoint and stays
+# first. Sina is now the second choice and Tencent the last resort, ordered by
+# how complete the payload is rather than by preference alone.
+#
+# Measured 2026-08-15, akshare 1.18.60, 5 symbols x 44 sessions through this
+# provider:
+#
+#   east_money  stock_zh_a_hist      UNREACHABLE  push2his.eastmoney.com,
+#                                    ConnectionError after ~262s per symbol
+#   sina        stock_zh_a_daily     220/220 volume (shares) AND 220/220 amount
+#                                    (CNY); amount/(volume*close) median 0.9986
+#   tencent     stock_zh_a_hist_tx   220/220 volume, 0/220 amount -- the source
+#                                    publishes no CNY turnover at all
+#
+# Tencent ahead of Sina meant that whenever EastMoney was unavailable the
+# pipeline silently lost turnover entirely, which disables every ADV, liquidity
+# and capacity screen downstream. Sina supplies it, so it must be tried first.
+# Note the failure is slow as well as total: EastMoney burns ~262s per symbol
+# before giving up, so an unreachable primary is expensive, not just useless.
+_DEFAULT_SOURCE_ORDER: tuple[str, ...] = ("east_money", "sina", "tencent")
 _CANONICAL_VOLUME_UNIT = "shares"
 _CANONICAL_AMOUNT_UNIT = "CNY"
 #: Emitted instead of a canonical unit when a source does not supply the
