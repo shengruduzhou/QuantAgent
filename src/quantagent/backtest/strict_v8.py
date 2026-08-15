@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 from typing import Mapping
 
@@ -93,6 +94,11 @@ class StrictBacktestMetrics:
     n_fills: int                    # number of individual fills (was the old n_trades)
     start_date: str
     end_date: str
+    #: 0.0 when no NAV series existed, i.e. no backtest ran. The performance
+    #: fields are then NaN and must not be ranked against a real trial. See
+    #: ensemble/strict_policy_search._score_metrics, which scores such a trial
+    #: -inf so a book that never traded cannot win a search.
+    evaluated: float = 1.0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -114,6 +120,7 @@ class StrictBacktestMetrics:
             "n_fills": int(self.n_fills),
             "start_date": self.start_date,
             "end_date": self.end_date,
+            "evaluated": float(self.evaluated),
             "metric_semantics_version": METRIC_SEMANTICS_VERSION,
             "nav_baseline": "configured_initial_cash",
         }
@@ -194,21 +201,35 @@ def _compute_metrics(
     initial_nav: float | None = None,
 ) -> StrictBacktestMetrics:
     if nav is None or nav.empty:
+        # NaN, not 0.0: no NAV series means no backtest ran, and zeros here are
+        # not placeholders but flattering claims. `max_drawdown=0.0` reads as a
+        # flawless risk profile rather than an absent one, and `sharpe=0.0` beats
+        # every genuinely losing strategy in a ranking. Counts stay 0 because
+        # "no trades" is a real observation; the performance ratios are not.
+        _nan = float("nan")
         return StrictBacktestMetrics(
-            total_return=0.0, annualized_return=0.0, max_drawdown=0.0,
-            sharpe=0.0, calmar=0.0, volatility=0.0, turnover=0.0,
-            win_rate=0.0, avg_profit_per_trade=0.0, median_profit_per_trade=0.0,
-            profit_factor=0.0, gross_profit=0.0, gross_loss=0.0, total_cost=0.0,
+            total_return=_nan, annualized_return=_nan, max_drawdown=_nan,
+            sharpe=_nan, calmar=_nan, volatility=_nan, turnover=_nan,
+            win_rate=_nan, avg_profit_per_trade=_nan, median_profit_per_trade=_nan,
+            profit_factor=_nan, gross_profit=_nan, gross_loss=_nan, total_cost=_nan,
             n_trades=0, n_fills=0, start_date="", end_date="",
+            evaluated=0.0,
         )
     nav_clean = nav.sort_index().replace([np.inf, -np.inf], np.nan).dropna().astype(float)
     if nav_clean.empty:
+        # NaN, not 0.0: no NAV series means no backtest ran, and zeros here are
+        # not placeholders but flattering claims. `max_drawdown=0.0` reads as a
+        # flawless risk profile rather than an absent one, and `sharpe=0.0` beats
+        # every genuinely losing strategy in a ranking. Counts stay 0 because
+        # "no trades" is a real observation; the performance ratios are not.
+        _nan = float("nan")
         return StrictBacktestMetrics(
-            total_return=0.0, annualized_return=0.0, max_drawdown=0.0,
-            sharpe=0.0, calmar=0.0, volatility=0.0, turnover=0.0,
-            win_rate=0.0, avg_profit_per_trade=0.0, median_profit_per_trade=0.0,
-            profit_factor=0.0, gross_profit=0.0, gross_loss=0.0, total_cost=0.0,
+            total_return=_nan, annualized_return=_nan, max_drawdown=_nan,
+            sharpe=_nan, calmar=_nan, volatility=_nan, turnover=_nan,
+            win_rate=_nan, avg_profit_per_trade=_nan, median_profit_per_trade=_nan,
+            profit_factor=_nan, gross_profit=_nan, gross_loss=_nan, total_cost=_nan,
             n_trades=0, n_fills=0, start_date="", end_date="",
+            evaluated=0.0,
         )
 
     if initial_nav is None:
@@ -244,7 +265,11 @@ def _compute_metrics(
     peaks = np.maximum.accumulate(nav_curve)
     drawdowns = nav_curve / peaks - 1.0
     max_dd = float(abs(drawdowns.min())) if len(drawdowns) else 0.0
-    calmar = float(ann_return / max_dd) if max_dd > 1e-9 else float(ann_return * 10.0)
+    # `ann_return * 10` is a fabricated stand-in: with no drawdown Calmar is
+    # undefined (division by zero), not ten times the return. quant_math's
+    # own implementation returns nan here, and republishing a made-up finite
+    # value makes a no-drawdown run look like a ranked, comparable result.
+    calmar = float(ann_return / max_dd) if max_dd > 1e-9 else float("nan")
     # Turnover proxy: average daily traded value / NAV.
     n_fills = 0
     turnover = 0.0
@@ -398,6 +423,23 @@ def _profit_by_sector(
 
 # ---------------------------------------------------------------------------
 # Artifact bundle
+
+def _json_safe(payload: dict[str, object]) -> dict[str, object]:
+    """Replace non-finite floats with None so the result is valid JSON.
+
+    NaN means "not measured" here; ``null`` is its JSON spelling. Emitting the
+    bare ``NaN`` token instead produces a file that strict parsers reject and
+    lenient ones silently mis-handle -- which would turn an honest "unevaluated"
+    signal back into an absent one.
+    """
+    out: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            out[key] = None
+        else:
+            out[key] = value
+    return out
+
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -423,11 +465,16 @@ class StrictBacktestArtifactSet:
         out.mkdir(parents=True, exist_ok=True)
         paths: dict[str, Path] = {}
         paths["metrics"] = out / "metrics.json"
-        metrics_payload = self.metrics.to_dict()
+        metrics_payload = _json_safe(self.metrics.to_dict())
         if self.trust_stamp:
             metrics_payload.update(self.trust_stamp)
         paths["metrics"].write_text(
-            json.dumps(metrics_payload, indent=2, default=str),
+            # allow_nan=False: an unevaluated backtest now reports NaN rather
+            # than a flattering 0.0, and json.dumps would otherwise emit a bare
+            # `NaN` token, which is not valid JSON. Readers that swallow the
+            # parse error degrade silently to "no metrics"; readers that do not
+            # simply break. Missing values serialise as null instead.
+            json.dumps(metrics_payload, indent=2, default=str, allow_nan=False),
             encoding="utf-8",
         )
         paths["nav"] = out / "nav.csv"
