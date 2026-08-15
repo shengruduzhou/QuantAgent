@@ -122,7 +122,46 @@ class EventDrivenBacktester:
             if daily_prices.empty:
                 nav_curve[date] = nav
                 continue
-            fill_date = dates[i + 1] if (self.config.next_day_fill and i + 1 < len(dates)) else date
+            if self.config.next_day_fill and i + 1 >= len(dates):
+                # Under a next-day-fill policy the final bar has no session to
+                # fill in. The old `else date` fallback executed it on its own
+                # bar instead, which both violates the policy and leaves a
+                # position that no later bar can unwind -- so the phantom mark
+                # never washes out and the total return itself is wrong. The
+                # order simply does not execute inside the tested window.
+                #
+                # Skip the TRADING, not the MARKING: positions still have to be
+                # revalued at this bar's close, or the final mark-to-market is
+                # silently dropped and NAV no longer equals cash + holdings.
+                nav = cash + sum(
+                    pos.total_shares() * float(daily_prices["close"].get(sym, 0.0))
+                    for sym, pos in positions.items()
+                )
+                nav_curve[date] = nav
+                weight_curve.append(
+                    {
+                        "trade_date": date,
+                        **{
+                            sym: positions[sym].total_shares()
+                            * float(daily_prices["close"].get(sym, 0.0))
+                            / max(nav, 1e-6)
+                            for sym in symbols
+                        },
+                    }
+                )
+                reject_log.append(
+                    {
+                        "trade_date": date,
+                        "symbol": "*",
+                        "reason": "no_next_session_to_fill",
+                        "detail": (
+                            "next_day_fill is enabled and this is the final bar; "
+                            "the order would execute outside the tested window"
+                        ),
+                    }
+                )
+                continue
+            fill_date = dates[i + 1] if self.config.next_day_fill else date
             fill_prices = (
                 prices[prices["trade_date"] == fill_date]
                 .set_index("symbol")[self.config.fill_price_column]
