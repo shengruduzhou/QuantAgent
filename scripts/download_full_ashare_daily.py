@@ -22,12 +22,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
+
+#: ``stock_zh_a_daily`` accepts no timeout argument, so a half-open socket blocks
+#: its worker forever. A first full-universe run hung for ~2h50m on its last 4
+#: symbols with no progress and no error -- the retry loop never got to run,
+#: because the underlying recv never returned. A process-wide default timeout is
+#: the only lever that reaches it.
+SOCKET_TIMEOUT_SECONDS = 30.0
 
 DEFAULT_OUT = Path("data/raw/ashare_daily")
 #: Below the measured rate-limit knee (8); see module docstring.
@@ -78,8 +85,10 @@ def main(argv=None) -> int:
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=0, help="0 = whole universe")
+    parser.add_argument("--only", default="", help="comma-separated symbols to fetch")
     args = parser.parse_args(argv)
 
+    socket.setdefaulttimeout(SOCKET_TIMEOUT_SECONDS)
     import akshare as ak
 
     shard_dir = args.out / f"adjust={args.adjust or 'none'}"
@@ -88,6 +97,9 @@ def main(argv=None) -> int:
     print(f"akshare {ak.__version__}  window {args.start}..{args.end}  "
           f"adjust={args.adjust or 'none'}  workers={args.workers}")
     universe = fetch_universe(ak)
+    if args.only:
+        wanted = {x.strip() for x in args.only.split(",") if x.strip()}
+        universe = universe[universe["prefixed"].isin(wanted)]
     if args.limit:
         universe = universe.head(args.limit)
     print(f"universe: {len(universe):,} symbols "
