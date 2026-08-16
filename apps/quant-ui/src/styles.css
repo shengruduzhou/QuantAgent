@@ -3967,3 +3967,22 @@ a:focus-visible,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --- walk-forward risk page ------------------------------------------- */
+.wf-page { padding: 20px 24px; }
+.wf-header h1 { margin: 0 0 6px; font-size: 20px; }
+.wf-header p { margin: 0 0 18px; opacity: .8; font-size: 13px; }
+.wf-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 18px; }
+.wf-table th, .wf-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--vnx-border, #284354); }
+.wf-table th:first-child, .wf-table td:first-child,
+.wf-table th:nth-child(2), .wf-table td:nth-child(2) { text-align: left; }
+.wf-table thead th { opacity: .75; font-weight: 600; }
+/* A-share convention: red = up, green = down. */
+.wf-up { color: var(--market-up, #f0525f); }
+.wf-down { color: var(--market-down, #22b889); }
+/* An unmeasured value must not read as good OR bad. */
+.wf-muted { opacity: .55; }
+/* Flagged windows stay visible but are visibly not load-bearing. */
+.wf-lowbreadth { opacity: .5; font-style: italic; }
+.wf-note { font-size: 12px; opacity: .7; line-height: 1.5; max-width: 70ch; }
+.wf-error { color: var(--vnx-danger, #f0525f); }
