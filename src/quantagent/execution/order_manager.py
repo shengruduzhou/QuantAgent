@@ -164,6 +164,11 @@ class OrderManager:
     constraint_evaluator: ExecutionConstraintEvaluator = field(
         default_factory=ExecutionConstraintEvaluator
     )
+    #: Per-symbol day-volume snapshots feeding the participation-rate limit.
+    #: Callers that own market data inject it here; a broker may instead expose
+    #: ``query_daily_volume(symbol)``.  Neither present ⇒ the constraint is
+    #: reported unmeasured and production submission fails closed.
+    daily_volume_hints: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.forensic_replay:
@@ -602,25 +607,58 @@ class OrderManager:
             timestamp=timestamp,
             order_value=float(order.quantity) * float(order.price),
             portfolio_nav=nav,
-            daily_volume_hint=None,
+            daily_volume_hint=self._daily_volume_hint(order.symbol),
         )
         report = self.constraint_evaluator.evaluate([*self._risk_intents_today, risk_intent])
+        # A constraint the evaluator could not measure is not a pass.  Production
+        # submission requires the whole configured set to have been evaluated,
+        # otherwise a broker that cannot answer ``query_account_value`` (NAV) or a
+        # caller that supplies no day-volume snapshot would silently retire the
+        # turnover and participation limits while the report still read passed.
+        certified = report.passed and report.fully_measured
+        if not report.passed:
+            reason = "blocking execution constraint violation: " + ",".join(sorted(report.by_constraint))
+        elif not report.fully_measured:
+            reason = (
+                "production pre-trade refuses to certify an order against an "
+                "unmeasured constraint: " + ",".join(report.unmeasured_constraints)
+            )
+        else:
+            reason = "all production pre-submit execution constraints passed"
         decision = CanonicalRiskDecision.create(
-            approved=report.passed,
+            approved=certified,
             rule="execution_constraint_dsl",
             threshold=self.constraint_evaluator.constraints.as_dict(),
             measured=report.to_dict(),
-            reason=(
-                "all production pre-submit execution constraints passed"
-                if report.passed
-                else "blocking execution constraint violation: " + ",".join(sorted(report.by_constraint))
-            ),
+            reason=reason,
             lineage=canonical_order.lineage,
             decided_by="execution_constraint_dsl",
         )
-        if not report.passed:
+        if not certified:
             return order, decision, None
         return replace(order, risk_check_result="approved"), decision, risk_intent
+
+    def _daily_volume_hint(self, symbol: str) -> float | None:
+        """Day-volume snapshot for the participation-rate constraint.
+
+        Returns ``None`` when the venue cannot answer, which now surfaces as an
+        unmeasured constraint rather than as a silent pass.
+        """
+        hint = self.daily_volume_hints.get(str(symbol))
+        if hint is not None:
+            try:
+                value = float(hint)
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+        query = getattr(self.broker, "query_daily_volume", None)
+        if not callable(query):
+            return None
+        try:
+            value = float(query(symbol))
+        except Exception:
+            return None
+        return value if pd.notna(value) and value > 0 else None
 
     def _open_canonical_pending(self, order: Order):
         session = str(order.timestamp)[:10]

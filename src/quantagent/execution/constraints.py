@@ -103,8 +103,13 @@ class ExecutionConstraintSet:
     """Declarative bag of A-share execution constraints.
 
     All limits are *inclusive upper bounds* unless otherwise stated.
-    Setting any value to ``None`` disables that check (the DSL never
-    blocks for missing data, only for confirmed violations).
+    Setting any value to ``None`` disables that check.
+
+    The evaluator never *blocks* for missing data, only for confirmed
+    violations — but a constraint it could not evaluate is reported as an
+    :class:`UnmeasuredConstraint` rather than dropped, so "not measured"
+    never reads as "passed".  Production callers must require
+    ``report.passed and report.fully_measured``.
     """
 
     # Rate limits
@@ -204,16 +209,58 @@ class ExecutionConstraintViolation:
 
 
 @dataclass(frozen=True)
+class UnmeasuredConstraint:
+    """A configured constraint whose input measurement was not supplied.
+
+    This is the third state between "passed" and "violated".  The evaluator
+    itself still refuses to block on missing data (see the class docstring of
+    :class:`ExecutionConstraintSet`), but it must not let the absence of a
+    measurement look identical to a clean pass: a constraint that was never
+    evaluated is recorded here so the *caller* can decide to fail closed.
+
+    Historically ``max_single_stock_participation_rate`` and
+    ``max_daily_turnover`` were skipped silently whenever the day-volume hint
+    or the NAV snapshot was missing, and the production order path supplied
+    neither — so both limits were structurally unreachable while the report
+    still read ``passed=True``.
+    """
+
+    constraint: str
+    missing_input: str
+    reason: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ExecutionConstraintReport:
     n_intents: int
     n_violations: int
     n_blocking: int
     violations: list[ExecutionConstraintViolation] = field(default_factory=list)
     by_constraint: dict[str, int] = field(default_factory=dict)
+    unmeasured: list[UnmeasuredConstraint] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
+        """No *confirmed* breach.
+
+        Deliberately unchanged: it does not fold in :attr:`unmeasured`, because
+        research and backtest callers legitimately evaluate intent streams that
+        carry no NAV or day-volume snapshot.  Production callers must consult
+        :attr:`fully_measured` as well — ``passed and fully_measured`` is the
+        only combination that certifies an order against the whole constraint
+        set rather than against the subset that happened to have inputs.
+        """
         return self.n_blocking == 0
+
+    @property
+    def fully_measured(self) -> bool:
+        """Every configured constraint had the inputs it needed."""
+        return not self.unmeasured
+
+    @property
+    def unmeasured_constraints(self) -> list[str]:
+        return sorted({u.constraint for u in self.unmeasured})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -222,6 +269,16 @@ class ExecutionConstraintReport:
             "n_blocking": self.n_blocking,
             "by_constraint": dict(self.by_constraint),
             "passed": self.passed,
+            "fully_measured": self.fully_measured,
+            "unmeasured": [
+                {
+                    "constraint": u.constraint,
+                    "missing_input": u.missing_input,
+                    "reason": u.reason,
+                    "detail": dict(u.detail),
+                }
+                for u in self.unmeasured
+            ],
             "violations": [
                 {
                     "intent_id": v.intent_id,
@@ -256,6 +313,7 @@ class ExecutionConstraintEvaluator:
     def evaluate(self, intents: Sequence[OrderIntentRecord]) -> ExecutionConstraintReport:
         c = self.constraints
         violations: list[ExecutionConstraintViolation] = []
+        unmeasured: list[UnmeasuredConstraint] = []
         intents = list(intents)
         n_total = len(intents)
 
@@ -352,6 +410,16 @@ class ExecutionConstraintEvaluator:
             for symbol, vol in volume_by_symbol.items():
                 dvol = day_volume_hint.get(symbol)
                 if not dvol:
+                    # Record, do not silently skip: without a day-volume
+                    # snapshot this limit cannot be evaluated for this symbol.
+                    unmeasured.append(
+                        UnmeasuredConstraint(
+                            constraint="max_single_stock_participation_rate",
+                            missing_input="daily_volume_hint",
+                            reason=f"no positive day-volume hint for {symbol}",
+                            detail={"symbol": symbol, "intent_volume": vol},
+                        )
+                    )
                     continue
                 rate = vol / dvol
                 if rate > c.max_single_stock_participation_rate:
@@ -369,7 +437,16 @@ class ExecutionConstraintEvaluator:
         # Daily turnover (as % of NAV)
         if c.max_daily_turnover is not None:
             navs = [it.portfolio_nav for it in ordered if it.portfolio_nav is not None and it.portfolio_nav > 0]
-            if navs:
+            if not navs:
+                unmeasured.append(
+                    UnmeasuredConstraint(
+                        constraint="max_daily_turnover",
+                        missing_input="portfolio_nav",
+                        reason="no intent in the batch carried a positive NAV snapshot",
+                        detail={"n_intents": len(ordered)},
+                    )
+                )
+            else:
                 nav = float(navs[0])
                 gross_value = sum(
                     float(it.order_value) if it.order_value > 0 else float(it.quantity) * float(it.price)
@@ -522,6 +599,7 @@ class ExecutionConstraintEvaluator:
             n_blocking=n_blocking,
             violations=violations,
             by_constraint=by_constraint,
+            unmeasured=unmeasured,
         )
 
 
@@ -532,5 +610,6 @@ __all__ = [
     "ExecutionConstraintSet",
     "ExecutionConstraintViolation",
     "OrderIntentRecord",
+    "UnmeasuredConstraint",
     "classify_auction_phase",
 ]

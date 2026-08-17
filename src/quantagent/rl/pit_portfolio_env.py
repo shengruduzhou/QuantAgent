@@ -414,11 +414,22 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         w = passive * (1.0 + cfg.max_tilt * a[:n])
         w = np.where(in_book, np.maximum(w, 0.0), 0.0)
         passive_gross = float(passive.sum())
+        # The gross floor must never lift a book the agent did not ask to lift.
+        # Clipping the tilted gross at a fixed ``min_gross`` meant that whenever
+        # the passive book was itself below that floor, a zero action produced
+        # ``w = passive * (min_gross / passive_gross) != passive`` — the
+        # environment levered the book up on its own and then credited the
+        # resulting difference to the agent as value-add. The floor therefore
+        # binds only down to the passive gross: with ``a[n] == 0`` the tilted
+        # gross is exactly ``passive_gross`` and lands inside the interval, so
+        # zero action is zero reward by construction.
+        gross_floor = min(cfg.min_gross, passive_gross)
+        gross_ceiling = min(cfg.max_gross, 1.0)
         gross = float(
             np.clip(
                 passive_gross * (1.0 + cfg.max_cash_tilt * a[n]),
-                cfg.min_gross,
-                min(cfg.max_gross, 1.0),
+                gross_floor,
+                max(gross_ceiling, gross_floor),
             )
         )
         weight_sum = float(w.sum())
