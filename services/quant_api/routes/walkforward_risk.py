@@ -23,6 +23,10 @@ router = APIRouter(prefix="/api/walkforward-risk", tags=["walkforward", "risk"])
 RESULT_DIR = Path("runtime/walkforward_risk")
 STATUS_FILE = RESULT_DIR / "status.json"
 
+#: The strategy search is a separate, isolated run namespace.
+SEARCH_DIR = Path("runtime/strategy_search")
+SEARCH_STATUS = SEARCH_DIR / "status.json"
+
 
 def _load() -> dict:
     if not STATUS_FILE.exists():
@@ -79,3 +83,47 @@ async def runs() -> dict:
     return {"runs": [{"runId": f.stem.removeprefix("run_"),
                       "path": str(f),
                       "sizeBytes": f.stat().st_size} for f in files]}
+
+
+def _load_search() -> dict:
+    if not SEARCH_STATUS.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=("no strategy search found. Start one with "
+                    "scripts/strategy_search_walkforward.py."),
+        )
+    try:
+        return json.loads(SEARCH_STATUS.read_text())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=503, detail=f"search status unreadable: {exc}") from exc
+
+
+@router.get("/search")
+async def search() -> dict:
+    """Best configuration, with the penalty for having searched at all.
+
+    `bestHoldout` is measured on windows the ranking never saw and is the number
+    worth believing; `bestSelect` is in-sample for the ranking and is reported
+    only so the gap between them is visible. `searchPenalty` carries PBO and the
+    expected maximum Sharpe from N noisy draws -- a winner below that threshold
+    is not distinguishable from luck, and the UI is expected to say so rather
+    than present the winner as a finding.
+    """
+    d = _load_search()
+    return {
+        "runId": d.get("run_id"),
+        "state": d.get("state"),
+        "configsTried": d.get("configs_tried"),
+        "configsDone": d.get("configs_done"),
+        "configsTotal": d.get("configs_total"),
+        "selectUntil": d.get("select_until"),
+        "bestConfig": d.get("best_config"),
+        "bestSelect": d.get("best_select"),
+        "bestHoldout": d.get("best_holdout"),
+        "nSelectWindows": d.get("n_select_windows"),
+        "nHoldoutWindows": d.get("n_holdout_windows"),
+        "searchPenalty": d.get("search_penalty"),
+        "leaderboard": d.get("leaderboard", []),
+        "note": d.get("note"),
+        "elapsedSeconds": d.get("elapsed_s"),
+    }
