@@ -42,7 +42,21 @@ class VirtualBroker(BrokerBase):
             state = OrderState(order.client_order_id, None, OrderStatus.REJECTED, 0, fill.price, fill.message)
             self._record(order, state, "order_rejected")
             return state
-        costs = self.cost_model.calculate(order.side, fill.quantity, fill.price)
+        # Participation is the order's share of the day's traded volume; it is
+        # what turns the declared square-root impact model into a real charge.
+        # Omitting it (the previous behaviour) left ``impact_cost`` permanently
+        # 0.0 while the trusted-backtest certificate still published
+        # ``impact_alpha_bps``, i.e. the certificate claimed a cost that was
+        # never taken.
+        day_volume = self._available_volume(order.symbol)
+        participation = (
+            float(fill.quantity) / float(day_volume)
+            if day_volume is not None and float(day_volume) > 0
+            else 0.0
+        )
+        costs = self.cost_model.calculate(
+            order.side, fill.quantity, fill.price, participation_rate=participation
+        )
         if order.side == OrderSide.BUY and self.ledger.cash < fill.quantity * fill.price + costs["total"]:
             state = OrderState(order.client_order_id, None, OrderStatus.REJECTED, 0, fill.price, "insufficient_cash")
             self._record(order, state, "order_rejected")
@@ -57,6 +71,7 @@ class VirtualBroker(BrokerBase):
             commission=costs["commission"],
             stamp_duty=costs["stamp_duty"],
             transfer_fee=costs["transfer_fee"],
+            impact_cost=costs["impact_cost"],
         )
         self.ledger.apply_fill(trade)
         status = OrderStatus.FILLED if fill.quantity == order.quantity else OrderStatus.PARTIAL

@@ -86,6 +86,12 @@ class TradeFill:
     commission: float
     stamp_duty: float
     transfer_fee: float
+    #: Square-root market-impact charge (yuan).  Defaults to 0.0 so a venue
+    #: that cannot observe day volume records "no impact charged" explicitly
+    #: rather than by omission; ``AShareCostModel.impact_alpha_bps`` is
+    #: published in the trusted-backtest certificate, so a venue that can
+    #: observe participation must charge it here.
+    impact_cost: float = 0.0
 
 
 class BrokerBase(ABC):

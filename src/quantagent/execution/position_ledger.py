@@ -14,7 +14,7 @@ class PositionLedger:
     def apply_fill(self, fill: TradeFill) -> None:
         current = self.positions.get(fill.symbol, Position(fill.symbol, 0, 0, fill.fill_price))
         value = fill.fill_quantity * fill.fill_price
-        cost = fill.commission + fill.stamp_duty + fill.transfer_fee
+        cost = fill.commission + fill.stamp_duty + fill.transfer_fee + fill.impact_cost
         if fill.side == OrderSide.BUY:
             total_shares = current.available_shares + current.frozen_shares + fill.fill_quantity
             avg_cost = ((current.available_shares + current.frozen_shares) * current.avg_cost + value) / max(total_shares, 1)
