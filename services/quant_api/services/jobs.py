@@ -270,6 +270,24 @@ COMMANDS: dict[str, dict[str, Any]] = {
         # search space so an operator cannot deflate their own Sharpe ratio.
         "dual_boolean_options": {"include_genetic"},
     },
+    # Every scheme `search-factor-fusion` enumerates is a weight vector over
+    # rank-centred factors, i.e. `score = Σ wᵢ · xᵢ`. It cannot express an
+    # interaction, so "best fusion" from that command is the best *additive*
+    # fusion. This command is the governed way to ask whether letting factors
+    # interact adds anything, and without it on the allowlist the workstation
+    # had no path to the question at all.
+    "audit-nonlinear-factors": {
+        "type": "research",
+        "required": {"panel_path", "factor_names", "output_dir"},
+        "allowed": {
+            "panel_path", "factor_names", "label_column", "horizon_days", "top_k",
+            "cost_bps", "n_folds", "holdout_folds", "valid_size_days",
+            "min_train_days", "embargo_days", "output_dir", "enforce_promotion_gates",
+        },
+        "path_inputs": {"panel_path"},
+        "path_outputs": {"output_dir"},
+        "dual_boolean_options": {"enforce_promotion_gates"},
+    },
     "predict-alpha-v7": {
         "type": "infer",
         "required": {"model_dir", "feature_dataset", "output"},
