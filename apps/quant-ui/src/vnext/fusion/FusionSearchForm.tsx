@@ -29,6 +29,12 @@ export interface FusionSearchDraft {
 }
 
 export const DEFAULT_SEARCH_DRAFT: FusionSearchDraft = {
+  // This default panel carries 15 features, of which three are moving
+  // averages: no Alpha101, no GTJA-191, no fundamental, no event, no macro.
+  // A fusion search launched on it is combining fifteen price-and-volume
+  // statistics, which bounds what any resulting "best blend" can mean. See
+  // the note in src/domain/jobTemplates.ts for why the certified panel is
+  // narrow and what the 348-column alternative costs.
   factorPanelPath: "runtime/data/gold/full_universe/dataset.parquet",
   forwardReturnsPath: "runtime/data/gold/full_universe/labels.parquet",
   forwardColumn: "forward_return_5d",

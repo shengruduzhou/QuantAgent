@@ -174,8 +174,30 @@ class MarketPlaybookService(_V2MarketPlaybookService):
         if not close_parts:
             raise ValueError("no asset has enough index history for time-series momentum")
 
-        close = pd.concat(close_parts, axis=1).sort_index().ffill()
-        open_price = pd.concat(open_parts, axis=1).reindex(close.index).ffill()
+        # Assets do not share a calendar, so the union of their dates has holes.
+        # Forward-filling those holes made the strategy trade at an open price
+        # that was never printed while `assumptions` declared open-to-open
+        # marking, recorded every gap day as a 0% return, and suppressed
+        # realised volatility -- which then tilted the inverse-vol weights
+        # TOWARDS whichever asset had the worst data. Measured on one price
+        # process: +33.5102% fully observed against +41.1854% forward-filled,
+        # 7.67pp of pure fill.
+        #
+        # A date on which an asset did not print is a date it could not be
+        # traded, so the panel is restricted to dates where every asset was
+        # observed, and the count dropped is published rather than absorbed.
+        raw_close = pd.concat(close_parts, axis=1).sort_index()
+        raw_open = pd.concat(open_parts, axis=1).reindex(raw_close.index)
+        observed = raw_close.notna().all(axis=1) & raw_open.notna().all(axis=1)
+        unobserved_sessions = int((~observed).sum())
+        close = raw_close.loc[observed]
+        open_price = raw_open.loc[observed]
+        if len(close) < 200:
+            raise ValueError(
+                "fewer than 200 sessions where every asset printed a bar; "
+                f"{unobserved_sessions} of {len(raw_close)} sessions were "
+                "unobserved for at least one asset"
+            )
         net, target, active, vol = self._momentum_case(
             close,
             open_price,
@@ -229,6 +251,12 @@ class MarketPlaybookService(_V2MarketPlaybookService):
                 "cash": "100% minus active asset weights; no Active asset => 100% cash",
                 "execution": "T close target -> T+1 open; open-to-open marking",
                 "costBps": cost_bps,
+                "calendar": (
+                    "restricted to sessions where every asset printed a bar; "
+                    "unobserved sessions are dropped, never forward-filled"
+                ),
+                "unobservedSessionsDropped": unobserved_sessions,
+                "sessionsEvaluated": int(len(close)),
             },
             "benchmark": benchmark.upper(),
         }
@@ -341,7 +369,12 @@ class MarketPlaybookService(_V2MarketPlaybookService):
         open_price = pd.concat(open_parts, axis=1).reindex(close.index)
         volume = pd.concat(volume_parts, axis=1).reindex(close.index)
         benchmark_bars = self._index_bars(benchmark, 720).set_index("date").sort_index()
-        benchmark_close = benchmark_bars["close"].astype(float).reindex(close.index).ffill()
+        # A benchmark gap forward-filled becomes a 0% benchmark day, which is
+        # DEF-022 exactly: excess return inflates by the whole missing move.
+        # Left as NaN the excess for that session is NaN, which downstream
+        # reports as missing rather than as a session the strategy won.
+        benchmark_close = benchmark_bars["close"].astype(float).reindex(close.index)
+        benchmark_missing = int(benchmark_close.isna().sum())
 
         net, target, score, rank_ic = self._reversal_case(
             close,
@@ -412,6 +445,11 @@ class MarketPlaybookService(_V2MarketPlaybookService):
                 "execution": "T close selection -> T+1 open; open-to-open marking",
                 "costBps": cost_bps,
                 "constituentCaveat": "current constituents only; historical membership is not backfilled",
+                "benchmarkMissingSessions": benchmark_missing,
+                "calendar": (
+                    "a session with no benchmark print leaves excess return "
+                    "missing; it is never filled with a 0% benchmark day"
+                ),
             },
             "benchmark": benchmark.upper(),
         }

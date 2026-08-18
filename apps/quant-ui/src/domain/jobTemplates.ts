@@ -17,6 +17,27 @@ export const jobTemplates = {
       // V7 frozen cohort (3,872) once FULL_UNIVERSE_GOLD_READY was granted.
       // There is deliberately no fallback to the old path: a silently
       // narrower universe is worse than a job that fails.
+      //
+      // THE SAME SWITCH ALSO CUT FEATURE BREADTH FROM 348 COLUMNS TO 15, and
+      // that half was never written down. This panel carries ret_{1,5,20,60}d,
+      // px_to_ma_{5,20,60}, vol_{20,60}d, turnover_20d, volume_ratio_5_20,
+      // amihud_20d, high_low_range_20d, gap_open and intraday_range -- zero
+      // Alpha101, zero GTJA-191, zero fundamental, zero event, zero macro.
+      // Three of the fifteen are moving averages, which is why the workstation
+      // reads as a technical-analysis system: on this artifact it is one.
+      //
+      // FULL_UNIVERSE_GOLD_READY certifies structural readiness only. Its 18
+      // checks (build_u0_full_universe_gold.py + readiness_tiers.py) include
+      // none for feature breadth, so "certified" here does not mean "carries
+      // the factors the research stack can compute".
+      //
+      // The richer panel (348 columns, 156 Alpha101 + 58 GTJA-191 + 21
+      // fundamental + 22 macro) is
+      // runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus7clean_fund.parquet
+      // -- but it covers 3,638 symbols with zero STAR and zero BSE, on a qfq
+      // basis rather than hfq, so it is not a drop-in substitute. Neither
+      // artifact dominates; the default stays on universe breadth and the
+      // trade-off is now stated rather than inherited.
       dataset_path: "runtime/data/gold/full_universe/dataset.parquet",
       silver_panel_path: "runtime/data/v7/silver/market_panel/market_panel.parquet",
       output_dir: "runtime/reports/quant_ui_jobs/web_train_all_symbols",
