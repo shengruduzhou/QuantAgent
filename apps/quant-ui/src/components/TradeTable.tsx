@@ -1,5 +1,5 @@
 import type { Trade } from "../api/types";
-import { formatCompact, formatNumber } from "../utils/format";
+import { UNMEASURED_TITLE, formatCompact, formatNumber, toneClass } from "../utils/format";
 
 interface TradeTableProps {
   trades: Trade[];
@@ -53,7 +53,7 @@ export function TradeTable({
               <td className="numeric mono">{formatCompact(trade.amount)}</td>
               <td className="numeric mono">{formatCompact(trade.positionAfter)}</td>
               <td className="numeric mono">{formatNumber(trade.modelScore)}</td>
-              <td className={`numeric mono ${(trade.pnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>
+              <td className={`numeric mono ${toneClass(trade.pnl)}`} title={trade.pnl == null ? UNMEASURED_TITLE : undefined}>
                 {formatNumber(trade.pnl)}
               </td>
               <td className="truncate-cell">{trade.riskReason ?? trade.failureReason ?? trade.signalSource ?? "暂无记录"}</td>

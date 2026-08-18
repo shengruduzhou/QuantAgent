@@ -5,7 +5,7 @@ import { downloadJson } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
-import { formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { downloadOfflineResearchHtml, type OfflineResearchReport } from "../utils/researchReport";
 
 const PROMOTION_POLICY = [
@@ -27,7 +27,7 @@ export function ReportsPage(): JSX.Element {
   const latest = data?.latestBacktest;
 
   if (overview.isLoading) return <StateView state="loading" />;
-  if (!data) return <StateView state="empty" />;
+  if (!data) return <StateView state="empty" title="没有系统概览产物" detail="Quant API 返回了空的 /api/system/overview：runtime 里还没有被索引的回测、模型或风控 artifact。报告页保持只读、不生成任何数字。下一步：在策略实验室跑一次完整研究闭环，或在 Runtime 工作站重建索引。" />;
 
   const limitations = [
     "若 runtime 未持久化 promotion_gate.json，则 PBO / DSR / SPA 视为未提供证据，不得标记 production eligible。",
@@ -185,7 +185,7 @@ export function ReportsPage(): JSX.Element {
             {(backtests.data?.data ?? []).slice(0, 12).map((run) => (
               <div key={run.id}>
                 <span><strong>{run.name}</strong><small>{run.horizon ?? "research"}</small></span>
-                <span className={(run.annualReturn ?? 0) >= 0 ? "tone-positive" : "tone-negative"}>{formatPercent(run.annualReturn)}</span>
+                <span className={toneClass(run.annualReturn)} title={run.annualReturn == null ? UNMEASURED_TITLE : undefined}>{formatPercent(run.annualReturn)}</span>
                 <code>{run.path}</code>
               </div>
             ))}

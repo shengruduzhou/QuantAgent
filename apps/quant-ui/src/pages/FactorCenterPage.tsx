@@ -32,6 +32,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { mutableTemplate, type JobLaunchPayload } from "../domain/jobTemplates";
 import { useApi } from "../hooks/useApi";
 import { formatNumber, formatPercent } from "../utils/format";
+import { useVNextChartPalette } from "../vnext/theme";
 import {
   ActionableState,
   SegmentedTabs,
@@ -134,6 +135,7 @@ function utilityStatus(factor: Factor): { label: string; status: string } {
 }
 
 export function FactorCenterPage(): JSX.Element {
+  const palette = useVNextChartPalette();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -214,10 +216,10 @@ export function FactorCenterPage(): JSX.Element {
     xAxis: { type: "category", data: metrics?.icSeries.map((point) => point.datetime) ?? [] },
     yAxis: { type: "value", scale: true },
     series: [
-      { name: "IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.icSeries.map((point) => point.value) ?? [], lineStyle: { color: "#5b9cff", width: 2 }, itemStyle: { color: "#5b9cff" } },
-      { name: "Rank IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.rankIcSeries.map((point) => point.value) ?? [], lineStyle: { color: "#35c39e", width: 2 }, itemStyle: { color: "#35c39e" } },
+      { name: "IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.icSeries.map((point) => point.value) ?? [], lineStyle: { color: palette.series[0], width: 2 }, itemStyle: { color: palette.series[0] } },
+      { name: "Rank IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.rankIcSeries.map((point) => point.value) ?? [], lineStyle: { color: palette.series[1], width: 2 }, itemStyle: { color: palette.series[1] } },
     ],
-  }), [metrics?.icSeries, metrics?.rankIcSeries]);
+  }), [metrics?.icSeries, metrics?.rankIcSeries, palette]);
 
   const decayOption = useMemo<EChartsOption>(() => ({
     animationDuration: 240,
@@ -225,8 +227,8 @@ export function FactorCenterPage(): JSX.Element {
     tooltip: { trigger: "axis" },
     xAxis: { type: "category", data: metrics?.decay.map((point) => `${point.horizonDays}D`) ?? [] },
     yAxis: { type: "value", scale: true },
-    series: [{ type: "bar", data: metrics?.decay.map((point) => point.ic ?? 0) ?? [], itemStyle: { color: "#7b8cff", borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
-  }), [metrics?.decay]);
+    series: [{ type: "bar", data: metrics?.decay.map((point) => (typeof point.ic === "number" && !Number.isNaN(point.ic) ? point.ic : null)) ?? [], itemStyle: { color: palette.series[3], borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
+  }), [metrics?.decay, palette]);
 
   const setDiscoveryParameter = (key: string, value: string | number | boolean | null): void => {
     setDiscoveryConfig((current) => ({ ...current, parameters: { ...current.parameters, [key]: value } }));
@@ -497,7 +499,7 @@ function ValidationView({ metrics, loading, icOption, decayOption }: { metrics?:
     <div className="factor-validation-grid">
       <WorkbenchPanel eyebrow="SOURCE-BACKED SERIES" title="IC / RankIC 时间序列">{metrics?.icSeries.length || metrics?.rankIcSeries.length ? <EChart option={icOption} className="factor-chart" /> : <ActionableState title="没有独立 IC 序列" detail="先运行 factor judgment / discovery evaluation，再从对应 artifact 读取。" icon={ChartLineUp} />}</WorkbenchPanel>
       <WorkbenchPanel eyebrow="HORIZON DECAY" title="衰减曲线">{metrics?.decay.length ? <EChart option={decayOption} className="factor-chart" /> : <ActionableState title="没有衰减评估" detail="至少需要两个持有期的 source-backed IC 指标。" icon={ChartLineUp} />}</WorkbenchPanel>
-      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={value === null ? "unavailable" : (value ?? 0) >= 0 ? "passed" : "failed"} />)}</div></WorkbenchPanel>
+      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={typeof value !== "number" || Number.isNaN(value) ? "unavailable" : value >= 0 ? "passed" : "failed"} />)}</div></WorkbenchPanel>
       <WorkbenchPanel eyebrow="ARTIFACT CONTRACT" title="独立验证能力"><div className="factor-availability">{Object.entries(metrics?.availability ?? {}).map(([name, available]) => <div key={name}><span>{name}</span><StatusBadge status={available ? "ready" : "unavailable"} label={available ? "可用" : "缺失"} /></div>)}</div><TruthNotice tone="warning">没有独立 trade / signal artifact 时，不复用多因子买卖点。</TruthNotice></WorkbenchPanel>
     </div>
   </div>;

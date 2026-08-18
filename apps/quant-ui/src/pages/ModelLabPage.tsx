@@ -29,7 +29,8 @@ import { MetricCard } from "../components/MetricCard";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatBytes, formatCompact, formatDate, formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatBytes, formatCompact, formatDate, formatNumber, formatPercent, toneClass } from "../utils/format";
+import { useVNextChartPalette, type VNextChartPalette } from "../vnext/theme";
 import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface TrainingPoint {
@@ -73,6 +74,7 @@ const modelTabs: Array<{ key: ModelTab; label: string; icon: Icon }> = [
 ];
 
 export function ModelLabPage(): JSX.Element {
+  const palette = useVNextChartPalette();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const models = useApi<ModelSummary[]>(["models"], "/models");
@@ -157,71 +159,71 @@ export function ModelLabPage(): JSX.Element {
   const lossOption = useMemo<EChartsOption>(() => ({
     animationDuration: 280,
     grid: { left: 52, right: 18, top: 32, bottom: 34 },
-    tooltip: { trigger: "axis", backgroundColor: "#071521", borderColor: "#24506b", textStyle: { color: "#e2edf5" } },
-    legend: { data: ["Train Loss", "Validation Loss"], textStyle: { color: "#8da3b7" }, top: 2 },
-    xAxis: { type: "category", data: training.data?.data.map((point) => point.epoch) ?? [], axisLabel: { color: "#71879a" } },
-    yAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
+    tooltip: { trigger: "axis", backgroundColor: palette.tooltip, borderColor: palette.tooltipBorder, textStyle: { color: palette.tooltipText } },
+    legend: { data: ["Train Loss", "Validation Loss"], textStyle: { color: palette.muted }, top: 2 },
+    xAxis: { type: "category", data: training.data?.data.map((point) => point.epoch) ?? [], axisLabel: { color: palette.axis } },
+    yAxis: { type: "value", axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
     series: [
-      { name: "Train Loss", type: "line", smooth: true, data: training.data?.data.map((point) => point.loss) ?? [], showSymbol: false, lineStyle: { color: "#4f91ff", width: 2 } },
-      { name: "Validation Loss", type: "line", smooth: true, data: training.data?.data.map((point) => point.validationLoss) ?? [], showSymbol: false, lineStyle: { color: "#27d3ad", width: 2 } },
+      { name: "Train Loss", type: "line", smooth: true, data: training.data?.data.map((point) => point.loss) ?? [], showSymbol: false, lineStyle: { color: palette.series[0], width: 2 } },
+      { name: "Validation Loss", type: "line", smooth: true, data: training.data?.data.map((point) => point.validationLoss) ?? [], showSymbol: false, lineStyle: { color: palette.series[1], width: 2 } },
     ],
-  }), [training.data?.data]);
+  }), [training.data?.data, palette]);
 
   const importanceOption = useMemo<EChartsOption>(() => {
     const rows = (importance.data?.data ?? []).slice(0, 18).reverse();
     return {
       animationDuration: 280,
       grid: { left: 128, right: 18, top: 16, bottom: 24 },
-      tooltip: { trigger: "axis", backgroundColor: "#071521", borderColor: "#24506b", textStyle: { color: "#e2edf5" } },
-      xAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
-      yAxis: { type: "category", data: rows.map((row) => row.feature), axisLabel: { color: "#a8bdcc", fontSize: 10 } },
-      series: [{ type: "bar", data: rows.map((row) => row.importance), itemStyle: { color: "#4389ef", borderRadius: [0, 3, 3, 0] }, barMaxWidth: 12 }],
+      tooltip: { trigger: "axis", backgroundColor: palette.tooltip, borderColor: palette.tooltipBorder, textStyle: { color: palette.tooltipText } },
+      xAxis: { type: "value", axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
+      yAxis: { type: "category", data: rows.map((row) => row.feature), axisLabel: { color: palette.text, fontSize: 10 } },
+      series: [{ type: "bar", data: rows.map((row) => row.importance), itemStyle: { color: palette.series[0], borderRadius: [0, 3, 3, 0] }, barMaxWidth: 12 }],
     };
-  }, [importance.data?.data]);
+  }, [importance.data?.data, palette]);
 
   const scatterOption = useMemo<EChartsOption>(() => ({
     animationDuration: 280,
     grid: { left: 54, right: 20, top: 22, bottom: 38 },
     tooltip: {
       trigger: "item",
-      backgroundColor: "#071521",
-      borderColor: "#24506b",
-      textStyle: { color: "#e2edf5" },
+      backgroundColor: palette.tooltip,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: palette.tooltipText },
       formatter: (params: unknown) => {
         const value = (params as { value?: [number, number, string] }).value;
         return value ? `${value[2]}<br/>score ${formatNumber(value[0], 4)}<br/>return ${formatPercent(value[1])}` : "";
       },
     },
-    xAxis: { type: "value", name: "Prediction", nameTextStyle: { color: "#71879a" }, axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
-    yAxis: { type: "value", name: "Actual Return", nameTextStyle: { color: "#71879a" }, axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
+    xAxis: { type: "value", name: "Prediction", nameTextStyle: { color: palette.axis }, axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
+    yAxis: { type: "value", name: "Actual Return", nameTextStyle: { color: palette.axis }, axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
     series: [{
       type: "scatter",
       symbolSize: 6,
       data: (predictions.data?.data ?? [])
         .filter((row) => row.actualReturn !== null && row.actualReturn !== undefined)
         .map((row) => [row.score, row.actualReturn, row.symbol]),
-      itemStyle: { color: "#4b92ff", opacity: 0.62 },
+      itemStyle: { color: palette.series[0], opacity: 0.62 },
     }],
-  }), [predictions.data?.data]);
+  }), [predictions.data?.data, palette]);
 
   const metricOption = useMemo<EChartsOption>(() => {
     const rows = selectVisualMetrics(observed?.metrics ?? []).slice(0, 14).reverse();
     return {
       animationDuration: 280,
       grid: { left: 160, right: 24, top: 16, bottom: 24 },
-      tooltip: { trigger: "axis", backgroundColor: "#071521", borderColor: "#24506b", textStyle: { color: "#e2edf5" } },
-      xAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
-      yAxis: { type: "category", data: rows.map((row) => row.label), axisLabel: { color: "#a8bdcc", fontSize: 10, width: 145, overflow: "truncate" } },
+      tooltip: { trigger: "axis", backgroundColor: palette.tooltip, borderColor: palette.tooltipBorder, textStyle: { color: palette.tooltipText } },
+      xAxis: { type: "value", axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
+      yAxis: { type: "category", data: rows.map((row) => row.label), axisLabel: { color: palette.text, fontSize: 10, width: 145, overflow: "truncate" } },
       series: [{
         type: "bar",
         data: rows.map((row) => ({
           value: row.value,
-          itemStyle: { color: row.value >= 0 ? groupColor(row.group) : "#ef6870", borderRadius: [0, 3, 3, 0] },
+          itemStyle: { color: row.value >= 0 ? groupColor(row.group, palette) : palette.danger, borderRadius: [0, 3, 3, 0] },
         })),
         barMaxWidth: 12,
       }],
     };
-  }, [observed?.metrics]);
+  }, [observed?.metrics, palette]);
 
   if (models.isLoading) return <StateView state="loading" />;
   if (!list.length) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="MODEL REGISTRY / OBSERVABILITY" title="模型注册表" description="版本、训练证据、评估、血缘与人工 Gate 的统一模型资产视图。" context="source-backed only" /><ActionableState title="没有可识别模型" detail="先从训练实验室验证并运行研究任务；成功产物会由现有 RuntimeIndexer 自动进入注册表。" icon={Brain} primary={{ label: "打开训练实验室", onClick: () => navigate("/training") }} secondary={{ label: "检查 Runtime", onClick: () => navigate("/runtime") }} /></div>;
@@ -364,7 +366,7 @@ export function ModelLabPage(): JSX.Element {
                   <div className="comparison-row" key={key}>
                     <span>{key.replaceAll("_", " ")}</span>
                     {comparison.data.data.models.map((model) => (
-                      <strong key={model.id} className={(model.metrics[key] ?? 0) >= 0 ? "tone-positive" : "tone-negative"}>
+                      <strong key={model.id} className={toneClass(model.metrics[key])} title={model.metrics[key] == null ? UNMEASURED_TITLE : undefined}>
                         {formatNumber(model.metrics[key], 4)}
                       </strong>
                     ))}
@@ -438,7 +440,7 @@ export function ModelLabPage(): JSX.Element {
                       </details>
                     ))}
                   </div>
-                ) : <StateView state="empty" />}
+                ) : <StateView state="empty" title="没有评估产物" detail="该模型目录下没有可解析的 evaluation JSON。指标区保持空白而不是显示 0。下一步：对该模型运行 evaluate-alpha-v7，或在 Runtime 工作站确认产物路径。" />}
               </Panel>
             </section>
           ) : null}
@@ -461,7 +463,7 @@ export function ModelLabPage(): JSX.Element {
                     ))}</tbody>
                   </table>
                 </div>
-              ) : <StateView state="empty" />}
+              ) : <StateView state="empty" title="没有关联 artifact" detail="RuntimeIndexer 没有为该模型索引到任何文件。只展示已声明的关系，不推断未声明的。下一步：在 Runtime 工作站重建索引。" />}
             </Panel>
           ) : null}
 
@@ -510,11 +512,11 @@ function formatMetric(metric: ModelMetric): string {
   return formatNumber(metric.value, 4);
 }
 
-function groupColor(group: ModelMetric["group"]): string {
-  if (group === "return") return "#25c79f";
-  if (group === "risk") return "#e9a740";
-  if (group === "quality") return "#4b92ff";
-  return "#7f8fa1";
+function groupColor(group: ModelMetric["group"], palette: VNextChartPalette): string {
+  if (group === "return") return palette.series[1];
+  if (group === "risk") return palette.warning;
+  if (group === "quality") return palette.series[0];
+  return palette.muted;
 }
 
 function coveragePercent(availability?: Record<string, boolean>): number {
@@ -524,21 +526,22 @@ function coveragePercent(availability?: Record<string, boolean>): number {
 }
 
 function PredictionWeightView({ predictions }: { predictions: Prediction[] }): JSX.Element {
+  const palette = useVNextChartPalette();
   const option = useMemo<EChartsOption>(() => {
     const rows = predictions.slice(0, 50);
     return {
       animationDuration: 280,
       grid: { left: 92, right: 20, top: 18, bottom: 28 },
-      xAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
-      yAxis: { type: "category", data: rows.map((row) => row.symbol), axisLabel: { color: "#9cb1c3", fontSize: 9 } },
-      series: [{ type: "bar", data: rows.map((row) => row.score), itemStyle: { color: "#27caa2", borderRadius: [0, 3, 3, 0] }, barMaxWidth: 10 }],
+      xAxis: { type: "value", axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
+      yAxis: { type: "category", data: rows.map((row) => row.symbol), axisLabel: { color: palette.axis, fontSize: 9 } },
+      series: [{ type: "bar", data: rows.map((row) => row.score), itemStyle: { color: palette.series[1], borderRadius: [0, 3, 3, 0] }, barMaxWidth: 10 }],
     };
-  }, [predictions]);
+  }, [predictions, palette]);
   return <EChart option={option} className="chart chart-medium" />;
 }
 
 function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.Element {
-  if (!predictions.length) return <StateView state="empty" />;
+  if (!predictions.length) return <StateView state="empty" title="没有预测产物" detail="该模型没有可映射的 predictions artifact，因此不展示任何分数。下一步：运行 predict-alpha-v7 生成预测后再回到本页。" />;
   return (
     <div className="table-scroll">
       <table className="data-table">
@@ -549,7 +552,7 @@ function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.El
             <td><strong>{row.symbol || "portfolio"}</strong></td>
             <td>{row.horizon ?? "—"}</td>
             <td className="numeric mono">{formatNumber(row.score, 5)}</td>
-            <td className={`numeric mono ${(row.actualReturn ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>{formatNumber(row.actualReturn, 4)}</td>
+            <td className={`numeric mono ${toneClass(row.actualReturn)}`} title={row.actualReturn == null ? UNMEASURED_TITLE : undefined}>{formatNumber(row.actualReturn, 4)}</td>
             <td className="numeric mono">{row.rank ?? "—"}</td>
           </tr>
         ))}</tbody>
@@ -559,7 +562,7 @@ function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.El
 }
 
 function MetricTable({ metrics }: { metrics: ModelMetric[] }): JSX.Element {
-  if (!metrics.length) return <StateView state="empty" />;
+  if (!metrics.length) return <StateView state="empty" title="没有归一化指标" detail="该模型的评估产物里没有可归一化的数值指标。空表示未测量，不代表指标为 0。下一步：检查该运行的 metrics 产物是否完整。" />;
   return (
     <div className="table-scroll">
       <table className="data-table">

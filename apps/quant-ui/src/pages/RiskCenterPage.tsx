@@ -9,7 +9,7 @@ import { Panel } from "../components/Panel";
 import { RiskRadar } from "../components/RiskRadar";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatCompact, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { marketPalette } from "../theme/marketPalette";
 import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
@@ -66,7 +66,7 @@ export function RiskCenterPage(): JSX.Element {
       grid: { left: 106, right: 18, top: 16, bottom: 24 },
       tooltip: { trigger: "axis", backgroundColor: marketPalette.panel, borderColor: marketPalette.border, textStyle: { color: marketPalette.text } },
       xAxis: { type: "value", axisLabel: { color: marketPalette.axis }, splitLine: { lineStyle: { color: marketPalette.grid } } },
-      yAxis: { type: "category", inverse: true, data: entries.map(([name]) => name), axisLabel: { color: "#9cb1c3", fontSize: 10 } },
+      yAxis: { type: "category", inverse: true, data: entries.map(([name]) => name), axisLabel: { color: marketPalette.axis, fontSize: 10 } },
       series: [{ type: "bar", data: entries.map(([, value]) => value), itemStyle: { color: marketPalette.risk }, barMaxWidth: 14 }],
     };
   }, [risk?.eventCounts]);
@@ -85,7 +85,7 @@ export function RiskCenterPage(): JSX.Element {
       value: (stock) => stock.netPnl ?? Number.NEGATIVE_INFINITY,
       csvValue: (stock) => stock.netPnl,
       render: (stock) => (
-        <span className={`mono ${(stock.netPnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>
+        <span className={`mono ${toneClass(stock.netPnl)}`} title={stock.netPnl == null ? UNMEASURED_TITLE : undefined}>
           {formatNumber(stock.netPnl)}
         </span>
       ),
@@ -140,7 +140,7 @@ export function RiskCenterPage(): JSX.Element {
           <RiskRadar risk={risk} />
         </Panel>
         <Panel title="风控事件分布" eyebrow="Persisted risk_events.json" className="risk-events-chart">
-          {Object.keys(risk.eventCounts).length ? <EChart option={eventOption} className="chart chart-medium" /> : <StateView state="empty" />}
+          {Object.keys(risk.eventCounts).length ? <EChart option={eventOption} className="chart chart-medium" /> : <StateView state="empty" title="没有 risk_events 产物" detail="该回测没有写出 risk_events.json，或写出的事件计数为空。图表不会把「没有记录」画成「零违规」。下一步：确认回测启用了风控评估，或在 Runtime 工作站检查该运行的产物清单。" />}
         </Panel>
         <Panel title="风险规则" eyebrow="Thresholds read from code defaults" className="risk-rules-panel">
           <div className="risk-rule-list">
@@ -177,7 +177,7 @@ export function RiskCenterPage(): JSX.Element {
                 </div>
               ))}
             </div>
-          ) : <StateView state="empty" />}
+          ) : <StateView state="empty" title="没有逐条风控事件" detail="风控事件流为空。这表示这次运行没有落盘事件记录，不等于运行期间没有触发限额。下一步：在 Runtime 工作站核对该运行的 risk artifact。" />}
         </Panel>
       </section>
     </div>

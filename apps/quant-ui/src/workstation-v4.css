@@ -460,6 +460,17 @@ textarea {
   color: var(--market-down) !important;
 }
 
+/*
+ * An absent measurement has no direction. Painting it with `--market-up`
+ * (which is what `(x ?? 0) >= 0` used to do) states a gain the artifact never
+ * reported. Missing renders flat and dimmed, and carries a `title` so the
+ * reason is readable without relying on colour alone.
+ */
+.tone-unmeasured {
+  color: var(--market-flat) !important;
+  font-style: italic;
+}
+
 /* Retire the legacy 7–10px terminal typography that caused overlap and eye strain. */
 #root .app-frame :where(p, small, label, button, input, select, textarea, td, th, kbd, code),
 #root .app-frame :where(.status-badge, .state-view span, .runtime-stat span, .runtime-stat small, .terminal-statusbar span, .terminal-statusbar button),

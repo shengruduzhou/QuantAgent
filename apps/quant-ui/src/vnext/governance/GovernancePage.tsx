@@ -236,6 +236,29 @@ function yesNo(value: boolean | undefined): string {
   return "—";
 }
 
+/**
+ * Audit counts must never fall back to `0`.
+ *
+ * A governance panel that prints "越权/解密访问 0" for a field the status
+ * artifact never reported reads as "audited and clean" — which is exactly the
+ * DEF-023 shape (never audited recorded as clean). Absent stays absent.
+ */
+function auditCount(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "未测量";
+  return value.toLocaleString();
+}
+
+/** Same rule for a measured `covered / total` pair. */
+function auditRatio(
+  covered: number | null | undefined,
+  total: number | null | undefined,
+  separator = " / ",
+): string {
+  if (typeof covered !== "number" || Number.isNaN(covered)) return "未测量";
+  if (typeof total !== "number" || Number.isNaN(total)) return "未测量";
+  return `${covered}${separator}${total}`;
+}
+
 export function GovernancePage(): JSX.Element {
   const query = useApi<GovernanceStatus>(["governance"], "/governance/status", undefined, {
     refetchInterval: 30_000,
@@ -261,7 +284,7 @@ export function GovernancePage(): JSX.Element {
       {
         label: "Track-F 账本链",
         value: shadow.ledgerChainValid === true ? "VALID" : shadow.ledgerChainValid === false ? "BROKEN" : "—",
-        detail: `${shadow.ledgerRecordsTotal ?? 0} 条记录 · 越权访问 ${shadow.unblindOrNonRoutineAccesses ?? 0}`,
+        detail: `${auditCount(shadow.ledgerRecordsTotal)} 条记录 · 越权访问 ${auditCount(shadow.unblindOrNonRoutineAccesses)}`,
         tone: boolTone(shadow.ledgerChainValid),
         icon: Lock,
       },
@@ -275,7 +298,7 @@ export function GovernancePage(): JSX.Element {
       {
         label: "S4 批量重放",
         value: s4.status === "ready" ? (s4.decision ?? "—") : "不可用",
-        detail: s4.status === "ready" ? `${s4.refitCutoffsReplayed ?? 0} 个 cutoff · 确定性 ${yesNo(s4.deterministic)}` : (s4.reason ?? ""),
+        detail: s4.status === "ready" ? `${auditCount(s4.refitCutoffsReplayed)} 个 cutoff · 确定性 ${yesNo(s4.deterministic)}` : (s4.reason ?? ""),
         tone: s4.decision === "S4_BATCH_REPLAY_READY" ? "positive" : "warning",
         icon: CheckCircle,
       },
@@ -343,7 +366,7 @@ export function GovernancePage(): JSX.Element {
               <div><dt>有效日期</dt><dd>{shadow.validDates?.length ? shadow.validDates.join(", ") : "—"}</dd></div>
               <div><dt>下一个预期有效日</dt><dd>{shadow.nextExpectedValidDate ?? "—"}</dd></div>
               <div><dt>账本链</dt><dd>{shadow.ledgerChainValid ? "VALID" : "BROKEN"}（{shadow.ledgerRecordsTotal} 条）</dd></div>
-              <div><dt>越权/解密访问</dt><dd>{shadow.unblindOrNonRoutineAccesses ?? 0}</dd></div>
+              <div><dt>越权/解密访问</dt><dd>{auditCount(shadow.unblindOrNonRoutineAccesses)}</dd></div>
               <div><dt>证书</dt><dd>{shadow.certificateWritten ? "已签发" : "累积中（未早签）"}</dd></div>
             </dl>
             <div className="governance-excluded">
@@ -371,7 +394,7 @@ export function GovernancePage(): JSX.Element {
             <div><dt>逐 cutoff 精确复现</dt><dd>{yesNo(s4.exactReproduction)}</dd></div>
             <div><dt>双跑确定性</dt><dd>{yesNo(s4.deterministic)}</dd></div>
             <div><dt>归档输入完整</dt><dd>{yesNo(s4.archivedInputsComplete)}</dd></div>
-            <div><dt>重放 refit cutoff 数</dt><dd>{s4.refitCutoffsReplayed ?? 0}</dd></div>
+            <div><dt>重放 refit cutoff 数</dt><dd>{auditCount(s4.refitCutoffsReplayed)}</dd></div>
             <div><dt>语义变化 / FRESH 访问</dt><dd>{yesNo(s4.semanticsChanged)} / {yesNo(s4.freshAccess)}</dd></div>
             <div><dt>代码或 trace 哈希变化</dt><dd>{s4.codeOrTraceHashChanged === null ? "—" : yesNo(s4.codeOrTraceHashChanged)}</dd></div>
           </dl>
@@ -390,12 +413,12 @@ export function GovernancePage(): JSX.Element {
               <div><dt>覆盖证券</dt><dd>{u0.coveredSecurities ?? "—"} / {u0.masterSecurities ?? "—"}{u0.coverageShare != null ? `（${(u0.coverageShare * 100).toFixed(1)}%）` : ""}</dd></div>
               <div><dt>尚未采集</dt><dd>{u0.notYetAcquired ?? "—"}</dd></div>
               <div><dt>缺席板块</dt><dd>{u0.boardsAbsent?.length ? u0.boardsAbsent.join(", ") : "无"}</dd></div>
-              <div><dt>退市覆盖（生存者偏差）</dt><dd>{u0.coverageByStatus?.delisted ? `${u0.coverageByStatus.delisted.covered ?? 0}/${u0.coverageByStatus.delisted.total ?? 0} 有行情` : "—"}</dd></div>
+              <div><dt>退市覆盖（生存者偏差）</dt><dd>{u0.coverageByStatus?.delisted ? `${auditRatio(u0.coverageByStatus.delisted.covered, u0.coverageByStatus.delisted.total, "/")} 有行情` : "未测量"}</dd></div>
               <div><dt>复权口径</dt><dd>{u0.quality?.adjustmentMethod ?? "—"}</dd></div>
               <div><dt>单位</dt><dd>成交量 {u0.quality?.volumeUnit ?? "—"} · 成交额 {u0.quality?.amountUnit ?? "—"}{u0.quality?.amountCoverage != null ? `（成交额覆盖 ${(u0.quality.amountCoverage * 100).toFixed(1)}%）` : ""}</dd></div>
               <div><dt>校验失败项</dt><dd>{u0.quality?.failures?.length ? u0.quality.failures.join(", ") : "无"}</dd></div>
               <div><dt>未执行校验</dt><dd>{u0.quality?.notRun?.length ? u0.quality.notRun.join(", ") : "无"}</dd></div>
-              <div><dt>回退供应商已实测</dt><dd>{yesNo(u0.provider?.fallbackProvidersExercised)}（{u0.provider?.fallbackSymbolsServed ?? 0} 票）</dd></div>
+              <div><dt>回退供应商已实测</dt><dd>{yesNo(u0.provider?.fallbackProvidersExercised)}（{auditCount(u0.provider?.fallbackSymbolsServed)} 票）</dd></div>
               <div><dt>缺口分类（停牌 / 供应商截断 / 无法解释）</dt><dd>{u0.panel?.sessionGapsSuspended ?? "—"} / {u0.panel?.sessionGapsProviderTruncated ?? "—"} / {u0.panel?.sessionGapsUnexplained ?? "—"}</dd></div>
               <div><dt>OHLC 矛盾行（已隔离）</dt><dd>{u0.panel?.ohlcViolationsQuarantined ?? "—"}</dd></div>
               <div><dt>面板</dt><dd>{u0.panel?.rows?.toLocaleString() ?? "—"} 行 · {u0.panel?.symbols ?? "—"} 票 · {u0.panel?.dateRange?.[0] ?? "—"} → {u0.panel?.dateRange?.[1] ?? "—"}</dd></div>
@@ -405,7 +428,7 @@ export function GovernancePage(): JSX.Element {
               <h3>板块覆盖（已覆盖 / 总数）</h3>
               <ul>
                 {Object.entries(u0.coverageByBoard ?? {}).map(([board, row]) => (
-                  <li key={board}><strong>{board}</strong><span>{row?.covered ?? 0} / {row?.total ?? 0}</span></li>
+                  <li key={board}><strong>{board}</strong><span>{auditRatio(row?.covered, row?.total)}</span></li>
                 ))}
               </ul>
               <h3>PIT 执行字段</h3>
@@ -437,14 +460,14 @@ export function GovernancePage(): JSX.Element {
         <WorkbenchPanel
           eyebrow="A股数据底座"
           title="供应商能力 / 授权矩阵与采集溯源"
-          meta={`${data.ashareFoundation.capability?.supportedProbes ?? 0}/${data.ashareFoundation.capability?.probes ?? 0} 实网探针 SUPPORTED`}
+          meta={`${auditRatio(data.ashareFoundation.capability?.supportedProbes, data.ashareFoundation.capability?.probes, "/")} 实网探针 SUPPORTED`}
         >
           <div className="governance-grid">
             <dl className="governance-facts">
               <div><dt>运行环境出网</dt><dd>{data.ashareFoundation.capability?.environment?.egress ?? "—"}</dd></div>
               <div><dt>有实测支持的供应商</dt><dd>{data.ashareFoundation.capability?.providersWithAnySupport?.join(", ") || "—"}</dd></div>
               <div><dt>证券主表</dt><dd>{data.ashareFoundation.securityMaster?.securities ?? "—"} 只 · 退市 {data.ashareFoundation.securityMaster?.byStatus?.delisted ?? "—"} · 当前 ST {data.ashareFoundation.securityMaster?.currentStNames ?? "—"}</dd></div>
-              <div><dt>分钟数据</dt><dd>{data.ashareFoundation.intraday ? `${data.ashareFoundation.intraday.symbolsWithBars ?? 0} 票 · ${data.ashareFoundation.intraday.rows?.toLocaleString() ?? 0} 根 ${data.ashareFoundation.intraday.frequencyMinutes ?? "?"}分钟条` : "未采集"}</dd></div>
+              <div><dt>分钟数据</dt><dd>{data.ashareFoundation.intraday ? `${auditCount(data.ashareFoundation.intraday.symbolsWithBars)} 票 · ${auditCount(data.ashareFoundation.intraday.rows)} 根 ${data.ashareFoundation.intraday.frequencyMinutes ?? "?"}分钟条` : "未采集"}</dd></div>
               <div><dt>分钟深度限制</dt><dd>{data.ashareFoundation.intraday?.depthLimitation ?? "—"}</dd></div>
               <div><dt>校验结论</dt><dd>{Object.entries(data.ashareFoundation.validation?.verdicts ?? {}).map(([k, v]) => `${k}:${v}`).join(" · ") || "—"}</dd></div>
             </dl>
@@ -474,7 +497,7 @@ export function GovernancePage(): JSX.Element {
                 {data.ashareFoundation.adjustmentForensics.results.map((row) => (
                   <li key={row.label} className={row.verdict === "RAW" ? "" : "blocked"}>
                     <strong>{row.label}</strong>
-                    <span>{row.verdict} · 符号一致率 {row.sign_agreement ?? "—"}（{row.events_tested ?? 0} 事件）</span>
+                    <span>{row.verdict} · 符号一致率 {row.sign_agreement ?? "未测量"}（{auditCount(row.events_tested)} 事件）</span>
                   </li>
                 ))}
               </ul>

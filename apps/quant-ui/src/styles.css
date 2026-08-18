@@ -545,12 +545,26 @@ time {
   border-top-color: rgba(231, 165, 58, 0.65);
 }
 
+/*
+ * `positive`/`negative` here mean PRICE DIRECTION, not goodness, so they must
+ * resolve to the A-share market pair (red up / green down) — not to
+ * `--green`/`--red`, which are governance verdict colours. This file used to
+ * map tone-positive to `--green`; the only thing keeping the UI red-up was
+ * that `workstation-v4.css` is imported later and re-declares both with
+ * `!important`. Reordering the imports in `main.tsx` would silently invert
+ * every P&L cell in the product.
+ */
 .tone-positive {
-  color: var(--green) !important;
+  color: var(--market-up) !important;
 }
 
 .tone-negative {
-  color: var(--red) !important;
+  color: var(--market-down) !important;
+}
+
+.tone-unmeasured {
+  color: var(--market-flat) !important;
+  font-style: italic;
 }
 
 .tone-warning {

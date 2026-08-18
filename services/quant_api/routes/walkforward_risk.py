@@ -4,6 +4,10 @@ Serves whatever the runner has written so far, so the frontend can poll while a
 run is still in progress. The runner writes `status.json` atomically via a
 tmp+replace, so a poll never observes a torn file.
 
+Responses use the same `{status, data, issues}` envelope as every other router,
+so `apps/quant-ui/src/api/client.ts` can read them; this file previously
+returned bare dicts, which is why its only consumer had to bypass that client.
+
 This endpoint deliberately performs NO computation and NO defaulting. It reports
 `state` exactly as the runner set it and passes metrics through untouched --
 including nulls. A missing metric here means "the run has not produced it",
@@ -17,6 +21,8 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+
+from services.quant_api.routes.api import response
 
 router = APIRouter(prefix="/api/walkforward-risk", tags=["walkforward", "risk"])
 
@@ -46,7 +52,7 @@ def _load() -> dict:
 async def status() -> dict:
     """Progress only — cheap enough to poll every second."""
     data = _load()
-    return {
+    return response({
         "runId": data.get("run_id"),
         "state": data.get("state"),
         "windowsDone": data.get("windows_done", len(data.get("results", []))),
@@ -54,14 +60,14 @@ async def status() -> dict:
         "currentTestYear": data.get("current_test_year"),
         "elapsedSeconds": data.get("elapsed_s"),
         "breadthFloor": data.get("breadth_floor"),
-    }
+    })
 
 
 @router.get("/results")
 async def results() -> dict:
     """Full per-window results plus the aggregate, as written."""
     data = _load()
-    return {
+    return response({
         "runId": data.get("run_id"),
         "state": data.get("state"),
         "windowsTotal": data.get("windows_total"),
@@ -71,18 +77,21 @@ async def results() -> dict:
         "aggregate": data.get("aggregate_over_ok_windows"),
         "note": data.get("note"),
         "results": data.get("results", []),
-    }
+    })
 
 
 @router.get("/runs")
 async def runs() -> dict:
     """Completed runs on disk, newest first."""
     if not RESULT_DIR.exists():
-        return {"runs": []}
+        return response({"runs": []}, status="empty")
     files = sorted(RESULT_DIR.glob("run_*.json"), reverse=True)
-    return {"runs": [{"runId": f.stem.removeprefix("run_"),
-                      "path": str(f),
-                      "sizeBytes": f.stat().st_size} for f in files]}
+    return response(
+        {"runs": [{"runId": f.stem.removeprefix("run_"),
+                   "path": str(f),
+                   "sizeBytes": f.stat().st_size} for f in files]},
+        status="ready" if files else "empty",
+    )
 
 
 def _load_search() -> dict:
@@ -110,7 +119,7 @@ async def search() -> dict:
     than present the winner as a finding.
     """
     d = _load_search()
-    return {
+    return response({
         "runId": d.get("run_id"),
         "state": d.get("state"),
         "configsTried": d.get("configs_tried"),
@@ -126,4 +135,4 @@ async def search() -> dict:
         "leaderboard": d.get("leaderboard", []),
         "note": d.get("note"),
         "elapsedSeconds": d.get("elapsed_s"),
-    }
+    })
