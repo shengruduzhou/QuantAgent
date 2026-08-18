@@ -46,6 +46,7 @@ from quantagent.paper.account_identity import (
 )
 from quantagent.paper.account_lock import paper_account_lock
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
+from quantagent.paper.risk import RiskEngine, RiskLimits
 from quantagent.paper.canonical_receipt import (
     CanonicalPrefixReceiptError,
     build_canonical_prefix_index,
@@ -86,6 +87,14 @@ class ContinuousPaperExecutionConfig:
     lot_size: int = 100
     min_order_value_yuan: float = 100.0
     max_participation_rate: float = 0.05
+    #: Portfolio-level limits enforced by the venue. Left as None the loop uses
+    #: the institutional defaults (10% single name, 30% industry, 100% gross,
+    #: 20% drawdown); pre-trade participation stays at a full bar because
+    #: `max_participation_rate` above already meters fills. A run that
+    #: wants a concentrated book must say so here rather than inherit an absent
+    #: limit -- before this existed the loop enforced no portfolio limit at all,
+    #: and a 50% single-name position executed without anything objecting.
+    risk_limits: "RiskLimits | None" = None
     execution_clock: str = "14:59:00+08:00"
     strategy_version: str = "v7_continuous_paper_v1"
 
@@ -1186,6 +1195,20 @@ def _execute_pending_for_session_locked(
             book=book,
             lineage=lineage,
             config=BrokerConfig(participation_cap=config.max_participation_rate),
+            # Portfolio-level limits on the continuous production loop. The
+            # venue's own `_validate` covers instrument rules only, so without
+            # this no single-name weight, industry concentration, gross
+            # exposure, daily loss or drawdown limit applied here either.
+            risk_engine=RiskEngine(
+                # `max_participation=1.0`: the venue's `participation_cap`
+                # above already meters how much of a bar one order consumes.
+                # Setting the pre-trade limit to the same number would reject
+                # every order large enough to leave a remainder, making a
+                # partial fill unreachable. The gate refuses grossly oversized
+                # orders; the cap does the metering.
+                limits=config.risk_limits or RiskLimits(max_participation=1.0),
+                run_id=run_id,
+            ),
         )
         market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
         adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)

@@ -12,6 +12,7 @@ from quantagent.paper.canonical_receipt import canonical_snapshot
 from quantagent.paper.broker import PaperBroker
 from quantagent.domain.ledger import CanonicalLedger
 import quantagent.paper.execution_journal as execution_journal_module
+from quantagent.paper.risk import RiskLimits
 from quantagent.paper.continuous_execution import (
     ContinuousPaperExecutionBlocked,
     ContinuousPaperExecutionConfig,
@@ -70,6 +71,17 @@ def _config(tmp_path) -> ContinuousPaperExecutionConfig:
         account_identity_path=str(tmp_path / "account_identity.json"),
         initial_cash=100_000.0,
         max_participation_rate=0.05,
+        # These fixtures exercise the execution CLOCK on a deliberately
+        # concentrated book (a single 50% name), so they declare a
+        # concentration policy that permits it. Stating it here keeps the
+        # venue's portfolio limits live for everything else rather than
+        # switching risk off wholesale, and keeps the fixture's own policy
+        # visible instead of inherited from an absent limit.
+        risk_limits=RiskLimits(
+            max_single_name_weight=1.0,
+            max_industry_weight=1.0,
+            max_participation=0.05,
+        ),
     )
 
 
