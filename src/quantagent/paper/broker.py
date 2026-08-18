@@ -127,11 +127,26 @@ class PaperBroker:
         lineage: Lineage | None = None,
         canonical_ledger: CanonicalLedger | None = None,
         book: OrderBook | None = None,
+        risk_engine: "RiskEngine | None" = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = event_ledger
         self.run_id = run_id
         self.config = config or BrokerConfig()
+        # Portfolio-level risk (single-name weight, industry concentration,
+        # gross exposure, daily loss, drawdown, participation). `_validate`
+        # below only ever covered instrument-level rules, so a paper venue
+        # constructed without this enforces NO portfolio limit at all. That was
+        # the production state: `quantagent.paper.risk` was imported by nothing
+        # except its own test file while three production call sites built this
+        # broker.
+        #
+        # None is permitted -- a reconciliation harness comparing engines must
+        # not have risk injected into the economic comparison -- but it is
+        # never silent: `risk_engine_attached` publishes which regime a run was
+        # in, so "no portfolio risk was applied" is readable from the run rather
+        # than assumed from the absence of rejections.
+        self.risk_engine = risk_engine
         self.orders: dict[str, Order] = {}
         self.fills: list[Fill] = []
         #: Execution ids already booked. A set rather than a scan over `fills`
@@ -274,6 +289,11 @@ class PaperBroker:
                               trade_date=getattr(market, 'trade_date', None))
         return order
 
+    @property
+    def risk_engine_attached(self) -> bool:
+        """Whether portfolio-level limits are enforced on this venue."""
+        return self.risk_engine is not None
+
     def _validate(self, order: Order, market: MarketSnapshot) -> str | None:
         """Return a rejection reason, or None when the order may proceed."""
         if self.killed:
@@ -322,6 +342,20 @@ class PaperBroker:
         if order.side == SELL and order.quantity - self.portfolio.sellable(order.symbol) > 1e-9:
             return (f"sell of {order.quantity:.0f} exceeds the T+1-settled "
                     f"{self.portfolio.sellable(order.symbol):.0f}")
+
+        # Portfolio-level limits last: everything above is a property of the
+        # instrument and the order, this is a property of the book they would
+        # join. A rejection here is final -- `RiskDecision` deliberately carries
+        # no override path.
+        if self.risk_engine is not None:
+            decision = self.risk_engine.check_order(
+                order,
+                self.portfolio,
+                reference_price=market.last_price,
+                session_volume=market.session_volume,
+            )
+            if not decision.approved:
+                return "portfolio risk rejected: " + ",".join(decision.failed)
 
         return None
 

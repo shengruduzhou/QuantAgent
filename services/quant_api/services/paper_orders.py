@@ -66,6 +66,7 @@ from quantagent.execution.order_manager import (
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
 from quantagent.paper import ledger as paper_ledger
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
+from quantagent.paper.risk import RiskEngine, RiskLimits
 from quantagent.paper.portfolio import Portfolio
 from quantagent.safety.operating_mode import (
     OperatingModeState,
@@ -251,10 +252,12 @@ class PaperOrderService:
         market_source: MarketSource | None = None,
         initial_cash: float = 1_000_000.0,
         broker_config: BrokerConfig | None = None,
+        risk_limits: RiskLimits | None = None,
         acquire_writer_lock: bool = True,
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.broker_config = broker_config or BrokerConfig()
         self.mode = OperatingModeState(mode=PAPER)
         self.mode.require_order_simulation()
 
@@ -282,9 +285,31 @@ class PaperOrderService:
             portfolio,
             paper_ledger.EventLedger(self.root / "operational.jsonl"),
             run_id="paper_api",
-            config=broker_config or BrokerConfig(),
+            config=self.broker_config,
             canonical_ledger=self.ledger,
             lineage=Lineage(run_id="paper_api"),
+            # Portfolio-level limits. Without this the venue enforced only
+            # instrument-level rules and no single-name weight, industry
+            # concentration, gross exposure, daily loss or drawdown limit
+            # applied to anything submitted through the HTTP path.
+            #
+            # The pre-trade participation limit and the venue's
+            # `participation_cap` are deliberately NOT the same number. The cap
+            # meters how much of a bar one order may consume per fill, which is
+            # what produces a legitimate partial fill; the pre-trade limit
+            # refuses an order that is grossly oversized for the book at all.
+            # Setting both to 0.10 makes a partial fill unreachable -- every
+            # order large enough to leave a remainder is rejected before the
+            # venue can meter it -- so the gate defaults to a full bar and the
+            # cap keeps doing the metering.
+            risk_engine=RiskEngine(
+                limits=(
+                    risk_limits
+                    if risk_limits is not None
+                    else RiskLimits(max_participation=1.0)
+                ),
+                run_id="paper_api",
+            ),
         )
         self.adapter = PaperBrokerAdapter(self.broker, self._market_for)
         self.manager = OrderManager(

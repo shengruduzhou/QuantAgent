@@ -241,6 +241,11 @@ def build_v7_target_weights(
         "timing_gate_summary": [],
         "holding_period_locks": [],
     }
+    # Which tradability filters actually ran, and which were requested but had
+    # no input column. Never merged into one boolean: "not enforced" and
+    # "enforced and nothing was blocked" are different facts.
+    enforced_tradability: set[str] = set()
+    unenforced_tradability: dict[str, str] = {}
     previous_weights = _normalize_initial_weights(
         initial_weights,
         long_short=bool(config.long_short),
@@ -313,10 +318,22 @@ def build_v7_target_weights(
         rejected: list[dict[str, object]] = []
         keep_mask = pd.Series(True, index=merged.index)
         for column, config_attr, reason in _TRADABILITY_CONSTRAINTS:
+            requested = bool(getattr(config, config_attr, False))
             if column not in merged.columns:
+                # A configured filter whose input column is absent from the
+                # panel used to `continue` silently while `diagnostics["config"]`
+                # kept reporting it as enabled. The certified full-universe
+                # panel carries no tradability flags at all, so an ST,
+                # suspended or limit-locked name entered top-k with
+                # `rejected=0` and a report that said `block_st=True`. Record
+                # the gap; it is published as `tradability_unenforced` and the
+                # effective config below reports False rather than the request.
+                if requested:
+                    unenforced_tradability[config_attr] = column
                 continue
-            if not getattr(config, config_attr, False):
+            if not requested:
                 continue
+            enforced_tradability.add(config_attr)
             blocked = merged[column].fillna(False).astype(bool)
             for symbol in merged.loc[blocked, "symbol"]:
                 rejected.append({"trade_date": str(date), "symbol": str(symbol), "reason": reason})
@@ -702,7 +719,20 @@ def build_v7_target_weights(
             "weighting": config.weighting,
         },
         "initial_weights": initial_state_diagnostics,
-        "config": asdict(config),
+        # The EFFECTIVE config: a filter whose column was missing reports False
+        # here, whatever was requested. `config_requested` keeps the ask, so the
+        # difference between the two is the audit trail rather than a silent
+        # overwrite.
+        "config": {
+            **asdict(config),
+            **{attr: False for attr in unenforced_tradability},
+        },
+        "config_requested": asdict(config),
+        "tradability_enforced": sorted(enforced_tradability),
+        "tradability_unenforced": [
+            {"constraint": attr, "missing_column": column, "reason": "column_absent"}
+            for attr, column in sorted(unenforced_tradability.items())
+        ],
         **diagnostics,
     }
     pivot.index.name = "trade_date"
