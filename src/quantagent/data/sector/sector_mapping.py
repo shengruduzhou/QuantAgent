@@ -394,8 +394,22 @@ def sector_coverage_gate(
     if stale_rate > float(cfg.max_stale_available_at_rate):
         reasons.append("stale_available_at_rate_above_threshold")
     usable_for_optimization = not reasons
+    # Diagnostics tolerate a weaker map than the optimiser does -- a partly
+    # covered map still supports exposure reporting -- but "weaker" is not
+    # "unconditional". This was the literal `True`, so the gate could not go
+    # false for any input, including a map that failed validation outright or
+    # covered nothing. AGENTS.md forbids writing a gate as a constant: an
+    # unfalsifiable gate records absence of evidence as a pass.
+    # Zero coverage is still renderable -- every name reports as UNKNOWN, which
+    # is a true exposure report -- so coverage is deliberately NOT a condition
+    # here; that is what separates this gate from the optimiser's. What must be
+    # a condition is that the map validated at all: a map that failed
+    # validation cannot support an exposure report either.
+    usable_for_diagnostics = validation["status"] == "passed"
+    if not usable_for_diagnostics:
+        reasons.append("sector_map_unusable_for_diagnostics")
     return {
-        "sector_usable_for_diagnostics": True,
+        "sector_usable_for_diagnostics": bool(usable_for_diagnostics),
         "sector_usable_for_optimization": bool(usable_for_optimization),
         "reason": "passed" if usable_for_optimization else ",".join(reasons),
         "thresholds": {

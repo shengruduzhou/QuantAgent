@@ -92,7 +92,12 @@ def load_sector_st_gate_status(
     st_gate = _gate_from_manifest(st_payload)
 
     return SectorSTGateStatus(
-        sector_usable_for_diagnostics=bool(sector_gate.get("sector_usable_for_diagnostics", True)),
+        sector_usable_for_diagnostics=bool(
+            # Default False: a missing manifest is missing evidence, not a
+            # passing gate. This defaulted True, so an absent sector manifest
+            # certified the map as usable for diagnostics.
+            sector_gate.get("sector_usable_for_diagnostics", False)
+        ),
         sector_usable_for_optimization=bool(sector_gate.get("sector_usable_for_optimization", False)),
         sector_reason=str(sector_gate.get("reason", "manifest_missing")),
         st_usable_for_risk_filter=bool(st_gate.get("st_usable_for_risk_filter", False)),
