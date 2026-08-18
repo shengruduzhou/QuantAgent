@@ -5,7 +5,7 @@ import { downloadJson } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
-import { formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { downloadOfflineResearchHtml, type OfflineResearchReport } from "../utils/researchReport";
 
 const PROMOTION_POLICY = [
@@ -185,7 +185,7 @@ export function ReportsPage(): JSX.Element {
             {(backtests.data?.data ?? []).slice(0, 12).map((run) => (
               <div key={run.id}>
                 <span><strong>{run.name}</strong><small>{run.horizon ?? "research"}</small></span>
-                <span className={(run.annualReturn ?? 0) >= 0 ? "tone-positive" : "tone-negative"}>{formatPercent(run.annualReturn)}</span>
+                <span className={toneClass(run.annualReturn)} title={run.annualReturn == null ? UNMEASURED_TITLE : undefined}>{formatPercent(run.annualReturn)}</span>
                 <code>{run.path}</code>
               </div>
             ))}

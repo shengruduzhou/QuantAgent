@@ -225,7 +225,7 @@ export function FactorCenterPage(): JSX.Element {
     tooltip: { trigger: "axis" },
     xAxis: { type: "category", data: metrics?.decay.map((point) => `${point.horizonDays}D`) ?? [] },
     yAxis: { type: "value", scale: true },
-    series: [{ type: "bar", data: metrics?.decay.map((point) => point.ic ?? 0) ?? [], itemStyle: { color: "#7b8cff", borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
+    series: [{ type: "bar", data: metrics?.decay.map((point) => (typeof point.ic === "number" && !Number.isNaN(point.ic) ? point.ic : null)) ?? [], itemStyle: { color: "#7b8cff", borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
   }), [metrics?.decay]);
 
   const setDiscoveryParameter = (key: string, value: string | number | boolean | null): void => {
@@ -497,7 +497,7 @@ function ValidationView({ metrics, loading, icOption, decayOption }: { metrics?:
     <div className="factor-validation-grid">
       <WorkbenchPanel eyebrow="SOURCE-BACKED SERIES" title="IC / RankIC 时间序列">{metrics?.icSeries.length || metrics?.rankIcSeries.length ? <EChart option={icOption} className="factor-chart" /> : <ActionableState title="没有独立 IC 序列" detail="先运行 factor judgment / discovery evaluation，再从对应 artifact 读取。" icon={ChartLineUp} />}</WorkbenchPanel>
       <WorkbenchPanel eyebrow="HORIZON DECAY" title="衰减曲线">{metrics?.decay.length ? <EChart option={decayOption} className="factor-chart" /> : <ActionableState title="没有衰减评估" detail="至少需要两个持有期的 source-backed IC 指标。" icon={ChartLineUp} />}</WorkbenchPanel>
-      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={value === null ? "unavailable" : (value ?? 0) >= 0 ? "passed" : "failed"} />)}</div></WorkbenchPanel>
+      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={typeof value !== "number" || Number.isNaN(value) ? "unavailable" : value >= 0 ? "passed" : "failed"} />)}</div></WorkbenchPanel>
       <WorkbenchPanel eyebrow="ARTIFACT CONTRACT" title="独立验证能力"><div className="factor-availability">{Object.entries(metrics?.availability ?? {}).map(([name, available]) => <div key={name}><span>{name}</span><StatusBadge status={available ? "ready" : "unavailable"} label={available ? "可用" : "缺失"} /></div>)}</div><TruthNotice tone="warning">没有独立 trade / signal artifact 时，不复用多因子买卖点。</TruthNotice></WorkbenchPanel>
     </div>
   </div>;

@@ -7,7 +7,7 @@ import { EChart } from "../components/EChart";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatCompact, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
 import { useVNextChartPalette } from "../vnext/theme";
 import { TTradingResearchPanel } from "../vnext/tplusone/TTradingResearchPanel";
@@ -117,8 +117,8 @@ export function TPlusOnePage(): JSX.Element {
     series: [{
       type: "bar",
       data: (data?.pairs ?? []).slice(0, 80).map((pair) => ({
-        value: pair.netPnl ?? 0,
-        itemStyle: { color: (pair.netPnl ?? 0) >= 0 ? chartPalette.positive : chartPalette.negative },
+        value: typeof pair.netPnl === "number" && !Number.isNaN(pair.netPnl) ? pair.netPnl : null,
+        itemStyle: { color: typeof pair.netPnl !== "number" || Number.isNaN(pair.netPnl) ? chartPalette.muted : pair.netPnl >= 0 ? chartPalette.positive : chartPalette.negative },
       })),
       barMaxWidth: 12,
     }],
@@ -200,7 +200,7 @@ export function TPlusOnePage(): JSX.Element {
                         <td><strong className="tone-positive mono">{formatNumber(pair.buyPrice)}</strong><span>{pair.buyTime?.slice(11, 19) ?? "暂无时间"}</span></td>
                         <td><strong className="tone-negative mono">{formatNumber(pair.sellPrice)}</strong><span>{pair.sellTime?.slice(11, 19) ?? "暂无时间"}</span></td>
                         <td className="numeric mono">{formatCompact(pair.quantity)}</td>
-                        <td className={`numeric mono ${(pair.netPnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>{formatNumber(pair.netPnl)}</td>
+                        <td className={`numeric mono ${toneClass(pair.netPnl)}`} title={pair.netPnl == null ? UNMEASURED_TITLE : undefined}>{formatNumber(pair.netPnl)}</td>
                         <td><StatusBadge status={pair.success ? "success" : pair.success === false ? "failed" : "partial"} label={pair.state ?? "unknown"} /></td>
                         <td>{pair.highSellFailed ? "高抛失败" : pair.lowBuyFailed ? "低吸失败" : pair.success ? "成功" : "暂无判定"}</td>
                         <td>{pair.issues?.[0]?.message ?? "minute fill available"}</td>

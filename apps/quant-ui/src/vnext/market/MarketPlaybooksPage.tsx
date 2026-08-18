@@ -20,6 +20,29 @@ function latestAnomalyReason(row: Record<string, unknown>): string {
   const events = Array.isArray(row.events) ? row.events.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")) : [];
   const event = events[0]; return String(event?.reason ?? event?.anomaly_reason ?? event?.reason_desc ?? "—");
 }
+/**
+ * Compound a NAV curve, refusing to invent flat days.
+ *
+ * The previous form was `const ret = finite(r.netReturn) ?? 0; nav *= 1 + ret`
+ * — a missing return became a 0% day and the curve drew a flat segment across
+ * a hole in the data. That is DEF-022 (benchmark gap filled as a 0% day,
+ * overstating excess by 20pp) reproduced client-side. A gap makes every later
+ * NAV unknowable, so the series is null from the first gap onward and the page
+ * says so.
+ */
+export function compoundNav(rows: Array<Record<string, unknown>>): Array<number | null> {
+  let nav = 1;
+  let broken = false;
+  return rows.map((r) => {
+    if (broken) return null;
+    if (typeof r.nav === "number" && Number.isFinite(r.nav)) { nav = r.nav; return nav; }
+    const ret = finite(r.netReturn);
+    if (ret === null || ret === undefined) { broken = true; return null; }
+    nav *= 1 + ret;
+    return nav;
+  });
+}
+
 function rowsOf(payload: Payload | undefined, key = "rows"): Array<Record<string, unknown>> {
   const value = payload?.[key]; return Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object")) : [];
 }
@@ -56,7 +79,7 @@ export function MarketPlaybooksPage(): JSX.Element {
       const rows = rowsOf(payload); return { animation:false, tooltip:{trigger:"axis"}, legend:{data:["个股","基准","热榜名次"]}, grid:{left:55,right:55,top:35,bottom:45}, xAxis:{type:"category",data:rows.map(r=>String(r.date??"")),axisLabel:{hideOverlap:true}}, yAxis:[{type:"value",scale:true,name:"指数化价格"},{type:"value",inverse:true,name:"热榜名次"}], dataZoom:[{type:"inside"}], series:[{name:"个股",type:"line",showSymbol:false,data:rows.map(r=>r.stockIndex),lineStyle:{color:palette.primary}},{name:"基准",type:"line",showSymbol:false,data:rows.map(r=>r.benchmarkIndex),lineStyle:{color:palette.series[1]}},{name:"热榜名次",type:"line",yAxisIndex:1,showSymbol:false,data:rows.map(r=>r.rank),lineStyle:{color:palette.series[2]}}] };
     }
     if (["13","14","15"].includes(selected.id)) {
-      const rows = rowsOf(payload); let nav = 1; const navSeries = rows.map((r) => { if (typeof r.nav === "number") return r.nav; const ret = finite(r.netReturn) ?? 0; nav *= 1 + ret; return nav; }); return { animation:false, tooltip:{trigger:"axis"}, grid:{left:55,right:24,top:24,bottom:45}, xAxis:{type:"category",data:rows.map(r=>String(r.date??"")),axisLabel:{hideOverlap:true}}, yAxis:{type:"value",scale:true,name:"净值"}, dataZoom:[{type:"inside"}], series:[{type:"line",showSymbol:false,data:navSeries,lineStyle:{color:palette.primary,width:2},areaStyle:{opacity:0.08}}] };
+      const rows = rowsOf(payload); const navSeries = compoundNav(rows); return { animation:false, tooltip:{trigger:"axis"}, grid:{left:55,right:24,top:24,bottom:45}, xAxis:{type:"category",data:rows.map(r=>String(r.date??"")),axisLabel:{hideOverlap:true}}, yAxis:{type:"value",scale:true,name:"净值"}, dataZoom:[{type:"inside"}], series:[{type:"line",showSymbol:false,data:navSeries,lineStyle:{color:palette.primary,width:2},areaStyle:{opacity:0.08}}] };
     }
     if (selected.id === "12") { const rows = rowsOf(payload,"ladder"); return { animation:false, tooltip:{trigger:"axis"}, xAxis:{type:"category",data:rows.map(r=>String(r.date??""))}, yAxis:{type:"value",minInterval:1,name:"最高板"}, series:[{type:"bar",data:rows.map(r=>r.maxBoard),itemStyle:{color:palette.primary}}] }; }
     if (selected.id === "10") { const rows = rowsOf(payload); return { animation:false, tooltip:{trigger:"axis"}, legend:{data:["经营现金流","FCF proxy","净利润"]}, xAxis:{type:"category",data:rows.map(r=>String(r.fiscalYear??""))}, yAxis:{type:"value",scale:true}, series:[{name:"经营现金流",type:"bar",data:rows.map(r=>r.operatingCashFlow),itemStyle:{color:palette.primary}},{name:"FCF proxy",type:"line",data:rows.map(r=>r.freeCashFlowProxy),lineStyle:{color:palette.series[1]}},{name:"净利润",type:"line",data:rows.map(r=>r.netProfit),lineStyle:{color:palette.series[2]}}] }; }
@@ -68,6 +91,15 @@ export function MarketPlaybooksPage(): JSX.Element {
   if (!selected) return <StateView state="empty" detail="没有可用研究模板。" />;
   const metrics = (payload?.metrics && typeof payload.metrics === "object") ? payload.metrics as Record<string, unknown> : {};
 
+  const navGapDate = useMemo(() => {
+    if (!payload || !["13", "14", "15"].includes(selected.id)) return null;
+    const rows = rowsOf(payload);
+    const series = compoundNav(rows);
+    const index = series.indexOf(null);
+    if (index < 0) return null;
+    return String(rows[index]?.date ?? `第 ${index + 1} 行`);
+  }, [payload, selected.id]);
+
   return <div className="page institutional-workbench playbooks-page">
     <section className="playbook-hero panel"><div><span className="playbook-kicker"><Flask size={17}/> Fuyao × QuantAgent Research Playbooks</span><h2>16 个数据看板、研究与回测工作台</h2><p>功能与证据链对齐官方示例，视觉与治理保持 QuantAgent。真实数据只由服务端读取 API Key；PIT、T+1、成本、基准与缺失状态显式展示。</p></div><StatusBadge status="ready" label={`${items.length}/16 registered`} /></section>
     <section className="playbook-layout"><aside className="playbook-nav panel">{items.map((item)=><button key={item.id} className={item.id===selected.id?"active":""} onClick={()=>{const next=new URLSearchParams(params);next.set("id",item.id);setParams(next)}}><b>{item.id}</b><span>{item.title}<small>{item.kind} · {item.status}</small></span></button>)}</aside>
@@ -75,7 +107,7 @@ export function MarketPlaybooksPage(): JSX.Element {
         <section className="panel playbook-controls"><label>{selected.id==="05"?"自选股（逗号分隔）":"股票代码"}<input value={symbol} onChange={e=>setSymbol(e.target.value.toUpperCase())}/></label><label>基准指数<input value={benchmark} onChange={e=>setBenchmark(e.target.value.toUpperCase())}/></label><label>行业/概念指数<input value={indexSymbol} onChange={e=>setIndexSymbol(e.target.value.toUpperCase())}/></label><label>成本 bps<input type="number" min="0" max="500" value={costBps} onChange={e=>setCostBps(Number(e.target.value)||0)}/></label></section>
         {run.isLoading ? <StateView state="loading" detail="正在按真实数据重新计算研究工作台。" /> : !payload ? <StateView state="unavailable" detail={run.error instanceof Error ? run.error.message : "上游数据或权限不可用；不会用模拟金融数据补齐。"}/> : <>
           <section className="playbook-metrics">{Object.entries(metrics).slice(0,6).map(([key,value])=><div className="panel" key={key}><small>{key}</small><strong>{key.toLowerCase().includes("return")||key.toLowerCase().includes("drawdown")||key.toLowerCase().includes("rate")?pct(value):num(value,3)}</strong></div>)}{selected.id==="11"?<><div className="panel"><small>Spearman</small><strong>{num(payload.spearman,3)}</strong></div><div className="panel"><small>样本数</small><strong>{num(payload.sample,0)}</strong></div></>:null}{selected.id==="12"?<><div className="panel"><small>涨停数量</small><strong>{num(payload.limitUpCount,0)}</strong></div><div className="panel"><small>最高板</small><strong>{num(payload.maxBoard,0)}</strong></div></>:null}</section>
-          {option ? <section className="panel playbook-chart"><EChart option={option} style={{ height: 410 }} /></section> : null}
+          {option ? <section className="panel playbook-chart"><EChart option={option} style={{ height: 410 }} />{navGapDate ? <p className="playbook-caption">净值曲线在 <b>{navGapDate}</b> 之后中断：该日 <code>netReturn</code> 缺失。缺一天收益后所有后续净值都不可知，因此不按 0% 补齐、也不继续绘制。</p> : null}</section> : null}
           {selected.id==="05" ? <section className="panel playbook-table"><table><thead><tr><th>标的</th><th>最新价</th><th>涨跌幅</th><th>异动数</th><th>最新原因</th></tr></thead><tbody>{rowsOf(payload).map((row)=>{const snapshot=recordOf(row.snapshot);return <tr key={String(row.symbol)}><td>{String(row.symbol??"")}</td><td>{num(snapshot?.last_price)}</td><td>{num(snapshot?.price_change_ratio_pct)}%</td><td>{num(row.eventCount,0)}</td><td>{latestAnomalyReason(row)}</td></tr>})}</tbody></table></section> : null}
           {selected.id==="09" ? <section className="panel playbook-table"><table><thead><tr><th>行业</th><th>5日</th><th>20日</th><th>加速度</th><th>当前上涨占比</th></tr></thead><tbody>{rowsOf(payload).map((row)=><tr key={String(row.symbol)}><td>{String(row.name??row.symbol??"")}</td><td>{pct(row.return5d)}</td><td>{pct(row.return20d)}</td><td>{pct(row.acceleration)}</td><td>{pct(row.advancingShare)}</td></tr>)}</tbody></table></section> : null}
           <section className="playbook-evidence panel"><h4><ShieldCheck size={18}/> 证据与口径</h4><pre>{JSON.stringify({provenance:payload.provenance,assumptions:payload.assumptions,notes:payload.notes,pitKey:payload.pitKey,periodKey:payload.periodKey},null,2)}</pre></section>{selected.id==="16"?<div className="playbook-caption"><Graph size={16}/> 拓扑仅穿透所选指数当前成分；不会把当前成分回填为历史成分。</div>:null}

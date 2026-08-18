@@ -50,3 +50,20 @@ export function valueTone(value: number | null | undefined): "positive" | "negat
   if (value === null || value === undefined || value === 0) return "neutral";
   return value > 0 ? "positive" : "negative";
 }
+
+/**
+ * Direction tone for a *market* number (A-share convention: red is up).
+ *
+ * An absent measurement is not a direction. Pages used to inline
+ * `(x ?? 0) >= 0 ? "tone-positive" : "tone-negative"`, which routed every
+ * missing value through `0 >= 0` and painted it as an up move — the number
+ * itself honestly read "暂无" while the colour beside it claimed a gain.
+ * Missing stays visibly unmeasured here instead.
+ */
+export function toneClass(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "tone-unmeasured";
+  return value >= 0 ? "tone-positive" : "tone-negative";
+}
+
+/** Hover text explaining why a cell carries no direction. */
+export const UNMEASURED_TITLE = "未测量：该产物没有这个字段，不按 0 处理";

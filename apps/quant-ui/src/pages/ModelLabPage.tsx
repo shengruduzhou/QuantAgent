@@ -29,7 +29,7 @@ import { MetricCard } from "../components/MetricCard";
 import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatBytes, formatCompact, formatDate, formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatBytes, formatCompact, formatDate, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
 interface TrainingPoint {
@@ -364,7 +364,7 @@ export function ModelLabPage(): JSX.Element {
                   <div className="comparison-row" key={key}>
                     <span>{key.replaceAll("_", " ")}</span>
                     {comparison.data.data.models.map((model) => (
-                      <strong key={model.id} className={(model.metrics[key] ?? 0) >= 0 ? "tone-positive" : "tone-negative"}>
+                      <strong key={model.id} className={toneClass(model.metrics[key])} title={model.metrics[key] == null ? UNMEASURED_TITLE : undefined}>
                         {formatNumber(model.metrics[key], 4)}
                       </strong>
                     ))}
@@ -549,7 +549,7 @@ function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.El
             <td><strong>{row.symbol || "portfolio"}</strong></td>
             <td>{row.horizon ?? "—"}</td>
             <td className="numeric mono">{formatNumber(row.score, 5)}</td>
-            <td className={`numeric mono ${(row.actualReturn ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>{formatNumber(row.actualReturn, 4)}</td>
+            <td className={`numeric mono ${toneClass(row.actualReturn)}`} title={row.actualReturn == null ? UNMEASURED_TITLE : undefined}>{formatNumber(row.actualReturn, 4)}</td>
             <td className="numeric mono">{row.rank ?? "—"}</td>
           </tr>
         ))}</tbody>

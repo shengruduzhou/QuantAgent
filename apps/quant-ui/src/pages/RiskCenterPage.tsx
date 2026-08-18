@@ -9,7 +9,7 @@ import { Panel } from "../components/Panel";
 import { RiskRadar } from "../components/RiskRadar";
 import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatCompact, formatNumber, formatPercent } from "../utils/format";
+import { UNMEASURED_TITLE, formatCompact, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { marketPalette } from "../theme/marketPalette";
 import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
 
@@ -85,7 +85,7 @@ export function RiskCenterPage(): JSX.Element {
       value: (stock) => stock.netPnl ?? Number.NEGATIVE_INFINITY,
       csvValue: (stock) => stock.netPnl,
       render: (stock) => (
-        <span className={`mono ${(stock.netPnl ?? 0) >= 0 ? "tone-positive" : "tone-negative"}`}>
+        <span className={`mono ${toneClass(stock.netPnl)}`} title={stock.netPnl == null ? UNMEASURED_TITLE : undefined}>
           {formatNumber(stock.netPnl)}
         </span>
       ),
