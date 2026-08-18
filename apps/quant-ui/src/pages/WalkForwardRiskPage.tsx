@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useApi } from "../hooks/useApi";
+import { StateView } from "../components/StateView";
 
 /**
  * Walk-forward risk-control results.
@@ -37,8 +38,6 @@ interface Payload {
   results: WindowResult[];
 }
 
-const API = "/api/walkforward-risk";
-
 function pct(v: unknown): string {
   if (typeof v !== "number" || Number.isNaN(v)) return "暂无";
   return `${(v * 100).toFixed(1)}%`;
@@ -54,29 +53,34 @@ function tone(v: unknown): string {
 }
 
 export function WalkForwardRiskPage(): JSX.Element {
-  const [data, setData] = useState<Payload | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const r = await fetch(`${API}/results`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = (await r.json()) as Payload;
-        if (alive) { setData(j); setError(null); }
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
-      }
-    };
-    poll();
+  // Goes through the shared API client like every other page: one place for the
+  // `{status, data, issues}` envelope, request cancellation and error-body
+  // compaction. This page used to hand-roll `fetch` + `setInterval(2000)`, which
+  // polled without an AbortSignal and reported raw `HTTP 500` to the operator.
+  const query = useApi<Payload>(["walkforward-risk-results"], "/walkforward-risk/results", undefined, {
     // Keep polling while a run is in flight so the page updates live.
-    const id = setInterval(poll, 2000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
+    refetchInterval: 2_000,
+  });
+  const data = query.data?.data;
 
-  if (error) return <div className="wf-page"><p className="wf-error">无法读取回测结果：{error}</p></div>;
-  if (!data) return <div className="wf-page"><p>加载中…</p></div>;
+  if (query.isError) {
+    return (
+      <div className="wf-page">
+        <StateView
+          state="error"
+          title="无法读取滚动窗口回测结果"
+          detail={`${query.error instanceof Error ? query.error.message : "未知错误"}。没有结果时本页不会展示任何数字。下一步：确认 runner 已写出 runtime/walkforward_risk/status.json。`}
+        />
+      </div>
+    );
+  }
+  if (!data) {
+    return (
+      <div className="wf-page">
+        <StateView state={query.isLoading ? "loading" : "empty"} title="没有滚动窗口回测产物" detail="runner 还没有写出 status.json，因此没有窗口结果可读。下一步：运行 scripts/strategy_search_walkforward.py 或对应的滚动窗口回测。" />
+      </div>
+    );
+  }
 
   const agg = data.aggregate ?? {};
   const on = agg.risk_on ?? {};
