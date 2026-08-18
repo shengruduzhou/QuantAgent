@@ -317,14 +317,30 @@ def board_price_limit_vector(
     return result
 
 
-def limit_up_mask(
+def _observed_price(frame: pd.DataFrame, price_column: str) -> pd.Series:
+    """The price the board test is applied to. Missing column is fail-loud.
+
+    A board flag decides whether an order can execute. If the caller asks for a
+    basis the tape does not carry, answering with some other column silently
+    changes what "sealed" means, which is the exact defect this parameter
+    exists to close. Raise instead.
+    """
+    if price_column not in frame.columns:
+        raise KeyError(
+            f"price_column={price_column!r} is not in the frame "
+            f"(available: {sorted(map(str, frame.columns))}). "
+            "A board test must be evaluated on the price it gates."
+        )
+    return frame[price_column]
+
+
+def _board_reference(
     frame: pd.DataFrame,
-    symbol_column: str = "symbol",
-    is_st_column: str | None = "is_st",
-    tolerance: float = 1e-3,
-    limits: ASharePriceLimit | None = None,
-) -> pd.Series:
-    """True when close >= prev_close * (1 + dated board limit) within tolerance."""
+    symbol_column: str,
+    is_st_column: str | None,
+    limits: ASharePriceLimit | None,
+) -> tuple[pd.Series, pd.Series]:
+    """(prev_close, pct_limit) — the statutory base and the dated band width."""
     prev_close = frame.groupby(symbol_column)["close"].shift(1)
     is_st = frame[is_st_column] if is_st_column and is_st_column in frame.columns else False
     trade_dates = frame["trade_date"] if "trade_date" in frame.columns else None
@@ -334,8 +350,35 @@ def limit_up_mask(
         limits,
         trade_dates=trade_dates,
     )
+    return prev_close, pct_limit
+
+
+def limit_up_mask(
+    frame: pd.DataFrame,
+    symbol_column: str = "symbol",
+    is_st_column: str | None = "is_st",
+    tolerance: float = 1e-3,
+    limits: ASharePriceLimit | None = None,
+    price_column: str = "close",
+) -> pd.Series:
+    """True when `price_column` >= prev_close * (1 + dated band) within tolerance.
+
+    `price_column` selects the *price basis* the board test is evaluated on. The
+    statutory reference is always the previous session's close; what varies is
+    which of today's prints is compared against it.
+
+    ``"close"`` answers "did the session end sealed" and is the right basis for
+    factor-side questions (was this bar tradable in the daily sense). It is NOT
+    the right basis for a simulator that executes at the open: an order filled
+    at `open(t)` must be gated by whether `open(t)` was at the board, not by
+    where the bar happened to finish. Callers that execute must pass the same
+    column they fill at — see `EventDrivenBacktester`, which passes
+    `BacktestConfig.fill_price_column`.
+    """
+    prev_close, pct_limit = _board_reference(frame, symbol_column, is_st_column, limits)
+    observed = _observed_price(frame, price_column)
     target = prev_close * (1.0 + pct_limit)
-    return (frame["close"] >= target * (1.0 - tolerance)) & (prev_close > 0)
+    return (observed >= target * (1.0 - tolerance)) & (prev_close > 0)
 
 
 def limit_down_mask(
@@ -344,18 +387,70 @@ def limit_down_mask(
     is_st_column: str | None = "is_st",
     tolerance: float = 1e-3,
     limits: ASharePriceLimit | None = None,
+    price_column: str = "close",
 ) -> pd.Series:
-    prev_close = frame.groupby(symbol_column)["close"].shift(1)
-    is_st = frame[is_st_column] if is_st_column and is_st_column in frame.columns else False
-    trade_dates = frame["trade_date"] if "trade_date" in frame.columns else None
-    pct_limit = board_price_limit_vector(
-        frame[symbol_column],
-        is_st,
-        limits,
-        trade_dates=trade_dates,
-    )
+    """True when `price_column` <= prev_close * (1 - dated band) within tolerance.
+
+    See `limit_up_mask` for why `price_column` must match the execution basis.
+    """
+    prev_close, pct_limit = _board_reference(frame, symbol_column, is_st_column, limits)
+    observed = _observed_price(frame, price_column)
     target = prev_close * (1.0 - pct_limit)
-    return (frame["close"] <= target * (1.0 + tolerance)) & (prev_close > 0)
+    return (observed <= target * (1.0 + tolerance)) & (prev_close > 0)
+
+
+def one_word_board_mask(
+    frame: pd.DataFrame,
+    symbol_column: str = "symbol",
+    is_st_column: str | None = "is_st",
+    tolerance: float = 1e-3,
+    limits: ASharePriceLimit | None = None,
+) -> pd.Series:
+    """True for a one-word board: the bar printed a single price, at the band.
+
+    ``high == low`` with non-zero volume means the whole session traded at one
+    price. When that price is a board price there is no crossing available at
+    any other level -- the session is a queue at the limit -- so a simulator
+    that fills "at the open" is filling at a price it could only have reached
+    by standing in that queue from the auction.
+
+    This is deliberately *independent* of `limit_up_mask` / `limit_down_mask`
+    rather than derived from them, because those two cannot answer the question
+    when `prev_close` is unknown (the first bar of a symbol, or the bar after a
+    tape gap) -- and a zero-range bar is exactly where an unknown reference is
+    most dangerous. An unknown `prev_close` on a zero-range traded bar is
+    reported as a board, not as tradable: fail-closed.
+
+    Zero-volume bars are excluded; those are halts and belong to
+    `suspension_mask`.
+
+    **Measurability.** The whole criterion rests on `high` and `low` being real
+    measurements. Some tapes in this repo synthesise them — the composite
+    replay path builds every bar as `open == high == low == close` from a single
+    last-price snapshot, and the golden scenarios do the same. On such a tape
+    `high == low` says nothing about sealing, so the criterion is reported as
+    NOT APPLICABLE (all False) rather than firing on every bar. That is not a
+    silent default: it is the honest answer that this tape cannot answer the
+    question, and the limit masks still gate execution on their own. A tape
+    that carries at least one bar with `high != low` is treated as measuring
+    ranges and the criterion applies throughout.
+    """
+    high = frame["high"]
+    low = frame["low"]
+    ranges_measured = bool((high != low).any())
+    if not ranges_measured:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    volume = frame["volume"].fillna(0.0) if "volume" in frame.columns else 0.0
+    zero_range = (high == low) & (high > 0)
+    traded = volume > 0
+    prev_close, _ = _board_reference(frame, symbol_column, is_st_column, limits)
+    reference_unknown = prev_close.isna() | (prev_close <= 0)
+    at_board = limit_up_mask(
+        frame, symbol_column, is_st_column, tolerance, limits, price_column="close"
+    ) | limit_down_mask(
+        frame, symbol_column, is_st_column, tolerance, limits, price_column="close"
+    )
+    return zero_range & traded & (at_board | reference_unknown)
 
 
 def suspension_mask(frame: pd.DataFrame, symbol_column: str = "symbol") -> pd.Series:
