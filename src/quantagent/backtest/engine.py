@@ -113,6 +113,10 @@ class EventDrivenBacktester:
         trade_log: list[dict] = []
         reject_log: list[dict] = []
         release_dates: dict[str, pd.Timestamp] = {s: dates[0] for s in symbols}
+        # Positions held on a bar that carries no close for them. Recorded
+        # so an unpriceable holding shows up as a gap rather than as a
+        # silent zero inside NAV.
+        self._unpriced_marks: list[dict] = []
 
         for i, date in enumerate(dates):
             for sym, pos in positions.items():
@@ -122,6 +126,31 @@ class EventDrivenBacktester:
             if daily_prices.empty:
                 nav_curve[date] = nav
                 continue
+
+            # NAV(t) contains exactly the fills whose fill_date <= t.
+            #
+            # Under `next_day_fill` this bar's orders execute at dates[i+1], so
+            # the book actually held DURING this bar is the one standing before
+            # the trading block below; it already contains every fill from
+            # iteration i-1, whose fill_date was this very bar. Marking after
+            # the trading block instead stamped a position acquired at
+            # open(t+1) onto close(t), booking the overnight gap
+            # `shares x (close(t) - open(t+1))` as instantaneous P&L on a day
+            # the position was not held. On a tape flat at 10.00 with one gap
+            # bar that turned a -0.046% strategy into +11.05% and flipped the
+            # reported Sharpe from -7.0993 to +7.0993 with max_drawdown 0.0.
+            #
+            # Under same-bar fill (`next_day_fill=False`) the fill_date IS this
+            # bar, so the fill belongs in NAV(t) and marking stays after the
+            # trading block. An earlier attempt moved the mark unconditionally
+            # and broke exactly that case: the composite ledger-replay path
+            # runs same-bar fills and diverged by 12.45 because native and
+            # replay then disagreed about which fills belonged to the last bar.
+            if self.config.next_day_fill:
+                nav = self._mark_to_market(cash, positions, daily_prices)
+                nav_curve[date] = nav
+                weight_curve.append(self._weight_row(date, positions, daily_prices, nav, symbols))
+
             if self.config.next_day_fill and i + 1 >= len(dates):
                 # Under a next-day-fill policy the final bar has no session to
                 # fill in. The old `else date` fallback executed it on its own
@@ -130,25 +159,10 @@ class EventDrivenBacktester:
                 # never washes out and the total return itself is wrong. The
                 # order simply does not execute inside the tested window.
                 #
-                # Skip the TRADING, not the MARKING: positions still have to be
-                # revalued at this bar's close, or the final mark-to-market is
-                # silently dropped and NAV no longer equals cash + holdings.
-                nav = cash + sum(
-                    pos.total_shares() * float(daily_prices["close"].get(sym, 0.0))
-                    for sym, pos in positions.items()
-                )
-                nav_curve[date] = nav
-                weight_curve.append(
-                    {
-                        "trade_date": date,
-                        **{
-                            sym: positions[sym].total_shares()
-                            * float(daily_prices["close"].get(sym, 0.0))
-                            / max(nav, 1e-6)
-                            for sym in symbols
-                        },
-                    }
-                )
+                # Skip the TRADING, not the MARKING -- but the marking already
+                # happened above, before the trading block, because under this
+                # policy that is where the held book is valued. Re-marking here
+                # would stamp this bar twice.
                 reject_log.append(
                     {
                         "trade_date": date,
@@ -305,18 +319,18 @@ class EventDrivenBacktester:
                         )
                     else:
                         self._record_canonical_fill(book, ledger, canonical, executed, fill_date)
-            equity = cash + sum(
-                pos.total_shares() * float(daily_prices["close"].get(sym, 0.0))
-                for sym, pos in positions.items()
-            )
-            nav = equity
-            nav_curve[date] = nav
-            weight_curve.append(
-                {
-                    "trade_date": date,
-                    **{sym: positions[sym].total_shares() * float(daily_prices["close"].get(sym, 0.0)) / max(nav, 1e-6) for sym in symbols},
-                }
-            )
+            if not self.config.next_day_fill:
+                # Same-bar fill: the fill_date IS this bar, so it belongs in
+                # NAV(t) and the book is valued after trading.
+                nav = self._mark_to_market(cash, positions, daily_prices)
+                nav_curve[date] = nav
+                weight_curve.append(self._weight_row(date, positions, daily_prices, nav, symbols))
+            else:
+                # Next-bar fill: this iteration's trades land on dates[i+1] and
+                # will be valued when that bar is marked. `cash` and `positions`
+                # carry them forward; `nav` stays the value of the book held
+                # during this bar, which is what the next iteration sizes from.
+                pass
 
         nav_series = pd.Series(nav_curve).sort_index()
         returns = nav_series.pct_change().dropna()
@@ -552,6 +566,52 @@ class EventDrivenBacktester:
         }
         if fill.side is Side.SELL:
             row["stamp_duty"] = fill.stamp_duty
+        return row
+
+    def _mark_to_market(
+        self,
+        cash: float,
+        positions: dict[str, TPlusOnePosition],
+        daily_prices: pd.DataFrame,
+    ) -> float:
+        """Value the book at this bar's closes.
+
+        A held symbol with no close on this bar is EXCLUDED from the valuation
+        and recorded in ``self._unpriced_marks``, not counted as zero. The old
+        ``daily_prices["close"].get(sym, 0.0)`` silently valued such a position
+        at nothing, which manufactures a loss that looks real: NAV falls by the
+        whole position while every accounting identity still balances, so no
+        internal consistency check can catch it. Excluding it keeps NAV equal to
+        "cash plus what could be priced" and leaves the gap visible in the
+        diagnostics rather than buried in the number.
+        """
+        closes = daily_prices["close"]
+        equity = float(cash)
+        for sym, pos in positions.items():
+            shares = pos.total_shares()
+            if not shares:
+                continue
+            close = closes.get(sym)
+            if close is None or pd.isna(close):
+                self._unpriced_marks.append({"symbol": sym, "shares": float(shares)})
+                continue
+            equity += shares * float(close)
+        return equity
+
+    @staticmethod
+    def _weight_row(
+        date: pd.Timestamp,
+        positions: dict[str, TPlusOnePosition],
+        daily_prices: pd.DataFrame,
+        nav: float,
+        symbols: list[str],
+    ) -> dict:
+        closes = daily_prices["close"]
+        row: dict = {"trade_date": date}
+        for sym in symbols:
+            close = closes.get(sym)
+            value = 0.0 if close is None or pd.isna(close) else float(close)
+            row[sym] = positions[sym].total_shares() * value / max(nav, 1e-6)
         return row
 
     @staticmethod
