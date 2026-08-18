@@ -35,5 +35,37 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        /*
+         * Every lazy workstation page imports `EChart`, so Rollup used to fold
+         * the whole echarts + zrender vendor tree into one shared 651 kB chunk
+         * named after that component. Splitting the vendors out gives each a
+         * stable filename that survives app edits (long-lived browser cache)
+         * and drops the largest chunk under the 500 kB warning threshold.
+         *
+         * zrender is echarts' rendering engine and is a separate package, so
+         * it splits cleanly; the charts/components registered in EChart.tsx
+         * stay tree-shaken exactly as before.
+         */
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("node_modules/zrender")) return "vendor-zrender";
+          if (id.includes("node_modules/echarts")) return "vendor-echarts";
+          if (
+            id.includes("node_modules/react-router") ||
+            id.includes("node_modules/react-dom") ||
+            id.includes("node_modules/scheduler") ||
+            /node_modules\/react\//.test(id)
+          ) {
+            return "vendor-react";
+          }
+          if (id.includes("node_modules/@tanstack")) return "vendor-query";
+          return undefined;
+        },
+      },
+    },
+  },
   plugins: [react()],
 });

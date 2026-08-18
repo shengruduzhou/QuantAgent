@@ -66,7 +66,7 @@ export function RiskCenterPage(): JSX.Element {
       grid: { left: 106, right: 18, top: 16, bottom: 24 },
       tooltip: { trigger: "axis", backgroundColor: marketPalette.panel, borderColor: marketPalette.border, textStyle: { color: marketPalette.text } },
       xAxis: { type: "value", axisLabel: { color: marketPalette.axis }, splitLine: { lineStyle: { color: marketPalette.grid } } },
-      yAxis: { type: "category", inverse: true, data: entries.map(([name]) => name), axisLabel: { color: "#9cb1c3", fontSize: 10 } },
+      yAxis: { type: "category", inverse: true, data: entries.map(([name]) => name), axisLabel: { color: marketPalette.axis, fontSize: 10 } },
       series: [{ type: "bar", data: entries.map(([, value]) => value), itemStyle: { color: marketPalette.risk }, barMaxWidth: 14 }],
     };
   }, [risk?.eventCounts]);

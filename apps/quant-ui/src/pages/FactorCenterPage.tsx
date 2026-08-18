@@ -32,6 +32,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { mutableTemplate, type JobLaunchPayload } from "../domain/jobTemplates";
 import { useApi } from "../hooks/useApi";
 import { formatNumber, formatPercent } from "../utils/format";
+import { useVNextChartPalette } from "../vnext/theme";
 import {
   ActionableState,
   SegmentedTabs,
@@ -134,6 +135,7 @@ function utilityStatus(factor: Factor): { label: string; status: string } {
 }
 
 export function FactorCenterPage(): JSX.Element {
+  const palette = useVNextChartPalette();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -214,10 +216,10 @@ export function FactorCenterPage(): JSX.Element {
     xAxis: { type: "category", data: metrics?.icSeries.map((point) => point.datetime) ?? [] },
     yAxis: { type: "value", scale: true },
     series: [
-      { name: "IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.icSeries.map((point) => point.value) ?? [], lineStyle: { color: "#5b9cff", width: 2 }, itemStyle: { color: "#5b9cff" } },
-      { name: "Rank IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.rankIcSeries.map((point) => point.value) ?? [], lineStyle: { color: "#35c39e", width: 2 }, itemStyle: { color: "#35c39e" } },
+      { name: "IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.icSeries.map((point) => point.value) ?? [], lineStyle: { color: palette.series[0], width: 2 }, itemStyle: { color: palette.series[0] } },
+      { name: "Rank IC", type: "line", showSymbol: true, smooth: .16, data: metrics?.rankIcSeries.map((point) => point.value) ?? [], lineStyle: { color: palette.series[1], width: 2 }, itemStyle: { color: palette.series[1] } },
     ],
-  }), [metrics?.icSeries, metrics?.rankIcSeries]);
+  }), [metrics?.icSeries, metrics?.rankIcSeries, palette]);
 
   const decayOption = useMemo<EChartsOption>(() => ({
     animationDuration: 240,
@@ -225,8 +227,8 @@ export function FactorCenterPage(): JSX.Element {
     tooltip: { trigger: "axis" },
     xAxis: { type: "category", data: metrics?.decay.map((point) => `${point.horizonDays}D`) ?? [] },
     yAxis: { type: "value", scale: true },
-    series: [{ type: "bar", data: metrics?.decay.map((point) => (typeof point.ic === "number" && !Number.isNaN(point.ic) ? point.ic : null)) ?? [], itemStyle: { color: "#7b8cff", borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
-  }), [metrics?.decay]);
+    series: [{ type: "bar", data: metrics?.decay.map((point) => (typeof point.ic === "number" && !Number.isNaN(point.ic) ? point.ic : null)) ?? [], itemStyle: { color: palette.series[3], borderRadius: [2, 2, 0, 0] }, barMaxWidth: 28 }],
+  }), [metrics?.decay, palette]);
 
   const setDiscoveryParameter = (key: string, value: string | number | boolean | null): void => {
     setDiscoveryConfig((current) => ({ ...current, parameters: { ...current.parameters, [key]: value } }));

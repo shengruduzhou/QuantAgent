@@ -11,6 +11,7 @@ import { StateView } from "../components/StateView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatNumber } from "../utils/format";
 import { ActionableState, TruthNotice, WorkbenchHeader, WorkbenchMetricStrip, WorkbenchPanel } from "../vnext/workbench/InstitutionalWorkbench";
+import { useVNextChartPalette } from "../vnext/theme";
 
 interface RankingRow {
   symbol: string;
@@ -49,6 +50,7 @@ interface DecisionChain {
 
 export function SelectionLogicPage(): JSX.Element {
   const navigate = useNavigate();
+  const palette = useVNextChartPalette();
   const runs = useApi<SelectionRun[]>(["selection-runs"], "/selection/runs");
   const [runId, setRunId] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -82,12 +84,12 @@ export function SelectionLogicPage(): JSX.Element {
     return {
       animation: false,
       grid: { left: 76, right: 18, top: 16, bottom: 24 },
-      tooltip: { trigger: "axis", backgroundColor: "#0b1824", borderColor: "#27425a", textStyle: { color: "#d7e4ef" } },
-      xAxis: { type: "value", axisLabel: { color: "#71879a" }, splitLine: { lineStyle: { color: "#14283a" } } },
-      yAxis: { type: "category", inverse: true, data: data.map(([name]) => name), axisLabel: { color: "#9cb1c3", fontSize: 10 } },
-      series: [{ type: "bar", data: data.map(([, value]) => value), itemStyle: { color: "#3f8cff" }, barMaxWidth: 15 }],
+      tooltip: { trigger: "axis", backgroundColor: palette.tooltip, borderColor: palette.tooltipBorder, textStyle: { color: palette.tooltipText } },
+      xAxis: { type: "value", axisLabel: { color: palette.axis }, splitLine: { lineStyle: { color: palette.grid } } },
+      yAxis: { type: "category", inverse: true, data: data.map(([name]) => name), axisLabel: { color: palette.axis, fontSize: 10 } },
+      series: [{ type: "bar", data: data.map(([, value]) => value), itemStyle: { color: palette.primary }, barMaxWidth: 15 }],
     };
-  }, [ranking.data?.data]);
+  }, [ranking.data?.data, palette]);
 
   if (runs.isLoading) return <StateView state="loading" />;
   if (!runs.data?.data.length) return <EmptySelectionWorkspace navigate={navigate} />;
