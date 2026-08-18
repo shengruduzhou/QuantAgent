@@ -16,6 +16,15 @@ The environment follows the repository's canonical execution semantics:
   names so an untradable exit cannot disappear from accounting.
 * Reward is policy value-add versus the same constrained passive book, so a zero
   action earns exactly zero reward.
+* Optional risk terms (``drawdown_lambda``, ``volatility_lambda``) price excess
+  max drawdown and excess downside semi-variance *against that same passive
+  book*. Both default to ``0.0``. The deprecated ``PortfolioEnv`` carried a
+  ``drawdown_lambda=2.0`` penalty which was dropped, undocumented, when the
+  reward clock was corrected; the reward then encoded only half of the stated
+  objective ("highest excess return, smallest drawdown") and was not isomorphic
+  to the ``AGENTS.md`` max-drawdown acceptance gate. Turning a term on is an
+  explicit caller decision, and must be justified by measurement -- see
+  ``docs/audits/round22/11_rl_reward.md``.
 
 This remains research infrastructure. Exported weights require strict replay,
 quarantine governance, statistical validation, and forward shadow evidence.
@@ -42,6 +51,14 @@ _REQUIRED_EXECUTION_FLAGS = ("is_limit_up", "is_limit_down", "is_suspended")
 
 @dataclass(frozen=True)
 class PITPortfolioEnvConfig:
+    """Environment knobs.
+
+    ``drawdown_lambda`` and ``volatility_lambda`` default to ``0.0``, which
+    reproduces the pre-round-22 reward **exactly** -- turning a risk penalty on
+    is a decision a caller makes, never one this default makes for them. See
+    ``PITPortfolioEnv.step`` for what each term costs and in what units.
+    """
+
     max_book: int = 60
     max_tilt: float = 0.8
     max_cash_tilt: float = 0.3
@@ -50,6 +67,13 @@ class PITPortfolioEnvConfig:
     cost_bps: float = 12.0
     reward_scale: float = 100.0
     reward_end_date_limit: str | None = None
+    #: Price, in units of cumulative excess return, of one unit of *excess max
+    #: drawdown* over the passive book. ``1.0`` means "a percentage point of
+    #: excess max drawdown cancels a percentage point of cumulative value-add".
+    drawdown_lambda: float = 0.0
+    #: Price, in units of cumulative excess return, of one unit of *excess
+    #: downside semi-variance* over the passive book (units: 1/return).
+    volatility_lambda: float = 0.0
 
 
 class PITPortfolioEnv(gym.Env if gym is not None else object):
@@ -74,6 +98,16 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self.config = config or PITPortfolioEnvConfig()
         if self.config.max_book <= 0:
             raise ValueError("PITPortfolioEnv max_book must be positive")
+        for name in ("drawdown_lambda", "volatility_lambda"):
+            value = float(getattr(self.config, name))
+            if not np.isfinite(value) or value < 0.0:
+                # A negative lambda would *pay* the agent for running deeper
+                # drawdowns than the passive book. That is never a knob anyone
+                # wants; accepting it silently would produce a policy whose
+                # training objective is the opposite of the acceptance gate.
+                raise ValueError(
+                    f"PITPortfolioEnv {name} must be finite and >= 0, got {value!r}"
+                )
         self._build_caches(
             book_weights,
             predictions,
@@ -100,6 +134,10 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self._prev_w_passive: dict[str, float] = {}
         self._nav = 1.0
         self._nav_passive = 1.0
+        self._peak = 1.0
+        self._peak_passive = 1.0
+        self._max_drawdown = 0.0
+        self._max_drawdown_passive = 0.0
 
     def _build_caches(
         self,
@@ -396,6 +434,10 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self._prev_w_passive = {}
         self._nav = 1.0
         self._nav_passive = 1.0
+        self._peak = 1.0
+        self._peak_passive = 1.0
+        self._max_drawdown = 0.0
+        self._max_drawdown_passive = 0.0
         return self._obs(), {}
 
     def step(self, action):
@@ -476,10 +518,66 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         net_policy = ret_policy - cost_policy
         net_passive = ret_passive - cost_passive
         value_add = net_policy - net_passive
-        reward = value_add * cfg.reward_scale
 
         self._nav *= 1.0 + net_policy
         self._nav_passive *= 1.0 + net_passive
+
+        # --- risk terms (round 22) ------------------------------------------
+        # Both terms are *differences against the same constrained passive
+        # book* that the return term already differences against. That is not
+        # cosmetic: an absolute risk penalty would charge the agent for the
+        # passive book's own drawdown, which it did not choose and cannot
+        # avoid, and -- more damagingly -- it would break "zero action earns
+        # exactly zero", the construction that makes this environment immune to
+        # the env-flat trap (round 21 DEF-036). Under a zero action the policy
+        # weights are bit-identical to the passive weights, so both NAV paths,
+        # both peaks and both drawdown paths coincide and every term below is
+        # identically 0.0.
+        #
+        # Drawdown term. With MDD_t = max_{s<=t} (1 - NAV_s / peak_s), the
+        # per-step increment dMDD_t >= 0 telescopes over the episode to MDD_T.
+        # The episode return is therefore
+        #     kappa * [ sum_t value_add_t
+        #               - lambda_dd * (MDD_policy,T - MDD_passive,T) - ... ]
+        # i.e. *isomorphic to the acceptance gate*: cumulative excess return
+        # priced against excess max drawdown (AGENTS.md "max drawdown below a
+        # configured threshold").
+        #
+        # Note on potential-based shaping (Ng, Harada & Russell 1999): with
+        # Phi(s) = -lambda * MDD(s) and gamma = 1, -lambda * dMDD_t is
+        # algebraically a potential-based shaping term, whose theorem would
+        # make it policy-*invariant* -- i.e. inert, a penalty that can never
+        # change what the agent does. The theorem's escape hatch is its
+        # episodic precondition Phi(terminal) = 0. This term deliberately
+        # violates it: the telescoped sum is -lambda * MDD_T, which depends on
+        # the policy. Enforcing Phi(terminal) = 0 here would cancel the penalty
+        # exactly and yield a decorative guard. See docs/audits/round22.
+        self._peak = max(self._peak, self._nav)
+        self._peak_passive = max(self._peak_passive, self._nav_passive)
+        drawdown_policy = 1.0 - self._nav / self._peak
+        drawdown_passive = 1.0 - self._nav_passive / self._peak_passive
+        previous_mdd = self._max_drawdown
+        previous_mdd_passive = self._max_drawdown_passive
+        self._max_drawdown = max(previous_mdd, drawdown_policy)
+        self._max_drawdown_passive = max(previous_mdd_passive, drawdown_passive)
+        drawdown_penalty = cfg.drawdown_lambda * (
+            (self._max_drawdown - previous_mdd)
+            - (self._max_drawdown_passive - previous_mdd_passive)
+        )
+
+        # Downside term. Per-step contribution to the Sortino-style downside
+        # semi-variance sigma_down^2 = (1/T) sum_t max(0, -R_t)^2 used by the
+        # risk-aware reward literature (arXiv 2506.04358), again differenced
+        # against the passive book so upside dispersion is never punished.
+        downside_policy = min(net_policy, 0.0) ** 2
+        downside_passive = min(net_passive, 0.0) ** 2
+        volatility_penalty = cfg.volatility_lambda * (
+            downside_policy - downside_passive
+        )
+
+        risk_penalty = drawdown_penalty + volatility_penalty
+        reward = (value_add - risk_penalty) * cfg.reward_scale
+
         self._prev_w = current
         self._prev_w_passive = current_passive
         self._t += 1
@@ -498,6 +596,13 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             "turnover_passive": turnover_passive,
             "nav": self._nav,
             "nav_passive": self._nav_passive,
+            "drawdown_policy": drawdown_policy,
+            "drawdown_passive": drawdown_passive,
+            "max_drawdown_policy": self._max_drawdown,
+            "max_drawdown_passive": self._max_drawdown_passive,
+            "drawdown_penalty": drawdown_penalty,
+            "volatility_penalty": volatility_penalty,
+            "risk_penalty": risk_penalty,
         }
         return self._obs(), float(reward), bool(terminated), False, info
 
