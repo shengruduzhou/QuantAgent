@@ -162,7 +162,7 @@ export function TPlusOnePage(): JSX.Element {
 
       <section className="t1-grid">
         <Panel title="每笔 T+1 做 T 收益" eyebrow="Pair-level waterfall · only persisted fills" className="t1-waterfall">
-          {data?.pairs.length ? <EChart option={waterfall} className="chart" /> : <StateView state={analysis.isLoading ? "loading" : "empty"} />}
+          {data?.pairs.length ? <EChart option={waterfall} className="chart" /> : <StateView state={analysis.isLoading ? "loading" : "empty"} title="没有 T+1 配对成交" detail="该数据源没有落盘可配对的分钟级成交，因此没有可展示的逐笔损益。缺失不会被画成一条零线。下一步：换一个已产出分钟成交的数据源，或先跑一次 T+1 研究任务。" />}
         </Panel>
 
         <Panel title="失败控制" eyebrow="T-Pair Failure Control" className="t1-control">
@@ -215,7 +215,7 @@ export function TPlusOnePage(): JSX.Element {
                 <button disabled={pairPage >= pairPageCount} onClick={() => setPairPage((value) => Math.min(pairPageCount, value + 1))}>下一页</button>
               </div>
             </>
-          ) : <StateView state="empty" />}
+          ) : <StateView state="empty" title="没有配对明细" detail="当前筛选下没有 persisted T+1 配对记录。下一步：清除标的筛选，或换一个数据源。" />}
         </Panel>
       </section>
 

@@ -27,7 +27,7 @@ export function ReportsPage(): JSX.Element {
   const latest = data?.latestBacktest;
 
   if (overview.isLoading) return <StateView state="loading" />;
-  if (!data) return <StateView state="empty" />;
+  if (!data) return <StateView state="empty" title="没有系统概览产物" detail="Quant API 返回了空的 /api/system/overview：runtime 里还没有被索引的回测、模型或风控 artifact。报告页保持只读、不生成任何数字。下一步：在策略实验室跑一次完整研究闭环，或在 Runtime 工作站重建索引。" />;
 
   const limitations = [
     "若 runtime 未持久化 promotion_gate.json，则 PBO / DSR / SPA 视为未提供证据，不得标记 production eligible。",

@@ -51,8 +51,16 @@ export default defineConfig({
          */
         manualChunks(id) {
           if (!id.includes("node_modules")) return undefined;
-          if (id.includes("node_modules/zrender")) return "vendor-zrender";
-          if (id.includes("node_modules/echarts")) return "vendor-echarts";
+          if (id.includes("node_modules/zrender") || id.includes("node_modules/echarts")) {
+            // echarts and zrender must stay in ONE chunk. Splitting them (either
+            // package-wise or lib/chart vs core) makes Rollup report
+            // "Circular chunk: A -> B -> A", because echarts' internals are
+            // genuinely cyclic. Trading a size warning for a module-init-order
+            // hazard is not an improvement, so this chunk stays over the
+            // 500 kB threshold and the warning is left standing rather than
+            // silenced with chunkSizeWarningLimit.
+            return "vendor-echarts";
+          }
           if (
             id.includes("node_modules/react-router") ||
             id.includes("node_modules/react-dom") ||

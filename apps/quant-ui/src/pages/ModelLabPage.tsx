@@ -440,7 +440,7 @@ export function ModelLabPage(): JSX.Element {
                       </details>
                     ))}
                   </div>
-                ) : <StateView state="empty" />}
+                ) : <StateView state="empty" title="没有评估产物" detail="该模型目录下没有可解析的 evaluation JSON。指标区保持空白而不是显示 0。下一步：对该模型运行 evaluate-alpha-v7，或在 Runtime 工作站确认产物路径。" />}
               </Panel>
             </section>
           ) : null}
@@ -463,7 +463,7 @@ export function ModelLabPage(): JSX.Element {
                     ))}</tbody>
                   </table>
                 </div>
-              ) : <StateView state="empty" />}
+              ) : <StateView state="empty" title="没有关联 artifact" detail="RuntimeIndexer 没有为该模型索引到任何文件。只展示已声明的关系，不推断未声明的。下一步：在 Runtime 工作站重建索引。" />}
             </Panel>
           ) : null}
 
@@ -541,7 +541,7 @@ function PredictionWeightView({ predictions }: { predictions: Prediction[] }): J
 }
 
 function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.Element {
-  if (!predictions.length) return <StateView state="empty" />;
+  if (!predictions.length) return <StateView state="empty" title="没有预测产物" detail="该模型没有可映射的 predictions artifact，因此不展示任何分数。下一步：运行 predict-alpha-v7 生成预测后再回到本页。" />;
   return (
     <div className="table-scroll">
       <table className="data-table">
@@ -562,7 +562,7 @@ function PredictionTable({ predictions }: { predictions: Prediction[] }): JSX.El
 }
 
 function MetricTable({ metrics }: { metrics: ModelMetric[] }): JSX.Element {
-  if (!metrics.length) return <StateView state="empty" />;
+  if (!metrics.length) return <StateView state="empty" title="没有归一化指标" detail="该模型的评估产物里没有可归一化的数值指标。空表示未测量，不代表指标为 0。下一步：检查该运行的 metrics 产物是否完整。" />;
   return (
     <div className="table-scroll">
       <table className="data-table">

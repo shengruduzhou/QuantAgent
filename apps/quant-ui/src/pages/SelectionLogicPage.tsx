@@ -118,7 +118,7 @@ export function SelectionLogicPage(): JSX.Element {
 
       <section className="selection-top-grid">
         <Panel title="透明选股漏斗" eyebrow="Universe → liquidity → risk → factor → model → portfolio">
-          {funnel.data?.data.length ? <SelectionFunnel stages={funnel.data.data} /> : <StateView state="empty" />}
+          {funnel.data?.data.length ? <SelectionFunnel stages={funnel.data.data} /> : <StateView state="empty" title="没有漏斗关卡产物" detail="该选股运行没有写出逐关卡的 funnel artifact。漏斗不会用推测的关卡数填充。下一步：重新运行选股并确认它落盘了 selection funnel。" />}
         </Panel>
         <Panel title="行业分布" eyebrow="Final research pool">
           <EChart option={sectorOption} className="chart chart-medium" />
@@ -135,7 +135,7 @@ export function SelectionLogicPage(): JSX.Element {
               </div>
               <div className="final-rank"><span>最终排名</span><strong>#{selected.finalRank ?? "—"}</strong><em>{selected.actionBucket ?? "research"}</em></div>
             </div>
-          ) : <StateView state="empty" />}
+          ) : <StateView state="empty" title="未选中标的" detail="排名表里还没有选中任何标的，因此没有可展示的分项打分。下一步：在右侧排名表点选一行。" />}
         </Panel>
       </section>
 
@@ -170,7 +170,7 @@ export function SelectionLogicPage(): JSX.Element {
                 </tbody>
               </table>
             </div>
-          ) : <StateView state={ranking.isLoading ? "loading" : "empty"} />}
+          ) : <StateView state={ranking.isLoading ? "loading" : "empty"} title="没有排名产物" detail="该运行没有落盘 ranking artifact，因此不展示任何候选。下一步：选择另一次运行，或重新发起选股。" />}
         </Panel>
 
         <Panel title="完整决策链" eyebrow={`${chain.data?.data.traceType ?? "no trace"} · ${chain.data?.data.datetime ?? ""}`} className="selection-chain-panel">
@@ -190,7 +190,7 @@ export function SelectionLogicPage(): JSX.Element {
               <div className="chain-result"><span>最终决策</span><strong>{chain.data.data.finalDecision ?? "research only"}</strong></div>
               {chain.data.data.issues?.map((issue) => <p className="muted-copy" key={issue.message}>{issue.message}</p>)}
             </div>
-          ) : <StateView state={chain.isLoading ? "loading" : "empty"} />}
+          ) : <StateView state={chain.isLoading ? "loading" : "empty"} title="没有决策链证据" detail="该标的没有 persisted decision-chain：关卡与否决理由都不可知，不会用模型分反推。下一步：选一个排名表里带决策链标记的标的。" />}
         </Panel>
       </section>
     </div>
