@@ -325,3 +325,144 @@ R8 零产出，主角色实跑：
 6. **P1** kill switch 从 stop-new-orders 升级到 flatten/cancel-on-trigger。
 7. **P2** AkShare 端点族可达性矩阵进每日产物。
 8. **P2** 前端 `EChart` chunk 拆分。
+
+---
+
+# 第二轮 / Session 2 — 修复阶段 / Repair phase
+
+上一节的"下一轮优先级"里，**1、2、3 三条 P0 全部闭合**，另加两条。
+本轮 agent 分批 **3 个**（上一轮 8 个全灭的直接教训），**3 个全部跑完并交付**。
+
+## 已修并合入 main
+
+### DEF-038【P0】interior-bar NAV 时钟 —— 闭合
+
+`docs/interior_bar_nav_defect.md` 从 **OPEN → CLOSED**。
+
+钉死的约定，一条规则同时覆盖两种成交策略：
+
+> **`NAV(t)` 恰好包含 `fill_date <= t` 的全部成交。**
+
+| 策略 | fill_date | 属于 NAV(t)？ | 标记位置 |
+|---|---|---|---|
+| `next_day_fill=True` | `dates[i+1]` | 否 | 交易块**之前** |
+| `next_day_fill=False` | `dates[i]` | 是 | 交易块**之后** |
+
+**上次尝试为何失败**：它把标记**无条件**前移。而 composite ledger-replay
+（`reconciliation/composite.py:run_fast_path`）跑的是 `next_day_fill=False`，
+那条路径上同 bar 成交**确实**属于 `NAV(t)`；把另一种策略的答案套上去，
+就把最后一根 bar 的成交从账本里丢了 —— 正是记录在案的 12.45（约 1.2 bps）分歧。
+**约定从来没错，错在把一种策略的答案用到另一条路径上。**
+`tests/domain/test_composite_replay.py` 未做任何削弱即通过。
+
+**对上一节数字表述的更正**：R1 的"Sharpe +1.4768 而诚实值 −7.10"是拿**两条不同的
+tape** 比（gap tape vs `open==close` 的平坦 tape）。准确且同样严重的表述是：
+gap tape 上整个 11.05% 的涨幅被盖在**仓位还不存在的那根 bar 上**；修复后它落在
+真正以 9.00 买入、10.00 收盘的那根 bar，信号 bar 不持仓因而纹丝不动。
+
+同一次修复还关掉了文档里并列的那条：`daily_prices["close"].get(sym, 0.0)`
+把有持仓却无收盘价的标的按**零**计价，制造出看起来真实的亏损而所有会计恒等式
+仍然平衡。现在改为排除并记入 `_unpriced_marks`。
+
+测试 8 条，其中 **4 条对修复前的引擎失败**（stash 对照验证）。
+黄金场景看不见这个缺陷 —— 它每根 bar 都 `open == close` —— 所以新测试**故意用 gap tape**。
+
+### DEF-039【P0】组合风控终于接到生产 venue 上
+
+`quantagent.paper.risk` 是全仓最完整的风控引擎（单票权重/行业集中度/gross/
+日换手/日亏/回撤/参与率/fat-finger/scoped kill switch），此前**只被自己的测试
+import**，而三个生产点在构造 `PaperBroker`。`PaperBroker._validate` 只覆盖
+标的层规则，所以**一个 50% 单票的 paper 仓位执行时无人反对**。
+
+现在 `PaperBroker` 接受 `risk_engine`，在标的规则之后调用它；两个**生产**点
+（HTTP paper 路径、continuous loop）都挂上了。reconciliation harness **故意不挂** ——
+往一个以"比较引擎"为目的的运行里注入风控，会改变它存在的意义。
+`risk_engine_attached` 公布运行处于哪种状态，使"本次没有施加组合风控"
+可读，而不是从"没有拒单"反推。
+
+接上之后立刻暴露：continuous loop 一直在跑 50% 单票。那些以执行时钟为主题、
+依赖集中持仓的 fixture 现在通过新增的 `ContinuousPaperExecutionConfig.risk_limits`
+**显式声明**这个集中度策略。**限额没有被放宽以让测试通过；是测试被要求说出
+它一直在依赖的策略。**
+
+一处设计裁决：**pre-trade 参与率限额与 venue 的 `participation_cap` 刻意不是同一个数**。
+cap 管的是一笔单每次成交吃掉多少 bar，这正是合法部分成交的来源；pre-trade
+限额管的是这笔单对这个盘口是否根本就过大。两者都设 0.10 会让**部分成交不可达** ——
+任何大到会留下余量的单子都在 venue 计量之前就被拒了。
+
+### DEF-040【P0】选股器不再声称跑过它没跑的过滤器
+
+`_TRADABILITY_CONSTRAINTS` 对输入列缺失的过滤器直接 `continue`，而
+`diagnostics["config"]` 照旧公布**被请求**的值。认证全宇宙面板**根本没有
+可交易性旗标**且是 UI 默认，于是 ST / 停牌 / 涨停的标的进了 top-k，
+运行报告 `rejected=0`，诊断写着 `block_st=True`。
+**报告不是漏报，是断言了相反的事实。**
+
+现在发布 `tradability_enforced` 与 `tradability_unenforced`，
+`config` 报**生效值**、`config_requested` 保留请求值 —— 二者之差是审计线索
+而不是静默覆盖。与 DEF-033 同一缺陷类：**无法测量的限额读成了被满足的限额。**
+
+### DEF-041【P1】sector 诊断闸门此前不可能为假
+
+`sector_usable_for_diagnostics` 在唯一生产者处是字面量 `True`，消费者在
+manifest 缺失时又默认 `True`。两者相加，该闸门**对任何输入都不可能为假**。
+同一个 dict 里另外两个同族标志都默认 False。违反 AGENTS.md
+"禁止把关卡写成常量 True，NOT_RUN 不得当作 PASS"。
+
+现在读真实的 validation 结果。**覆盖率刻意不作为条件**：全 UNKNOWN 的 map
+仍然给出真实的敞口报告，这正是它与优化器闸门的区别。
+一个更严格的初版修法与 `test_sector_audit.py` 既有意图冲突，
+**被更正的是修法而不是测试**。
+
+### UI 修复（R8，独立 worktree，已 review 后合并）
+
+前端的同形缺陷：**没被测量的东西渲染成了被满足的东西**。
+regime IC 的 `undefined` 经 `?? 0` 被记成 **passed**；治理页把 7 个未测量的审计
+计数印成 `0`（含"越权/解密访问 **0**"）；market playbooks 把缺失收益当作
+**0% 的一天**复利进净值（DEF-022 的前端复刻）；7 处 `(x ?? 0) >= 0`
+把缺失涂成红色（A 股语义下的**上涨**）；`styles.css` 曾把 `.tone-positive`
+映射到 `--green`，只靠 import 顺序才没把涨跌色整体翻转。
+
+体积：`index` 492.08 → **220.41 kB**（gzip 144.57 → 58.56），vendor 拆分后
+文件名不再随应用改动变化。
+
+## 本轮实测
+
+| 项 | 结果 |
+|---|---|
+| 后端全量 | **3461 passed / 4 skipped / 0 failed**（本轮起点 3437） |
+| 新增测试 | 29 条，其中 **13 条对各自修复前的代码失败**（逐条 stash 对照） |
+| 前端 typecheck | exit 0 |
+| 前端 vitest | **119 passed / 1 skipped**（基线 100/1） |
+| 前端 build | 成功 5.33s |
+
+## 本轮新收到但**未**修的（下一轮队列）
+
+R9（代码治理）与 R3b（认证面板）各交了一份完整报告，见
+`09_debug.md`（584 行）与 `03b_certified_panel.md`（886 行）。要点：
+
+1. **P0 FIND-R3b-02**：`jobTemplates.ts` / `FusionSearchForm.tsx` 的默认面板
+   指向 15 特征那个；注释记录了"宇宙 3,872→5,790"，**完全没记录同一次切换
+   把特征从 348 砍到 15**。
+2. **认证面板可以补因子，计算侧几乎零成本**：Alpha101 165.3s、GTJA191 220.3s，
+   合计 **6.4 分钟 + 21 GB 内存 = 165 个因子**。真阻塞只有两条：
+   基本面抓取宇宙冻结在 3,658（**STAR 613 与 BSE 328 全部从未抓过**，
+   且覆盖率**近年更差**：2019 年 93.41% → 2026 年 66.43%），以及 hfq/qfq
+   口径不同必须重算不能搬列。
+3. **PIT 抽查 PASS**：600519.SH 2023Q1 公告日 04-26 当天 `roe` 仍是上期
+   32.4077，04-27 才切到 10.0028；150 符号 / 280,542 行复验
+   maxabsdiff = 0.000e+00。
+4. **A-04 P1** 治理哈希链 append 是 read-then-write，**无文件锁无 fsync**；
+   实测 4 进程 × 40 条 ⇒ 160 行里**只有 1 条从创世哈希可达，159 条孤儿**，
+   且全程不抛异常。仓库另外 4 个 append-only 写者都 import 了 `fcntl`，唯独
+   带哈希链的这个没有。
+5. **A-06 P1** `market_playbooks_v3.py` 对多资产面板 `.ffill()`：实测同一底层
+   价格过程，完整观测 +33.5102% vs 现网 ffill 面板 **+41.1854%**，虚增 7.67pp。
+6. **零引用模块 = 0/540** —— 本仓的"屎山"不是死模块，而是**活着但没接线的
+   子系统**加上版本号进文件名的分层链。可安全删除 12 个文件 / 1174 行（附证明）。
+   R9 **推翻了任务简报里的三个假设**：`live_model_trust` 四件套是活链条不是残骸；
+   `intraday_dot_*` 实际 3 个文件且全在用；`PortfolioEnv` 是受治理的弃用件。
+7. **滑点有 6 个独立默认值**，**NAV 有 9 个实现、其中 5 个在 `cumprod` 前裸
+   `fillna(0.0)`**。
+8. **P2 分块 warmup 陷阱**：145d vs 390d warmup 下 **58/101 因子差 >1e-9**，
+   `alpha072` 差 396.8。
