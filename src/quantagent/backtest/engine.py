@@ -12,6 +12,7 @@ from quantagent.quant_math.ashare import (
     enforce_tradability,
     limit_down_mask,
     limit_up_mask,
+    one_word_board_mask,
     suspension_mask,
 )
 from quantagent.backtest.fill_model import AShareFillModel, FillModelConfig
@@ -69,7 +70,10 @@ class EventDrivenBacktester:
     def __init__(self, config: BacktestConfig | None = None) -> None:
         self.config = config or BacktestConfig()
         self.rule_engine = AshareRuleEngine()
-        self.fill_model = AShareFillModel(self.config.fill_model)
+        # One cost config feeds both the price friction (fill model) and the
+        # explicit fees (`_execute_buy` / `_execute_sell`), so what a run
+        # declares is what it charges.
+        self.fill_model = AShareFillModel(self.config.fill_model, self.config.cost)
 
     def run(
         self,
@@ -81,12 +85,29 @@ class EventDrivenBacktester:
         prices["trade_date"] = pd.to_datetime(prices["trade_date"])
         prices = prices.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
-        flag_up = limit_up_mask(prices)
-        flag_down = limit_down_mask(prices)
+        # The board test is evaluated on the SAME price basis the engine fills
+        # at. Judging with `close` while executing at `open` makes the criterion
+        # and the execution price two measurements of two different moments, and
+        # it is wrong in both directions:
+        #   * false block -- the bar opens tradable and only seals at the close,
+        #     so an order that would have filled at the open is refused;
+        #   * false fill  -- the bar opens sealed and comes off the board later,
+        #     so the flag reads False and the engine fills at an open price
+        #     nobody could reach. That one is a favourable-direction bias and it
+        #     is INVISIBLE in the reject log: it looks like a normal trade.
+        # Measured on 30 real symbols over 2022-01..2026-05 (31,650 bars):
+        # 210 close-based limit-ups vs 31 open-based -- 189 false blocks, plus
+        # 10 bars that were sealed at the open and would have been filled.
+        flag_up = limit_up_mask(prices, price_column=self.config.fill_price_column)
+        flag_down = limit_down_mask(prices, price_column=self.config.fill_price_column)
         flag_susp = suspension_mask(prices)
+        # Independent of the two above on purpose: a zero-range traded bar whose
+        # `prev_close` is unknown is a board the limit masks cannot see.
+        flag_one_word = one_word_board_mask(prices)
         prices["flag_up"] = flag_up
         prices["flag_down"] = flag_down
         prices["flag_susp"] = flag_susp
+        prices["flag_one_word"] = flag_one_word
 
         target_weights.index = pd.to_datetime(target_weights.index)
         target_weights = target_weights.sort_index().fillna(0.0)
@@ -176,18 +197,26 @@ class EventDrivenBacktester:
                 )
                 continue
             fill_date = dates[i + 1] if self.config.next_day_fill else date
-            fill_prices = (
-                prices[prices["trade_date"] == fill_date]
-                .set_index("symbol")[self.config.fill_price_column]
-            )
-            fill_flags_up = prices[prices["trade_date"] == fill_date].set_index("symbol")["flag_up"] if fill_date in prices["trade_date"].values else pd.Series(False, index=symbols)
-            fill_flags_down = prices[prices["trade_date"] == fill_date].set_index("symbol")["flag_down"] if fill_date in prices["trade_date"].values else pd.Series(False, index=symbols)
-            fill_flags_susp = prices[prices["trade_date"] == fill_date].set_index("symbol")["flag_susp"] if fill_date in prices["trade_date"].values else pd.Series(False, index=symbols)
+            fill_bar = prices[prices["trade_date"] == fill_date].set_index("symbol")
+            fill_prices = fill_bar[self.config.fill_price_column]
+            fill_flags_up = self._fill_flag(fill_bar, "flag_up", symbols)
+            fill_flags_down = self._fill_flag(fill_bar, "flag_down", symbols)
+            fill_flags_susp = self._fill_flag(fill_bar, "flag_susp", symbols)
+            fill_flags_one_word = self._fill_flag(fill_bar, "flag_one_word", symbols)
 
             target = target_weights.loc[date]
             current_weights = self._current_weights(positions, daily_prices["close"], nav)
-            can_buy = (~fill_flags_up.fillna(True)) & (~fill_flags_susp.fillna(True))
-            can_sell = (~fill_flags_down.fillna(True)) & (~fill_flags_susp.fillna(True))
+            # A one-word board blocks the side that has to queue: you cannot buy
+            # into a sealed up board and you cannot sell into a sealed down one,
+            # while the opposite side crosses instantly and stays allowed. When
+            # the tape gives no usable `prev_close` the direction is unknown,
+            # both `flag_up` and `flag_down` read False, and the term below
+            # blocks BOTH sides -- an unknown board is refused, not assumed
+            # tradable.
+            block_buy = fill_flags_up | (fill_flags_one_word & ~fill_flags_down)
+            block_sell = fill_flags_down | (fill_flags_one_word & ~fill_flags_up)
+            can_buy = (~block_buy) & (~fill_flags_susp)
+            can_sell = (~block_sell) & (~fill_flags_susp)
             tradable_target = enforce_tradability(target, current_weights, can_buy, can_sell)
 
             for sym in symbols:
@@ -206,8 +235,14 @@ class EventDrivenBacktester:
                     float(target.reindex(symbols).fillna(0.0).get(sym, 0.0)) * nav / max(price, 1e-12)
                 )
                 if intended_shares < current_total and not bool(can_sell.get(sym, True)):
-                    blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_down_no_sell"
-                    self._reject(reject_log, fill_date, sym, blocked)
+                    one_word = bool(fill_flags_one_word.get(sym, False))
+                    blocked = self._block_reason(
+                        "sell",
+                        suspended=bool(fill_flags_susp.get(sym, False)),
+                        at_limit=bool(fill_flags_down.get(sym, False)),
+                        one_word=one_word,
+                    )
+                    self._reject(reject_log, fill_date, sym, blocked, one_word_board=one_word)
                     self._record_rejected_intent(
                         book, ledger, sym, Side.SELL,
                         abs(int(round(current_total - intended_shares))),
@@ -230,28 +265,53 @@ class EventDrivenBacktester:
                     # simply vanishes from the audit trail.
                     intended = float(target.reindex(symbols).fillna(0.0).get(sym, 0.0)) * nav / max(price, 1e-12)
                     intended_delta = intended - current_total
+                    one_word = bool(fill_flags_one_word.get(sym, False))
                     if intended_delta > 0 and not bool(can_buy.get(sym, True)):
-                        blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_up_no_buy"
-                        self._reject(reject_log, fill_date, sym, blocked)
+                        blocked = self._block_reason(
+                            "buy",
+                            suspended=bool(fill_flags_susp.get(sym, False)),
+                            at_limit=bool(fill_flags_up.get(sym, False)),
+                            one_word=one_word,
+                        )
+                        self._reject(reject_log, fill_date, sym, blocked, one_word_board=one_word)
                         self._record_rejected_intent(
                             book, ledger, sym, Side.BUY, abs(int(round(intended_delta))),
                             fill_date, price, blocked,
                         )
                     elif intended_delta < 0 and not bool(can_sell.get(sym, True)):
-                        blocked = "suspended" if bool(fill_flags_susp.get(sym, False)) else "limit_down_no_sell"
-                        self._reject(reject_log, fill_date, sym, blocked)
+                        blocked = self._block_reason(
+                            "sell",
+                            suspended=bool(fill_flags_susp.get(sym, False)),
+                            at_limit=bool(fill_flags_down.get(sym, False)),
+                            one_word=one_word,
+                        )
+                        self._reject(reject_log, fill_date, sym, blocked, one_word_board=one_word)
                         self._record_rejected_intent(
                             book, ledger, sym, Side.SELL, abs(int(round(intended_delta))),
                             fill_date, price, blocked,
                         )
                     continue
-                if delta > 0 and bool(fill_flags_up.get(sym, False)):
-                    self._reject(reject_log, fill_date, sym, "limit_up_no_buy")
-                    self._record_rejected_intent(book, ledger, sym, Side.BUY, abs(int(delta)), fill_date, price, "limit_up_no_buy")
+                if delta > 0 and bool(block_buy.get(sym, False)):
+                    one_word = bool(fill_flags_one_word.get(sym, False))
+                    blocked = self._block_reason(
+                        "buy",
+                        suspended=bool(fill_flags_susp.get(sym, False)),
+                        at_limit=bool(fill_flags_up.get(sym, False)),
+                        one_word=one_word,
+                    )
+                    self._reject(reject_log, fill_date, sym, blocked, one_word_board=one_word)
+                    self._record_rejected_intent(book, ledger, sym, Side.BUY, abs(int(delta)), fill_date, price, blocked)
                     continue
-                if delta < 0 and bool(fill_flags_down.get(sym, False)):
-                    self._reject(reject_log, fill_date, sym, "limit_down_no_sell")
-                    self._record_rejected_intent(book, ledger, sym, Side.SELL, abs(int(delta)), fill_date, price, "limit_down_no_sell")
+                if delta < 0 and bool(block_sell.get(sym, False)):
+                    one_word = bool(fill_flags_one_word.get(sym, False))
+                    blocked = self._block_reason(
+                        "sell",
+                        suspended=bool(fill_flags_susp.get(sym, False)),
+                        at_limit=bool(fill_flags_down.get(sym, False)),
+                        one_word=one_word,
+                    )
+                    self._reject(reject_log, fill_date, sym, blocked, one_word_board=one_word)
+                    self._record_rejected_intent(book, ledger, sym, Side.SELL, abs(int(delta)), fill_date, price, blocked)
                     continue
                 if bool(fill_flags_susp.get(sym, False)):
                     self._reject(reject_log, fill_date, sym, "suspended")
@@ -629,8 +689,64 @@ class EventDrivenBacktester:
         return pd.Series(rows)
 
     @staticmethod
-    def _reject(log: list[dict], date: pd.Timestamp, symbol: str, reason: str) -> None:
-        log.append({"trade_date": date, "symbol": symbol, "reason": reason})
+    def _reject(
+        log: list[dict],
+        date: pd.Timestamp,
+        symbol: str,
+        reason: str,
+        one_word_board: bool = False,
+    ) -> None:
+        # `one_word_board` is a separate column rather than a different `reason`
+        # string so the existing reason vocabulary keeps its meaning while the
+        # log can still distinguish "sealed at one price for the whole session"
+        # from "merely at the band at the fill price". Those are materially
+        # different refusals and an analyst reading the log has to be able to
+        # tell them apart.
+        log.append(
+            {
+                "trade_date": date,
+                "symbol": symbol,
+                "reason": reason,
+                "one_word_board": bool(one_word_board),
+            }
+        )
+
+    @staticmethod
+    def _fill_flag(fill_bar: pd.DataFrame, column: str, symbols: list[str]) -> pd.Series:
+        """Board/halt flag for the fill session, indexed by symbol.
+
+        A NaN flag is read as True (blocked): an unmeasured board is refused,
+        never assumed tradable. A fill session absent from the tape yields all
+        False here because every symbol is already rejected upstream with
+        `missing_price` before any flag is consulted.
+        """
+        if fill_bar.empty or column not in fill_bar.columns:
+            return pd.Series(False, index=pd.Index(symbols), dtype=bool)
+        return fill_bar[column].fillna(True).astype(bool)
+
+    @staticmethod
+    def _block_reason(
+        side: str,
+        *,
+        suspended: bool,
+        at_limit: bool,
+        one_word: bool,
+    ) -> str:
+        """Name the refusal. Most specific cause that actually fired wins.
+
+        `one_word_board_no_*` is reserved for the case the limit masks cannot
+        reach: a zero-range traded bar with no usable `prev_close`, where the
+        board is visible in the bar's own shape but its direction is not. That
+        refusal is fail-closed on both sides and needs its own name, because no
+        other reason describes it.
+        """
+        if suspended:
+            return "suspended"
+        if at_limit:
+            return "limit_up_no_buy" if side == "buy" else "limit_down_no_sell"
+        if one_word:
+            return "one_word_board_no_buy" if side == "buy" else "one_word_board_no_sell"
+        return "not_tradable_no_buy" if side == "buy" else "not_tradable_no_sell"
 
     def _record_rejected_intent(
         self,

@@ -78,14 +78,23 @@ def test_signal_bar_nav_is_unmoved_by_a_fill_that_lands_next_bar() -> None:
 
 
 def test_adverse_gap_is_not_booked_as_a_phantom_loss_on_the_signal_bar() -> None:
-    """Mirror direction: an adverse fill must not sink the previous bar."""
-    opens = [10.0, 10.0, 11.0, 10.0, 10.0, 10.0]  # gap UP against the buyer
+    """Mirror direction: an adverse fill must not sink the previous bar.
+
+    Round 22 / F-03: the adverse open used to be 11.00 against a 10.00 previous
+    close -- exactly +10%, i.e. a limit-up open on this main-board symbol. Once
+    the board test moved onto the price the engine actually fills at, that open
+    became correctly unbuyable and no fill happened at all, so the NAV-clock
+    assertion had nothing to measure. The gap is now 10.50 (+5%), inside the
+    band. The assertion itself is unchanged and no weaker: an adverse fill still
+    has to land on bar 2, not bar 1.
+    """
+    opens = [10.0, 10.0, 10.5, 10.0, 10.0, 10.0]  # gap UP against the buyer
     closes = [10.0] * 6
     result = _run(opens, closes)
 
     nav = result.nav_curve
     assert nav.iloc[1] == pytest.approx(1_000_000.0)
-    # Buying at 11.00 and marking at 10.00 is a real loss, on bar 2.
+    # Buying at 10.50 and marking at 10.00 is a real loss, on bar 2.
     assert nav.iloc[2] < nav.iloc[1]
 
 
@@ -109,7 +118,14 @@ def test_flat_tape_with_no_gap_earns_only_the_costs() -> None:
 
     nav = result.nav_curve
     assert nav.iloc[-1] < 1_000_000.0, "a flat tape must lose exactly the fees"
-    assert nav.iloc[-1] == pytest.approx(999_540.408042, rel=1e-9)
+    # Round 22 / F-04: was 999_540.408042 while the engine applied 2.0 bps of
+    # slippage from a private `FillModelConfig` field. Slippage now comes from
+    # `CostModelConfig.slippage_bps` (5.0) -- the number every configuration
+    # serialises and every report quotes -- so a ~1,000,000 notional buy costs
+    # 3 bps more: 999_540.408042 - 999_240.314136 = 300.09. The tape's volume is
+    # 1e12, so square-root impact is ~0.003 bps here and rounds out of sight;
+    # `test_fill_cost_single_source.py` measures it where it bites.
+    assert nav.iloc[-1] == pytest.approx(999_240.314136, rel=1e-9)
 
 
 def test_same_bar_fill_still_marks_the_fill_it_executed() -> None:

@@ -16,11 +16,23 @@ defaults in `CostModelConfig`:
     fills           next day, at that day's open
 
 Slippage is *not* a fee. `AShareFillModel` moves the execution price away from
-the reference by `slippage_bps (2.0) + impact_bps x filled/volume`, and the
-trade log records the resulting cash difference. The engine used to charge
-`cost.slippage_bps (5.0)` on top of that already-moved price, so its effective
+the reference by `slippage_bps + square_root_impact_bps(filled / volume)`, and
+the trade log records the resulting cash difference. The engine used to charge
+`cost.slippage_bps` on top of that already-moved price, so its effective
 slippage was ~7 bps while every configuration declared 5. Fees are therefore
 computed on the *fill* price, never the reference price.
+
+Round 22 / F-04 + F-05 changed both halves of that price move, and the hand
+calculation below moved with them:
+
+* slippage now comes from `CostModelConfig.slippage_bps` (5.0), the same field
+  every configuration serialises and every report quotes. It used to be a
+  private `FillModelConfig.slippage_bps = 2.0`, so a run that declared 5 bps
+  charged 2 -- optimistic, and invisible in the output.
+* impact is now the square-root law `10.0 x sqrt(participation)` shared with
+  `estimate_trade_cost_bps` and `AShareCostModel`, replacing a linear
+  `1.0 x participation` term that could not exceed 0.05 bps under the shipped
+  5% participation cap.
 """
 
 from __future__ import annotations
@@ -64,15 +76,17 @@ def _weights(dates, values, symbol: str = SYMBOL) -> pd.DataFrame:
 def test_buy_costs_match_hand_calculation():
     """10% of 1,000,000 NAV at a 10.00 open, volume 100,000,000.
 
-    impact bps  = 1.0 x 10,000 / 100,000,000  =  0.0001
-    fill price  = 10.00 x (1 + 2.0001/10000)  = 10.0020001
-    raw target  = 100,000 / 10.00             = 10,000 shares (100 lots)
-    gross       = 10,000 x 10.0020001         = 100,020.001
-    commission  = gross x 2.5/10000           =      25.00500  (above 5.00 floor)
-    transfer    = gross x 0.1/10000           =       1.00020
-    stamp duty  = 0 (buy side)
-    slippage    = |10.0020001 - 10.00| x 10,000 = 20.001  (recorded, in the price)
-    cash out    = gross + 25.00500 + 1.00020  = 100,046.00620
+    participation = 10,000 / 100,000,000        =  0.0001
+    impact bps    = 10.0 x sqrt(0.0001)         =  0.1
+    slippage bps  = CostModelConfig.slippage_bps =  5.0
+    fill price    = 10.00 x (1 + 5.1/10000)     = 10.0051
+    raw target    = 100,000 / 10.00             = 10,000 shares (100 lots)
+    gross         = 10,000 x 10.0051            = 100,051.00
+    commission    = gross x 2.5/10000           =      25.01275  (above 5.00 floor)
+    transfer      = gross x 0.1/10000           =       1.00051
+    stamp duty    = 0 (buy side)
+    slippage      = |10.0051 - 10.00| x 10,000  =      51.00  (recorded, in the price)
+    cash out      = gross + 25.01275 + 1.00051  = 100,077.01326
     """
     dates = ["2026-01-05", "2026-01-06", "2026-01-07"]
     prices = _prices([
@@ -86,13 +100,13 @@ def test_buy_costs_match_hand_calculation():
     assert len(buys) == 1
     trade = buys.iloc[0]
     assert trade["shares"] == 10_000
-    assert trade["price"] == pytest.approx(10.0020001, abs=1e-7)
-    assert trade["commission"] == pytest.approx(25.00500, abs=1e-4)
-    assert trade["transfer_fee"] == pytest.approx(1.00020, abs=1e-4)
-    assert trade["slippage"] == pytest.approx(20.001, abs=1e-3)
+    assert trade["price"] == pytest.approx(10.0051, abs=1e-7)
+    assert trade["commission"] == pytest.approx(25.01275, abs=1e-4)
+    assert trade["transfer_fee"] == pytest.approx(1.00051, abs=1e-4)
+    assert trade["slippage"] == pytest.approx(51.00, abs=1e-3)
 
-    # cash 899,953.9938 + 10,000 shares marked at the 10.00 close.
-    assert result.nav_curve.loc[pd.Timestamp(dates[1])] == pytest.approx(999_953.9938, abs=0.01)
+    # cash 899,922.98674 + 10,000 shares marked at the 10.00 close.
+    assert result.nav_curve.loc[pd.Timestamp(dates[1])] == pytest.approx(999_922.98674, abs=0.01)
 
 
 def test_the_commission_floor_applies_to_tiny_orders():
