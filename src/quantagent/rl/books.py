@@ -100,10 +100,13 @@ def hold_band_book_from_predictions(
     * On every other session the book is carried forward unchanged, so its
       turnover is exactly zero.
 
-    ``exit_rank`` must be at least ``top_k``: an exit band no wider than the
-    entry band is not a band, and would evict a name the moment it is passed by
-    any other, reproducing the daily-churn behaviour this function exists to
-    avoid.
+    ``exit_rank`` must be at least ``top_k``. Below that the exit edge sits
+    *inside* the entry list, so a name could be evicted while still ranked well
+    enough to be re-bought on the same session -- an incoherent band that
+    manufactures turnover out of nothing. ``exit_rank == top_k`` is permitted
+    but degenerate: it evicts on the first overtake and reproduces the daily
+    churn this function exists to avoid, which is why the measured default is
+    much wider.
 
     Only information dated at or before each session is read -- the loop never
     looks at a later row -- so the book is PIT-safe with respect to the
@@ -114,9 +117,9 @@ def hold_band_book_from_predictions(
         raise ValueError("top_k must be positive")
     if exit_rank < top_k:
         raise ValueError(
-            f"exit_rank ({exit_rank}) must be >= top_k ({top_k}); a band that is "
-            "not wider than the entry rank evicts on the first overtake and "
-            "reproduces daily churn"
+            f"exit_rank ({exit_rank}) must be >= top_k ({top_k}); an exit edge "
+            "inside the entry list would evict a name that is still good enough "
+            "to be re-bought on the same session"
         )
     if min_hold_sessions < 0:
         raise ValueError("min_hold_sessions must be non-negative")
