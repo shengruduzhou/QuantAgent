@@ -156,6 +156,11 @@ def book_turnover_report(book: pd.DataFrame) -> dict[str, float]:
     Two-sided: a completely replaced 1.0-gross book scores 2.0, matching the
     environment's ``sum |dw|`` accounting. The first session is excluded because
     it measures building the book from cash, not rebalancing it.
+
+    Holding spells still open on the last session are counted at their observed
+    length, so the spell statistics are right-censored and understate a
+    long-holding book. That biases *against* the hold band and in favour of the
+    daily rebuild, so it cannot manufacture the difference being reported.
     """
     filled = book.fillna(0.0)
     delta = (filled - filled.shift(1).fillna(0.0)).abs().sum(axis=1)
