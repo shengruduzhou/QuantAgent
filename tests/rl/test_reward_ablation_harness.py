@@ -162,3 +162,17 @@ def test_the_yardstick_never_carries_the_arm_s_risk_lambdas(tmp_path):
     np.testing.assert_array_equal(
         plain[columns].to_numpy(), penalised[columns].to_numpy()
     )
+
+
+def test_gross_exposure_is_measured_against_the_same_passive_book(tmp_path):
+    """Round 22 predicted the drawdown penalty would be bought by de-grossing.
+
+    The action's cash tilt can cut gross by up to 30%, so a penalised arm can
+    lower its drawdown by simply holding less -- a return give-up, not better
+    selection. The ablation therefore has to report gross, and report it
+    against the same constrained passive book the reward differences against.
+    Under a zero action the two are bit-identical, which is what this pins.
+    """
+    runs = _run(tmp_path, [RewardArm(name="zero", kind="zero")])
+    assert (runs["mean_gross"] == runs["mean_gross_passive"]).all()
+    assert (runs["mean_gross"] > 0.0).all()

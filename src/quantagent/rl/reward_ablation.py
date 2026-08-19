@@ -78,6 +78,13 @@ class EpisodeMetrics:
     calmar_passive: float | None
     mean_turnover: float
     mean_turnover_passive: float
+    #: Mean gross exposure of the policy book. Round 22 predicted the drawdown
+    #: penalty would be bought by *de-grossing* (the action's cash tilt can cut
+    #: gross by up to 30%), which is a return give-up rather than better name
+    #: selection. Without this column a penalised arm that simply held less
+    #: would be indistinguishable from one that picked better.
+    mean_gross: float
+    mean_gross_passive: float
 
     def as_row(self) -> dict[str, float | int | None]:
         return dict(self.__dict__)
@@ -93,6 +100,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
     value_add: list[float] = []
     turnover: list[float] = []
     turnover_passive: list[float] = []
+    gross: list[float] = []
+    gross_passive: list[float] = []
     info: dict = {}
     done = False
     while not done:
@@ -101,6 +110,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
         value_add.append(float(info["value_add"]))
         turnover.append(float(info["turnover_policy"]))
         turnover_passive.append(float(info["turnover_passive"]))
+        gross.append(float(sum(info["weights"].values())))
+        gross_passive.append(float(sum(info["weights_passive"].values())))
         done = terminated or truncated
     if not info:
         raise RuntimeError("evaluation environment produced no steps")
@@ -122,6 +133,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
         ),
         mean_turnover=float(np.mean(turnover)),
         mean_turnover_passive=float(np.mean(turnover_passive)),
+        mean_gross=float(np.mean(gross)),
+        mean_gross_passive=float(np.mean(gross_passive)),
     )
 
 
@@ -344,6 +357,7 @@ def summarise(runs: pd.DataFrame) -> pd.DataFrame:
         "excess_max_drawdown",
         "calmar",
         "mean_turnover",
+        "mean_gross",
     ]
     out: list[dict] = []
     for arm, group in runs.groupby("arm", sort=False):
