@@ -246,6 +246,87 @@ identical across 0.0 / 0.05 / 0.99: True
    - `test_the_enforced_participation_limit_is_the_constraint_set_one` —— 说明真正
      生效的是哪个（移除的是 no-op，不是 enforcement）
 
+### 2.6 新测试对**修复前**代码的表现（可证伪性检查）
+
+把 `order_manager.py` 临时换回 `HEAD` 版本（文件拷贝，**未用 `git stash`**）后重跑
+这 4 条新测试：
+
+```
+$ pytest tests/execution/test_order_manager_participation_knob_removed.py -q
+FAILED ...::test_order_manager_config_has_no_participation_knob
+FAILED ...::test_order_manager_never_declares_or_reads_a_participation_rate
+2 failed, 2 passed
+```
+
+**4 条里 2 条对修复前代码失败** —— 正是那两条断言旋钮不存在的守卫。
+另外 2 条（钉值路由 + 真正生效的约束在哪）在修复前后**都通过**，这正是
+「行为不变」的证明：它们度量的东西本来就不受这个旋钮影响。
+恢复后 4 条全绿。
+
+---
+
+## 3. 根目录过期 `.md` 归档（`git mv`，**不是删除**）
+
+### 3.1 引用统计（当前树重跑，42 份根目录 `.md` 全扫）
+
+每份文件四个维度计数：
+`AUTH` = 被 `AGENTS.md`/`CLAUDE.md`/`README.md` 点名；
+`CODE` = 被 `src`/`services`/`scripts`/`tests`/`configs`/`apps` 引用；
+`ROOTMD` = 被其他根目录 `.md` 交叉引用；
+`DOCS` = 被 `docs/**` 引用（排除 `docs/audits/round2*`，那是提出归档提案的报告本身）。
+
+```bash
+for f in *.md; do
+  auth=$(grep -Ilr -F "$f" AGENTS.md CLAUDE.md README.md | wc -l)
+  code=$(grep -rIn -F "$f" src services scripts tests configs apps | wc -l)
+  rootmd=$(grep -In -F "$f" *.md | grep -v "^$f:" | wc -l)
+  docs=$(grep -rIn -F "$f" docs | grep -v "docs/audits/round2" | wc -l)
+done
+```
+
+### 3.2 归档清单（6 份）
+
+逐份的全仓 `grep -F` 输出（排除自身与 `docs/audits/round2*`）：
+
+```
+### EXPERIMENT_HISTORY_SUMMARY.md     --- end (empty == zero references)
+### H009_DRAWDOWN_REGIME_OVERLAY.md   --- end (empty == zero references)
+### PBO_DSR_INPUT_CENSUS.md           --- end (empty == zero references)
+### PRODUCTION_REPRODUCIBLE.md        --- end (empty == zero references)
+### PBO_DSR_INPUT_VALIDATION.md
+PBO_DSR_INPUT_CENSUS.md:15:... 重建过程与偏差控制见 `PBO_DSR_INPUT_VALIDATION.md`。
+### OUTPUT_ARTIFACT_AUDIT.md
+CODEBASE_CLEANUP_REPORT.md:4:> 依据：`DEAD_CODE_AUDIT.md` / `OUTPUT_ARTIFACT_AUDIT.md` / `PRUNE_PLAN.md` / ...
+```
+
+| 文件 | 行数 | 引用 | 取代关系 |
+|---|---|---|---|
+| `EXPERIMENT_HISTORY_SUMMARY.md` | 74 | 0 | Phase 1 快照；§4 的 38.6% holdout 疑点已由 `HOLDOUT_CONTAMINATION_AUDIT.md` + `BASELINE_TRUST_CLASSIFICATION.md` 承载。文中指向的 `LEAKAGE_AUDIT.md` **在仓库里不存在**（悬空引用） |
+| `H009_DRAWDOWN_REGIME_OVERLAY.md` | 60 | 0 | 裁决在活的 `EXPERIMENT_LEDGER.md`「EXP-009 … DONE / 全部 REJECTED」；本文件是唯一逐折明细，但数字是 **pre-INC-E1** 口径且 ledger 记「修正重跑待做」⇒ 不可作当前结论引用 |
+| `PBO_DSR_INPUT_CENSUS.md` | 58 | 0 | 结论在 `PBO_DSR_ANALYSIS.md` + `PBO_DSR_RESULTS.csv`（留在根目录） |
+| `PBO_DSR_INPUT_VALIDATION.md` | 37 | 1（来自同批归档的 census） | 同上；与 census 成对同批移动，引用不断 |
+| `PRODUCTION_REPRODUCIBLE.md` | 54 | 0 | Stage B 修复完成报告；可执行事实源现在是**代码消费的** `configs/production_blend.json` + `PRODUCTION_CONFIG_SCHEMA.md`（留在根目录） |
+| `OUTPUT_ARTIFACT_AUDIT.md` | 46 | 1（`CODEBASE_CLEANUP_REPORT.md:4`，本轮已改路径） | 执行记录在 `CODEBASE_CLEANUP_REPORT.md`；其「删除候选 #3 full_nosynth」在 B-1 批次被**改判 keep** ⇒ 留在根目录有诱导误删生产数据集的风险 |
+
+链接修复：`CODEBASE_CLEANUP_REPORT.md:4` 的依据行改指 `docs/archive/OUTPUT_ARTIFACT_AUDIT.md`
+（**唯一**一处会因归档失效的链接，已修，不留死链）。
+
+### 3.3 复核后**保留**的 8 份（Round 21 曾列为次优先归档）—— 记为待定
+
+本轮判「活」的三条判据：自称滚动维护 / 仍有 `排队`·`待跑` 条目 / 被活文档或
+活代码指向。
+
+| 文件 | 保留理由 |
+|---|---|
+| `RESEARCH_LOG.md` | 抬头自称「持续维护」，产出直接喂**活的** `HYPOTHESIS_REGISTRY.md`（零入边 ≠ 死） |
+| `IDEA_QUEUE.md` | 活 backlog，仍有 `排队` 条目与明确出队条件 |
+| `CODEBASE_CLEANUP_REPORT.md` | 抬头自称「滚动更新」，是清理批次执行台账 |
+| `PRODUCTION_CONFIG_SCHEMA.md` | **代码消费的** `configs/production_blend.json` 的字段规范 |
+| `MODEL_FLOW_MAP.md` | `docs/research/current_model_audit.md:4` 作为 [VERIFIED] 来源引用 |
+| `design-qa.md` | `docs/quant_ui_completion_matrix.md:16` 列为交付物 |
+| `LONG_SLEEVE_DIAGNOSTIC.md` | 活的 `EXPERIMENT_LEDGER.md:63`「详见 …」指向，且有在用脚本 `scripts/analysis/exp004_long_sleeve_diagnostic.py` |
+| `EXP010_CORRECTED_INC_E1.md` | 与 `EXP008/EXP011_CORRECTED_INC_E1.md` 是一个系列，另两份仍有引用；拆散系列比留着更糟 |
+
 ---
 
 ## 5. 分批与全量 pytest / Batches & full-suite runs
@@ -256,3 +337,4 @@ identical across 0.0 / 0.05 / 0.99: True
 |---|---|---|---|---|
 | B-0 基线 | `main@3d4ecd8`，未改动 | **3522** | 47 | 615.82s |
 | B-1 删除 | `strategy/weight_adapter.py`、`cli/fuyao_research.py`、`training/composite_loss.py`（−404 行） | **3522** | 47 | 640.38s |
+| B-2 旋钮 | 移除 `OrderManagerConfig.max_participation_rate` + 两个写入方 + 4 条新测试 | **3526** | 47 | 618.65s |
