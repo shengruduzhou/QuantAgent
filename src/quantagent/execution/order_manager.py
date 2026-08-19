@@ -132,7 +132,18 @@ class OrderManagerConfig:
     max_orders_per_symbol_per_day: int = 5
     block_buy_limit_up: bool = True
     block_sell_limit_down: bool = True
-    max_participation_rate: float = 0.05
+    # No participation limit lives here on purpose.  ``max_participation_rate``
+    # was declared on this dataclass and written by two production callers, but
+    # nothing in this module ever read it, so setting it constrained nothing
+    # (Round 21 A-09 / Round 22 Q-01).  It was not wired up because its
+    # semantics -- how much of one bar a single order may consume -- are a fill
+    # quantity, and this class does not match orders.  The participation limit
+    # the production path really enforces is
+    # ``ExecutionConstraintSet.max_single_stock_participation_rate``, checked by
+    # ``constraint_evaluator`` below and fail-closed when the day volume is
+    # unmeasured.  The venue's own fill metering is
+    # ``BrokerConfig.participation_cap``; the two must stay different numbers or
+    # a partial fill becomes unreachable.
     negligible_weight: float = 1e-6
     strategy_version: str = "v4.0"
 

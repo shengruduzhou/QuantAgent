@@ -148,7 +148,12 @@ def simulate_ashare_target_weights(
             lot_size=config.lot_size,
             min_order_value_yuan=config.min_order_value_yuan,
             allow_odd_lot_sell_only_for_full_liquidation=config.allow_odd_lot_sell_only_for_full_liquidation,
-            max_participation_rate=config.volume_participation_cap,
+            # `volume_participation_cap` is not passed to the order manager: it
+            # meters fills, and the order manager does not match orders.  It
+            # reaches the only component that can act on it, the FillSimulator
+            # above.  Until Round 24 it was also written onto OrderManagerConfig,
+            # where nothing read it -- a caller setting the cap here believed it
+            # had constrained routing as well, and it never had.
             strategy_version="v7_ashare_simulation",
         ),
     )

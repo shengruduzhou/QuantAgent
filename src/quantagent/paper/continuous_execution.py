@@ -1222,7 +1222,11 @@ def _execute_pending_for_session_locked(
                 config=OrderManagerConfig(
                     lot_size=config.lot_size,
                     min_order_value_yuan=config.min_order_value_yuan,
-                    max_participation_rate=config.max_participation_rate,
+                    # `max_participation_rate` is deliberately not forwarded
+                    # here.  It meters fills and reaches the venue above as
+                    # `BrokerConfig(participation_cap=...)`; the order manager
+                    # never read the copy it used to be given, so passing it
+                    # advertised a routing constraint that did not exist.
                     strategy_version=config.strategy_version,
                 ),
             )
