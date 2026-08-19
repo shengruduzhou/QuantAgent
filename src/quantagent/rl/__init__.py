@@ -9,11 +9,13 @@ Its reward is the close(T) -> close(T+1) return on the signal date, which is not
 executable, so constructing it requires an explicit acknowledgement flag.
 """
 
+from quantagent.rl.books import hold_band_book_from_predictions
 from quantagent.rl.pit_portfolio_env import PITPortfolioEnv, PITPortfolioEnvConfig
 from quantagent.rl.portfolio_env import PortfolioEnv, PortfolioEnvConfig
 from quantagent.rl.train_ppo import PPOTrainingConfig, train_ppo_policy
 
 __all__ = [
+    "hold_band_book_from_predictions",
     "PITPortfolioEnv",
     "PITPortfolioEnvConfig",
     "PortfolioEnv",

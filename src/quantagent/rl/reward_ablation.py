@@ -29,7 +29,10 @@ but an absolute number from here is not a gate result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import math
+from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -75,6 +78,13 @@ class EpisodeMetrics:
     calmar_passive: float | None
     mean_turnover: float
     mean_turnover_passive: float
+    #: Mean gross exposure of the policy book. Round 22 predicted the drawdown
+    #: penalty would be bought by *de-grossing* (the action's cash tilt can cut
+    #: gross by up to 30%), which is a return give-up rather than better name
+    #: selection. Without this column a penalised arm that simply held less
+    #: would be indistinguishable from one that picked better.
+    mean_gross: float
+    mean_gross_passive: float
 
     def as_row(self) -> dict[str, float | int | None]:
         return dict(self.__dict__)
@@ -90,6 +100,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
     value_add: list[float] = []
     turnover: list[float] = []
     turnover_passive: list[float] = []
+    gross: list[float] = []
+    gross_passive: list[float] = []
     info: dict = {}
     done = False
     while not done:
@@ -98,6 +110,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
         value_add.append(float(info["value_add"]))
         turnover.append(float(info["turnover_policy"]))
         turnover_passive.append(float(info["turnover_passive"]))
+        gross.append(float(sum(info["weights"].values())))
+        gross_passive.append(float(sum(info["weights_passive"].values())))
         done = terminated or truncated
     if not info:
         raise RuntimeError("evaluation environment produced no steps")
@@ -119,6 +133,8 @@ def evaluate_episode(env: PITPortfolioEnv, policy) -> EpisodeMetrics:
         ),
         mean_turnover=float(np.mean(turnover)),
         mean_turnover_passive=float(np.mean(turnover_passive)),
+        mean_gross=float(np.mean(gross)),
+        mean_gross_passive=float(np.mean(gross_passive)),
     )
 
 
@@ -181,6 +197,19 @@ def _make_env(
     )
 
 
+def _load_completed(results_path: Path) -> list[dict]:
+    """Read back rows an earlier, interrupted invocation already finished."""
+    if not results_path.exists():
+        return []
+    rows: list[dict] = []
+    for line in results_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
 def run_ablation(
     *,
     train_book: pd.DataFrame,
@@ -191,18 +220,32 @@ def run_ablation(
     config: AblationConfig | None = None,
     session_gaps: pd.DataFrame | None = None,
     progress: bool = False,
+    results_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Train and score every ``arm`` on every seed; return one row per run.
 
     The returned frame is deliberately long/tidy rather than pre-aggregated:
     the dispersion across seeds is part of the evidence, and a caller that only
     ever sees a mean cannot tell a real effect from seed noise.
+
+    ``results_path`` makes the run *interruptible*. Every finished ``(arm,
+    seed)`` is appended to that file as JSON Lines the moment it is scored, and
+    a later invocation with the same path skips the pairs already present and
+    returns them alongside the new ones. A multi-hour training sweep that dies
+    partway through then costs the remaining arms, not all of them. Without it
+    the only output is the return value, and an interrupted sweep produces
+    nothing at all.
     """
     from dataclasses import replace
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     cfg = config or AblationConfig()
+    sink = Path(results_path) if results_path is not None else None
+    rows_done: list[dict] = _load_completed(sink) if sink is not None else []
+    completed = {(row["arm"], int(row["seed"])) for row in rows_done}
+    if sink is not None:
+        sink.parent.mkdir(parents=True, exist_ok=True)
     train_base = replace(
         cfg.base_env, reward_end_date_limit=cfg.train_reward_end_limit
     )
@@ -222,9 +265,17 @@ def run_ablation(
     probe = build_eval()
     action_dim = int(probe.action_space.shape[0])
 
-    rows: list[dict] = []
+    rows: list[dict] = list(rows_done)
     for arm in arms:
         for seed in cfg.seeds:
+            if (arm.name, int(seed)) in completed:
+                if progress:
+                    print(
+                        f"  {arm.name:<28} seed={seed:<9} resumed from {sink}",
+                        flush=True,
+                    )
+                continue
+            started = time.time()
             if arm.kind == "zero":
                 policy = zero_policy(action_dim)
             elif arm.kind == "random":
@@ -265,9 +316,20 @@ def run_ablation(
                 raise ValueError(f"unknown arm kind {arm.kind!r}")
 
             metrics = evaluate_episode(build_eval(), policy)
-            row = {"arm": arm.name, "kind": arm.kind, "seed": int(seed)}
+            row = {
+                "arm": arm.name,
+                "kind": arm.kind,
+                "seed": int(seed),
+                "drawdown_lambda": float(arm.drawdown_lambda),
+                "volatility_lambda": float(arm.volatility_lambda),
+                "wall_seconds": round(time.time() - started, 2),
+            }
             row.update(metrics.as_row())
             rows.append(row)
+            if sink is not None:
+                with sink.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(row, sort_keys=True) + "\n")
+                    handle.flush()
             if progress:
                 print(
                     f"  {arm.name:<28} seed={seed:<9} "
@@ -295,6 +357,7 @@ def summarise(runs: pd.DataFrame) -> pd.DataFrame:
         "excess_max_drawdown",
         "calmar",
         "mean_turnover",
+        "mean_gross",
     ]
     out: list[dict] = []
     for arm, group in runs.groupby("arm", sort=False):

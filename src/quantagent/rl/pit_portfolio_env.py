@@ -589,6 +589,12 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             "reward_end_date": str(self.reward_end_dates[t].date()),
             "reward_clock_semantics": self.reward_clock_semantics,
             "weights": current,
+            # Published alongside the policy weights so a caller can compare
+            # gross exposure against the same constrained passive book the
+            # reward differences against. A penalised policy that simply holds
+            # less is doing something different from one that holds better, and
+            # without the passive side there is nothing to compare it to.
+            "weights_passive": current_passive,
             "net_policy": net_policy,
             "net_passive": net_passive,
             "value_add": value_add,
