@@ -238,3 +238,4 @@ src/quantagent/agents/ashare_specialists.py:148:    former ``AgentRouter`` consu
 |---|---|---|---|---|
 | B-0 基线 | `main@b313153`，未改动 | **3507** | 43 | 438.06s |
 | B-1 删除 | `agents/agent_router.py`、`agents/agent_reliability.py`、`themes/policy_universe_builder.py`、`training/ablation_runner.py`（−374 行） | **3507** | 43 | 590.21s |
+| B-2 删除 | `quant_math/hmm_regime.py`、`quant_math/hrp.py`、`quant_math/realized_vol.py`、`strategy/rule_signals.py`（−412 行） | **3507** | 43 | 761.78s |
