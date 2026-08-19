@@ -142,7 +142,12 @@ def build_ashare_specialist_signals(frame: pd.DataFrame) -> list[AgentSignal]:
 
 
 def specialist_evidence_records(signals: list[AgentSignal], timestamp: str) -> list[EvidenceRecord]:
-    """Convert specialist signals into the AgentRouter evidence contract."""
+    """Convert specialist signals into the ``EvidenceRecord`` evidence contract.
+
+    The schema lives in :mod:`quantagent.agents.views_schema`.  (Round 23: the
+    former ``AgentRouter`` consumer was removed as proven-zero-reference dead
+    code; this function's contract is the record schema itself, not a router.)
+    """
 
     records: list[EvidenceRecord] = []
     for signal in signals:
