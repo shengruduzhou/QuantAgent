@@ -145,3 +145,66 @@ RL 奖励是**对被动账本的超额**。被动账本因此不是配角，它�
 **任何「没差别」都不能用「λ 太小」来解释。**
 （`λ_dd` 的望远镜和 = λ × 超额 MDD_T，随机策略实测超额 MDD = 6.23pp，
 与 §2.5 表里 random arm 的 `excess_max_drawdown` 同源。）
+
+### 2.5 裁决规则（在看到处理组数字**之前**写下）
+
+写这一节时，已知的只有两个对照组（`zero` / `random`）与一次 400k 的单 seed 试跑；
+6 个训练 arm 的结果尚未产出。规则先定，避免事后挑一个好看的指标当结论。
+
+1. 若**没有任何**训练 arm 的 `cumulative_value_add` 均值超过 `zero` 对照（构造上恰为 0）
+   一个 seed 标准差以上 ⇒ 在这套设置下 RL 本身不产生超额，
+   **风险项无从推荐**，裁决 `不启用`。
+2. 若 `old_reward_lambda0` 胜过 `zero`，且某个 λ arm 在**逐 seed 配对**比较上
+   于 Calmar 优于 `old_reward_lambda0` 且符号在各 seed 上一致 ⇒ 裁决 `启用`，给出该 λ 与代价。
+3. 其余情形 ⇒ `证据不足`，并写清还缺什么。
+
+两个问题必须分开回答，不能混成一句：
+
+- **(a) 机制**：惩罚项有没有把回撤往它声称的方向推？（看 `max_drawdown` 与 `mean_gross` 的配对差）
+- **(b) 价值**：这值不值得在生产里打开？（看它相对 `zero` 对照的绝对位置）
+
+(a) 为「是」而 (b) 为「否」是完全可能的，也**必须如实这样写**。
+
+---
+
+## 3. 顺带挖出的缺陷：仓库自带的 hold band 在全宇宙上不产生持有期
+
+写 `src/quantagent/rl/books.py` 之前先查了仓库是否已有同类实现 —— **有**：
+`src/quantagent/portfolio/hold_band.py`，自述「turnover-controlled top-K selection」，
+且**已经接在 `scripts/rl_pit_train_eval.py` 上**。于是先在**同一份 690 session 数据**上
+实测它，而不是假定它不合用：
+
+| 账本 | 换手中位 | 换手均值 | **持有期中位（session）** |
+|---|---:|---:|---:|
+| `hold_band` n50/e30/x150（**模块自带默认值**） | 1.4737 | 1.4580 | **1** |
+| `hold_band` n30/e30/x90 | 1.6000 | 1.5438 | **1** |
+| `hold_band` n30/e30/x300 | 1.1333 | 1.1334 | **1** |
+| `hold_band` n30/e30/x900 | 0.5333 | 0.6292 | 2 |
+| `hold_band` n30/e30/x3000 | 0.0000 | 0.0484 | 19 |
+| `rl.books` k30/x90/minhold**0**/rebal**1** | 1.6000 | 1.5438 | 1 |
+| `rl.books` k30/x90/minhold5/rebal1 | 0.4000 | 0.3955 | 5 |
+| `rl.books` k30/x90/minhold10/rebal1 | 0.2000 | 0.2088 | 10 |
+| `rl.books` k30/x90/minhold10/rebal5（本轮采用） | 0.0000 | 0.1935 | 10 |
+
+两条结论：
+
+1. **`rl.books` 在 `min_hold_sessions=0, rebalance_every=1` 时逐位复现
+   `build_hold_band_weights`**（x90 两者 1.6000/1.5438 完全相同，x300、x900 同理）。
+   它是那条规则的**忠实超集**，不是另起炉灶的第二套选股规则 ——
+   `tests/rl/test_hold_band_book.py::test_it_reproduces_the_repository_hold_band_when_the_new_knobs_are_off`
+   把这条钉住；一旦两者分叉，RL 基准就不再能和生产账本比较。
+
+2. **排名带（rank band）在 ~3,253 只的宇宙上根本无法产生持有期。**
+   一个名字要活下去就得留在 3,253 名里的前 `exit_rank` 名内，而日频截面 alpha 不会
+   让同一批名字长期待在头部：直到把带宽开到覆盖 **~92% 的宇宙**（`exit_rank=3000`）
+   它才开始起作用 —— 而那时它已经不再选股了。
+   在**模块自己的默认值**下持有期中位数是 **1 个 session**。
+
+⇒ **`HoldBandConfig` 的换手控制在全 A 宇宙上是装饰性的**（Round 20 DEF-030 的同一形状：
+一个读起来像守卫、实测下不约束任何东西的旋钮）。真正能造出持有期的是
+**基于时间的最小持有期**，而 `HoldBandConfig` 没有这个字段。
+
+**本轮没有修它**：`src/quantagent/portfolio/` 不在本角色的写入范围内，
+而且它被生产账本消费 —— 改换手就是改策略，需要它自己的证据链（`ACCEPTANCE_RULES.md`）。
+**转交主角色路由**。本轮只在 `src/quantagent/rl/books.py` 里补上 RL 基准需要的那部分，
+并在 docstring 里写明「更好的归宿是 `portfolio.hold_band` 本身」。

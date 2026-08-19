@@ -4,22 +4,62 @@ The RL reward is *value-add over a passive book*, so the book is not a detail:
 it is the benchmark, and its trading behaviour is baked into every number the
 environment reports. ``train_ppo.equal_weight_book_from_predictions`` rebuilds
 the top-k list from scratch on every session. Measured on the round-23 dataset
-(v8.9+7 ``short_5d`` scores, 257 sessions, ``top_k=30``) that book replaces a
-median of 21 of its 30 names per session: two-sided turnover has median 1.40
-and mean 1.40, i.e. ~70% of the book one-way *every day*. At the environment's
-12 bps cost that is ~16.8 bps of cost per session on the benchmark itself.
+(``lightgbm-csrank`` walk-forward ``alpha_5d``, 690 sessions, 3,253 names per
+session, ``top_k=30``) that book replaces a median of 27 of its 30 names per
+session: two-sided turnover has median 1.80 and mean 1.77, median holding spell
+**one session**. At the environment's 12 bps cost that is ~21 bps of cost per
+session on the benchmark itself.
 
 A reward ablation run against that book does not measure what it claims to
 measure. Both the policy and the passive book bleed cost far faster than any
 drawdown term could matter, so the arms get ranked by how much trading they
 avoid, and the experiment silently becomes a study of transaction costs.
 
-:func:`hold_band_book_from_predictions` builds a book with an actual holding
-period instead: names enter only on rebalance sessions, are protected by a
-minimum holding period, and leave only when they fall out of a wider exit
-band. Nothing here is a claim that this book is *good* -- it is a benchmark
-with a plausible holding period, which is the precondition for the drawdown
-question being askable at all.
+Why not just call ``quantagent.portfolio.hold_band``
+-----------------------------------------------------
+
+That module exists, is named for the job, describes itself as
+"turnover-controlled top-K selection", and is already wired into
+``scripts/rl_pit_train_eval.py``. It was measured before this module was
+written, on the same 690 sessions, rather than assumed to be unsuitable:
+
+===============================================  ==========  ============
+book                                             turnover    median hold
+                                                 (median)    (sessions)
+===============================================  ==========  ============
+``hold_band`` n50/e30/x150 (module default)          1.4737             1
+``hold_band`` n30/e30/x90                            1.6000             1
+``hold_band`` n30/e30/x300                           1.1333             1
+``hold_band`` n30/e30/x900                           0.5333             2
+``hold_band`` n30/e30/x3000                          0.0000            19
+this module, k30/x90, min hold 10, rebal 5           0.0000            10
+===============================================  ==========  ============
+
+A *rank* band cannot produce a holding period on a universe this wide. A name
+survives only while it stays inside ``exit_rank`` out of ~3,253 scored names,
+and a daily cross-sectional alpha does not keep the same names near the top for
+long: the band only starts to bind once it covers ~92% of the universe
+(``exit_rank=3000``), at which point it has stopped selecting anything. At the
+module's own defaults the median holding spell is **one session** -- a knob that
+reads as turnover control and, on a full A-share universe, is not.
+
+So the missing ingredient is not a wider band, it is a *time*-based minimum
+holding period, which ``HoldBandConfig`` has no field for. This module adds one
+(and a rebalance cadence) and is otherwise the same rule. That equivalence is
+pinned, not asserted: with ``min_hold_sessions=0`` and ``rebalance_every=1``
+this builder reproduces ``build_hold_band_weights`` exactly -- see
+``tests/rl/test_hold_band_book.py``. Adding the minimum hold to
+``quantagent.portfolio.hold_band`` itself would be the better home for it, but
+that module is outside this round's write scope and is consumed by the
+production book, where a turnover change is a strategy change and needs its own
+evidence. Recorded in ``docs/audits/round23/11_rl_ablation.md`` for routing.
+
+:func:`hold_band_book_from_predictions` therefore builds a book with an actual
+holding period: names enter only on rebalance sessions, are protected by a
+minimum holding period, and leave only when they fall out of a wider exit band.
+Nothing here is a claim that this book is *good* -- it is a benchmark with a
+plausible holding period, which is the precondition for the drawdown question
+being askable at all.
 """
 
 from __future__ import annotations

@@ -237,3 +237,40 @@ def test_a_name_that_loses_its_score_is_dropped_without_reweighting_the_book():
     turnover = _two_sided_turnover(book)
     # Exactly one leg moved: the dropped name. Nothing else was touched.
     assert float(turnover.loc[SESSIONS[2]]) == pytest.approx(0.1)
+
+
+def test_it_reproduces_the_repository_hold_band_when_the_new_knobs_are_off():
+    """A faithful superset of ``quantagent.portfolio.hold_band``, not a fork.
+
+    That module already implements entry band / exit band / equal-weight top-K
+    and is wired into ``scripts/rl_pit_train_eval.py``. What it has no field for
+    is a *time*-based minimum holding period -- and measurement showed the rank
+    band alone cannot produce a holding period on a ~3,250-name A-share
+    universe: at the module's own defaults the median holding spell is one
+    session, and the band only starts to bind once it covers ~92% of the
+    universe, by which point it has stopped selecting anything.
+
+    So this builder adds a minimum hold and a rebalance cadence and changes
+    nothing else. With both new knobs disabled the two must agree exactly; if
+    they ever diverge, this module has quietly become a second selection rule
+    and the RL benchmark stops being comparable to the production book.
+    """
+    hold_band = pytest.importorskip("quantagent.portfolio.hold_band")
+
+    predictions = _churning_predictions()
+    theirs = hold_band.build_hold_band_weights(
+        predictions,
+        config=hold_band.HoldBandConfig(
+            n_hold=10, entry_rank=10, exit_rank=30, delay_days=0
+        ),
+    )
+    ours = hold_band_book_from_predictions(
+        predictions,
+        top_k=10,
+        exit_rank=30,
+        min_hold_sessions=0,
+        rebalance_every=1,
+        entry_rank_limit=10,
+    )
+    aligned = ours.reindex(index=theirs.index, columns=theirs.columns).fillna(0.0)
+    np.testing.assert_allclose(theirs.to_numpy(), aligned.to_numpy(), rtol=0, atol=1e-12)
