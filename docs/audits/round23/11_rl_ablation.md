@@ -1,0 +1,123 @@
+# Round 23 — R11 强化学习：风险项对照实验 / RL Risk-Term Ablation
+
+- 角色 / Role: R11 — RL 奖励设计与实测
+- 基线 / Baseline: `b313153` (main tip)
+- 分支 / Branch: `agent/round23-rl-ablation`
+- 范围 / Scope: **仅** `src/quantagent/rl/**` 与 `tests/rl/**`
+- 日期 / Date: 2026-08-19
+
+## 0. 本轮要补的证据 / The gap being closed
+
+Round 22 实现了 `drawdown_lambda` / `volatility_lambda`（默认 `0.0`，已并入 main），
+但对照实验没跑完。主角色在合并说明里写明：
+
+> 本次合并提供的是**能力**，不是**证据**。
+
+用户标准原话：「**一定要保证有用才能使用**」。本轮唯一任务是把
+「风险项到底有没有用」跑出答案。
+
+---
+
+## 1. 先解决阻塞：被动账本每天换手一次
+
+### 1.1 为什么这是阻塞而不是瑕疵
+
+RL 奖励是**对被动账本的超额**。被动账本因此不是配角，它是基准，它的交易行为
+被烘焙进环境报出的每一个数字。Round 22 用的
+`train_ppo.equal_weight_book_from_predictions` 每个 session **从零重建** top-k 名单。
+
+在 12 bps 成本下，一个每天换手 ~90%（双边 1.8）的基准每 session 自己就要付
+**21.3 bps**。策略和基准都在以远快于任何回撤项能影响的速度流血 ⇒
+各 arm 会按「少交易」被排序，实验会**静默地变成一个关于交易成本的研究**，
+而不是关于回撤的研究。
+
+### 1.2 修复前后实测（本轮数据集，690 个 session，`top_k=30`）
+
+由 `quantagent.rl.reward_ablation_experiment.book_turnover_report` 计算，
+双边口径（整本换掉 = 2.0），排除第一个 session（那是建仓不是调仓）。
+
+| 指标 | 修复前 `daily_topk_book` | 修复后 `hold_band_book_from_predictions` |
+|---|---:|---:|
+| 换手 **中位数** | **1.8000** | **0.0000** |
+| 换手 均值 | 1.7740 | 0.1935 |
+| 换手 p90 | 2.0000 | 0.9333 |
+| 每 session 新进名字（中位） | 27 / 30 | 0 |
+| **持有期中位数（session）** | **1** | **10** |
+| 持有期均值（session） | 1.13 | 9.98 |
+| 账本 gross 中位 | 1.000 | 1.000 |
+
+修复前中位换手 1.80、p90 2.00 —— **确认了上一轮被打断前那条「每天换手一次」的
+观察**（上一轮记的是 2.0，本轮在这份面板上实测中位 1.80、p90 2.00：
+最坏的日子确实是整本换掉）。
+
+均值换手降低 **9.17×**（1.7740 → 0.1935）。以 12 bps 计，基准自身的成本从
+**21.3 bps/session** 降到 **2.3 bps/session**。
+
+修复后的构造（`src/quantagent/rl/books.py`）：
+`top_k=30`、`exit_rank=90`（出场带比入场带宽 3×）、`min_hold_sessions=10`、
+`rebalance_every=5`。非调仓日账本原样结转 ⇒ 换手**恰好** 0，这就是中位数为 0 的原因。
+唯一的强制出场是「当天没有有限 alpha」——环境要求每个目标名字有有限 alpha，
+带着一个没打分的名字会直接 raise。
+
+（环境内部的 `turnover_passive` 与账本自身的换手不同，因为涨跌停/停牌约束会
+按住账本想动的仓位：评估窗口上实测 env 口径均值 **0.2025**。）
+
+### 1.3 修复的实现与钉住它的测试
+
+`src/quantagent/rl/books.py` — `hold_band_book_from_predictions`：
+
+- 只在调仓 session（每 `rebalance_every` 个）做增减；其余 session **原样结转**
+  （不是重新推导出相同权重 —— 后者在浮点上不逐位相等，而环境按 `sum |dw|` 收费，
+  30 个名字上 1e-17 的抖动在 690 个 session 上会累积成真实成本且不会出现在任何摘要里）。
+- 出场带 `exit_rank` 必须 ≥ `top_k`，否则直接 raise：一条不比入场带宽的「带」不是带，
+  它会在第一次被超越时就换人，把每日churn 换个名字重演一遍。
+- 最小持有期 `min_hold_sessions` 保护刚入场的名字。
+- 唯一强制出场 = 当天没有有限 alpha；释放的权重**不再分配**给幸存者（否则为一个
+  缺失分数向所有幸存者收换手费），账本 gross 下沉、到下一次调仓恢复。
+
+`tests/rl/test_hold_band_book.py`（6 条）把上述性质写成断言，其中
+`test_hold_band_book_turns_over_far_less_than_the_daily_rebuild` 在同一个
+「排名每天整体轮转」的构造上同时算两种账本，**对修复前的构造是失败的**
+（daily rebuild 中位换手实测 2.0）。
+`test_book_rows_do_not_depend_on_later_sessions` 钉住无前视：截断输入后，
+存活的行逐字节相同。
+
+---
+
+## 2. 实验设置 / Experiment setup
+
+### 2.1 数据来源（全部为真实产物，无合成数据）
+
+| 角色 | 产物 | 事实 |
+|---|---|---|
+| 行情面板 | `runtime/data/v7/silver/market_panel/market_panel.parquet` | 2022-10-01→2025-09-30 切片 2,655,061 行 / 727 sessions；带真实 `is_limit_up` / `is_limit_down` / `is_suspended` |
+| 预测（alpha） | `runtime/stage6_classical_walkforward/wf/walkforward_predictions.parquet` 的 `alpha_5d` | `lightgbm-csrank@cov099`，**6 折 purged walk-forward，每折 120 sessions 全部为样本外**；2022-10-31→2025-08-29 取 690 signal sessions / 3,427 symbols |
+| 停牌证据 | `runtime/data/u0/panel/session_gaps.parquet` | 用于证明缺失 bar 属 `SUSPENDED`；环境对未证明的缺失 **fail-closed** |
+
+**评测窗口纪律**：`configs/quarantined_windows.json` 的两个禁评窗
+（烧毁 holdout 2025-09-01→2026-05-18、冻结新鲜窗 2026-05-19+）**均未被读取**。
+实验窗口在 2025-08-29 处停止。
+
+**宇宙剔除**：149 / 3,427 个 symbol（4.3%）在窗口内某个 session 缺 bar 且
+`session_gaps` 未判为 `SUSPENDED`。环境按设计对它们 fail-closed。这些名字被
+从候选宇宙**整体剔除**（而不是放松守卫）。剔除用到了全窗口信息，因此在
+**宇宙定义**上是一个轻度前视；它对被动账本与所有 arm **完全同等地**施加，
+且数量被打印出来以免它悄悄变大。剩余宇宙 3,278 symbols。
+
+### 2.2 训练 / 评测切分
+
+| | 窗口 | sessions |
+|---|---|---|
+| 训练 | 2022-10-31 → 2024-10-23 | 480（奖励时钟被 `reward_end_date_limit=2024-10-23` 截断，故训练 transition 数为 478） |
+| 评测 | 2024-10-24 → 2025-08-29 | 210 |
+
+训练段的奖励时钟被显式截断在切分点，因此**没有任何训练 transition 能读到评测段的收益**
+（仅截断 signal date 是不够的：奖励区间是 `close(T+1) → close(T+2)`）。
+
+### 2.3 同一把尺子（反循环论证）
+
+所有 arm —— 包括带惩罚训练出来的 —— 都在
+`drawdown_lambda = volatility_lambda = 0` 的评估环境里打分。
+用带惩罚的指标去评带惩罚的策略等于假定结论。
+`tests/rl/test_reward_ablation_harness.py::test_the_yardstick_never_carries_the_arm_s_risk_lambdas`
+把这条写成断言：两个只在训练 λ 上不同的对照 arm 必须给出**逐位相同**的评测指标。

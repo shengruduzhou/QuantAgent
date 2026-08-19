@@ -61,6 +61,17 @@ def equal_weight_book_from_predictions(
     a policy that merely reproduces it scores zero. Pick it deliberately -- an
     equal-weight top-k book is a much weaker opponent than the live target
     weights, and beating it is correspondingly less meaningful.
+
+    **It also has no holding period.** The top-k list is rebuilt from scratch on
+    every session, so the book follows the ranking wherever it goes. Measured on
+    the round-23 dataset (690 sessions, ``top_k=30``) that is a median of 27 of
+    30 names replaced per session: two-sided turnover median 1.80, p90 2.00,
+    median holding spell one session, ~21 bps of cost per session at the
+    environment's 12 bps. Any result quoted against this book is dominated by
+    transaction cost. Use
+    :func:`quantagent.rl.books.hold_band_book_from_predictions` when the
+    benchmark is supposed to represent something anyone would actually hold; see
+    ``docs/audits/round23/11_rl_ablation.md`` for the before/after measurement.
     """
     if top_k <= 0:
         raise ValueError("top_k must be positive")
