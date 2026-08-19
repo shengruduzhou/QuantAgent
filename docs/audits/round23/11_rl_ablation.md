@@ -272,3 +272,37 @@ Round 22 §2.2 论证了回撤项的望远镜性质使**整段** episode 奖励�
 `excess_cost = (policy_turnover − passive_turnover) × 12bps × 208 steps`，
 `residual_selection = cumulative_value_add + excess_cost`。
 两项相加恒等于 `cumulative_value_add`（这是恒等式，不是拟合）。
+
+### 4.5 复现方式 / How to reproduce
+
+```bash
+AI_quant_venv/bin/python3 -m quantagent.rl.reward_ablation_experiment \
+  --panel   runtime/data/v7/silver/market_panel/market_panel.parquet \
+  --predictions runtime/stage6_classical_walkforward/wf/walkforward_predictions.parquet \
+  --score-column alpha_5d \
+  --session-gaps runtime/data/u0/panel/session_gaps.parquet \
+  --start 2022-10-31 --end 2025-08-29 \
+  --top-k 30 --exit-rank 90 --min-hold-sessions 10 --rebalance-every 5 \
+  --train-sessions 480 --timesteps 400000 --n-envs 4 --device cpu \
+  --seeds 1729,20260819,7,13,42 \
+  --results <path>.jsonl --book-report <path>.json
+```
+
+（本轮为并行起见按 arm 拆成多个进程 `--arms <name>`，结果文件分开；
+`--results` 是**可续跑**的：已完成的 `(arm, seed)` 会被跳过。
+`--panel` 在本轮读的是预先切好的 2022-10-01→2025-09-30 分片，
+与直接读全量面板等价，只是快一些。）
+
+**确定性**：同一 `(arm, seed)` 在新进程里重跑，`cumulative_value_add` 差 = 0.000e+00。
+
+### 4.6 一个必须点明的结构性事实：动作空间没有免费的空动作
+
+评估用 `deterministic=True`，输出的是策略的均值动作。要让换手回到被动账本水平，
+策略必须学会在 **61 维**上都输出接近 0 的均值（`a[:60]` 是逐名权重倾斜 ±80%，
+`a[60]` 是现金倾斜 ±30%）。任何偏离 0 的均值动作都直接产生相对被动账本的**额外换手**，
+按 12 bps 立刻收费。
+
+所有训练 arm 的换手都在 **0.32–0.45** 之间，而被动账本是 **0.2045**。
+也就是说：PPO 学到的均值动作离 0 很远，它在为「与被动账本不同」持续付费。
+这不是某个 λ 的问题 —— 它对所有 arm（包括 `old_reward_lambda0`）同等成立，
+也正是 §4.3 分解里「excess_cost」那一列的来源。
