@@ -32,10 +32,24 @@ Verdict = Literal["pass", "warn", "blocked", "unknown"]
 # Ordered: the council is read top to bottom, data first and governance last.
 COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
     {
+        "id": "data_acquisition",
+        "label": "数据采购",
+        "domain": "供应商、抓取批次、时间戳与输入产物完整性",
+        "vetoScope": "数据来源与采集证据",
+        "veto": True,
+    },
+    {
         "id": "data_quality",
         "label": "数据质量",
         "domain": "PIT 完整性、provenance、复权口径、基准口径",
         "vetoScope": "输入数据不可信时阻塞整条链",
+        "veto": True,
+    },
+    {
+        "id": "microstructure",
+        "label": "市场微观结构",
+        "domain": "频率、时钟、撮合粒度与日内假设适用边界",
+        "vetoScope": "日内或微观结构相关主张",
         "veto": True,
     },
     {
@@ -74,10 +88,24 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "veto": True,
     },
     {
+        "id": "challenger",
+        "label": "独立挑战者",
+        "domain": "基线、随机对照、负面结论与替代解释",
+        "vetoScope": "未经过对照挑战的候选晋级",
+        "veto": True,
+    },
+    {
+        "id": "compliance",
+        "label": "合规与模型风险",
+        "domain": "研究/生产边界、授权范围、模型风险披露",
+        "vetoScope": "越权或 production/live 声明",
+        "veto": True,
+    },
+    {
         "id": "governance",
-        "label": "治理",
-        "domain": "readiness tier、人工 Gate、审计链",
-        "vetoScope": "任何 live 意图",
+        "label": "CIO / 决策主席",
+        "domain": "汇总各部门裁决、readiness tier、人工 Gate 与审计链",
+        "vetoScope": "公司级晋级结论与任何 live 意图",
         "veto": True,
     },
 )
@@ -89,8 +117,9 @@ ROLE_IDS = tuple(role["id"] for role in COUNCIL_ROLES)
 class CouncilThresholds:
     """Promotion bars. Operator-visible, and every one of them is checked."""
 
-    max_pbo: float = 0.50
-    min_deflated_sharpe: float = 0.50
+    max_pbo: float = 0.25
+    min_deflated_sharpe: float = 0.95
+    max_spa_pvalue: float = 0.05
     min_observations: int = 60
     min_folds: int = 3
     max_drawdown: float = 0.25
@@ -102,6 +131,7 @@ class CouncilThresholds:
         return {
             "maxPbo": self.max_pbo,
             "minDeflatedSharpe": self.min_deflated_sharpe,
+            "maxSpaPValue": self.max_spa_pvalue,
             "minObservations": self.min_observations,
             "minFolds": self.min_folds,
             "maxDrawdown": self.max_drawdown,
@@ -156,6 +186,10 @@ class CouncilService:
         """Review one fusion search run, optionally focused on one candidate."""
         detail = self.fusion.detail(run_id)
         summary = detail.get("summary") or {}
+        # promotion_gate.json is the canonical PBO/DSR/SPA and research/live
+        # boundary evidence. Keep it out of persisted summary files but make it
+        # available to the role checks in this review invocation.
+        summary = {**summary, "_promotionGate": detail.get("promotionGate")}
         candidates = detail.get("candidates") or []
         frontier = [item for item in candidates if item.get("onFrontier")]
         subject = None
@@ -171,12 +205,16 @@ class CouncilService:
         findings = [
             check(summary, subject, candidates, self.thresholds)
             for check in (
+                _review_data_acquisition,
                 _review_data_quality,
+                _review_microstructure,
                 _review_factor_integrity,
                 _review_model_validation,
                 _review_fusion_search,
                 _review_portfolio_risk,
                 _review_execution_realism,
+                _review_challenger,
+                _review_compliance,
                 _review_governance,
             )
         ]
@@ -228,12 +266,16 @@ class CouncilService:
         findings = [
             check(result, self.thresholds)
             for check in (
+                _run_data_acquisition,
                 _run_data_quality,
+                _run_microstructure,
                 _run_factor_integrity,
                 _run_model_validation,
                 _run_search_statistics,
                 _run_portfolio_risk,
                 _run_execution_realism,
+                _run_challenger,
+                _run_compliance,
                 _run_governance,
             )
         ]
@@ -348,6 +390,48 @@ def _metric(candidate: dict[str, Any] | None, key: str) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _promotion_gate(summary: dict[str, Any]) -> dict[str, Any] | None:
+    value = summary.get("_promotionGate")
+    return value if isinstance(value, dict) else None
+
+
+def _review_data_acquisition(summary, subject, candidates, thresholds) -> dict[str, Any]:
+    generated = summary.get("generatedAt")
+    factors = summary.get("factorNames")
+    declared = summary.get("candidateCount")
+    evaluated = summary.get("evaluatedCandidateCount")
+    evidence = {
+        "generatedAt": generated,
+        "factorNames": factors,
+        "declaredCandidateCount": declared,
+        "persistedCandidateCount": len(candidates),
+        "evaluatedCandidateCount": evaluated,
+    }
+    if not generated or not isinstance(factors, list) or not factors:
+        return _finding(
+            "data_acquisition", "unknown", "采集批次证据不完整",
+            "缺少生成时间或输入因子清单，无法把本次搜索绑定到一个可审计的数据批次。",
+            evidence, "补齐 manifest 的时间戳与输入清单后重跑",
+        )
+    if not isinstance(declared, int) or not isinstance(evaluated, int):
+        return _finding(
+            "data_acquisition", "unknown", "候选落盘计数未声明",
+            "缺少声明候选数或已评估候选数，无法证明搜索输出完整落盘。",
+            evidence, "重新生成带计数的搜索产物",
+        )
+    if declared != len(candidates) or evaluated <= 0 or evaluated > declared:
+        return _finding(
+            "data_acquisition", "blocked", "搜索产物计数不一致",
+            "声明数量、实际落盘数量与已评估数量不一致，产物可能被截断或混入其他批次。",
+            evidence, "清理该运行目录并从同一数据快照完整重跑",
+        )
+    return _finding(
+        "data_acquisition", "pass", "输入批次与产物计数可追溯",
+        f"{len(factors)} 个输入因子，{evaluated}/{declared} 个候选完成评估并落盘。",
+        evidence, "无",
+    )
+
+
 def _review_data_quality(summary, subject, candidates, thresholds) -> dict[str, Any]:
     benchmark = summary.get("benchmarkMode")
     observations = _metric(subject, "observations")
@@ -376,6 +460,32 @@ def _review_data_quality(summary, subject, candidates, thresholds) -> dict[str, 
         "data_quality", "pass", "输入口径可追溯",
         f"基准 {benchmark}，样本外观测 {int(observations)}。",
         evidence, "无",
+    )
+
+
+def _review_microstructure(summary, subject, candidates, thresholds) -> dict[str, Any]:
+    horizon = summary.get("horizonDays")
+    evidence = {
+        "horizonDays": horizon,
+        "barFrequency": summary.get("barFrequency"),
+        "intradayClaim": summary.get("intradayClaim"),
+    }
+    if not isinstance(horizon, int):
+        return _finding(
+            "microstructure", "unknown", "研究时钟未声明",
+            "没有持有期或频率字段，无法判断需要日频还是日内微观结构证据。",
+            evidence, "写入 horizonDays 与 barFrequency",
+        )
+    if horizon < 1:
+        return _finding(
+            "microstructure", "blocked", "持有期不符合日频协议",
+            "持有期小于一个交易日，却没有盘口、成交队列或事件时钟证据。",
+            evidence, "使用日内专用数据和撮合协议重新研究",
+        )
+    return _finding(
+        "microstructure", "warn", "仅完成日频边界审查",
+        "本次证据支持日频研究，不支持日内成交、排队位置或冲击曲线主张；这些能力仍需独立验证。",
+        evidence, "若提出日内主张，提交盘口与事件时钟证据",
     )
 
 
@@ -490,11 +600,16 @@ def _review_fusion_search(summary, subject, candidates, thresholds) -> dict[str,
     trials = summary.get("nTrials")
     pbo = summary.get("pbo")
     breakdown = (subject or {}).get("robustnessBreakdown") or {}
-    dsr = breakdown.get("deflatedSharpeProbability")
+    promotion = _promotion_gate(summary) or {}
+    statistical = promotion.get("statisticalEvidence")
+    statistical = statistical if isinstance(statistical, dict) else {}
+    dsr = statistical.get("dsrProbability", breakdown.get("deflatedSharpeProbability"))
+    spa = statistical.get("spaPValue")
     evidence = {
         "nTrials": trials,
         "pbo": pbo,
         "deflatedSharpeProbability": dsr,
+        "spaPValue": spa,
         "evaluatedCandidates": summary.get("evaluatedCandidateCount"),
     }
     if trials is None:
@@ -517,16 +632,28 @@ def _review_fusion_search(summary, subject, candidates, thresholds) -> dict[str,
             "样本内冠军很可能只是选择偏差的产物。",
             evidence, "缩小搜索空间或延长样本外区间",
         )
-    if isinstance(dsr, (int, float)) and float(dsr) < thresholds.min_deflated_sharpe:
+    if not isinstance(dsr, (int, float)) or not isinstance(spa, (int, float)):
         return _finding(
-            "fusion_search", "warn", "收缩后显著性偏低",
+            "fusion_search", "unknown", "DSR / SPA 证据不完整",
+            "PBO 不能替代多重试验收缩后的 DSR 与 SPA；缺失任一项都不能记为通过。",
+            evidence, "使用 promotion_gate.json 持久化完整统计证据",
+        )
+    if float(dsr) < thresholds.min_deflated_sharpe:
+        return _finding(
+            "fusion_search", "blocked", "收缩后显著性未达标",
             f"按 {trials} 次试验收缩后的 Sharpe 显著性只有 {float(dsr):.3f}，"
             f"低于 {thresholds.min_deflated_sharpe:.2f}。",
             evidence, "减少试验或提高单候选质量",
         )
+    if float(spa) > thresholds.max_spa_pvalue:
+        return _finding(
+            "fusion_search", "blocked", "SPA 未排除数据挖掘偏差",
+            f"SPA p-value {float(spa):.3f} 高于 {thresholds.max_spa_pvalue:.2f}。",
+            evidence, "缩小候选集合并在更长的样本外窗口复核",
+        )
     return _finding(
         "fusion_search", "pass", "统计口径成立",
-        f"{trials} 次试验，PBO {float(pbo):.3f}。",
+        f"{trials} 次试验，PBO {float(pbo):.3f}，DSR {float(dsr):.3f}，SPA {float(spa):.3f}。",
         evidence, "无",
     )
 
@@ -594,13 +721,90 @@ def _review_execution_realism(summary, subject, candidates, thresholds) -> dict[
     )
 
 
+def _review_challenger(summary, subject, candidates, thresholds) -> dict[str, Any]:
+    controls = [item for item in candidates if item.get("isControl") is True]
+    random_controls = [
+        item for item in controls if str(item.get("scheme") or "").startswith("random")
+    ]
+    single_controls = [
+        item for item in controls if item.get("scheme") == "single_factor"
+    ]
+    evidence = {
+        "controlCount": len(controls),
+        "randomControlCount": len(random_controls),
+        "singleFactorControlCount": len(single_controls),
+        "selectedIsControl": (subject or {}).get("isControl"),
+    }
+    if not candidates:
+        return _finding(
+            "challenger", "unknown", "没有可挑战的候选集合",
+            "候选列表为空，挑战者无法比较冠军、基线与负面对照。",
+            evidence, "恢复完整候选产物",
+        )
+    if (subject or {}).get("isControl") is True:
+        return _finding(
+            "challenger", "warn", "对照组赢得本轮搜索",
+            "这是有效的负面研究结论，但对照组本身不应被包装成可晋级策略。",
+            evidence, "保留负面结论并停止本候选晋级",
+        )
+    if not controls:
+        return _finding(
+            "challenger", "blocked", "没有独立对照组",
+            "搜索只比较了拟合候选，没有随机或单因子基线，无法排除复杂度幻觉。",
+            evidence, "加入预注册随机对照与单因子基线后重跑",
+        )
+    if not random_controls or not single_controls:
+        return _finding(
+            "challenger", "warn", "挑战集合不完整",
+            "已有对照，但随机对照与单因子基线没有同时覆盖。",
+            evidence, "补齐缺失的一类对照后复核",
+        )
+    return _finding(
+        "challenger", "pass", "候选通过双重对照挑战",
+        f"已比较 {len(random_controls)} 个随机对照与 {len(single_controls)} 个单因子基线。",
+        evidence, "无",
+    )
+
+
+def _review_compliance(summary, subject, candidates, thresholds) -> dict[str, Any]:
+    promotion = _promotion_gate(summary)
+    evidence = {
+        "promotionGatePresent": promotion is not None,
+        "researchOnly": promotion.get("researchOnly") if promotion else None,
+        "productionEligible": promotion.get("productionEligible") if promotion else None,
+        "stage4Governed": promotion.get("stage4Governed") if promotion else None,
+        "productionBlockers": promotion.get("productionBlockers") if promotion else None,
+    }
+    if promotion is None:
+        return _finding(
+            "compliance", "unknown", "研究/生产边界证据缺失",
+            "没有 promotion_gate.json，无法确认该产物是否明确禁止 production/live 使用。",
+            evidence, "生成研究晋级门并保留 production blockers",
+        )
+    if promotion.get("researchOnly") is not True or promotion.get("productionEligible") is not False:
+        return _finding(
+            "compliance", "blocked", "研究产物出现越权声明",
+            "本层产物必须显式 researchOnly=true 且 productionEligible=false。",
+            evidence, "撤销越权状态并走完整 Stage-4 独立认证",
+        )
+    return _finding(
+        "compliance", "pass", "研究与生产权限已隔离",
+        "该运行明确是 research-only，并保留了进入生产前仍需解决的阻塞项。",
+        evidence, "不得把本裁决解释为 live 授权",
+    )
+
+
 def _review_governance(summary, subject, candidates, thresholds) -> dict[str, Any]:
     generated = summary.get("generatedAt")
+    promotion = _promotion_gate(summary)
     evidence = {
         "generatedAt": generated,
         "mode": "RESEARCH",
         "liveIntent": False,
         "candidateIsControl": bool((subject or {}).get("isControl")),
+        "researchPromotionEligible": (
+            promotion.get("researchPromotionEligible") if promotion else None
+        ),
     }
     if (subject or {}).get("isControl"):
         return _finding(
@@ -609,14 +813,20 @@ def _review_governance(summary, subject, candidates, thresholds) -> dict[str, An
             "（拟合方案没有赢过基线），但它不构成可晋级的策略。",
             evidence, "接受该负面结论，或更换因子集合重跑",
         )
-    if not generated:
+    if not generated or promotion is None:
         return _finding(
-            "governance", "unknown", "产物缺少生成时间",
-            "无法把该结论固定到审计链上。", evidence, "重新运行搜索",
+            "governance", "unknown", "主席缺少完整审计证据",
+            "生成时间或研究晋级门缺失，无法形成公司级决议。", evidence, "重新运行搜索",
+        )
+    if promotion.get("researchPromotionEligible") is not True:
+        return _finding(
+            "governance", "blocked", "研究晋级门未通过",
+            "统计或 PIT/基准/holdout 门未全部通过，CIO 不得将候选提交到人工晋级 Gate。",
+            evidence, "按 promotion_gate.json 的 blockers 修复后重跑",
         )
     return _finding(
-        "governance", "pass", "研究态、无实盘意图",
-        "本产物处于 RESEARCH 模式，未产生任何订单意图，可进入人工 Gate。",
+        "governance", "pass", "主席同意提交人工 Gate",
+        "各角色的结构化裁决可供人工复核；该决议仍处于 RESEARCH，未产生任何订单意图。",
         evidence, "人工复核后决定是否晋级",
     )
 
@@ -685,6 +895,37 @@ def _gate(result: dict[str, Any], name: str) -> dict[str, Any] | None:
     return None
 
 
+def _run_data_acquisition(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    stages = result.get("stages") or []
+    dataset = next(
+        (stage for stage in stages if isinstance(stage, dict) and stage.get("id") == "dataset"),
+        None,
+    )
+    evidence = {
+        "datasetPresent": dataset.get("present") if dataset else None,
+        "datasetPath": dataset.get("path") if dataset else None,
+        "datasetSizeBytes": dataset.get("sizeBytes") if dataset else None,
+        "artifactCount": len(result.get("artifacts") or []),
+    }
+    if dataset is None or dataset.get("present") is not True:
+        return _finding(
+            "data_acquisition", "unknown", "训练数据集产物缺失",
+            "运行目录没有 dataset/training_dataset.parquet，无法把后续结果绑定到输入快照。",
+            evidence, "恢复数据集产物与其 manifest 后重新提交评审",
+        )
+    if not isinstance(dataset.get("sizeBytes"), int) or dataset["sizeBytes"] <= 0:
+        return _finding(
+            "data_acquisition", "blocked", "训练数据集为空",
+            "文件存在但没有有效字节，不能作为采集完成的证据。",
+            evidence, "检查采集任务与落盘权限后重跑",
+        )
+    return _finding(
+        "data_acquisition", "pass", "训练数据快照已落盘",
+        "下游运行可追溯到非空的训练数据集产物。",
+        evidence, "无",
+    )
+
+
 def _run_data_quality(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
     pit = _gate(result, "no_pit_violations")
     mock = _gate(result, "no_mock_or_synthetic")
@@ -710,6 +951,28 @@ def _run_data_quality(result: dict[str, Any], thresholds: CouncilThresholds) -> 
         "data_quality", "pass", "PIT 与真实数据校验通过",
         f"零 PIT 违规，非合成数据，训练覆盖 {evidence['trainingSymbols']} 个标的。",
         evidence, "无",
+    )
+
+
+def _run_microstructure(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    backtest = result.get("backtest") or {}
+    orders = backtest.get("orderCount")
+    skipped = backtest.get("skippedOrderCount")
+    evidence = {
+        "orderCount": orders,
+        "skippedOrderCount": skipped,
+        "microstructureArtifact": backtest.get("microstructureSourcePath"),
+    }
+    if orders is None:
+        return _finding(
+            "microstructure", "unknown", "缺少市场时钟与撮合证据",
+            "没有回测委托记录，无法确认研究是否至少遵循日频交易时钟。",
+            evidence, "完成严格 A 股回测；日内策略另需盘口证据",
+        )
+    return _finding(
+        "microstructure", "warn", "日频约束已覆盖，日内能力未认证",
+        "当前证据只支持日频订单约束；盘口队列、延迟与冲击曲线仍不在本次认证范围。",
+        evidence, "保持日频声明；提出日内能力前补做微观结构验证",
     )
 
 
@@ -794,15 +1057,35 @@ def _run_search_statistics(result: dict[str, Any], thresholds: CouncilThresholds
             evidence, "减少候选数量或延长观测窗口后重新预注册",
         )
     pbo = governance.get("pbo")
-    if isinstance(pbo, (int, float)) and pbo > thresholds.max_pbo:
+    dsr = governance.get("dsrProbability")
+    spa = governance.get("spaPValue")
+    if not all(isinstance(value, (int, float)) for value in (pbo, dsr, spa)):
         return _finding(
-            "fusion_search", "warn", "PBO 高于议事会内部阈值",
-            f"PBO {pbo:.4f} 高于议事会阈值 {thresholds.max_pbo}，虽通过运行自身闸门但仍需说明。",
-            evidence, "在研究记录中说明试验计数与选择过程",
+            "fusion_search", "unknown", "统计闸门数值不完整",
+            "accepted 标记不能替代 PBO、DSR 与 SPA 三项实测值。",
+            evidence, "重新生成 selection_governance.json",
+        )
+    if pbo > thresholds.max_pbo:
+        return _finding(
+            "fusion_search", "blocked", "PBO 高于公司阈值",
+            f"PBO {pbo:.4f} 高于 {thresholds.max_pbo}。",
+            evidence, "减少试验次数或延长样本外窗口",
+        )
+    if dsr < thresholds.min_deflated_sharpe:
+        return _finding(
+            "fusion_search", "blocked", "DSR 低于公司阈值",
+            f"DSR {dsr:.4f} 低于 {thresholds.min_deflated_sharpe}。",
+            evidence, "提高样本外稳定性后重新预注册",
+        )
+    if spa > thresholds.max_spa_pvalue:
+        return _finding(
+            "fusion_search", "blocked", "SPA 未通过公司阈值",
+            f"SPA p-value {spa:.4f} 高于 {thresholds.max_spa_pvalue}。",
+            evidence, "降低数据挖掘自由度后重跑",
         )
     return _finding(
         "fusion_search", "pass", "统计闸门通过",
-        f"PBO {pbo}，DSR {governance.get('dsrProbability')}，"
+        f"PBO {pbo}，DSR {dsr}，SPA {spa}，"
         f"计入 {governance.get('cumulativeTrials')} 次试验。",
         evidence, "无",
     )
@@ -865,6 +1148,68 @@ def _run_execution_realism(result: dict[str, Any], thresholds: CouncilThresholds
         "execution_realism", "pass", "撮合约束下可执行",
         f"{orders} 笔成交，{skipped} 笔被约束跳过。",
         evidence, "无",
+    )
+
+
+def _run_challenger(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    candidates = [item for item in (result.get("candidates") or []) if isinstance(item, dict)]
+    selected = [item for item in candidates if item.get("selected") is True]
+    trials = (result.get("governance") or {}).get("cumulativeTrials")
+    evidence = {
+        "candidateCount": len(candidates),
+        "selectedCount": len(selected),
+        "cumulativeTrials": trials,
+    }
+    if not candidates:
+        return _finding(
+            "challenger", "unknown", "候选与反事实未落盘",
+            "没有逐候选 paper report，无法独立复核为什么选择冠军。",
+            evidence, "保留每个候选的成本后报告",
+        )
+    if len(candidates) < 2 or len(selected) != 1:
+        return _finding(
+            "challenger", "blocked", "候选挑战协议不成立",
+            "至少需要一个替代候选，且必须恰好有一个被选候选。",
+            evidence, "补齐对照候选并固定唯一选择结果",
+        )
+    return _finding(
+        "challenger", "pass", "冠军可与替代候选逐项复核",
+        f"保留 {len(candidates)} 个候选，唯一冠军及其成本后结果均可追溯。",
+        evidence, "无",
+    )
+
+
+def _run_compliance(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+    conclusion = result.get("conclusion") or {}
+    pipeline = result.get("pipelineReport") or {}
+    live_claims = {
+        key: value
+        for key, value in pipeline.items()
+        if any(token in str(key).upper() for token in ("LIVE", "PRODUCTION"))
+        and value not in (None, False, "", "disabled", "research_only")
+    }
+    evidence = {
+        "outcome": conclusion.get("outcome"),
+        "promotable": conclusion.get("promotable"),
+        "liveOrProductionClaims": live_claims,
+        "acceptanceStatus": pipeline.get("QUANT_ACCEPTANCE_STATUS"),
+    }
+    if live_claims:
+        return _finding(
+            "compliance", "blocked", "研究报告包含 production/live 声明",
+            "策略流水线只能产出 research/paper 证据，不能在本层授予生产权限。",
+            evidence, "删除越权声明并提交独立生产认证",
+        )
+    if conclusion.get("outcome") in {"no_evidence", "incomplete"}:
+        return _finding(
+            "compliance", "unknown", "合规边界证据不完整",
+            "运行尚未形成完整研究结论，无法完成模型风险披露。",
+            evidence, "补齐完整产物后复核",
+        )
+    return _finding(
+        "compliance", "warn", "仅允许 research/paper 使用",
+        "未发现 production/live 授权，但流水线也不具备授予该权限的能力；本裁决只确认研究边界。",
+        evidence, "保持禁用 live；需要生产能力时走独立审批",
     )
 
 

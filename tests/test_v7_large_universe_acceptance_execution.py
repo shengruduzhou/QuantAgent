@@ -102,8 +102,28 @@ def test_paper_report_separates_generation_and_quant_acceptance(tmp_path):
 
     market = pd.DataFrame(
         [
-            {"trade_date": "2026-01-02", "symbol": "000001.SZ", "close": 10.0, "volume": 1_000_000},
-            {"trade_date": "2026-01-05", "symbol": "000001.SZ", "close": 10.2, "volume": 1_000_000},
+            {
+                "trade_date": "2026-01-02",
+                "symbol": "000001.SZ",
+                "close": 10.0,
+                "volume": 1_000_000,
+                "amount": 10_000_000.0,
+                "is_suspended": False,
+                "is_st": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            },
+            {
+                "trade_date": "2026-01-05",
+                "symbol": "000001.SZ",
+                "close": 10.2,
+                "volume": 1_000_000,
+                "amount": 10_200_000.0,
+                "is_suspended": False,
+                "is_st": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            },
         ]
     )
     weights = pd.DataFrame({"000001.SZ": [0.10, 0.0]}, index=pd.to_datetime(["2026-01-02", "2026-01-05"]))

@@ -67,10 +67,9 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
         universe=config.universe,
     )
     result = QlibProvider(str(provider_path), config.region).daily_ohlcv(request)
-    # Offline panel build: the trailing edge's close has `available_at = end_date + 1`
-    # by construction (close-available-next-day). That is not a PIT leak — the row
-    # simply isn't actionable at end_date. The inference-time PIT check belongs in
-    # the dataset/inference layer, not here.
+    # Raw daily bars are known at their own session close.  The schema check
+    # enforces that coarse-date availability contract; execution latency is
+    # applied later by the simulator rather than encoded as a guessed date.
     report = validate_qlib_market_schema(result.frame, as_of_date=None)
     if report["status"] != "passed":
         raise ValueError(f"Qlib market schema failed: {report}")
@@ -111,7 +110,7 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
             "region": config.region,
             "feature_rows": int(feature_rows),
             "schema_report": report,
-            "available_at_policy": "next-trading-row availability for close-derived features",
+            "available_at_policy": "raw close-derived rows use available_at == trade_date",
         },
     )
     manifest_path = (lake.manifests / "market_panel.json") if lake else (legacy_root / "market_panel_manifest.json")

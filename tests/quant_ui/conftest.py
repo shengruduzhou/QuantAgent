@@ -385,6 +385,29 @@ def _write_fusion_fixture(runtime: Path) -> None:
         "2025-12-31,1.19,1.09,0.97\n",
         encoding="utf-8",
     )
+    (run / "promotion_gate.json").write_text(
+        json.dumps({
+            "promotionEligible": False,
+            "researchPromotionEligible": True,
+            "productionEligible": False,
+            "stage4Governed": False,
+            "researchOnly": True,
+            "productionBlockers": [
+                "requires independent Stage-4 lineage and executable certification",
+            ],
+            "statisticalEvidence": {
+                "preferred": "ic_weighted",
+                "dsrProbability": 0.96,
+                "spaPValue": 0.01,
+            },
+            "checks": [
+                {"name": "pbo", "passed": True, "observed": 0.18, "required": "<= 0.25"},
+                {"name": "dsr_probability", "passed": True, "observed": 0.96, "required": ">= 0.95"},
+                {"name": "spa_p_value", "passed": True, "observed": 0.01, "required": "<= 0.05"},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (run / "manifest.json").write_text(
         json.dumps({
             "artifact": "factor_fusion_search",
@@ -402,6 +425,7 @@ def _write_fusion_fixture(runtime: Path) -> None:
                 "candidates": "fusion_candidates.json",
                 "ranking": "fusion_ranking.json",
                 "nav": "fusion_nav.csv",
+                "promotionGate": "promotion_gate.json",
             },
         }, ensure_ascii=False),
         encoding="utf-8",

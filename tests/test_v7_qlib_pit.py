@@ -78,3 +78,26 @@ def test_validate_qlib_market_schema_flags_future_available_at():
     report = validate_qlib_market_schema(frame, as_of_date="2025-12-31")
     assert report["pit_violation_count"] >= 1
     assert report["status"] == "failed"
+
+
+def test_validate_qlib_market_schema_rejects_missing_and_late_availability():
+    missing = _synthetic_panel()
+    missing.loc[0, "available_at"] = pd.NaT
+    missing_report = validate_qlib_market_schema(missing)
+
+    late = _synthetic_panel()
+    late.loc[0, "available_at"] = pd.to_datetime(late.loc[0, "trade_date"]) + pd.Timedelta(days=1)
+    late_report = validate_qlib_market_schema(late)
+
+    assert missing_report["status"] == "failed"
+    assert missing_report["invalid_available_at_count"] == 1
+    assert late_report["status"] == "failed"
+    assert late_report["available_after_trade_date_count"] == 1
+
+
+def test_validate_qlib_market_schema_rejects_duplicate_session_symbol_keys():
+    frame = pd.concat([_synthetic_panel(), _synthetic_panel().iloc[[0]]], ignore_index=True)
+    report = validate_qlib_market_schema(frame)
+
+    assert report["status"] == "failed"
+    assert report["duplicate_key_count"] == 2

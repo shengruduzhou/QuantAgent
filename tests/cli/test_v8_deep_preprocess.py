@@ -10,7 +10,11 @@ from quantagent.cli.v8_deep import (
     _cross_sectional_normalize,
     _filter_by_regime_dates,
     _normalize_label_per_date,
+    _select_feature_columns,
+    _split_train_validation_test,
+    _validate_training_dataset_contract,
 )
+from quantagent.training.ft_transformer_trainer_impl import _apply_feature_preprocessing
 
 
 def _toy_frame():
@@ -87,6 +91,26 @@ def test_candidate_features_include_cicc_and_agent_selection_scores():
     assert "technical_agent_score" in out
 
 
+def test_candidate_alpha_ranges_are_numeric_not_lexicographic():
+    columns = [
+        "symbol", "trade_date", "forward_return_5d",
+        "alpha001", "alpha060", "alpha061", "alpha119", "alpha120",
+        "alpha121", "alpha181", "alpha182", "alpha999",
+    ]
+
+    short = _candidate_feature_names(columns, "short_5d")
+    mid = _candidate_feature_names(columns, "mid_5d_30d")
+    long = _candidate_feature_names(columns, "long_30d_120d")
+
+    assert {"alpha001", "alpha060"}.issubset(short)
+    assert "alpha061" not in short
+    assert {"alpha060", "alpha061", "alpha119", "alpha120"}.issubset(mid)
+    assert "alpha121" not in mid
+    assert {"alpha120", "alpha121", "alpha181"}.issubset(long)
+    assert "alpha182" not in long
+    assert "alpha999" not in long
+
+
 def test_candidate_features_core30_uses_only_core_columns():
     columns = [
         "symbol", "trade_date", "forward_return_5d", "alpha001",
@@ -112,3 +136,121 @@ def test_filter_by_regime_dates_keeps_only_requested_regime():
     out = _filter_by_regime_dates(panel, regimes, regimes=["bull"], min_rows=1)
 
     assert out["trade_date"].tolist() == [dates[0], dates[2]]
+
+
+def test_training_contract_and_split_keep_final_test_out_of_validation():
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    frame = pd.DataFrame({
+        "symbol": ["A"] * len(dates),
+        "trade_date": dates,
+        "available_at": dates,
+        "forward_return_5d": np.linspace(-0.02, 0.03, len(dates)),
+        "label_end_5d": dates + pd.offsets.BDay(2),
+        "point_in_time_valid": [True] * len(dates),
+        "alpha001": np.arange(len(dates), dtype=float),
+    })
+    _validate_training_dataset_contract(
+        frame,
+        label_col="forward_return_5d",
+        label_end_col="label_end_5d",
+    )
+
+    train, validation, test, manifest = _split_train_validation_test(
+        frame,
+        train_end=dates[24],
+        embargo_days=2,
+        purge_days=3,
+        validation_days=5,
+        test_end=dates[-1],
+        label_col="forward_return_5d",
+        label_end_col="label_end_5d",
+        session_dates=dates,
+    )
+
+    assert train["trade_date"].max() < validation["trade_date"].min()
+    assert validation["trade_date"].max() < test["trade_date"].min()
+    assert (train["label_end_5d"] < validation["trade_date"].min()).all()
+    assert (validation["label_end_5d"] < test["trade_date"].min()).all()
+    assert manifest["semantics"] == "train_validation_untouched_test_v1_label_end_purged"
+
+
+def test_training_contract_rejects_late_availability():
+    date = pd.Timestamp("2024-01-02")
+    frame = pd.DataFrame({
+        "symbol": ["A"],
+        "trade_date": [date],
+        "available_at": [date + pd.Timedelta(days=1)],
+        "point_in_time_valid": [True],
+        "forward_return_5d": [0.01],
+        "label_end_5d": [date + pd.Timedelta(days=7)],
+    })
+
+    with np.testing.assert_raises_regex(ValueError, "available_at after trade_date"):
+        _validate_training_dataset_contract(
+            frame,
+            label_col="forward_return_5d",
+            label_end_col="label_end_5d",
+        )
+
+
+def test_training_contract_requires_explicit_pit_verdict():
+    date = pd.Timestamp("2024-01-02")
+    frame = pd.DataFrame({
+        "symbol": ["A"],
+        "trade_date": [date],
+        "available_at": [date],
+        "forward_return_5d": [0.01],
+        "label_end_5d": [date + pd.Timedelta(days=7)],
+    })
+
+    with np.testing.assert_raises_regex(ValueError, "point_in_time_valid"):
+        _validate_training_dataset_contract(
+            frame,
+            label_col="forward_return_5d",
+            label_end_col="label_end_5d",
+        )
+
+
+def test_untouched_test_coverage_cannot_select_a_feature():
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    frame = pd.DataFrame({
+        "symbol": ["A"] * len(dates),
+        "trade_date": dates,
+        "available_at": dates,
+        "point_in_time_valid": [True] * len(dates),
+        "forward_return_5d": np.linspace(-0.02, 0.03, len(dates)),
+        "label_end_5d": dates + pd.offsets.BDay(2),
+        # Only the future partition has enough coverage. A leaky full-frame
+        # schema selector would include this feature.
+        "alpha001": [np.nan] * 19 + list(np.arange(21, dtype=float)),
+        "momentum_5d": np.arange(len(dates), dtype=float),
+    })
+    train, _validation, _test, _manifest = _split_train_validation_test(
+        frame,
+        train_end=dates[24],
+        embargo_days=2,
+        purge_days=3,
+        validation_days=5,
+        test_end=dates[-1],
+        label_col="forward_return_5d",
+        label_end_col="label_end_5d",
+        session_dates=dates,
+    )
+
+    assert "alpha001" in _select_feature_columns(frame, "short_5d")
+    assert "alpha001" not in _select_feature_columns(train, "short_5d")
+
+
+def test_artifact_preprocessing_replays_cross_sectional_rank():
+    frame = _toy_frame()
+    contract = {
+        "method": "rank",
+        "group_by": "trade_date",
+        "normalized_columns": ["f1", "f2"],
+        "passthrough_columns": [],
+    }
+
+    replayed = _apply_feature_preprocessing(frame, ("f1", "f2"), contract)
+    expected = _cross_sectional_normalize(frame.copy(), ["f1", "f2"], method="rank")
+
+    assert np.allclose(replayed[["f1", "f2"]], expected[["f1", "f2"]])

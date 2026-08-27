@@ -240,7 +240,43 @@ def _toy_training_frame(rows: int = 200, seed: int = 0) -> pd.DataFrame:
                     "forward_return_5d": ret * 5,
                 }
             )
-    return pd.DataFrame(records)
+    frame = pd.DataFrame(records)
+    date_lookup = pd.Series(pd.DatetimeIndex(sorted(frame["trade_date"].unique())))
+    for horizon in (1, 5):
+        positions = date_lookup.searchsorted(pd.to_datetime(frame["trade_date"])) + horizon
+        positions = np.minimum(positions, len(date_lookup) - 1)
+        frame[f"label_end_{horizon}d"] = date_lookup.iloc[positions].to_numpy()
+    return frame
+
+
+def test_ft_checkpoint_selection_is_inner_and_label_end_purged():
+    from quantagent.training.v7_experiment import _split_ft_checkpoint_validation
+
+    dates = pd.date_range("2025-01-02", periods=12, freq="B")
+    frame = pd.DataFrame(
+        {
+            "symbol": "A",
+            "trade_date": dates,
+            "feature_a": np.arange(len(dates), dtype=float),
+            "forward_return_5d": 0.01,
+            "label_end_5d": pd.Series(dates).shift(-2).fillna(dates[-1]).to_numpy(),
+        }
+    )
+
+    fit, checkpoint, manifest = _split_ft_checkpoint_validation(
+        frame,
+        (5,),
+        validation_size_days=3,
+        min_training_rows=5,
+    )
+
+    checkpoint_start = pd.to_datetime(checkpoint["trade_date"]).min()
+    assert pd.to_datetime(fit["label_end_5d"]).max() < checkpoint_start
+    assert set(pd.to_datetime(fit["trade_date"])).isdisjoint(
+        set(pd.to_datetime(checkpoint["trade_date"]))
+    )
+    assert manifest["checkpoint_selection_source"] == "inner_train_validation"
+    assert manifest["oos_evaluation_source"] == "outer_walk_forward_validation"
 
 
 def test_train_alpha_lightgbm_downgrade_blocks_without_flag(tmp_path, monkeypatch):

@@ -110,6 +110,7 @@ class FusionAdapter:
         directory = self._directory(run_id)
         summary = read_json(directory / "fusion_summary.json", {}) or {}
         manifest = read_json(directory / "manifest.json", {}) or {}
+        promotion_gate = read_json(directory / "promotion_gate.json", None)
         ranking = read_json(directory / "fusion_ranking.json", []) or []
         candidates = read_json(directory / "fusion_candidates.json", []) or []
         frontier = set(summary.get("frontier") or [])
@@ -137,6 +138,7 @@ class FusionAdapter:
             "path": project_relative(self.settings, directory),
             "summary": summary,
             "manifest": manifest,
+            "promotionGate": promotion_gate if isinstance(promotion_gate, dict) else None,
             "ranking": ranking,
             "candidates": enriched,
         }

@@ -237,8 +237,6 @@ def run_ablation(
     nothing at all.
     """
     from dataclasses import replace
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.vec_env import DummyVecEnv
 
     cfg = config or AblationConfig()
     sink = Path(results_path) if results_path is not None else None
@@ -266,6 +264,8 @@ def run_ablation(
     action_dim = int(probe.action_space.shape[0])
 
     rows: list[dict] = list(rows_done)
+    ppo_class = None
+    dummy_vec_env_class = None
     for arm in arms:
         for seed in cfg.seeds:
             if (arm.name, int(seed)) in completed:
@@ -281,6 +281,19 @@ def run_ablation(
             elif arm.kind == "random":
                 policy = random_policy(action_dim, seed)
             elif arm.kind == "trained":
+                if ppo_class is None or dummy_vec_env_class is None:
+                    try:
+                        from stable_baselines3 import PPO as _PPO
+                        from stable_baselines3.common.vec_env import (
+                            DummyVecEnv as _DummyVecEnv,
+                        )
+                    except ImportError as exc:
+                        raise ImportError(
+                            "trained reward-ablation arms require stable_baselines3; "
+                            "zero/random controls do not"
+                        ) from exc
+                    ppo_class = _PPO
+                    dummy_vec_env_class = _DummyVecEnv
                 train_config = arm.env_config(train_base)
 
                 def factory(rank: int):
@@ -303,8 +316,8 @@ def run_ablation(
                 # process and the transfer fails outright. The environment's
                 # own step is a 40-wide dot product, so the policy forward pass
                 # dominates and batching in-process still gives PPO its speedup.
-                vec = DummyVecEnv([factory(i) for i in range(cfg.n_envs)])
-                model = PPO("MlpPolicy", vec, device=cfg.device, seed=seed)
+                vec = dummy_vec_env_class([factory(i) for i in range(cfg.n_envs)])
+                model = ppo_class("MlpPolicy", vec, device=cfg.device, seed=seed)
                 model.learn(total_timesteps=int(cfg.timesteps), progress_bar=False)
                 vec.close()
 

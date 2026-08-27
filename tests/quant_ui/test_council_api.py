@@ -44,6 +44,7 @@ def test_roster_declares_every_role_with_a_veto_scope(quant_ui_settings) -> None
     app = create_app(quant_ui_settings)
     payload = request(app, "GET", "/api/council/roster").json()
     roles = payload["data"]["roles"]
+    assert len(roles) == 11
     assert len(roles) == len(COUNCIL_ROLES)
     for role in roles:
         assert role["vetoScope"], f"{role['id']} must declare what it can block"
@@ -53,7 +54,9 @@ def test_roster_declares_every_role_with_a_veto_scope(quant_ui_settings) -> None
 def test_roster_exposes_the_promotion_thresholds(quant_ui_settings) -> None:
     app = create_app(quant_ui_settings)
     thresholds = request(app, "GET", "/api/council/roster").json()["data"]["thresholds"]
-    assert thresholds["maxPbo"] == 0.5
+    assert thresholds["maxPbo"] == 0.25
+    assert thresholds["minDeflatedSharpe"] == 0.95
+    assert thresholds["maxSpaPValue"] == 0.05
     assert thresholds["minObservations"] == 60
 
 
@@ -142,6 +145,27 @@ def test_missing_trial_count_yields_unknown_and_blocks_a_clean_decision(quant_ui
     review = request(app, "GET", f"/api/council/review/fusion/{_run_id(app)}").json()["data"]
     assert _findings(review)["fusion_search"]["verdict"] == "unknown"
     assert review["decision"]["state"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_missing_promotion_gate_never_receives_compliance_clearance(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    run_dir = quant_ui_settings.runtime_root / "reports" / "fusion" / "fixture_search"
+    (run_dir / "promotion_gate.json").unlink()
+    review = request(app, "GET", f"/api/council/review/fusion/{_run_id(app)}").json()["data"]
+    assert _findings(review)["compliance"]["verdict"] == "unknown"
+    assert _findings(review)["governance"]["verdict"] == "unknown"
+    assert review["decision"]["state"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_dsr_below_company_bar_is_blocked(quant_ui_settings) -> None:
+    app = create_app(quant_ui_settings)
+    run_dir = quant_ui_settings.runtime_root / "reports" / "fusion" / "fixture_search"
+    gate = json.loads((run_dir / "promotion_gate.json").read_text(encoding="utf-8"))
+    gate["statisticalEvidence"]["dsrProbability"] = 0.94
+    (run_dir / "promotion_gate.json").write_text(json.dumps(gate), encoding="utf-8")
+    review = request(app, "GET", f"/api/council/review/fusion/{_run_id(app)}").json()["data"]
+    assert _findings(review)["fusion_search"]["verdict"] == "blocked"
+    assert review["decision"]["state"] == "BLOCKED"
 
 
 def test_overlapping_train_and_test_windows_are_blocked(quant_ui_settings) -> None:

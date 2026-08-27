@@ -173,6 +173,9 @@ def test_restart_finalises_from_the_supervisor_exit_code(quant_ui_settings) -> N
     status_path = quant_ui_settings.jobs_root / "job_done.status.json"
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    output_path = quant_ui_settings.project_root / COMMANDS["audit-u0-full-universe"]["fixed_outputs"][0]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("{}", encoding="utf-8")
     jm._persist()
 
     reloaded = JobManager(quant_ui_settings)
@@ -181,6 +184,81 @@ def test_restart_finalises_from_the_supervisor_exit_code(quant_ui_settings) -> N
         time.sleep(0.05)
     assert reloaded._jobs["job_done"].status == "succeeded"
     assert reloaded._jobs["job_done"].exitStatusObserved is True
+
+
+def test_zero_exit_without_declared_output_evidence_is_failed(quant_ui_settings) -> None:
+    """A process exit code is not evidence that its promised artifact exists."""
+    from services.quant_api.services.jobs import JobRecord, _now
+
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_no_output"] = JobRecord(
+        id="job_no_output", type="data", status="running",
+        commandId="audit-u0-full-universe", createdAt=_now(), statusPath=None,
+    )
+    status_path = quant_ui_settings.jobs_root / "job_no_output.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_no_output"].status == "running":
+        time.sleep(0.05)
+    record = reloaded._jobs["job_no_output"]
+    assert record.status == "failed"
+    assert record.failure["code"] == "output_evidence_missing"
+    assert record.exitStatusObserved is True
+
+
+def test_custom_output_replaces_fixed_default_for_completion_evidence(quant_ui_settings) -> None:
+    """A valid --output override must not also require the unused default path."""
+    from services.quant_api.services.jobs import JobRecord, _now
+
+    custom_output = quant_ui_settings.runtime_root / "custom" / "mt5_probe"
+    custom_output.mkdir(parents=True)
+    (custom_output / "capability_matrix.json").write_text("{}", encoding="utf-8")
+
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_custom_output"] = JobRecord(
+        id="job_custom_output",
+        type="data",
+        status="running",
+        commandId="probe-mt5-capability",
+        createdAt=_now(),
+        statusPath=None,
+        parameters={"output": str(custom_output)},
+    )
+    status_path = quant_ui_settings.jobs_root / "job_custom_output.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps({"state": "exited", "exitCode": 0}),
+        encoding="utf-8",
+    )
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_custom_output"].status == "running":
+        time.sleep(0.05)
+
+    record = reloaded._jobs["job_custom_output"]
+    assert record.status == "succeeded"
+    assert record.exitStatusObserved is True
+
+
+def test_zero_byte_file_does_not_make_output_directory_complete(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import _missing_output_evidence
+
+    output = quant_ui_settings.runtime_root / "empty_artifact_directory"
+    output.mkdir(parents=True)
+    (output / "placeholder.json").touch()
+
+    missing = _missing_output_evidence(
+        quant_ui_settings,
+        [str(output)],
+    )
+
+    assert missing == [f"{output}:empty_directory"]
 
 
 # --- progress / stage parsing ------------------------------------------------

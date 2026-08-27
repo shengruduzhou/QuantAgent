@@ -157,7 +157,7 @@ export function DataManagerWorkspace(): JSX.Element {
         await launch("record-tickflow-depth", { ...common, loop_seconds: 0, max_iterations: 1 });
       }
     } else if (providerId === "akshare_market") {
-      await launch("build-akshare-market-panel-v7", { ...common, start_date: startDate, end_date: endDate, output: outputPath.trim(), adjust: "qfq" });
+      await launch("build-akshare-market-panel-v7", { ...common, start_date: startDate, end_date: endDate, output: outputPath.trim(), adjust: "" });
     } else if (providerId === "qlib_local") {
       await launch("build-market-panel-v7", { symbols: symbols.trim(), start_date: startDate, end_date: endDate, provider_uri: providerUri.trim(), output_root: outputPath.trim(), region: "cn" });
     } else {
@@ -261,6 +261,7 @@ export function DataManagerWorkspace(): JSX.Element {
             {!(providerId === "tickflow" && tickflowMode !== "daily") ? <label className="field-row"><span>Runtime 输出</span><input value={outputPath} onChange={(event) => setOutputPath(event.target.value)} /><small>只接受 Runtime 内路径；分钟线和盘口沿用项目已有 canonical 目录。</small></label> : null}
             {needsNetwork ? <NetworkApproval checked={networkApproved} setChecked={setNetworkApproved} /> : <div className="local-provider-notice"><Database size={17} />本地 provider 不访问网络。</div>}
             {selectedModeNeedsKey && tickflowCredentialMissing ? <Notice tone="warning" text="分钟线与 Level-2 需要后端 TICKFLOW_API_KEY；凭据不会进入浏览器。" /> : null}
+            {providerId === "akshare_market" ? <Notice tone="info" text="AKShare 日线按 raw / 不复权口径获取；qfq/hfq 若无带 vintage 的复权因子会被 PIT 闸门阻塞。" /> : null}
             <ActionRow text="真实 provider 失败时任务失败，不会回退为 mock。"><button className="primary-button" disabled={!canAcquire || submitting} onClick={submitAcquire}><DownloadSimple size={16} />{submitting ? "提交中…" : "启动任务"}</button></ActionRow>
           </Panel>
         ) : null}

@@ -24,6 +24,7 @@ from quantagent.backtest.execution_timing import (
     execution_trace_sha256,
     validate_execution_trace,
 )
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 STRICT_CASH_ACCOUNT_SEMANTICS = "ashare_cash_long_only_v1_no_naked_stock_short"
@@ -39,6 +40,63 @@ class UnsupportedStockShortError(ValueError):
 
 class ExecutionTimingViolation(ValueError):
     """Raised when target/trace timing cannot prove the strict signal-date contract."""
+
+
+def validate_execution_market_panel(
+    target_weight_history: pd.DataFrame | None,
+    market_panel: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Fail closed unless every production fill input is measured and finite."""
+    if target_weight_history is None or target_weight_history.empty:
+        return market_panel.copy() if market_panel is not None else pd.DataFrame()
+    if market_panel is None or market_panel.empty:
+        raise ValueError("A-share execution requires a non-empty measured market panel")
+
+    required = {
+        "trade_date", "symbol", "close", "volume", "amount",
+        "is_suspended", "is_st", "is_limit_up", "is_limit_down",
+    }
+    missing = sorted(required.difference(market_panel.columns))
+    if missing:
+        raise ValueError(
+            "A-share execution requires measured execution fields; "
+            f"missing {missing}"
+        )
+
+    out, _ = ensure_tradability_flags(market_panel, require_measured=True)
+    trade_dates = pd.to_datetime(out["trade_date"], errors="coerce").dt.normalize()
+    symbols = out["symbol"].astype("string").str.strip()
+    close = pd.to_numeric(out["close"], errors="coerce")
+    volume = pd.to_numeric(out["volume"], errors="coerce")
+    amount = pd.to_numeric(out["amount"], errors="coerce")
+    if trade_dates.isna().any():
+        raise ValueError("A-share execution market panel has invalid trade_date values")
+    if symbols.isna().any() or symbols.eq("").any():
+        raise ValueError("A-share execution market panel has invalid symbol values")
+    if not np.isfinite(close.to_numpy(dtype=float)).all() or (close <= 0).any():
+        raise ValueError("A-share execution requires finite positive close prices")
+    if not np.isfinite(volume.to_numpy(dtype=float)).all() or (volume < 0).any():
+        raise ValueError(
+            "A-share execution requires finite non-negative measured volume"
+        )
+    if not np.isfinite(amount.to_numpy(dtype=float)).all() or (amount < 0).any():
+        raise ValueError(
+            "A-share execution requires finite non-negative measured amount"
+        )
+    duplicate = out.assign(
+        _trade_date=trade_dates,
+        _symbol=symbols,
+    ).duplicated(["_trade_date", "_symbol"], keep=False)
+    if duplicate.any():
+        raise ValueError(
+            "A-share execution market panel contains duplicate symbol/session rows"
+        )
+    out["trade_date"] = trade_dates
+    out["symbol"] = symbols.astype(str)
+    out["close"] = close
+    out["volume"] = volume
+    out["amount"] = amount
+    return out
 
 
 def validate_signal_dated_target_weights(
@@ -103,9 +161,13 @@ def simulate_ashare_target_weights(
     """Run the public production-grade simulator and verify its timing trace."""
     validate_signal_dated_target_weights(target_weight_history)
     validate_cash_account_target_weights(target_weight_history)
-    result = _impl.simulate_ashare_target_weights(
+    measured_panel = validate_execution_market_panel(
         target_weight_history,
         market_panel,
+    )
+    result = _impl.simulate_ashare_target_weights(
+        target_weight_history,
+        measured_panel,
         config,
     )
     metadata = dict(result.config or {})
@@ -155,5 +217,6 @@ __all__ = [
     "AShareExecutionSimulationResult",
     "validate_signal_dated_target_weights",
     "validate_cash_account_target_weights",
+    "validate_execution_market_panel",
     "simulate_ashare_target_weights",
 ]

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  ArrowRight,
   CheckCircle,
   Gavel,
   Prohibit,
@@ -40,6 +41,13 @@ const DECISION_META: Record<string, { label: string; tone: "success" | "warning"
   INSUFFICIENT_EVIDENCE: { label: "证据不足", tone: "warning" },
   BLOCKED: { label: "被否决", tone: "danger" },
 };
+
+const COMPANY_PHASES = [
+  { label: "01 数据准入", roleIds: ["data_acquisition", "data_quality", "microstructure"] },
+  { label: "02 研究验证", roleIds: ["factor_integrity", "model_validation", "fusion_search"] },
+  { label: "03 组合落地", roleIds: ["portfolio_risk", "execution_realism"] },
+  { label: "04 独立裁决", roleIds: ["challenger", "compliance", "governance"] },
+] as const;
 
 export function DecisionCouncilPage(): JSX.Element {
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -120,10 +128,10 @@ export function DecisionCouncilPage(): JSX.Element {
             label: "议事会结论",
             value: decisionMeta?.label ?? "—",
             detail: decision?.summary ?? "选择一个搜索产物后生成",
-            tone: decisionMeta?.tone === "danger" ? "danger" : decisionMeta?.tone === "warning" ? "warning" : "positive",
+            tone: !decisionMeta ? "neutral" : decisionMeta.tone === "danger" ? "danger" : decisionMeta.tone === "warning" ? "warning" : "positive",
             icon: Gavel,
           },
-          { label: "通过", value: String(counts.pass), detail: `${roles.length} 个角色`, tone: "positive", icon: CheckCircle },
+          { label: "通过", value: String(counts.pass), detail: `${roles.length} 个角色`, tone: counts.pass ? "positive" : "neutral", icon: CheckCircle },
           { label: "保留意见", value: String(counts.warn), detail: "不阻塞，但需复核", tone: "warning", icon: Warning },
           { label: "否决", value: String(counts.blocked), detail: "阻塞晋级，不阻塞研究", tone: counts.blocked ? "danger" : "neutral", icon: Prohibit },
           { label: "证据不足", value: String(counts.unknown), detail: "缺证据，不计为通过", tone: counts.unknown ? "warning" : "neutral", icon: Question },
@@ -136,6 +144,45 @@ export function DecisionCouncilPage(): JSX.Element {
           },
         ]}
       />
+      <span className="sr-only" role="status" aria-live="polite">
+        {decision ? `议事会结论：${decisionMeta?.label ?? decision.state}。${decision.summary}` : "议事会等待审查对象。"}
+      </span>
+
+      <WorkbenchPanel
+        eyebrow="COMPANY REVIEW CHAIN"
+        title={`${roles.length || 11} 个角色共同协商`}
+        meta="逐域否决 · 主席汇总 · 人工 Gate"
+      >
+        <ol className="council-company-flow" aria-label="公司共同决策流程">
+          {COMPANY_PHASES.map((phase, phaseIndex) => {
+            const phaseRoles = phase.roleIds
+              .map((roleId) => roles.find((role) => role.id === roleId))
+              .filter((role): role is NonNullable<typeof role> => Boolean(role));
+            if (!phaseRoles.length) return null;
+            return (
+              <li key={phase.label}>
+                <strong>{phase.label}</strong>
+                <div>
+                  {phaseRoles.map((role) => {
+                    const finding = findings.find((item) => item.roleId === role.id);
+                    const effective = finding?.override?.verdict ?? finding?.verdict ?? "unknown";
+                    const meta = VERDICT_META[effective];
+                    return (
+                      <span key={role.id} className="atlas-chip" data-tone={meta.tone}>
+                        {role.label} · {meta.label}
+                      </span>
+                    );
+                  })}
+                </div>
+                {phaseIndex < COMPANY_PHASES.length - 1 ? <ArrowRight aria-hidden="true" size={14} /> : null}
+              </li>
+            );
+          })}
+        </ol>
+        <TruthNotice tone="warning">
+          “共同协商”不是多数票：任一角色只能在自己的职责域内否决；unknown 不算通过；CIO 只汇总证据，不能绕过人工 Gate 或授予 live 权限。
+        </TruthNotice>
+      </WorkbenchPanel>
 
       <section className="atlas-split">
         <div className="atlas-stack">
@@ -160,7 +207,13 @@ export function DecisionCouncilPage(): JSX.Element {
                       <header>
                         <div>
                           <span className="atlas-eyebrow">{role?.vetoScope ?? "review"}</span>
-                          <strong>{roleLabel(finding.roleId)}</strong>
+                          <strong>
+                            <span aria-hidden="true">
+                              {String(findings.findIndex((item) => item.roleId === finding.roleId) + 1).padStart(2, "0")}
+                              /{String(roles.length).padStart(2, "0")} ·{" "}
+                            </span>
+                            <span>{roleLabel(finding.roleId)}</span>
+                          </strong>
                           <small>{role?.domain}</small>
                         </div>
                         <span className="atlas-chip" data-tone={meta.tone}>

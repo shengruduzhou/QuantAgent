@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { apiEventSourceUrl } from "../api/client";
 import type { JobSummary } from "../api/types";
 
-const TERMINAL = new Set(["succeeded", "failed", "cancelled", "rejected"]);
+const TERMINAL = new Set(["succeeded", "failed", "cancelled", "rejected", "blocked"]);
 const MAX_LINES = 800;
 
 export function useJobStream(jobId: string | null): {

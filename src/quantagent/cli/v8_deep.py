@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,12 @@ def _resolve_label_column(horizon_class: str) -> str:
         "mid_5d_30d": "forward_return_20d",
         "long_30d_120d": "forward_return_120d",
     }[horizon_class]
+
+
+def _alpha_number(name: str) -> int | None:
+    """Return the numeric Alpha id without relying on lexicographic ordering."""
+    matched = re.fullmatch(r"alpha(\d{1,3})", str(name), flags=re.IGNORECASE)
+    return int(matched.group(1)) if matched else None
 
 
 _FEATURE_COMMON_DROP = {
@@ -178,20 +185,20 @@ def _candidate_feature_names(
         )]
     if horizon_class == "short_5d":
         return [c for c in candidate if (
-            c.startswith("alpha") and c <= "alpha060"
+            (_alpha_number(c) is not None and 1 <= int(_alpha_number(c)) <= 60)
         ) or c in (
             "return_1d", "momentum_5d", "intraday_return",
             "volatility_20d", "volume_mean_20d", "amount_mean_20d",
         ) or c in _INTRADAY_FEATURES or _is_selection_feature(c)]
     if horizon_class == "mid_5d_30d":
         return [c for c in candidate if (
-            c.startswith("alpha") and "060" <= c <= "alpha120"
+            (_alpha_number(c) is not None and 60 <= int(_alpha_number(c)) <= 120)
         ) or c in (
             "momentum_20d", "volatility_20d", "amount_mean_20d", "volume_mean_20d",
         ) or c in _INTRADAY_FEATURES or _is_selection_feature(c)]
     # long_30d_120d
     return [c for c in candidate if (
-        c.startswith("alpha") and c >= "alpha100"
+        (_alpha_number(c) is not None and 120 <= int(_alpha_number(c)) <= 181)
     ) or c.startswith("idx_") or c in (
         "momentum_20d", "amount_mean_20d",
     ) or _is_selection_feature(c)]
@@ -224,19 +231,155 @@ def _select_feature_columns(
     return out
 
 
-def _split_by_date(
+def _validate_training_dataset_contract(
+    panel: pd.DataFrame,
+    *,
+    label_col: str,
+    label_end_col: str,
+) -> None:
+    """Fail closed on the PIT and forward-label fields used by this trainer."""
+    required = {
+        "symbol", "trade_date", "available_at", "point_in_time_valid",
+        label_col, label_end_col,
+    }
+    missing = sorted(required.difference(panel.columns))
+    if missing:
+        raise ValueError(f"training dataset is missing contract columns: {missing}")
+    if panel.empty:
+        raise ValueError("training dataset is empty")
+
+    trade_date = pd.to_datetime(panel["trade_date"], errors="coerce").dt.normalize()
+    available_at = pd.to_datetime(panel["available_at"], errors="coerce").dt.normalize()
+    label_end = pd.to_datetime(panel[label_end_col], errors="coerce").dt.normalize()
+    if trade_date.isna().any() or available_at.isna().any():
+        raise ValueError("training dataset contains invalid trade_date/available_at values")
+    if (available_at > trade_date).any():
+        count = int((available_at > trade_date).sum())
+        raise ValueError(
+            f"training dataset has {count} rows with available_at after trade_date; "
+            "features were not known at prediction time"
+        )
+    duplicate = panel.assign(_trade_date=trade_date).duplicated(["symbol", "_trade_date"], keep=False)
+    if duplicate.any():
+        raise ValueError(
+            "training dataset contains duplicate symbol/trade_date keys: "
+            f"{int(duplicate.sum())} rows"
+        )
+
+    label = pd.to_numeric(panel[label_col], errors="coerce")
+    observed = label.notna()
+    if observed.any():
+        if label_end[observed].isna().any():
+            raise ValueError(f"observed {label_col} rows require non-null {label_end_col}")
+        if (label_end[observed] < trade_date[observed]).any():
+            raise ValueError(f"{label_end_col} cannot precede trade_date")
+        if not np.isfinite(label[observed].to_numpy(dtype=float)).all():
+            raise ValueError(f"{label_col} contains non-finite values")
+
+    pit = panel["point_in_time_valid"]
+    valid = pit.map(lambda value: value is True or value == 1)
+    if not bool(valid.all()):
+        raise ValueError(
+            "training dataset contains point_in_time_valid != true; "
+            "unverified rows cannot enter governed training"
+        )
+
+
+def _split_train_validation_test(
     panel: pd.DataFrame,
     *,
     train_end: pd.Timestamp,
     embargo_days: int,
+    purge_days: int,
+    validation_days: int,
     test_end: pd.Timestamp,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    label_col: str,
+    label_end_col: str,
+    session_dates: pd.DatetimeIndex | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    """Create a validation window and an untouched final test window.
+
+    Label overlap is purged using the dataset's actual ``label_end_*`` value;
+    session-count embargo/purge gaps are reserved in addition to that proof.
+    """
+    if embargo_days < 0 or purge_days < 0:
+        raise ValueError("embargo_days and purge_days must be >= 0")
+    if validation_days < 1:
+        raise ValueError("validation_days must be >= 1")
     panel = panel.copy()
-    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
-    train = panel[panel["trade_date"] <= train_end]
-    test_start = train_end + pd.tseries.offsets.BDay(embargo_days)
-    test = panel[(panel["trade_date"] >= test_start) & (panel["trade_date"] <= test_end)]
-    return train.reset_index(drop=True), test.reset_index(drop=True)
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce").dt.normalize()
+    panel[label_end_col] = pd.to_datetime(panel[label_end_col], errors="coerce").dt.normalize()
+    sessions = pd.DatetimeIndex(
+        sorted(pd.to_datetime(session_dates if session_dates is not None else panel["trade_date"], errors="coerce").dropna().unique())
+    ).normalize()
+    pre_test = sessions[sessions <= pd.Timestamp(train_end).normalize()]
+    future = sessions[(sessions > pd.Timestamp(train_end).normalize()) & (sessions <= pd.Timestamp(test_end).normalize())]
+    if len(pre_test) <= validation_days + embargo_days:
+        raise ValueError(
+            "not enough sessions for a distinct train/validation split with embargo: "
+            f"have={len(pre_test)}, validation_days={validation_days}, embargo_days={embargo_days}"
+        )
+    gap = int(embargo_days) + int(purge_days)
+    if len(future) <= gap:
+        raise ValueError(
+            "not enough post-train sessions for the untouched test after purge+embargo: "
+            f"have={len(future)}, required>{gap}"
+        )
+
+    validation_start = pd.Timestamp(pre_test[-validation_days]).normalize()
+    validation_end = pd.Timestamp(pre_test[-1]).normalize()
+    validation_start_pos = len(pre_test) - validation_days
+    train_cutoff_pos = validation_start_pos - embargo_days - 1
+    if train_cutoff_pos < 0:
+        raise ValueError("embargo consumes the entire training window")
+    train_cutoff = pd.Timestamp(pre_test[train_cutoff_pos]).normalize()
+    test_start = pd.Timestamp(future[gap]).normalize()
+
+    has_label = pd.to_numeric(panel[label_col], errors="coerce").notna()
+    train = panel[
+        (panel["trade_date"] <= train_cutoff)
+        & has_label
+        & panel[label_end_col].notna()
+        & (panel[label_end_col] < validation_start)
+    ]
+    validation = panel[
+        (panel["trade_date"] >= validation_start)
+        & (panel["trade_date"] <= validation_end)
+        & has_label
+        & panel[label_end_col].notna()
+        & (panel[label_end_col] < test_start)
+    ]
+    test = panel[
+        (panel["trade_date"] >= test_start)
+        & (panel["trade_date"] <= pd.Timestamp(test_end).normalize())
+    ]
+    if train.empty or validation.empty or test.empty:
+        raise ValueError(
+            "purged split produced an empty partition: "
+            f"train={len(train)}, validation={len(validation)}, test={len(test)}"
+        )
+
+    manifest: dict[str, object] = {
+        "semantics": "train_validation_untouched_test_v1_label_end_purged",
+        "train_rows": int(len(train)),
+        "validation_rows": int(len(validation)),
+        "test_rows": int(len(test)),
+        "train_start": str(train["trade_date"].min().date()),
+        "train_end": str(train["trade_date"].max().date()),
+        "validation_start": str(validation_start.date()),
+        "validation_end": str(validation_end.date()),
+        "test_start": str(test_start.date()),
+        "test_end": str(test["trade_date"].max().date()),
+        "embargo_sessions": int(embargo_days),
+        "purge_sessions": int(purge_days),
+        "label_end_column": label_end_col,
+    }
+    return (
+        train.reset_index(drop=True),
+        validation.reset_index(drop=True),
+        test.reset_index(drop=True),
+        manifest,
+    )
 
 
 def _filter_by_regime_dates(
@@ -421,6 +564,14 @@ def train_v8_deep(
     train_end: str = typer.Option("2023-06-30"),
     test_end: str = typer.Option("2024-12-31"),
     embargo_days: int = typer.Option(20),
+    purge_days: Optional[int] = typer.Option(
+        None,
+        help="sessions reserved for forward-label purge before final test; defaults to the label horizon",
+    ),
+    validation_days: int = typer.Option(
+        63,
+        help="trailing pre-test sessions reserved for early stopping; final test remains untouched",
+    ),
     top_k: int = typer.Option(30),
     max_epochs: int = typer.Option(20),
     batch_size: int = typer.Option(8192),
@@ -480,7 +631,8 @@ def train_v8_deep(
         "dataset_path": str(dataset_path),
         "silver_panel_path": str(silver_panel_path),
         "train_start": train_start, "train_end": train_end, "test_end": test_end,
-        "embargo_days": embargo_days, "top_k": top_k,
+        "embargo_days": embargo_days, "purge_days": purge_days,
+        "validation_days": validation_days, "top_k": top_k,
         "max_epochs": max_epochs, "batch_size": batch_size,
         "d_token": d_token, "n_blocks": n_blocks, "n_heads": n_heads,
         "dates_per_step": dates_per_step, "train_micro_batch": train_micro_batch,
@@ -495,6 +647,9 @@ def train_v8_deep(
 
     # ── 1. Load + filter dataset ───────────────────────────────────────
     label_col = _resolve_label_column(horizon_class)
+    label_end_col = label_col.replace("forward_return_", "label_end_")
+    primary_horizon = int(label_col.removeprefix("forward_return_").removesuffix("d"))
+    resolved_purge_days = primary_horizon if purge_days is None else int(purge_days)
     typer.echo(f"[{_ts()}] loading dataset → label={label_col}")
     sym_filter: list[str] | None = None
     if symbols:
@@ -516,13 +671,14 @@ def train_v8_deep(
             err=True,
         )
         raise typer.Exit(code=1)
-    read_cols = ["symbol", "trade_date"]
-    if "available_at" in all_names:
-        read_cols.append("available_at")
-    if label_col not in all_names:
-        typer.echo(f"[fatal] dataset lacks label column {label_col}", err=True)
+    read_cols = [
+        "symbol", "trade_date", "available_at", "point_in_time_valid",
+        label_col, label_end_col,
+    ]
+    missing_contract = [column for column in read_cols if column not in all_names]
+    if missing_contract:
+        typer.echo(f"[fatal] dataset lacks contract columns {missing_contract}", err=True)
         raise typer.Exit(code=1)
-    read_cols.append(label_col)
     read_cols += [c for c in candidate_feats if c not in read_cols]
     df = pd.read_parquet(dataset_path, columns=read_cols)
     # Downcast feature columns float64 → float32 to halve the footprint.
@@ -539,6 +695,7 @@ def train_v8_deep(
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     df = df[(df["trade_date"] >= pd.Timestamp(train_start))
             & (df["trade_date"] <= pd.Timestamp(test_end))].reset_index(drop=True)
+    session_dates = pd.DatetimeIndex(sorted(df["trade_date"].dropna().unique()))
     typer.echo(f"[{_ts()}] after date filter rows={len(df)}")
     if df.empty:
         typer.echo("[fatal] no rows after filtering", err=True)
@@ -571,15 +728,48 @@ def train_v8_deep(
             f"({len(df) / max(1, before):.1%} of date-filtered rows)"
         )
 
-    # Drop rows where the primary label is missing (no forward return)
-    df = df[df[label_col].notna()].reset_index(drop=True)
-    typer.echo(f"[{_ts()}] after label dropna rows={len(df)}")
-    if df.empty:
-        typer.echo(f"[fatal] no rows with non-null {label_col}", err=True)
-        raise typer.Exit(code=1)
+    try:
+        _validate_training_dataset_contract(
+            df,
+            label_col=label_col,
+            label_end_col=label_end_col,
+        )
+    except ValueError as exc:
+        typer.echo(f"[fatal] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
-    # ── 2. Feature subset for the horizon class ────────────────────────
-    feature_cols = _select_feature_columns(df, horizon_class, feature_policy=feature_policy)
+    # ── 2. Train / validation / untouched final test ───────────────────
+    try:
+        train_df, validation_df, test_df, split_manifest = _split_train_validation_test(
+            df,
+            train_end=pd.Timestamp(train_end),
+            embargo_days=embargo_days,
+            purge_days=resolved_purge_days,
+            validation_days=validation_days,
+            test_end=pd.Timestamp(test_end),
+            label_col=label_col,
+            label_end_col=label_end_col,
+            session_dates=session_dates,
+        )
+    except ValueError as exc:
+        typer.echo(f"[fatal] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    (output_dir / "split_manifest.json").write_text(
+        json.dumps(split_manifest, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    typer.echo(
+        f"[{_ts()}] train rows={len(train_df)}, validation rows={len(validation_df)}, "
+        f"untouched test rows={len(test_df)}"
+    )
+
+    # ── 3. Feature subset selected from training evidence only ─────────
+    # Coverage in the untouched test must not decide the model schema.
+    feature_cols = _select_feature_columns(
+        train_df,
+        horizon_class,
+        feature_policy=feature_policy,
+    )
     typer.echo(f"[{_ts()}] horizon={horizon_class} feature_cols={len(feature_cols)}")
     if feature_policy == "core30" and len(feature_cols) > 30:
         feature_cols = feature_cols[:30]
@@ -587,30 +777,28 @@ def train_v8_deep(
     if len(feature_cols) < 8:
         typer.echo(f"[warn] only {len(feature_cols)} features selected — check dataset coverage")
 
-    # ── 2b. Per-date cross-sectional feature normalisation (A) ─────────
-    # Leak-free: each trade_date is normalised within its own cross-section.
-    # Applied to the whole frame before the split so train / OOS / inference
-    # all receive the identical transform.
+    # ── 3a. Artifact-bound cross-sectional feature preprocessing ───────
+    preprocessing = {
+        "version": "cross_sectional_v1",
+        "method": cross_sectional_norm or "none",
+        "group_by": "trade_date",
+        "normalized_columns": [c for c in feature_cols if c not in _NO_CROSS_SECTIONAL_NORM],
+        "passthrough_columns": [c for c in feature_cols if c in _NO_CROSS_SECTIONAL_NORM],
+    }
     if cross_sectional_norm and cross_sectional_norm != "none":
-        typer.echo(f"[{_ts()}] cross-sectional feature normalisation: {cross_sectional_norm}")
-        df = _cross_sectional_normalize(df, feature_cols, method=cross_sectional_norm)
-
-    # ── 3. Train / OOS split by date ───────────────────────────────────
-    train_df, test_df = _split_by_date(
-        df, train_end=pd.Timestamp(train_end), embargo_days=embargo_days,
-        test_end=pd.Timestamp(test_end),
-    )
-    typer.echo(f"[{_ts()}] train rows={len(train_df)}, test rows={len(test_df)}")
-    if train_df.empty or test_df.empty:
-        typer.echo("[fatal] empty train or test split", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(f"[{_ts()}] artifact-bound cross-sectional normalisation: {cross_sectional_norm}")
+        train_df = _cross_sectional_normalize(train_df, feature_cols, method=cross_sectional_norm)
+        validation_df = _cross_sectional_normalize(
+            validation_df, feature_cols, method=cross_sectional_norm,
+        )
 
     # ── 3b. Per-date label normalisation (B) — train rows only ─────────
-    # The OOS label stays raw (backtest PnL uses raw panel returns); only
-    # the training target is winsorised+zscored per date.
+    # Train and validation use the same target semantics. The untouched test
+    # label stays raw and is never read by early stopping.
     if label_norm:
-        typer.echo(f"[{_ts()}] per-date label winsorise+zscore on {label_col}")
+        typer.echo(f"[{_ts()}] per-date label winsorise+zscore on train/validation {label_col}")
         train_df = _normalize_label_per_date(train_df, label_col, winsor=0.01)
+        validation_df = _normalize_label_per_date(validation_df, label_col, winsor=0.01)
 
     # ── 4. FT-Transformer training ─────────────────────────────────────
     from quantagent.training.ft_transformer_trainer import (
@@ -618,7 +806,6 @@ def train_v8_deep(
         predict_ft_transformer_artifact,
     )
 
-    primary_horizon = int(label_col.removeprefix("forward_return_").removesuffix("d"))
     artifact_dir = output_dir / "ft"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     trainer = FTTransformerTrainer(FTTransformerTrainerConfig(
@@ -638,17 +825,20 @@ def train_v8_deep(
         output_dir=str(artifact_dir),
         use_amp=True,
         log_gpu_memory=True,
+        extra={"preprocessing": preprocessing, "split_manifest": split_manifest},
     ))
     # Keep train_df schema lean — only keys + features + label needed
     keep_cols = ["symbol", "trade_date"] + feature_cols + [label_col]
     train_slice = train_df[keep_cols].copy()
-    val_slice = test_df[keep_cols].copy()
+    val_slice = validation_df[keep_cols].copy()
     typer.echo(f"[{_ts()}] fitting FT-Transformer (epochs={max_epochs}, batch={batch_size}, d_token={d_token}, blocks={n_blocks})")
     artifacts = trainer.fit_and_save(train_slice, val_slice)
     typer.echo(f"[{_ts()}] training complete — device={artifacts.device} gpu={artifacts.gpu_name}")
 
     # ── 5. Predict on OOS ─────────────────────────────────────────────
     typer.echo(f"[{_ts()}] running OOS inference on {len(test_df)} rows")
+    # Pass raw test features. The predictor loads and applies the preprocessing
+    # contract stored inside the model artifact.
     pred_input = test_df[["symbol", "trade_date"] + feature_cols].copy()
     pred = predict_ft_transformer_artifact(
         artifact_dir=str(artifact_dir),
@@ -691,10 +881,26 @@ def train_v8_deep(
     bt_oos_end = test_df["trade_date"].max()
     typer.echo(f"[{_ts()}] strict backtest {bt_oos_start} → {bt_oos_end}")
     panel = pd.read_parquet(silver_panel_path)
-    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce")
-    panel = panel[(panel["trade_date"] >= bt_oos_start) & (panel["trade_date"] <= bt_oos_end)]
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"], errors="coerce").dt.normalize()
+    market_sessions = pd.DatetimeIndex(sorted(panel["trade_date"].dropna().unique()))
+    later_sessions = market_sessions[market_sessions > pd.Timestamp(bt_oos_end).normalize()]
+    if later_sessions.empty:
+        typer.echo(
+            "[fatal] silver panel lacks the next market session after the final signal; "
+            "strict T+1 execution cannot be mapped",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    execution_end = pd.Timestamp(later_sessions[0]).normalize()
+    panel = panel[(panel["trade_date"] >= bt_oos_start) & (panel["trade_date"] <= execution_end)]
     panel = panel[panel["symbol"].isin(target_weights.columns)].reset_index(drop=True)
-    panel, _unverified_tradability = ensure_tradability_flags(panel)
+    try:
+        panel, _unverified_tradability = ensure_tradability_flags(
+            panel, require_measured=True,
+        )
+    except ValueError as exc:
+        typer.echo(f"[fatal] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     bt_result = run_strict_backtest_v8(
         target_weights, panel,
         config=AShareExecutionSimulationConfig(slippage_bps=8.0, initial_cash=1_000_000.0),

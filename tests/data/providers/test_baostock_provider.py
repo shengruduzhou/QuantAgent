@@ -107,16 +107,29 @@ def test_to_baostock_symbol_rejects_unknown_format():
         to_baostock_symbol("XYZ.NYSE")
 
 
+def test_baostock_defaults_to_raw_prices_and_validates_adjustment():
+    assert BaoStockConfig().adjust_flag == "3"
+    with pytest.raises(ValueError, match="adjust_flag"):
+        BaoStockConfig(adjust_flag="0")
+
+
 # ---------------------------------------------------------------------------
 # Daily K-line
 # ---------------------------------------------------------------------------
 
-def _row(date: str, *, close: float, ist: str = "0", status: str = "1") -> list[str]:
+def _row(
+    date: str,
+    *,
+    close: float,
+    ist: str = "0",
+    status: str = "1",
+    adjustflag: str = "3",
+) -> list[str]:
     return [
         date, "sh.600519",
         str(close - 0.5), str(close + 1.0), str(close - 1.0),
         str(close), str(close - 0.5),
-        "1000000", "100000000", "1",
+        "1000000", "100000000", adjustflag,
         "0.50", status, "1.00", ist,
     ]
 
@@ -135,8 +148,11 @@ def test_daily_ohlcv_returns_v7_canonical_schema():
                 "source", "source_reliability", "point_in_time_valid"):
         assert col in res.frame.columns
     assert (res.frame["symbol"] == "600519.SH").all()
-    # available_at must come from the next bar (PIT)
-    assert res.frame["available_at"].iloc[0] > res.frame["trade_date"].iloc[0]
+    assert fake.queries[0][-1] == "3"
+    assert res.metadata["adjustment"] == "raw"
+    assert (res.frame["available_at"] == res.frame["trade_date"]).all()
+    assert res.point_in_time is True
+    assert res.frame["point_in_time_valid"].all()
 
 
 def test_daily_ohlcv_handles_empty_response():
@@ -188,7 +204,7 @@ def test_minute_ohlcv_rejects_one_minute():
 def test_minute_ohlcv_5min_normalises_timestamp():
     rows = [[
         "2024-03-01", "20240301093500000", "sh.600519",
-        "100.0", "100.5", "99.5", "100.2", "5000", "500000.0", "1",
+        "100.0", "100.5", "99.5", "100.2", "5000", "500000.0", "3",
     ]]
     fake = _FakeBaoStock(minute_rows={"sh.600519": rows})
     provider = BaoStockProvider(_bs_module=fake)
@@ -218,3 +234,47 @@ def test_tradability_extracts_st_and_suspension_flags():
     ))
     assert res.frame["is_st"].iloc[0]
     assert res.frame["is_suspended"].iloc[1]
+
+
+def test_daily_frame_maps_vendor_st_and_suspension_to_canonical_flags():
+    rows = [_row("2024-03-01", close=100.0, ist="1", status="0")]
+    fake = _FakeBaoStock(daily_rows={"sh.600519": rows})
+
+    result = BaoStockProvider(_bs_module=fake).daily_ohlcv(ProviderRequest(
+        start_date="2024-03-01",
+        end_date="2024-03-01",
+        symbols=("600519.SH",),
+    ))
+
+    assert result.frame.loc[0, "is_st"]
+    assert result.frame.loc[0, "is_suspended"]
+
+
+def test_adjusted_response_is_explicitly_not_point_in_time():
+    rows = [_row("2024-03-01", close=100.0, adjustflag="1")]
+    fake = _FakeBaoStock(daily_rows={"sh.600519": rows})
+
+    result = BaoStockProvider(
+        config=BaoStockConfig(adjust_flag="1"),
+        _bs_module=fake,
+    ).daily_ohlcv(ProviderRequest(
+        start_date="2024-03-01",
+        end_date="2024-03-01",
+        symbols=("600519.SH",),
+    ))
+
+    assert result.point_in_time is False
+    assert not result.frame["point_in_time_valid"].any()
+    assert "not_point_in_time" in " ".join(result.warnings)
+
+
+def test_response_adjustment_must_match_requested_basis():
+    rows = [_row("2024-03-01", close=100.0, adjustflag="1")]
+    fake = _FakeBaoStock(daily_rows={"sh.600519": rows})
+
+    with pytest.raises(ProviderUnavailable, match="adjustment mismatch"):
+        BaoStockProvider(_bs_module=fake).daily_ohlcv(ProviderRequest(
+            start_date="2024-03-01",
+            end_date="2024-03-01",
+            symbols=("600519.SH",),
+        ))

@@ -192,9 +192,26 @@ class RunResultResolver:
             }
 
         failures = list(acceptance.get("failures") or [])
-        accepted = bool(governance.get("accepted", False))
+        gates = list(acceptance.get("gates") or [])
+        accepted = governance.get("accepted") is True
         gate_status = (pipeline or {}).get("QUANT_ACCEPTANCE_STATUS")
-        if failures or gate_status == "failed" or not accepted:
+        if not gates:
+            return {
+                "outcome": "incomplete",
+                "headline": "验收报告存在，但没有任何可核对的闸门",
+                "reasons": ["acceptance_report.json 的 gates 为空"],
+                "remediation": "空闸门不等于通过；重新运行完整验收协议。",
+                "promotable": False,
+            }
+        if gate_status not in {"passed", "failed"}:
+            return {
+                "outcome": "incomplete",
+                "headline": "流程未声明可验证的验收终态",
+                "reasons": [f"QUANT_ACCEPTANCE_STATUS={gate_status!r}"],
+                "remediation": "只有显式 passed/failed 的验收终态可用于判定。",
+                "promotable": False,
+            }
+        if failures or gate_status == "failed" or not accepted or any(gate.get("passed") is not True for gate in gates):
             reasons = [
                 f"{gate['name']}: 实测 {gate['actual']}，阈值 {gate['threshold']}"
                 for gate in acceptance.get("gates", [])
@@ -227,7 +244,7 @@ class RunResultResolver:
         gates = [
             {
                 "name": gate.get("name"),
-                "passed": bool(gate.get("passed")),
+                "passed": gate.get("passed") is True,
                 "actual": gate.get("actual"),
                 "threshold": gate.get("threshold"),
                 "reason": gate.get("reason"),
@@ -248,7 +265,7 @@ class RunResultResolver:
         if not isinstance(payload, dict):
             return None
         return {
-            "accepted": bool(payload.get("accepted")),
+            "accepted": payload.get("accepted") is True,
             "pbo": _finite(payload.get("pbo")),
             "dsrProbability": _finite(payload.get("dsr_probability")),
             "spaPValue": _finite(payload.get("spa_pvalue")),

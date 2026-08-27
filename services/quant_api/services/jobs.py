@@ -50,6 +50,59 @@ ACTIVE_STATUSES = frozenset({"queued", "starting", "running", "paused", "cancell
 POLL_SECONDS = 1.0
 RESOURCE_SAMPLE_SECONDS = 5.0
 
+
+def _missing_output_evidence(settings: ApiSettings, outputs: list[str]) -> list[str]:
+    """Return declared outputs that do not contain any persisted evidence."""
+    missing: list[str] = []
+    for value in outputs:
+        try:
+            path = safe_project_path(settings, value)
+        except ValueError:
+            missing.append(f"{value}:unsafe")
+            continue
+        if not path.exists():
+            missing.append(f"{value}:missing")
+            continue
+        if path.is_file():
+            try:
+                if path.stat().st_size <= 0:
+                    missing.append(f"{value}:empty_file")
+            except OSError:
+                missing.append(f"{value}:unreadable")
+            continue
+        if path.is_dir():
+            try:
+                if not any(
+                    item.is_file() and item.stat().st_size > 0
+                    for item in path.rglob("*")
+                ):
+                    missing.append(f"{value}:empty_directory")
+            except OSError:
+                missing.append(f"{value}:unreadable")
+    return missing
+
+
+def _required_output_evidence(
+    settings: ApiSettings,
+    spec: dict[str, Any],
+    parameters: dict[str, Any],
+) -> list[str]:
+    """Resolve the artifacts whose existence proves a zero-exit run completed.
+
+    A number of governed commands expose an optional ``--output`` that replaces
+    their fixed default directory. Requiring both locations makes a successful
+    custom-output run fail merely because it correctly did not write the
+    default. Explicit Runtime outputs are therefore authoritative; fixed
+    outputs are the evidence contract only when no override was supplied.
+    """
+    explicit = [
+        project_relative(settings, value)
+        for key, value in parameters.items()
+        if key in spec["path_outputs"] and value not in (None, "")
+    ]
+    expected = explicit or list(spec.get("fixed_outputs", ()))
+    return list(dict.fromkeys(expected))
+
 # The supervisor ships with this code, so its location follows the package
 # rather than whatever project root the settings point at.
 JOB_SUPERVISOR = PROJECT_ROOT / "scripts" / "job_supervisor.py"
@@ -878,12 +931,7 @@ class JobManager:
 
     def validate(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         spec, _ = self._validate(job_type, command_id, parameters)
-        outputs = [
-            str(parameters[key])
-            for key in spec["path_outputs"]
-            if parameters.get(key) not in (None, "")
-        ]
-        outputs.extend(spec.get("fixed_outputs", ()))
+        outputs = _required_output_evidence(self.settings, spec, parameters)
         warnings = ["GPU availability is checked by the training process"] if parameters.get("require_gpu") else []
         if command_id == "synthesize-factors-v7":
             warnings.append("Factor discovery writes research candidates only; registration and training remain separate human-gated steps")
@@ -1458,12 +1506,7 @@ class JobManager:
         spec: dict[str, Any],
         parameters: dict[str, Any],
     ) -> None:
-        outputs = [
-            project_relative(self.settings, value)
-            for key, value in parameters.items()
-            if key in spec["path_outputs"] and value is not None
-        ]
-        outputs.extend(spec.get("fixed_outputs", ()))
+        outputs = _required_output_evidence(self.settings, spec, parameters)
         with self._lock:
             record = self._jobs.get(job_id)
             stages = list(record.stages) if record else []
@@ -1481,6 +1524,41 @@ class JobManager:
             )
             return
         if exit_code == 0:
+            required_outputs = _required_output_evidence(
+                self.settings,
+                spec,
+                parameters,
+            )
+            missing_outputs = _missing_output_evidence(
+                self.settings,
+                required_outputs,
+            )
+            if missing_outputs:
+                if stages:
+                    stages[-1]["status"] = "stopped"
+                    stages[-1]["message"] = "declared output evidence missing"
+                failure = JobFailure(
+                    code="output_evidence_missing",
+                    title="任务退出为 0，但未产出声明的证据",
+                    detail="; ".join(missing_outputs),
+                    remediation="检查输出参数、磁盘权限与运行日志后重试；空目录不能证明任务完成。",
+                    retryable=True,
+                    log_tail=_read_tail(log_path, 80)[-40:],
+                    exit_code=0,
+                )
+                self._update(
+                    job_id,
+                    status="failed",
+                    finishedAt=_now(),
+                    stages=stages,
+                    message=failure.title,
+                    error=failure.detail,
+                    failure=failure.to_dict(),
+                    exitCode=0,
+                    exitStatusObserved=exit_observed,
+                    outputPaths=outputs,
+                )
+                return
             if self.on_success is not None:
                 try:
                     self.on_success()
