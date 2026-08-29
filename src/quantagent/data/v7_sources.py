@@ -141,11 +141,11 @@ V7_DATA_SOURCES: tuple[V7DataSource, ...] = (
         name="qlib_cn_daily",
         kind="market",
         provider="qlib",
-        description="Local Qlib CN data provider; daily OHLCV + PIT next-day available_at.",
+        description="Local Qlib CN data provider; daily OHLCV available at its session close.",
         offline_behaviour="offline",
         required_columns=REQUIRED_COLUMNS["market_panel"],
         optional_columns=("is_suspended", "is_st", "is_limit_up", "is_limit_down"),
-        pit_policy="close-derived features available from the next trading row",
+        pit_policy="raw close-derived rows use available_at == trade_date; execution starts later",
         notes="run scripts/get_data.py qlib_data --region cn before first use",
     ),
     V7DataSource(

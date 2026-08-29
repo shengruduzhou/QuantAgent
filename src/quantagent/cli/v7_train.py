@@ -2290,10 +2290,26 @@ def _restrict_market_for_paper(
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     dates = pd.to_datetime(pd.Index(weights_frame.index), errors="coerce")
     dates = dates[~pd.isna(dates)]
+    if dates.empty:
+        return data.iloc[0:0].copy()
     symbols = {str(column) for column in weights_frame.columns if str(column) != "trade_date"}
     if benchmark_symbol:
         symbols.add(str(benchmark_symbol))
-    mask = data["trade_date"].isin(set(dates)) & data["symbol"].astype(str).isin(symbols)
+    sessions = pd.DatetimeIndex(sorted(data["trade_date"].dropna().unique()))
+    later = sessions[sessions > pd.Timestamp(dates.max()).normalize()]
+    if later.empty:
+        raise ValueError(
+            "paper backtest market panel lacks the next session after the final signal"
+        )
+    # Target indices are signal dates. Preserve every intervening exchange
+    # session so a sparse rebalance schedule cannot redefine "next session" as
+    # the next signal date, and keep one session after the last signal for T+1.
+    start = pd.Timestamp(dates.min()).normalize()
+    execution_end = pd.Timestamp(later[0]).normalize()
+    mask = (
+        data["trade_date"].between(start, execution_end)
+        & data["symbol"].astype(str).isin(symbols)
+    )
     return data.loc[mask].reset_index(drop=True)
 
 

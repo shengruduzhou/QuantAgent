@@ -590,6 +590,79 @@ def _make_walk_forward_folds(
     return folds
 
 
+def _split_ft_checkpoint_validation(
+    outer_train: pd.DataFrame,
+    horizons: Sequence[int],
+    *,
+    validation_size_days: int,
+    min_training_rows: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    """Create a purged inner checkpoint-selection window.
+
+    The outer walk-forward validation fold is reserved exclusively for OOS
+    evaluation.  Early stopping therefore receives a chronological slice from
+    the *outer training* data.  Training rows whose realised label extends
+    into that inner validation window are purged using the measured
+    ``label_end_{horizon}d`` columns, not a calendar-day approximation.
+    """
+
+    if outer_train is None or outer_train.empty:
+        raise ValueError("FT checkpoint selection requires non-empty outer training data")
+    label_end_columns = [f"label_end_{int(horizon)}d" for horizon in horizons]
+    missing = [column for column in ("trade_date", *label_end_columns) if column not in outer_train.columns]
+    if missing:
+        raise ValueError(
+            "FT checkpoint selection requires measured trade_date/label_end evidence; "
+            f"missing columns: {missing}"
+        )
+
+    frame = outer_train.copy()
+    trade_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.normalize()
+    if trade_dates.isna().any():
+        raise ValueError("FT checkpoint selection found invalid trade_date values")
+    parsed_label_ends: dict[str, pd.Series] = {}
+    for column in label_end_columns:
+        parsed = pd.to_datetime(frame[column], errors="coerce").dt.normalize()
+        if parsed.isna().any():
+            raise ValueError(f"FT checkpoint selection found invalid {column} values")
+        parsed_label_ends[column] = parsed
+
+    unique_dates = pd.Series(trade_dates.unique()).sort_values().reset_index(drop=True)
+    if len(unique_dates) < 2:
+        raise ValueError("FT checkpoint selection requires at least two distinct training dates")
+    requested_days = max(1, int(validation_size_days))
+    maximum_days = min(requested_days, len(unique_dates) - 1)
+    required_rows = max(1, int(min_training_rows))
+
+    for checkpoint_days in range(maximum_days, 0, -1):
+        checkpoint_start = pd.Timestamp(unique_dates.iloc[-checkpoint_days])
+        checkpoint_mask = trade_dates >= checkpoint_start
+        fit_mask = trade_dates < checkpoint_start
+        for parsed in parsed_label_ends.values():
+            fit_mask &= parsed < checkpoint_start
+        fit_frame = frame.loc[fit_mask].copy().reset_index(drop=True)
+        checkpoint_frame = frame.loc[checkpoint_mask].copy().reset_index(drop=True)
+        if len(fit_frame) < required_rows or checkpoint_frame.empty:
+            continue
+        manifest: dict[str, object] = {
+            "checkpoint_selection_source": "inner_train_validation",
+            "checkpoint_split_semantics": "chronological_label_end_purged_v1",
+            "checkpoint_validation_start": str(checkpoint_start.date()),
+            "checkpoint_validation_end": str(pd.Timestamp(trade_dates.loc[checkpoint_mask].max()).date()),
+            "checkpoint_validation_days": int(checkpoint_days),
+            "checkpoint_validation_rows": int(len(checkpoint_frame)),
+            "checkpoint_fit_rows": int(len(fit_frame)),
+            "checkpoint_label_end_columns": label_end_columns,
+            "oos_evaluation_source": "outer_walk_forward_validation",
+        }
+        return fit_frame, checkpoint_frame, manifest
+
+    raise ValueError(
+        "FT checkpoint selection cannot create a non-empty label-end-purged inner validation "
+        f"window while retaining {required_rows} training rows"
+    )
+
+
 def _run_ft_transformer_experiment(
     data: pd.DataFrame,
     feature_columns: list[str],
@@ -624,6 +697,12 @@ def _run_ft_transformer_experiment(
             all_predictions.extend(completed_predictions)
             fold_metrics.extend(completed_metrics)
             continue
+        checkpoint_fit, checkpoint_valid, checkpoint_manifest = _split_ft_checkpoint_validation(
+            train,
+            used_horizons,
+            validation_size_days=config.valid_size_days,
+            min_training_rows=max(config.min_train_rows, len(feature_columns)),
+        )
         trainer = FTTransformerTrainer(
             FTTransformerTrainerConfig(
                 horizons=used_horizons,
@@ -644,9 +723,10 @@ def _run_ft_transformer_experiment(
                 seed=config.ft_seed,
                 feature_columns=tuple(feature_columns),
                 output_dir=str(fold_dir),
+                extra={"split_manifest": checkpoint_manifest},
             )
         )
-        fold_artifacts = trainer.fit_and_save(train, validation_dataset=valid)
+        fold_artifacts = trainer.fit_and_save(checkpoint_fit, validation_dataset=checkpoint_valid)
         pred = predict_ft_transformer_artifact(fold_dir, valid, device=fold_artifacts.device)
         for horizon in used_horizons:
             label_column = f"forward_return_{horizon}d"
@@ -668,10 +748,12 @@ def _run_ft_transformer_experiment(
             all_predictions.append(fold_frame)
             metric = _fold_metrics(fold_frame, label_column, fold.fold_id, horizon, config)
             fold_metrics.append(metric)
+            metric.update(checkpoint_manifest)
             _write_incremental_fold_monitor(fold_dir, fold_frame, metric)
     if not all_predictions:
         raise ValueError("FT-Transformer training produced no out-of-sample predictions")
 
+    final_checkpoint_manifest: dict[str, object]
     if getattr(config, "skip_final_fit", False):
         # When skip_final_fit=True, fabricate a minimal artifact bundle from
         # the most-recent walk-forward fold so downstream metadata still has
@@ -685,7 +767,14 @@ def _run_ft_transformer_experiment(
             cuda_available = _torch.cuda.is_available()
             gpu_name = _torch.cuda.get_device_name(0) if _torch.cuda.is_available() else None
         final_artifacts = _MinimalArtifact()
+        final_checkpoint_manifest = {"final_fit_status": "skipped_by_configuration"}
     else:
+        final_fit_frame, final_checkpoint_frame, final_checkpoint_manifest = _split_ft_checkpoint_validation(
+            fit_frame,
+            used_horizons,
+            validation_size_days=config.valid_size_days,
+            min_training_rows=max(config.min_train_rows, len(feature_columns)),
+        )
         final_trainer = FTTransformerTrainer(
             FTTransformerTrainerConfig(
                 horizons=used_horizons,
@@ -706,9 +795,18 @@ def _run_ft_transformer_experiment(
                 seed=config.ft_seed,
                 feature_columns=tuple(feature_columns),
                 output_dir=str(output_dir),
+                extra={
+                    "split_manifest": {
+                        **final_checkpoint_manifest,
+                        "scope": "final_deployment_fit",
+                    }
+                },
             )
         )
-        final_artifacts = final_trainer.fit_and_save(fit_frame)
+        final_artifacts = final_trainer.fit_and_save(
+            final_fit_frame,
+            validation_dataset=final_checkpoint_frame,
+        )
 
     prediction_frame = pd.concat(all_predictions, ignore_index=True)
     metrics = _aggregate_metrics(prediction_frame, fold_metrics, coefficients={})
@@ -725,6 +823,7 @@ def _run_ft_transformer_experiment(
     metrics["cuda_available"] = final_artifacts.cuda_available
     metrics["gpu_name"] = final_artifacts.gpu_name
     metrics["gpu_required"] = config.require_gpu
+    metrics["final_checkpoint_split"] = final_checkpoint_manifest
     # ----- executable long-only top-K backtest with regime gate + rich output -----
     try:
         exec_summary = _compute_executable_backtest(prediction_frame, config, output_dir)
@@ -790,6 +889,15 @@ def _load_completed_ft_fold(
             return [], []
         predictions.append(pd.read_parquet(pred_path))
         metrics.append(_json.loads(metric_path.read_text(encoding="utf-8")))
+    if any(
+        metric.get("checkpoint_selection_source") != "inner_train_validation"
+        or metric.get("oos_evaluation_source") != "outer_walk_forward_validation"
+        for metric in metrics
+    ):
+        # Legacy folds used the same outer validation rows for early stopping
+        # and reported OOS performance.  They must be recomputed under the
+        # governed inner/outer split instead of being silently resumed.
+        return [], []
     return predictions, metrics
 
 

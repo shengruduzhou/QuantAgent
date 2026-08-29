@@ -27,6 +27,9 @@ performance figure derived from assumed tradability.
 
 from __future__ import annotations
 
+from numbers import Real
+
+import numpy as np
 import pandas as pd
 
 #: The A-share state flags every backtest path expects on its panel.
@@ -40,6 +43,23 @@ TRADABILITY_FLAG_COLUMNS: tuple[str, ...] = (
 
 class TradabilityEvidenceMissing(ValueError):
     """Raised when tradability flags are absent and the caller demanded them."""
+
+
+def _measured_boolean(value: object) -> bool | None:
+    """Parse canonical boolean evidence without treating ``"0"`` as true."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, Real) and float(value) in {0.0, 1.0}:
+        return bool(int(float(value)))
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def ensure_tradability_flags(
@@ -72,11 +92,11 @@ def ensure_tradability_flags(
             unverified.append(column)
             out[column] = False
             continue
-        raw = out[column]
-        # A NaN cell is an unknown state, not a measured "no".
-        if raw.isna().any():
+        parsed = out[column].map(_measured_boolean)
+        # A missing or malformed cell is an unknown state, not a measured "no".
+        if parsed.isna().any():
             unverified.append(column)
-        out[column] = raw.fillna(False).astype(bool)
+        out[column] = parsed.astype("boolean").fillna(False).astype(bool)
 
     resolved = tuple(dict.fromkeys(unverified))
     if resolved and require_measured:

@@ -42,6 +42,7 @@ from quantagent.training.horizon_models import (
     HorizonClass,
     build_all_horizon_bundles,
 )
+from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 
 @dataclass(frozen=True)
@@ -84,9 +85,7 @@ def _ensure_market_panel(router_result: RouterResult) -> pd.DataFrame:
     frame = router_result.frame.copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
     frame = frame.dropna(subset=["trade_date", "symbol"]).sort_values(["symbol", "trade_date"])
-    for column in ("is_suspended", "is_st", "is_limit_up", "is_limit_down"):
-        if column not in frame.columns:
-            frame[column] = False
+    frame, _ = ensure_tradability_flags(frame, require_measured=True)
     return frame.reset_index(drop=True)
 
 

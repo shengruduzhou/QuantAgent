@@ -322,6 +322,7 @@ def simulate_ashare_target_weights(
 
         for state in states:
             order = broker.order_objects.get(state.client_order_id)
+            fill = broker.fills_by_client_order_id.get(state.client_order_id)
             row: dict[str, object] = {
                 "trade_date": execution_date,
                 "signal_date": signal_date,
@@ -333,6 +334,19 @@ def simulate_ashare_target_weights(
                 "avg_price": state.avg_price,
                 "last_message": state.last_message,
             }
+            if fill is not None:
+                row |= {
+                    "commission": float(fill.commission),
+                    "stamp_duty": float(fill.stamp_duty),
+                    "transfer_fee": float(fill.transfer_fee),
+                    "impact_cost": float(fill.impact_cost),
+                    "total_cost": float(
+                        fill.commission
+                        + fill.stamp_duty
+                        + fill.transfer_fee
+                        + fill.impact_cost
+                    ),
+                }
             if order is not None:
                 row |= {
                     "symbol": order.symbol,

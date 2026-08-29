@@ -291,16 +291,34 @@ def _write_fusion_fixture(runtime: Path) -> None:
         "pbo": 0.18,
         "benchmarkMode": "index:000300.SH",
         "horizonDays": 5,
+        "barFrequency": "1d",
+        "intradayClaim": False,
         "topK": 30,
         "transactionCostBps": 8.0,
         "factorNames": ["alpha001", "alpha002"],
-        "foldWindows": [{
-            "foldIndex": "0",
-            "trainStart": "2024-01-02",
-            "trainEnd": "2025-06-30",
-            "testStart": "2025-07-10",
-            "testEnd": "2025-12-31",
-        }],
+        "foldWindows": [
+            {
+                "foldIndex": "0",
+                "trainStart": "2023-01-03",
+                "trainEnd": "2024-06-28",
+                "testStart": "2024-07-08",
+                "testEnd": "2024-12-31",
+            },
+            {
+                "foldIndex": "1",
+                "trainStart": "2023-01-03",
+                "trainEnd": "2024-12-31",
+                "testStart": "2025-01-10",
+                "testEnd": "2025-06-30",
+            },
+            {
+                "foldIndex": "2",
+                "trainStart": "2023-01-03",
+                "trainEnd": "2025-06-30",
+                "testStart": "2025-07-10",
+                "testEnd": "2025-12-31",
+            },
+        ],
         "frontier": ["ic_weighted", "equal"],
         "preferenceWeights": {
             "excessReturn": 0.4,
@@ -385,6 +403,32 @@ def _write_fusion_fixture(runtime: Path) -> None:
         "2025-12-31,1.19,1.09,0.97\n",
         encoding="utf-8",
     )
+    (run / "promotion_gate.json").write_text(
+        json.dumps({
+            "promotionEligible": False,
+            "researchPromotionEligible": True,
+            "productionEligible": False,
+            "stage4Governed": False,
+            "researchOnly": True,
+            "productionBlockers": [
+                "requires independent Stage-4 lineage and executable certification",
+            ],
+            "statisticalEvidence": {
+                "preferred": "ic_weighted",
+                "dsrProbability": 0.96,
+                "spaPValue": 0.01,
+            },
+            "checks": [
+                {"name": "pbo", "passed": True, "observed": 0.18, "required": "<= 0.25"},
+                {"name": "dsr_probability", "passed": True, "observed": 0.96, "required": ">= 0.95"},
+                {"name": "spa_p_value", "passed": True, "observed": 0.01, "required": "<= 0.05"},
+                {"name": "explicit_benchmark", "passed": True, "observed": "000300.SH", "required": "non-empty benchmark symbol"},
+                {"name": "point_in_time", "passed": True, "observed": True, "required": "PIT validation == true"},
+                {"name": "untouched_holdout", "passed": True, "observed": True, "required": "final holdout untouched until acceptance"},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (run / "manifest.json").write_text(
         json.dumps({
             "artifact": "factor_fusion_search",
@@ -402,6 +446,7 @@ def _write_fusion_fixture(runtime: Path) -> None:
                 "candidates": "fusion_candidates.json",
                 "ranking": "fusion_ranking.json",
                 "nav": "fusion_nav.csv",
+                "promotionGate": "promotion_gate.json",
             },
         }, ensure_ascii=False),
         encoding="utf-8",

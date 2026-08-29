@@ -492,6 +492,9 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
             "rank_loss_temperature": float(self.config.rank_loss_temperature),
             "checkpoint_selection": "minimum_validation_composite_objective",
         }
+        preprocessing = self.config.extra.get("preprocessing", {})
+        if not isinstance(preprocessing, dict):
+            raise ValueError("FT-Transformer preprocessing contract must be a mapping")
         torch.save(
             {
                 "model": model.state_dict(),
@@ -501,6 +504,7 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
                 "feature_scales": scales.tolist(),
                 "config": config.__dict__,
                 "objective_semantics": objective,
+                "preprocessing": preprocessing,
             },
             checkpoint_path,
         )
@@ -517,6 +521,7 @@ class FTTransformerTrainer(_impl.FTTransformerTrainer):
                     "architecture": "ft_transformer",
                     "version": "v7",
                     "objective_semantics_version": OBJECTIVE_SEMANTICS_VERSION,
+                    "preprocessing": preprocessing,
                 },
                 ensure_ascii=False,
                 indent=2,

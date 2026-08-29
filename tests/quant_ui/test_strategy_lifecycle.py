@@ -219,6 +219,32 @@ def test_a_clean_run_is_reported_as_accepted_but_still_research_only(quant_ui_se
     assert "research" in conclusion["remediation"] or "人工" in conclusion["remediation"]
 
 
+def test_empty_or_non_boolean_gates_never_promote(quant_ui_settings) -> None:
+    empty_root = quant_ui_settings.runtime_root / "reports" / "empty_gate_run"
+    _write_run(
+        empty_root,
+        acceptance={"failures": [], "gates": []},
+        governance={"accepted": True, "rejection_reasons": []},
+        pipeline={"QUANT_ACCEPTANCE_STATUS": "passed"},
+    )
+    empty = RunResultResolver(quant_ui_settings).resolve(str(empty_root))["conclusion"]
+    assert empty["outcome"] == "incomplete"
+    assert empty["promotable"] is False
+
+    string_root = quant_ui_settings.runtime_root / "reports" / "string_gate_run"
+    _write_run(
+        string_root,
+        acceptance={"failures": [], "gates": [
+            {"name": "rank_ic_mean", "passed": "true", "actual": 0.1, "threshold": "> 0"},
+        ]},
+        governance={"accepted": "true", "rejection_reasons": []},
+        pipeline={"QUANT_ACCEPTANCE_STATUS": "passed"},
+    )
+    stringy = RunResultResolver(quant_ui_settings).resolve(str(string_root))["conclusion"]
+    assert stringy["outcome"] == "not_accepted"
+    assert stringy["promotable"] is False
+
+
 def test_a_research_rejection_is_surfaced_with_its_remediation(quant_ui_settings) -> None:
     root = quant_ui_settings.runtime_root / "reports" / "rejected_run"
     _write_run(root, verdict={
@@ -518,3 +544,31 @@ def test_council_review_of_an_unknown_run_is_a_key_error(quant_ui_settings) -> N
         container.council.review_strategy_run(
             "run_nope", container.strategies.results, container.strategies
         )
+
+
+def test_every_strategy_council_role_is_unknown_when_required_evidence_is_absent(
+    quant_ui_settings,
+) -> None:
+    """No role, including the CIO, may turn an empty run into clearance."""
+    from services.quant_api.services.container import ServiceContainer
+    from services.quant_api.services.council import COUNCIL_ROLES
+
+    container = ServiceContainer.create(quant_ui_settings)
+    run = container.strategies.register_run(
+        strategy_id="empty-council",
+        version="v1",
+        job_id="job_empty",
+        output_dir="runtime/reports/never-produced",
+        name="Empty Council",
+    )
+    review = container.council.review_strategy_run(
+        run["runId"], container.strategies.results, container.strategies
+    )
+
+    assert [item["roleId"] for item in review["findings"]] == [
+        role["id"] for role in COUNCIL_ROLES
+    ]
+    assert {item["verdict"] for item in review["findings"]} == {"unknown"}
+    assert review["decision"]["state"] == "INSUFFICIENT_EVIDENCE"
+    assert review["decision"]["eligibleForHumanGate"] is False
+    assert review["decision"]["liveEligible"] is False

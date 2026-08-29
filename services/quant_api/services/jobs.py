@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 from threading import RLock, Thread
@@ -49,6 +51,234 @@ RETRYABLE_STATUSES = frozenset({"failed", "cancelled"})
 ACTIVE_STATUSES = frozenset({"queued", "starting", "running", "paused", "cancelling"})
 POLL_SECONDS = 1.0
 RESOURCE_SAMPLE_SECONDS = 5.0
+
+
+def _declared_output_path(
+    settings: ApiSettings,
+    value: str | Path,
+) -> tuple[Path, str, bool]:
+    """Return the lexical output path, stable key and symlink status.
+
+    ``safe_project_path`` intentionally resolves paths, which is correct for
+    containment but would hide that the declared output itself was replaced by
+    a symlink. Completion evidence keeps the lexical path so that substitution
+    is rejected instead of attributed to the symlink target.
+    """
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        if candidate.parts and candidate.parts[0] == "runtime":
+            candidate = settings.runtime_root.joinpath(*candidate.parts[1:])
+        else:
+            candidate = settings.project_root / candidate
+    lexical = Path(os.path.abspath(candidate))
+    runtime_root = Path(os.path.abspath(settings.runtime_root))
+    project_root = Path(os.path.abspath(settings.project_root))
+    if lexical == runtime_root or runtime_root in lexical.parents:
+        relative = lexical.relative_to(runtime_root)
+        key = (Path("runtime") / relative).as_posix() if relative.parts else "runtime"
+        root = runtime_root
+    elif lexical == project_root or project_root in lexical.parents:
+        key = lexical.relative_to(project_root).as_posix()
+        root = project_root
+    else:  # pragma: no cover - the resolved containment check normally fires first
+        raise ValueError("path is outside the QuantAgent project and runtime roots")
+
+    current = root
+    has_symlink = False
+    for part in lexical.relative_to(root).parts:
+        current /= part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                has_symlink = True
+                break
+        except FileNotFoundError:
+            break
+        except OSError:
+            # The evidence reader will report the final path as unreadable.
+            break
+    # Resolve non-link paths once for the existing containment contract. A
+    # declared link is never followed: it remains identifiable even when its
+    # target escapes the project, and the caller rejects it as evidence.
+    if not has_symlink:
+        safe_project_path(settings, lexical)
+    return lexical, key, has_symlink
+
+
+def _missing_output_evidence(settings: ApiSettings, outputs: list[str]) -> list[str]:
+    """Return declared outputs that do not contain any persisted evidence."""
+    missing: list[str] = []
+    for value in outputs:
+        try:
+            path, _, has_symlink = _declared_output_path(settings, value)
+        except ValueError:
+            missing.append(f"{value}:unsafe")
+            continue
+        if has_symlink:
+            missing.append(f"{value}:symlink_not_allowed")
+            continue
+        try:
+            path_stat = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            missing.append(f"{value}:missing")
+            continue
+        except OSError:
+            missing.append(f"{value}:unreadable")
+            continue
+        if stat.S_ISREG(path_stat.st_mode):
+            if path_stat.st_size <= 0:
+                missing.append(f"{value}:empty_file")
+            continue
+        if stat.S_ISDIR(path_stat.st_mode):
+            try:
+                if not any(
+                    stat.S_ISREG(item.stat(follow_symlinks=False).st_mode)
+                    and item.stat(follow_symlinks=False).st_size > 0
+                    for item in path.rglob("*")
+                ):
+                    missing.append(f"{value}:empty_directory")
+            except OSError:
+                missing.append(f"{value}:unreadable")
+            continue
+        missing.append(f"{value}:not_regular_evidence")
+    return missing
+
+
+def _required_output_evidence(
+    settings: ApiSettings,
+    spec: dict[str, Any],
+    parameters: dict[str, Any],
+) -> list[str]:
+    """Resolve the artifacts whose existence proves a zero-exit run completed.
+
+    A number of governed commands expose an optional ``--output`` that replaces
+    their fixed default directory. Requiring both locations makes a successful
+    custom-output run fail merely because it correctly did not write the
+    default. Explicit Runtime outputs are therefore authoritative; fixed
+    outputs are the evidence contract only when no override was supplied.
+    """
+    explicit = []
+    for key, value in parameters.items():
+        if key in spec["path_outputs"] and value not in (None, ""):
+            _, evidence_key, _ = _declared_output_path(settings, value)
+            explicit.append(evidence_key)
+    expected = explicit or list(spec.get("fixed_outputs", ()))
+    return list(dict.fromkeys(expected))
+
+
+def _output_evidence_snapshot(
+    settings: ApiSettings,
+    outputs: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Capture a bounded metadata fingerprint for each declared output.
+
+    Retries deliberately reuse the original output directory. Existence alone
+    therefore cannot prove that the current attempt produced anything: an old
+    non-empty artifact would otherwise turn an immediate zero exit into a false
+    success. The fingerprint streams file metadata into a digest without
+    reading model/data contents or retaining every path in memory. ``ctime_ns``
+    complements size and mtime so replacing a same-sized file is still visible
+    on normal local filesystems.
+    """
+    snapshots: dict[str, dict[str, Any]] = {}
+    for value in outputs:
+        raw_key = str(value)
+        try:
+            path, key, has_symlink = _declared_output_path(settings, raw_key)
+        except ValueError:
+            snapshots[raw_key] = {"kind": "unsafe"}
+            continue
+        if has_symlink:
+            snapshots[key] = {"kind": "symlink"}
+            continue
+        try:
+            root_stat = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            snapshots[key] = {"kind": "missing"}
+            continue
+        except OSError:
+            snapshots[key] = {"kind": "unreadable"}
+            continue
+        if stat.S_ISREG(root_stat.st_mode):
+            snapshots[key] = {
+                "kind": "file",
+                "size": int(root_stat.st_size),
+                "mtimeNs": int(root_stat.st_mtime_ns),
+                "ctimeNs": int(root_stat.st_ctime_ns),
+                "device": int(root_stat.st_dev),
+                "inode": int(root_stat.st_ino),
+            }
+            continue
+        if not stat.S_ISDIR(root_stat.st_mode):
+            snapshots[key] = {
+                "kind": "other",
+                "mode": int(root_stat.st_mode),
+            }
+            continue
+
+        digest = hashlib.sha256()
+        file_count = 0
+        non_empty_count = 0
+        total_size = 0
+        unreadable_count = 0
+        for current_root, directory_names, file_names in os.walk(
+            path,
+            topdown=True,
+            followlinks=False,
+        ):
+            current = Path(current_root)
+            # Do not let a Runtime symlink turn a completion check into a scan
+            # outside the bounded output tree. Sorting keeps the digest stable
+            # while retaining only one directory listing at a time.
+            directory_names[:] = sorted(
+                name for name in directory_names
+                if not (current / name).is_symlink()
+            )
+            for name in sorted(file_names):
+                item = current / name
+                try:
+                    item_stat = item.stat(follow_symlinks=False)
+                except OSError:
+                    unreadable_count += 1
+                    continue
+                if not stat.S_ISREG(item_stat.st_mode):
+                    continue
+                relative = item.relative_to(path).as_posix()
+                encoded = (
+                    f"{relative}\0{item_stat.st_size}\0{item_stat.st_mtime_ns}\0"
+                    f"{item_stat.st_ctime_ns}\0{item_stat.st_dev}\0{item_stat.st_ino}\n"
+                ).encode("utf-8", errors="surrogateescape")
+                digest.update(encoded)
+                file_count += 1
+                total_size += int(item_stat.st_size)
+                if item_stat.st_size > 0:
+                    non_empty_count += 1
+        snapshots[key] = {
+            "kind": "directory",
+            "fileCount": file_count,
+            "nonEmptyFileCount": non_empty_count,
+            "totalSize": total_size,
+            "unreadableCount": unreadable_count,
+            "metadataSha256": digest.hexdigest(),
+        }
+    return snapshots
+
+
+def _unchanged_output_evidence(
+    settings: ApiSettings,
+    outputs: list[str],
+    baseline: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Return declared outputs with no evidence change since job submission."""
+    current = _output_evidence_snapshot(settings, outputs)
+    unchanged: list[str] = []
+    for value in outputs:
+        try:
+            _, key, _ = _declared_output_path(settings, value)
+        except ValueError:
+            key = str(value)
+        if key not in baseline or current.get(key) == baseline.get(key):
+            unchanged.append(f"{value}:unchanged_since_attempt_start")
+    return unchanged
 
 # The supervisor ships with this code, so its location follows the package
 # rather than whatever project root the settings point at.
@@ -92,6 +322,9 @@ class JobRecord:
     labels: dict[str, str] = field(default_factory=dict)
     retryOf: str | None = None
     attempt: int = 1
+    # Metadata-only snapshot captured before launch. It survives API restarts
+    # and prevents a retry from claiming artifacts left by an earlier attempt.
+    outputEvidenceBaseline: dict[str, dict[str, Any]] = field(default_factory=dict)
     # --- observability -------------------------------------------------------
     stage: str | None = None
     stages: list[dict[str, Any]] = field(default_factory=list)
@@ -183,9 +416,11 @@ COMMANDS: dict[str, dict[str, Any]] = {
         "required": {"dataset_path", "silver_panel_path", "output_dir"},
         "allowed": {
             "horizon_class", "dataset_path", "silver_panel_path", "symbols", "symbols_file",
-            "train_start", "train_end", "test_end", "embargo_days", "top_k", "max_epochs",
+            "train_start", "train_end", "test_end", "embargo_days", "purge_days",
+            "validation_days", "top_k", "max_epochs",
             "batch_size", "d_token", "n_blocks", "n_heads", "dates_per_step",
-            "train_micro_batch", "cross_sectional_norm", "label_norm", "feature_policy",
+            "train_micro_batch", "activation_checkpointing", "cross_sectional_norm",
+            "label_norm", "feature_policy",
             "attention_dropout", "ffn_dropout", "weight_decay", "early_stopping_patience",
             "learning_rate", "regime_filter", "regime_min_rows", "require_gpu", "output_dir",
         },
@@ -802,6 +1037,7 @@ class JobManager:
             for key in spec["path_outputs"]
             if normalized.get(key) not in (None, "")
         ]
+        evidence_outputs = _required_output_evidence(self.settings, spec, normalized)
         record = JobRecord(
             id=job_id,
             type=job_type,
@@ -822,6 +1058,10 @@ class JobManager:
             labels=dict(labels or {}),
             retryOf=retry_of,
             attempt=attempt,
+            outputEvidenceBaseline=_output_evidence_snapshot(
+                self.settings,
+                evidence_outputs,
+            ),
             statusPath=project_relative(self.settings, self.settings.jobs_root / f"{job_id}.status.json"),
         )
         with self._lock:
@@ -878,12 +1118,7 @@ class JobManager:
 
     def validate(self, job_type: str, command_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         spec, _ = self._validate(job_type, command_id, parameters)
-        outputs = [
-            str(parameters[key])
-            for key in spec["path_outputs"]
-            if parameters.get(key) not in (None, "")
-        ]
-        outputs.extend(spec.get("fixed_outputs", ()))
+        outputs = _required_output_evidence(self.settings, spec, parameters)
         warnings = ["GPU availability is checked by the training process"] if parameters.get("require_gpu") else []
         if command_id == "synthesize-factors-v7":
             warnings.append("Factor discovery writes research candidates only; registration and training remain separate human-gated steps")
@@ -1212,6 +1447,16 @@ class JobManager:
             "--",
             *command,
         ]
+        # Capture immediately before spawn, not merely when the request was
+        # queued. This is the attempt boundary that survives an API restart.
+        evidence_outputs = _required_output_evidence(self.settings, spec, parameters)
+        self._update(
+            job_id,
+            outputEvidenceBaseline=_output_evidence_snapshot(
+                self.settings,
+                evidence_outputs,
+            ),
+        )
         try:
             # The child writes straight to the log file rather than through a
             # pipe this process must keep draining. With a pipe, an API restart
@@ -1458,16 +1703,12 @@ class JobManager:
         spec: dict[str, Any],
         parameters: dict[str, Any],
     ) -> None:
-        outputs = [
-            project_relative(self.settings, value)
-            for key, value in parameters.items()
-            if key in spec["path_outputs"] and value is not None
-        ]
-        outputs.extend(spec.get("fixed_outputs", ()))
+        outputs = _required_output_evidence(self.settings, spec, parameters)
         with self._lock:
             record = self._jobs.get(job_id)
             stages = list(record.stages) if record else []
             verdict = dict(record.verdict) if record and record.verdict else None
+            output_baseline = dict(record.outputEvidenceBaseline) if record else {}
         for stage in stages:
             if stage.get("completedAt") is None:
                 stage["completedAt"] = _now()
@@ -1481,6 +1722,120 @@ class JobManager:
             )
             return
         if exit_code == 0:
+            required_outputs = _required_output_evidence(
+                self.settings,
+                spec,
+                parameters,
+            )
+            missing_outputs = _missing_output_evidence(
+                self.settings,
+                required_outputs,
+            )
+            if missing_outputs:
+                if stages:
+                    stages[-1]["status"] = "stopped"
+                    stages[-1]["message"] = "declared output evidence missing"
+                failure = JobFailure(
+                    code="output_evidence_missing",
+                    title="任务退出为 0，但未产出声明的证据",
+                    detail="; ".join(missing_outputs),
+                    remediation="检查输出参数、磁盘权限与运行日志后重试；空目录不能证明任务完成。",
+                    retryable=True,
+                    log_tail=_read_tail(log_path, 80)[-40:],
+                    exit_code=0,
+                )
+                self._update(
+                    job_id,
+                    status="failed",
+                    finishedAt=_now(),
+                    stages=stages,
+                    message=failure.title,
+                    error=failure.detail,
+                    failure=failure.to_dict(),
+                    exitCode=0,
+                    exitStatusObserved=exit_observed,
+                    outputPaths=outputs,
+                )
+                return
+            baseline_keys: list[str] = []
+            for value in required_outputs:
+                try:
+                    _, evidence_key, _ = _declared_output_path(self.settings, value)
+                    baseline_keys.append(evidence_key)
+                except ValueError:
+                    baseline_keys.append(str(value))
+            has_complete_baseline = all(
+                key in output_baseline for key in baseline_keys
+            )
+            if required_outputs and not has_complete_baseline:
+                if stages:
+                    stages[-1]["status"] = "stopped"
+                    stages[-1]["message"] = "output freshness baseline unavailable"
+                failure = JobFailure(
+                    code="output_freshness_unknown",
+                    title="任务退出为 0，但无法证明产物属于本次尝试",
+                    detail="; ".join(
+                        f"{value}:freshness_baseline_missing" for value in required_outputs
+                    ),
+                    remediation=(
+                        "该记录来自旧版或损坏的 supervisor 边界；请从原策略发起新运行，"
+                        "不要把已有非空文件当作本次成功证据。"
+                    ),
+                    retryable=True,
+                    log_tail=_read_tail(log_path, 80)[-40:],
+                    exit_code=0,
+                )
+                self._update(
+                    job_id,
+                    status="failed",
+                    finishedAt=_now(),
+                    stages=stages,
+                    message=failure.title,
+                    error=failure.detail,
+                    failure=failure.to_dict(),
+                    exitCode=0,
+                    exitStatusObserved=exit_observed,
+                    outputPaths=outputs,
+                )
+                return
+            stale_outputs = (
+                _unchanged_output_evidence(
+                    self.settings,
+                    required_outputs,
+                    output_baseline,
+                )
+                if required_outputs
+                else []
+            )
+            if stale_outputs:
+                if stages:
+                    stages[-1]["status"] = "stopped"
+                    stages[-1]["message"] = "declared output evidence is stale"
+                failure = JobFailure(
+                    code="output_evidence_stale",
+                    title="任务退出为 0，但没有本次尝试的新证据",
+                    detail="; ".join(stale_outputs),
+                    remediation=(
+                        "检查 worker 是否在当前尝试中原子更新了全部声明产物；"
+                        "重试不得复用上一次的非空文件作为成功证据。"
+                    ),
+                    retryable=True,
+                    log_tail=_read_tail(log_path, 80)[-40:],
+                    exit_code=0,
+                )
+                self._update(
+                    job_id,
+                    status="failed",
+                    finishedAt=_now(),
+                    stages=stages,
+                    message=failure.title,
+                    error=failure.detail,
+                    failure=failure.to_dict(),
+                    exitCode=0,
+                    exitStatusObserved=exit_observed,
+                    outputPaths=outputs,
+                )
+                return
             if self.on_success is not None:
                 try:
                     self.on_success()
@@ -1579,13 +1934,19 @@ class JobManager:
             if isinstance(value, str) and ("\x00" in value or "\n" in value or "\r" in value):
                 raise ValueError(f"invalid control character in {key}")
             if key in spec["path_inputs"] | spec["path_outputs"]:
-                path = safe_project_path(self.settings, str(value))
-                if key in spec["path_inputs"] and not path.exists():
-                    raise ValueError(f"input path does not exist: {key}")
                 if key in spec["path_outputs"]:
-                    runtime = self.settings.runtime_root.resolve()
+                    path, _, has_symlink = _declared_output_path(
+                        self.settings, str(value)
+                    )
+                    if has_symlink:
+                        raise ValueError(f"output path cannot be a symlink: {key}")
+                    runtime = Path(os.path.abspath(self.settings.runtime_root))
                     if path != runtime and runtime not in path.parents:
                         raise ValueError(f"output path must be inside runtime: {key}")
+                else:
+                    path = safe_project_path(self.settings, str(value))
+                    if not path.exists():
+                        raise ValueError(f"input path does not exist: {key}")
                 normalized[key] = str(path)
             else:
                 if isinstance(value, str) and not re.fullmatch(r"[\w.,:+/ -]*", value):
@@ -1778,6 +2139,7 @@ class JobManager:
         data = asdict(record)
         data.pop("logPath", None)
         data.pop("ownedOutputPaths", None)
+        data.pop("outputEvidenceBaseline", None)
         data.pop("processStartTicks", None)
         data.pop("statusPath", None)
         data["terminal"] = record.status in TERMINAL_STATUSES

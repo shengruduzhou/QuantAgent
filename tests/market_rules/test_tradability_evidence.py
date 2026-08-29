@@ -84,6 +84,16 @@ class TestOutputContract:
         out, _ = ensure_tradability_flags(_panel(**cols))
         assert out["is_limit_up"].tolist() == [True, False]
 
+    def test_string_zero_is_false_and_malformed_text_is_unverified(self):
+        cols = {c: ["0", "0"] for c in TRADABILITY_FLAG_COLUMNS}
+        out, unverified = ensure_tradability_flags(_panel(**cols))
+        assert not out[list(TRADABILITY_FLAG_COLUMNS)].to_numpy().any()
+        assert unverified == ()
+
+        cols["is_st"] = ["false", "unknown"]
+        with pytest.raises(TradabilityEvidenceMissing, match="is_st"):
+            ensure_tradability_flags(_panel(**cols), require_measured=True)
+
     def test_evidence_note_distinguishes_measured_from_assumed(self):
         assert tradability_evidence_note(())["tradability_measured"] is True
         note = tradability_evidence_note(("is_suspended",))

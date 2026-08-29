@@ -12,9 +12,9 @@ Limitations of BaoStock acknowledged in the schema:
 
 * Symbol format ``sh.600519`` (not ``600519.SH``). The provider
   normalises both directions.
-* Adjustment flag: 1 = pre-adjust (前复权), 2 = post-adjust (后复权),
-  3 = unadjusted (原始). Defaults to pre-adjust to match the v7
-  market panel convention.
+* Adjustment flag: 1 = post-adjust (后复权), 2 = pre-adjust (前复权),
+  3 = unadjusted (原始). The provider defaults to raw prices; adjusted
+  research views must be derived explicitly and retain the raw lineage.
 * The 1-minute endpoint is the only one with a short look-back; for
   multi-year history use the 5-minute endpoint. The provider raises
   :class:`ProviderUnavailable` rather than silently switching freq.
@@ -57,9 +57,13 @@ _VALID_FREQS: tuple[str, ...] = ("d", "w", "m", "5", "15", "30", "60")
 
 @dataclass(frozen=True)
 class BaoStockConfig:
-    adjust_flag: str = "1"        # 1=pre, 2=post, 3=raw
+    adjust_flag: str = "3"        # 1=post, 2=pre, 3=raw
     timeout_seconds: float = 30.0
     chunk_size: int = 200          # symbols per BaoStock login session
+
+    def __post_init__(self) -> None:
+        if self.adjust_flag not in {"1", "2", "3"}:
+            raise ValueError("BaoStock adjust_flag must be 1=post, 2=pre or 3=raw")
 
 
 # ---------------------------------------------------------------------------
@@ -165,17 +169,30 @@ class BaoStockProvider:
                 warnings=tuple(warnings) or ("baostock_empty_result",),
             )
         full = pd.concat(frames, ignore_index=True)
-        normalised = _normalise_daily_frame(full)
+        _require_observed_adjustment(full, self.config.adjust_flag)
+        is_raw = self.config.adjust_flag == "3"
+        if not is_raw:
+            warnings.append("baostock_adjusted_series_not_point_in_time")
+        normalised = _normalise_daily_frame(full, point_in_time=is_raw)
         return ProviderResult(
             normalised,
             source="baostock_provider",
-            point_in_time=True,
+            point_in_time=is_raw,
             quality_score=0.85,
             warnings=tuple(warnings),
             metadata={
                 "rows": int(len(normalised)),
                 "symbols": int(normalised["symbol"].nunique()) if not normalised.empty else 0,
                 "adjust_flag": self.config.adjust_flag,
+                "adjustment": {"1": "post", "2": "pre", "3": "raw"}[self.config.adjust_flag],
+                "frequency": "daily",
+                "timezone": "Asia/Shanghai",
+                "volume_unit": "shares",
+                "amount_unit": "CNY",
+                "pit_semantics": (
+                    "raw_session_bar_available_at_session_close"
+                    if is_raw else "adjusted_view_requires_vintaged_factor_lineage"
+                ),
             },
         )
 
@@ -237,14 +254,30 @@ class BaoStockProvider:
                 warnings=tuple(warnings) or ("baostock_empty_minute",),
             )
         full = pd.concat(frames, ignore_index=True)
-        out = _normalise_minute_frame(full)
+        _require_observed_adjustment(full, self.config.adjust_flag)
+        is_raw = self.config.adjust_flag == "3"
+        if not is_raw:
+            warnings.append("baostock_adjusted_series_not_point_in_time")
+        out = _normalise_minute_frame(full, point_in_time=is_raw)
         return ProviderResult(
             out,
             source="baostock_provider",
-            point_in_time=True,
+            point_in_time=is_raw,
             quality_score=0.85,
             warnings=tuple(warnings),
-            metadata={"frequency": frequency, "rows": int(len(out))},
+            metadata={
+                "frequency": frequency,
+                "rows": int(len(out)),
+                "adjust_flag": self.config.adjust_flag,
+                "adjustment": {"1": "post", "2": "pre", "3": "raw"}[self.config.adjust_flag],
+                "timezone": "Asia/Shanghai",
+                "volume_unit": "shares",
+                "amount_unit": "CNY",
+                "pit_semantics": (
+                    "raw_intraday_bar_available_at_bar_timestamp"
+                    if is_raw else "adjusted_view_requires_vintaged_factor_lineage"
+                ),
+            },
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -263,15 +296,18 @@ class BaoStockProvider:
         if daily.frame.empty:
             return daily
         flags = daily.frame[["symbol", "trade_date"]].copy()
-        flags["is_st"] = (
-            daily.frame.get("isST", "0").astype(str).map({"1": True, "True": True}).fillna(False)
-        )
-        flags["is_suspended"] = (
-            daily.frame.get("tradestatus", "1").astype(str).map({"0": True}).fillna(False)
-        )
+        is_st = daily.frame.get("isST", pd.Series("0", index=daily.frame.index)).astype(str)
+        trade_status = daily.frame.get(
+            "tradestatus",
+            pd.Series("1", index=daily.frame.index),
+        ).astype(str)
+        flags["is_st"] = is_st.isin({"1", "True", "true"})
+        flags["is_suspended"] = trade_status.eq("0")
         return ProviderResult(
             flags, source="baostock_provider",
-            point_in_time=True, quality_score=daily.quality_score,
+            point_in_time=daily.point_in_time,
+            quality_score=daily.quality_score,
+            warnings=daily.warnings,
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -322,7 +358,29 @@ class BaoStockProvider:
 # Frame normalisation
 # ---------------------------------------------------------------------------
 
-def _normalise_daily_frame(raw: pd.DataFrame) -> pd.DataFrame:
+def _require_observed_adjustment(raw: pd.DataFrame, requested: str) -> None:
+    """Reject a vendor response whose row-level adjustment contradicts the request."""
+    if "adjustflag" not in raw.columns:
+        raise ProviderUnavailable(
+            "baostock response omitted adjustflag; price basis cannot be verified"
+        )
+    observed = {
+        str(value).strip()
+        for value in raw["adjustflag"].dropna().tolist()
+        if str(value).strip()
+    }
+    if observed != {str(requested)}:
+        raise ProviderUnavailable(
+            "baostock response adjustment mismatch: "
+            f"requested={requested!r}, observed={sorted(observed)!r}"
+        )
+
+
+def _normalise_daily_frame(
+    raw: pd.DataFrame,
+    *,
+    point_in_time: bool,
+) -> pd.DataFrame:
     """Convert BaoStock daily output to v7 canonical schema."""
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -332,25 +390,47 @@ def _normalise_daily_frame(raw: pd.DataFrame) -> pd.DataFrame:
     for col in numeric_cols:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
-    # available_at = next trade_date per symbol; last row falls back to trade_date+1d
     work = work.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-    work["available_at"] = work.groupby("symbol")["trade_date"].shift(-1)
-    work["available_at"] = work["available_at"].fillna(work["trade_date"] + pd.Timedelta(days=1))
+    # A raw daily bar is knowable at that session's close. Using the next
+    # calendar day both invented holiday sessions and violated the training
+    # invariant available_at <= trade_date.
+    work["available_at"] = work["trade_date"]
+    work["is_st"] = work.get("isST", pd.Series("", index=work.index)).astype(str).eq("1")
+    work["is_suspended"] = (
+        work.get("tradestatus", pd.Series("", index=work.index)).astype(str).eq("0")
+    )
+    from quantagent.quant_math.ashare import board_price_limit_vector
+
+    limit_ratio = board_price_limit_vector(
+        work["symbol"].astype(str),
+        work["is_st"],
+        trade_dates=work["trade_date"],
+    )
+    limit_up = (work["preclose"] * (1.0 + limit_ratio)).round(2)
+    limit_down = (work["preclose"] * (1.0 - limit_ratio)).round(2)
+    close = work["close"].round(2)
+    work["is_limit_up"] = ((close - limit_up).abs() < 0.005).fillna(False)
+    work["is_limit_down"] = ((close - limit_down).abs() < 0.005).fillna(False)
     work["source"] = "baostock"
     work["source_type"] = "market_data"
     work["source_reliability"] = 0.85
-    work["point_in_time_valid"] = True
+    work["point_in_time_valid"] = bool(point_in_time)
     keep = [
         "symbol", "trade_date", "open", "high", "low", "close",
         "preclose", "volume", "amount", "turn", "pctChg", "isST", "tradestatus",
-        "adjustflag", "available_at",
+        "adjustflag", "available_at", "is_st", "is_suspended",
+        "is_limit_up", "is_limit_down",
         "source", "source_type", "source_reliability", "point_in_time_valid",
     ]
     keep = [c for c in keep if c in work.columns]
     return work[keep].reset_index(drop=True)
 
 
-def _normalise_minute_frame(raw: pd.DataFrame) -> pd.DataFrame:
+def _normalise_minute_frame(
+    raw: pd.DataFrame,
+    *,
+    point_in_time: bool,
+) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
     work = raw.copy()
@@ -370,7 +450,7 @@ def _normalise_minute_frame(raw: pd.DataFrame) -> pd.DataFrame:
     work["source"] = "baostock"
     work["source_type"] = "market_data_minute"
     work["source_reliability"] = 0.85
-    work["point_in_time_valid"] = True
+    work["point_in_time_valid"] = bool(point_in_time)
     keep = [
         "symbol", "trade_date", "timestamp", "open", "high", "low",
         "close", "volume", "amount", "adjustflag", "available_at",

@@ -632,16 +632,61 @@ def council_overrides(
 
 @router.post("/council/overrides")
 def create_council_override(request: Request, body: CouncilOverrideRequest) -> dict:
+    svc = services(request)
     try:
-        data = services(request).council.record_override(
+        if body.subject_type == "fusion_run":
+            review = svc.council.review_fusion_run(body.subject_id, body.candidate_id)
+        elif body.subject_type == "strategy_run":
+            if body.candidate_id is not None:
+                raise ValueError("strategy_run overrides cannot declare candidateId")
+            review = svc.council.review_strategy_run(
+                body.subject_id, svc.strategies.results, svc.strategies
+            )
+        else:
+            raise ValueError("override subjectType must be fusion_run or strategy_run")
+        finding = next(
+            (item for item in review["findings"] if item["roleId"] == body.role_id),
+            None,
+        )
+        if finding is None:
+            raise ValueError(f"unknown council role: {body.role_id}")
+        expected = {
+            "protocolVersion": review["protocolVersion"],
+            "policyFingerprint": review["policyFingerprint"],
+            "subjectContentHash": review["subject"]["contentHash"],
+            "candidateId": review["subject"].get("candidateId"),
+            "findingHash": finding["findingHash"],
+            "originalVerdict": finding["verdict"],
+        }
+        submitted = {
+            "protocolVersion": body.protocol_version,
+            "policyFingerprint": body.policy_fingerprint,
+            "subjectContentHash": body.subject_content_hash,
+            "candidateId": body.candidate_id,
+            "findingHash": body.finding_hash,
+            "originalVerdict": body.original_verdict,
+        }
+        stale = [key for key, value in expected.items() if submitted.get(key) != value]
+        if stale:
+            raise ValueError(
+                "override scope is stale; refresh the review before submitting: "
+                + ", ".join(stale)
+            )
+        data = svc.council.record_override(
             subject_type=body.subject_type,
             subject_id=body.subject_id,
+            subject_content_hash=body.subject_content_hash,
+            candidate_id=body.candidate_id,
             role_id=body.role_id,
+            finding_hash=body.finding_hash,
+            original_verdict=body.original_verdict,
             verdict=body.verdict,
             reason=body.reason,
             author=body.author,
+            protocol_version=body.protocol_version,
+            policy_fingerprint=body.policy_fingerprint,
         )
-    except ValueError as exc:
+    except (KeyError, ValueError) as exc:
         raise HTTPException(422, str(exc))
     return response(data)
 

@@ -179,13 +179,25 @@ git diff --check
 
 ## 决策议事会 / Decision Council（ATLAS L5）
 
-- 七个角色（data_quality / factor_integrity / model_validation / fusion_search /
-  portfolio_risk / execution_realism / governance）各自只在 `vetoScope` 内否决。
+- 当前唯一协议为 **Council v2（11 岗、四阶段）**：
+  `data_acquisition / data_quality / microstructure` →
+  `factor_integrity / model_validation / fusion_search` →
+  `portfolio_risk / execution_realism` →
+  `challenger / compliance / governance`。角色顺序、阶段、阈值与
+  `policyFingerprint` 由 `services.quant_api.services.council` 单一 registry 固定；
+  Strategy preflight 必须复用同一 registry，不得维护第二套角色 ID。
+- v1 七岗历史裁决继续可读，但不参与 v2 effective decision；迁移理由与阈值变化见
+  [ADR-004](docs/architecture/adr-004-council-v2-company-protocol.md)。
+- 每个角色只在 `vetoScope` 内否决；CIO / governance 必须汇总前十岗，任一前置
+  `blocked` 或 `unknown` 时不得显示 `pass`。
 - 每条裁决必须附带 `evidence`（它实际读取的字段）；**证据缺失记 `unknown`，
-  永远不记 `pass`**；`unknown` 不阻塞研究，但也不算放行。
+  永远不记 `pass`**；`unknown` 不阻塞继续研究，但阻止进入 Human Gate。
 - 人工可推翻任一角色，但推翻必须带 author + 至少 8 字理由，写入
   `runtime/jobs/**/council_overrides.jsonl` append-only 日志；
-  原裁决与推翻记录并列保存，代码中没有删除路径。
+  原裁决与推翻记录并列保存，代码中没有删除路径。v2 override 必须冻结
+  `protocolVersion / policyFingerprint / candidateId / subjectContentHash /
+  findingHash / originalVerdict`；候选、产物、finding 或 policy 任一变化即 stale。
+  缺失证据的 `unknown` 不得仅凭人工理由改判为 clearance。
 
 ## 任务控制 / Job control
 
@@ -208,6 +220,9 @@ git diff --check
   归类原因并给出补救动作；无法归类时记 `unclassified` 并附日志尾部，**不得猜测**。
 - `retry` 只对 `failed` / `cancelled` 开放，且以**原参数**重放到原 output_dir；
   `succeeded` / `rejected` 重试会覆盖已有证据，应改为从策略发起新的运行。
+- 每次 attempt 在 `Popen` 前持久化声明产物的 metadata fingerprint；退出码为 0
+  仍要求每个 required output 相对该基线产生非空 regular-file 新证据。旧产物未变
+  记 `output_evidence_stale`，旧版记录缺基线记 `output_freshness_unknown`，均 fail closed。
 - JobRecord 持久化 `parameters`，否则任何已完成的任务都无法复现、重试或解释。
 
 ## Strategy Workbench / 策略实验室

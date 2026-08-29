@@ -410,6 +410,9 @@ class FTTransformerTrainer:
         config_path = output_dir / "ft_transformer_config.json"
         schema_path = output_dir / "ft_transformer_feature_schema.json"
         metrics_path = output_dir / "ft_transformer_metrics.json"
+        preprocessing = self.config.extra.get("preprocessing", {})
+        if not isinstance(preprocessing, dict):
+            raise ValueError("FT-Transformer preprocessing contract must be a mapping")
         torch.save(
             {
                 "model": model.state_dict(),
@@ -418,6 +421,7 @@ class FTTransformerTrainer:
                 "feature_means": means.tolist(),
                 "feature_scales": scales.tolist(),
                 "config": config.__dict__,
+                "preprocessing": preprocessing,
             },
             checkpoint_path,
         )
@@ -430,6 +434,7 @@ class FTTransformerTrainer:
                     "backend": "torch",
                     "architecture": "ft_transformer",
                     "version": "v7",
+                    "preprocessing": preprocessing,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -541,6 +546,60 @@ def _torch_device_report(device: str) -> dict[str, object]:  # pragma: no cover 
     }
 
 
+def _apply_feature_preprocessing(
+    feature_frame: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    contract: object,
+) -> pd.DataFrame:
+    """Apply the preprocessing persisted with an FT-Transformer artifact."""
+    if not isinstance(contract, dict):
+        return feature_frame.copy()
+    method = str(contract.get("method") or "none").strip().lower()
+    if method == "none":
+        return feature_frame.copy()
+    if method not in {"rank", "zscore"}:
+        raise ValueError(f"unsupported artifact preprocessing method: {method}")
+    group_by = str(contract.get("group_by") or "trade_date")
+    if group_by not in feature_frame.columns:
+        raise ValueError(
+            f"artifact preprocessing requires grouping column {group_by!r}"
+        )
+
+    out = feature_frame.copy()
+    out[group_by] = pd.to_datetime(out[group_by], errors="coerce")
+    if out[group_by].isna().any():
+        raise ValueError("artifact preprocessing received invalid trade_date values")
+    normalized_declared = contract.get("normalized_columns")
+    normalized = [
+        str(column)
+        for column in (normalized_declared if isinstance(normalized_declared, list) else feature_columns)
+        if str(column) in feature_columns
+    ]
+    passthrough_declared = contract.get("passthrough_columns")
+    passthrough = [
+        str(column)
+        for column in (passthrough_declared if isinstance(passthrough_declared, list) else [])
+        if str(column) in feature_columns
+    ]
+    for column in normalized + passthrough:
+        out[column] = pd.to_numeric(out[column], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan,
+        )
+    grouped = out.groupby(group_by, sort=False)
+    if normalized:
+        if method == "rank":
+            transformed = grouped[normalized].rank(pct=True) - 0.5
+        else:
+            mean = grouped[normalized].transform("mean")
+            std = grouped[normalized].transform("std").replace(0.0, np.nan)
+            transformed = (out[normalized] - mean) / std
+        for column in normalized:
+            out[column] = transformed[column].fillna(0.0).astype("float32")
+    for column in passthrough:
+        out[column] = out[column].fillna(0.0).astype("float32")
+    return out
+
+
 def predict_ft_transformer_artifact(
     artifact_dir: str | Path,
     feature_frame: pd.DataFrame,
@@ -576,7 +635,12 @@ def predict_ft_transformer_artifact(
     model.eval()
     means = np.asarray(checkpoint["feature_means"], dtype=float)
     scales = np.asarray(checkpoint["feature_scales"], dtype=float)
-    values = feature_frame[list(feature_columns)].to_numpy(dtype=float)
+    prepared = _apply_feature_preprocessing(
+        feature_frame,
+        feature_columns,
+        checkpoint.get("preprocessing"),
+    )
+    values = prepared[list(feature_columns)].to_numpy(dtype=float)
     tensor = torch.tensor((values - means) / scales, dtype=torch.float32, device=resolved_device)
     with torch.no_grad():
         outputs = _batched_predict_tensor(model, tensor, batch_size=4096).detach().cpu().numpy()

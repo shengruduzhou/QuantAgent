@@ -27,6 +27,7 @@ class VirtualBroker(BrokerBase):
         self.ledger = PositionLedger(cash=float(self.initial_cash))
         self.orders: dict[str, OrderState] = {}
         self.order_objects: dict[str, Order] = {}
+        self.fills_by_client_order_id: dict[str, TradeFill] = {}
         self.callbacks: list[object] = []
         self.audit = AuditLogger(self.audit_log_dir, "virtual_broker_audit.jsonl")
         self.audit.write("virtual_broker_initialized", {"user_id": self.user_id, "dry_run": self.dry_run})
@@ -74,6 +75,7 @@ class VirtualBroker(BrokerBase):
             impact_cost=costs["impact_cost"],
         )
         self.ledger.apply_fill(trade)
+        self.fills_by_client_order_id[order.client_order_id] = trade
         status = OrderStatus.FILLED if fill.quantity == order.quantity else OrderStatus.PARTIAL
         state = OrderState(order.client_order_id, f"VB-{uuid4().hex[:12]}", status, fill.quantity, fill.price, fill.message)
         self._record(order, state, "order_filled", trade)

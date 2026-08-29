@@ -87,6 +87,41 @@ test("keeps TickFlow acquisition and recorder modes mutually exclusive", async (
   expect(within(recorder).getByRole("radio", { name: "Level-2 五档盘口" })).toBeChecked();
 });
 
+test("submits AKShare daily data as raw instead of future-adjusted qfq", async () => {
+  let submittedBody: Record<string, unknown> | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/data/providers")) {
+      return jsonResponse({
+        providers: [
+          { id: "akshare_market", label: "AKShare 日线", module: "akshare", commandId: "build-akshare-market-panel-v7", assetClasses: ["A股"], intervals: ["1d"], operations: ["download"], requires: [], note: "raw PIT", installed: true, configured: true, status: "ready", missingRequirements: [], missingOptionalRequirements: [] },
+        ],
+        constraints: [], jobEndpoint: "/api/jobs/data", coverageEndpoint: "/api/data/coverage", quarantineEndpoint: "/api/data/quarantine", supportsCancellation: true, runtimeRoot: "runtime", serverPaths: { quarantine: "runtime/import_quarantine", imports: "runtime/data/imported", exports: "runtime/exports" },
+      });
+    }
+    if (url.endsWith("/jobs/data")) {
+      submittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({ id: "job_ak", type: "data", status: "queued", commandId: "build-akshare-market-panel-v7", createdAt: "2026-07-22T00:00:00Z", outputPaths: [] });
+    }
+    return jsonResponse([]);
+  }));
+
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MemoryRouter><QueryClientProvider client={queryClient}><DataManagerWorkspace /></QueryClientProvider></MemoryRouter>);
+
+  fireEvent.click(await screen.findByRole("button", { name: /AKShare 日线/ }));
+  expect(screen.getByText(/raw \/ 不复权口径/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: /确认允许本次真实 provider 任务访问网络/ }));
+  fireEvent.click(screen.getByRole("button", { name: /启动任务/ }));
+
+  await waitFor(() => expect(submittedBody).toBeDefined());
+  expect(submittedBody).toMatchObject({
+    commandId: "build-akshare-market-panel-v7",
+    parameters: { adjust: "" },
+  });
+  expect(JSON.stringify(submittedBody)).not.toContain('"adjust":"qfq"');
+});
+
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify({ status: "ready", data, issues: [] }), {
     status: 200,

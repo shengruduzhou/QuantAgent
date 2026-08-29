@@ -157,9 +157,15 @@ def _realized_round_trip_pnl(
     f["avg_price"] = pd.to_numeric(f["avg_price"], errors="coerce")
     f = f.dropna(subset=["avg_price"]).sort_values("trade_date")
 
-    def _fee_per_share(side: str, qty: float, price: float) -> float:
+    def _fee_per_share(row: pd.Series, side: str, qty: float, price: float) -> float:
         if qty <= 0:
             return 0.0
+        audited = pd.to_numeric(
+            pd.Series([row.get("total_cost")]),
+            errors="coerce",
+        ).iloc[0]
+        if pd.notna(audited) and float(audited) >= 0:
+            return float(audited) / qty
         try:
             total = cm.calculate(OrderSide(side), int(qty), float(price))["total"]
         except Exception:  # noqa: BLE001 — unknown side ⇒ no fee rather than crash
@@ -172,9 +178,9 @@ def _realized_round_trip_pnl(
         for _, r in g.iterrows():
             qty, price, date, side = r["filled_quantity"], r["avg_price"], r["trade_date"], r["side"]
             if side == "buy":
-                lots.append([qty, price, date, _fee_per_share("buy", qty, price)])
+                lots.append([qty, price, date, _fee_per_share(r, "buy", qty, price)])
             elif side == "sell":
-                sell_fee_ps = _fee_per_share("sell", qty, price)
+                sell_fee_ps = _fee_per_share(r, "sell", qty, price)
                 remaining = qty
                 while remaining > 1e-9 and lots:
                     lot = lots[0]

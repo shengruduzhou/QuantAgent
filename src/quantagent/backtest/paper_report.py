@@ -128,7 +128,15 @@ def _trade_frame(orders: pd.DataFrame, config: PaperReportConfig) -> pd.DataFram
         ref_price = float(row.get("reference_price", avg_price) or avg_price)
         gross_amount = quantity * avg_price
         gross.append(gross_amount)
-        fees.append(float(cost_model.calculate(side, quantity, avg_price)["total"]))
+        audited_total = pd.to_numeric(
+            pd.Series([row.get("total_cost")]),
+            errors="coerce",
+        ).iloc[0]
+        fees.append(
+            float(audited_total)
+            if pd.notna(audited_total) and float(audited_total) >= 0
+            else float(cost_model.calculate(side, quantity, avg_price)["total"])
+        )
         if side == OrderSide.BUY:
             slippage.append(max(0.0, avg_price - ref_price) * quantity)
         else:
@@ -157,16 +165,22 @@ def _pnl_frame(
         bench["trade_date"] = pd.to_datetime(bench["trade_date"], errors="coerce")
         bench = bench[bench["symbol"].astype(str) == str(benchmark_symbol)].sort_values("trade_date")
         if not bench.empty and "close" in bench.columns:
-            # Only the *first* observation is legitimately a 0% day — there is no
-            # prior close to compare it to. Interior gaps stay NaN. Blanket
-            # `fillna(0.0)` turned every session the benchmark was missing into a
-            # flat day, which is how excess return gets overstated by exactly the
-            # benchmark's move across the gap (DEF-022).
-            returns = pd.to_numeric(bench["close"], errors="coerce").pct_change()
-            if len(returns):
-                returns.iloc[0] = 0.0 if pd.isna(returns.iloc[0]) else returns.iloc[0]
-            bench["benchmark_return"] = returns
-            frame = frame.merge(bench[["trade_date", "benchmark_return"]], on="trade_date", how="left")
+            if bench["trade_date"].duplicated().any():
+                raise ValueError("benchmark panel contains duplicate trade_date rows")
+            # Rebase on the first NAV/execution close. Computing pct_change on
+            # pre-signal benchmark rows charged the benchmark's T -> T+1 move
+            # against a strategy whose first economic observation was already
+            # T+1, creating a one-session clock mismatch.
+            benchmark_close = bench[["trade_date", "close"]].rename(
+                columns={"close": "benchmark_close"},
+            )
+            frame = frame.merge(benchmark_close, on="trade_date", how="left")
+            close = pd.to_numeric(frame["benchmark_close"], errors="coerce")
+            returns = close.pct_change(fill_method=None)
+            if len(returns) and pd.notna(close.iloc[0]):
+                returns.iloc[0] = 0.0
+            frame["benchmark_return"] = returns
+            frame = frame.drop(columns=["benchmark_close"])
     return frame
 
 
@@ -207,7 +221,6 @@ def _selected_stocks(trades: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFra
         gross_buy = float(buys.get("gross_amount", pd.Series(dtype=float)).sum()) if not buys.empty else 0.0
         gross_sell = float(sells.get("gross_amount", pd.Series(dtype=float)).sum()) if not sells.empty else 0.0
         fees = float(symbol_trades.get("estimated_fee", pd.Series(dtype=float)).sum()) if not symbol_trades.empty else 0.0
-        slippage = float(symbol_trades.get("estimated_slippage", pd.Series(dtype=float)).sum()) if not symbol_trades.empty else 0.0
         ending_value = 0.0
         if not latest_holdings.empty:
             matched = latest_holdings[latest_holdings["symbol"].astype(str) == symbol]
@@ -225,7 +238,9 @@ def _selected_stocks(trades: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFra
                 "gross_buy_amount": gross_buy,
                 "gross_sell_amount": gross_sell,
                 "ending_market_value": ending_value,
-                "estimated_symbol_pnl": gross_sell - gross_buy + ending_value - fees - slippage,
+                # avg_price already contains simulated slippage. Subtracting the
+                # slippage estimate again double-charged every completed fill.
+                "estimated_symbol_pnl": gross_sell - gross_buy + ending_value - fees,
             }
         )
     return pd.DataFrame(rows, columns=columns)
@@ -240,22 +255,42 @@ def _summary(
 ) -> dict[str, object]:
     if pnl.empty:
         final_nav = float(initial_cash)
-        gross_return = 0.0
         max_drawdown = 0.0
     else:
         final_nav = float(pnl["nav"].iloc[-1])
-        gross_return = final_nav / float(initial_cash) - 1.0
         max_drawdown = float(pnl["drawdown"].min())
     realized_pnl = final_nav - float(initial_cash)
     fees = float(trades.get("estimated_fee", pd.Series(dtype=float)).sum())
     slippage = float(trades.get("estimated_slippage", pd.Series(dtype=float)).sum())
     completed = trades[trades.get("status", pd.Series(dtype=str)).astype(str).isin(["filled", "partial"])] if not trades.empty else trades
-    net_return = (final_nav - fees - slippage) / float(initial_cash) - 1.0
+    # VirtualBroker's NAV already includes explicit fees and fill-price
+    # slippage. Re-deducting both estimates here was a second cost charge.
+    net_return = final_nav / float(initial_cash) - 1.0
+    return_before_estimated_costs = (
+        (final_nav + fees + slippage) / float(initial_cash) - 1.0
+    )
     daily_returns = pd.to_numeric(pnl.get("daily_return", pd.Series(dtype=float)), errors="coerce").dropna() if not pnl.empty else pd.Series(dtype=float)
-    annualized_return = float((1.0 + gross_return) ** (252.0 / max(len(daily_returns), 1)) - 1.0) if len(daily_returns) else 0.0
+    if not pnl.empty and "trade_date" in pnl.columns:
+        observed_dates = pd.to_datetime(pnl["trade_date"], errors="coerce").dropna().sort_values()
+    else:
+        observed_dates = pd.Series(dtype="datetime64[ns]")
+    elapsed_calendar_days = (
+        max(1, int((observed_dates.iloc[-1] - observed_dates.iloc[0]).days) + 1)
+        if len(observed_dates)
+        else 0
+    )
+    elapsed_years = max(elapsed_calendar_days / 365.25, 1.0 / 252.0) if elapsed_calendar_days else 0.0
+    observations_per_year = (
+        len(daily_returns) / elapsed_years if elapsed_years > 0 else 0.0
+    )
+    annualized_return = (
+        float((1.0 + net_return) ** (1.0 / elapsed_years) - 1.0)
+        if len(daily_returns) and elapsed_years > 0 and net_return > -1.0
+        else (-1.0 if net_return <= -1.0 else 0.0)
+    )
     daily_std = float(daily_returns.std(ddof=0)) if len(daily_returns) else 0.0
-    annualized_volatility = float(daily_std * (252.0**0.5))
-    sharpe = float(daily_returns.mean() / daily_std * (252.0**0.5)) if daily_std > 0 else None
+    annualized_volatility = float(daily_std * (observations_per_year**0.5))
+    sharpe = float(daily_returns.mean() / daily_std * (observations_per_year**0.5)) if daily_std > 0 else None
     benchmark_return = None
     benchmark_max_drawdown = None
     information_ratio = None
@@ -297,7 +332,7 @@ def _summary(
                 excess_daily = aligned - bench_daily
                 tracking_error = float(excess_daily.std(ddof=0))
                 information_ratio = (
-                    float(excess_daily.mean() / tracking_error * (252.0**0.5))
+                    float(excess_daily.mean() / tracking_error * (observations_per_year**0.5))
                     if tracking_error > 0
                     else None
                 )
@@ -306,7 +341,8 @@ def _summary(
         "initial_cash": float(initial_cash),
         "final_nav": final_nav,
         "realized_money_earned_lost": realized_pnl,
-        "gross_return": gross_return,
+        "gross_return": return_before_estimated_costs,
+        "return_before_estimated_costs": return_before_estimated_costs,
         "net_return_after_estimated_costs": net_return,
         "turnover_adjusted_net_return": net_return,
         "benchmark_return": benchmark_return,
@@ -320,6 +356,10 @@ def _summary(
         "benchmark_sessions_missing": benchmark_sessions_missing,
         "annualized_return": annualized_return,
         "annualized_volatility": annualized_volatility,
+        "annualization_basis": "elapsed_calendar_time_between_nav_observations",
+        "annualization_elapsed_calendar_days": elapsed_calendar_days,
+        "annualization_observations": int(len(daily_returns)),
+        "estimated_costs_already_in_nav": True,
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "benchmark_max_drawdown": benchmark_max_drawdown,

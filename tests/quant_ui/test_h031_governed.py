@@ -131,6 +131,20 @@ def test_wrong_job_type_is_rejected(quant_ui_settings) -> None:
         jm.validate("governance", "audit-u0-full-universe", {})
 
 
+def test_declared_output_symlink_is_rejected_before_queueing(quant_ui_settings) -> None:
+    target = quant_ui_settings.runtime_root / "custom" / "real_output"
+    link = quant_ui_settings.runtime_root / "custom" / "declared_output"
+    target.mkdir(parents=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    jm = JobManager(quant_ui_settings)
+    with pytest.raises(ValueError, match="output path cannot be a symlink"):
+        jm.validate("data", "probe-mt5-capability", {"output": str(link)})
+
+
 # --- cancellation / resume ---------------------------------------------------
 def test_queued_job_cancels_before_process_start(quant_ui_settings) -> None:
     from services.quant_api.services.jobs import JobRecord, _now
@@ -163,16 +177,22 @@ def test_restart_reports_a_vanished_job_as_unknown_not_as_a_diagnosis(quant_ui_s
 
 def test_restart_finalises_from_the_supervisor_exit_code(quant_ui_settings) -> None:
     """When the supervisor recorded an exit code, the restart uses it."""
-    from services.quant_api.services.jobs import JobRecord, _now
+    from services.quant_api.services.jobs import JobRecord, _now, _output_evidence_snapshot
     jm = JobManager(quant_ui_settings)
+    output_path = quant_ui_settings.project_root / COMMANDS["audit-u0-full-universe"]["fixed_outputs"][0]
     jm._jobs["job_done"] = JobRecord(
         id="job_done", type="data", status="running",
         commandId="audit-u0-full-universe", createdAt=_now(),
         statusPath=None,
+        outputEvidenceBaseline=_output_evidence_snapshot(
+            quant_ui_settings, [str(output_path)]
+        ),
     )
     status_path = quant_ui_settings.jobs_root / "job_done.status.json"
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("{}", encoding="utf-8")
     jm._persist()
 
     reloaded = JobManager(quant_ui_settings)
@@ -181,6 +201,185 @@ def test_restart_finalises_from_the_supervisor_exit_code(quant_ui_settings) -> N
         time.sleep(0.05)
     assert reloaded._jobs["job_done"].status == "succeeded"
     assert reloaded._jobs["job_done"].exitStatusObserved is True
+
+
+def test_zero_exit_without_declared_output_evidence_is_failed(quant_ui_settings) -> None:
+    """A process exit code is not evidence that its promised artifact exists."""
+    from services.quant_api.services.jobs import JobRecord, _now
+
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_no_output"] = JobRecord(
+        id="job_no_output", type="data", status="running",
+        commandId="audit-u0-full-universe", createdAt=_now(), statusPath=None,
+    )
+    status_path = quant_ui_settings.jobs_root / "job_no_output.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_no_output"].status == "running":
+        time.sleep(0.05)
+    record = reloaded._jobs["job_no_output"]
+    assert record.status == "failed"
+    assert record.failure["code"] == "output_evidence_missing"
+    assert record.exitStatusObserved is True
+
+
+def test_custom_output_replaces_fixed_default_for_completion_evidence(quant_ui_settings) -> None:
+    """A valid --output override must not also require the unused default path."""
+    from services.quant_api.services.jobs import JobRecord, _now, _output_evidence_snapshot
+
+    custom_output = quant_ui_settings.runtime_root / "custom" / "mt5_probe"
+
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_custom_output"] = JobRecord(
+        id="job_custom_output",
+        type="data",
+        status="running",
+        commandId="probe-mt5-capability",
+        createdAt=_now(),
+        statusPath=None,
+        parameters={"output": str(custom_output)},
+        outputEvidenceBaseline=_output_evidence_snapshot(
+            quant_ui_settings, [str(custom_output)]
+        ),
+    )
+    custom_output.mkdir(parents=True)
+    (custom_output / "capability_matrix.json").write_text("{}", encoding="utf-8")
+    status_path = quant_ui_settings.jobs_root / "job_custom_output.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps({"state": "exited", "exitCode": 0}),
+        encoding="utf-8",
+    )
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_custom_output"].status == "running":
+        time.sleep(0.05)
+
+    record = reloaded._jobs["job_custom_output"]
+    assert record.status == "succeeded"
+    assert record.exitStatusObserved is True
+
+
+def test_restart_rejects_unchanged_retry_artifacts_as_stale(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import JobRecord, _now, _output_evidence_snapshot
+
+    output = quant_ui_settings.runtime_root / "custom" / "stale_retry"
+    output.mkdir(parents=True)
+    (output / "capability_matrix.json").write_text("old", encoding="utf-8")
+    baseline = _output_evidence_snapshot(quant_ui_settings, [str(output)])
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_stale"] = JobRecord(
+        id="job_stale", type="data", status="running",
+        commandId="probe-mt5-capability", createdAt=_now(), statusPath=None,
+        parameters={"output": str(output)}, retryOf="job_previous", attempt=2,
+        outputEvidenceBaseline=baseline,
+    )
+    status_path = quant_ui_settings.jobs_root / "job_stale.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_stale"].status == "running":
+        time.sleep(0.05)
+    record = reloaded._jobs["job_stale"]
+    assert record.status == "failed"
+    assert record.failure["code"] == "output_evidence_stale"
+
+
+def test_legacy_zero_exit_without_freshness_baseline_fails_closed(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import JobRecord, _now
+
+    output = quant_ui_settings.runtime_root / "custom" / "legacy_output"
+    output.mkdir(parents=True)
+    (output / "capability_matrix.json").write_text("legacy", encoding="utf-8")
+    jm = JobManager(quant_ui_settings)
+    jm._jobs["job_legacy"] = JobRecord(
+        id="job_legacy", type="data", status="running",
+        commandId="probe-mt5-capability", createdAt=_now(), statusPath=None,
+        parameters={"output": str(output)},
+    )
+    status_path = quant_ui_settings.jobs_root / "job_legacy.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"state": "exited", "exitCode": 0}), encoding="utf-8")
+    jm._persist()
+
+    reloaded = JobManager(quant_ui_settings)
+    deadline = time.time() + 5
+    while time.time() < deadline and reloaded._jobs["job_legacy"].status == "running":
+        time.sleep(0.05)
+    assert reloaded._jobs["job_legacy"].failure["code"] == "output_freshness_unknown"
+
+
+def test_every_declared_output_must_change_for_attempt_freshness(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import (
+        _output_evidence_snapshot,
+        _unchanged_output_evidence,
+    )
+
+    first = quant_ui_settings.runtime_root / "custom" / "multi_first.json"
+    second = quant_ui_settings.runtime_root / "custom" / "multi_second.json"
+    first.parent.mkdir(parents=True)
+    first.write_text("old-first", encoding="utf-8")
+    second.write_text("old-second", encoding="utf-8")
+    baseline = _output_evidence_snapshot(
+        quant_ui_settings,
+        [str(first), str(second)],
+    )
+
+    first.write_text("new-first-with-new-size", encoding="utf-8")
+
+    assert _unchanged_output_evidence(
+        quant_ui_settings,
+        [str(first), str(second)],
+        baseline,
+    ) == [f"{second}:unchanged_since_attempt_start"]
+
+
+def test_output_symlink_is_not_accepted_as_attempt_evidence(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import (
+        _missing_output_evidence,
+        _output_evidence_snapshot,
+    )
+
+    target = quant_ui_settings.runtime_root / "custom" / "outside.json"
+    link = quant_ui_settings.runtime_root / "custom" / "declared.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("external evidence", encoding="utf-8")
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    snapshot = _output_evidence_snapshot(quant_ui_settings, [str(link)])
+    key = str(link.relative_to(quant_ui_settings.project_root))
+    assert snapshot[key]["kind"] == "symlink"
+    assert _missing_output_evidence(
+        quant_ui_settings,
+        [str(link)],
+    ) == [f"{link}:symlink_not_allowed"]
+
+
+def test_zero_byte_file_does_not_make_output_directory_complete(quant_ui_settings) -> None:
+    from services.quant_api.services.jobs import _missing_output_evidence
+
+    output = quant_ui_settings.runtime_root / "empty_artifact_directory"
+    output.mkdir(parents=True)
+    (output / "placeholder.json").touch()
+
+    missing = _missing_output_evidence(
+        quant_ui_settings,
+        [str(output)],
+    )
+
+    assert missing == [f"{output}:empty_directory"]
 
 
 # --- progress / stage parsing ------------------------------------------------

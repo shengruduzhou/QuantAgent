@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -216,3 +217,50 @@ def test_empty_inputs_produce_empty_but_well_shaped_bundle(tmp_path):
     # Files exist even when empty
     assert paths["metrics"].exists()
     assert paths["trades"].exists()
+
+
+def test_nonempty_strict_run_rejects_assumed_tradability_flags():
+    market = _market_panel().drop(columns=["is_suspended"])
+
+    with pytest.raises(ValueError, match="measured execution fields"):
+        run_strict_backtest_v8(_target_weights(), market)
+
+
+def test_nonempty_strict_run_rejects_unmeasured_volume():
+    market = _market_panel()
+    market.loc[0, "volume"] = None
+
+    with pytest.raises(ValueError, match="measured volume"):
+        run_strict_backtest_v8(_target_weights(), market)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("close", np.inf, "finite positive close"),
+        ("volume", np.inf, "finite non-negative measured volume"),
+        ("amount", np.inf, "finite non-negative measured amount"),
+        ("amount", None, "finite non-negative measured amount"),
+    ],
+)
+def test_nonempty_strict_run_rejects_nonfinite_execution_values(
+    column: str,
+    value: float | None,
+    message: str,
+):
+    market = _market_panel()
+    market.loc[0, column] = value
+
+    with pytest.raises(ValueError, match=message):
+        run_strict_backtest_v8(_target_weights(), market)
+
+
+def test_public_simulator_cannot_bypass_measured_execution_gate():
+    from quantagent.backtest.ashare_execution_simulator import (
+        simulate_ashare_target_weights,
+    )
+
+    market = _market_panel().drop(columns=["volume"])
+
+    with pytest.raises(ValueError, match="measured execution fields"):
+        simulate_ashare_target_weights(_target_weights(), market)

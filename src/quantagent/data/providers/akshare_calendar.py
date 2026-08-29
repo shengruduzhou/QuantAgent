@@ -84,7 +84,23 @@ def load_akshare_research_calendar(
             {**base_meta, "status": "empty_or_invalid", "akshare_version": version},
             ("akshare_calendar_empty_or_invalid",),
         )
-    parsed = pd.to_datetime(raw["trade_date"], errors="coerce").dropna().dt.normalize()
+    parsed_raw = pd.to_datetime(raw["trade_date"], errors="coerce")
+    if parsed_raw.isna().any():
+        # A partially malformed response is not a trustworthy session set.
+        # Dropping the bad rows would make the calendar appear complete while
+        # silently changing its membership.
+        invalid_count = int(parsed_raw.isna().sum())
+        return AkShareCalendarEvidence(
+            TradingCalendar.from_dates(()),
+            {
+                **base_meta,
+                "status": "invalid_sessions",
+                "akshare_version": version,
+                "invalid_session_count": invalid_count,
+            },
+            (f"akshare_calendar_invalid_sessions:{invalid_count}",),
+        )
+    parsed = parsed_raw.dt.normalize()
     if parsed.empty:
         return AkShareCalendarEvidence(
             TradingCalendar.from_dates(()),

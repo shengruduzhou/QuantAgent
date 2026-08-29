@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  ArrowRight,
   CheckCircle,
   Gavel,
   Prohibit,
@@ -41,6 +42,13 @@ const DECISION_META: Record<string, { label: string; tone: "success" | "warning"
   BLOCKED: { label: "被否决", tone: "danger" },
 };
 
+const COMPANY_PHASES = [
+  { label: "01 数据准入", roleIds: ["data_acquisition", "data_quality", "microstructure"] },
+  { label: "02 研究验证", roleIds: ["factor_integrity", "model_validation", "fusion_search"] },
+  { label: "03 组合落地", roleIds: ["portfolio_risk", "execution_realism"] },
+  { label: "04 独立裁决", roleIds: ["challenger", "compliance", "governance"] },
+] as const;
+
 export function DecisionCouncilPage(): JSX.Element {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [openOverrideRole, setOpenOverrideRole] = useState("");
@@ -67,7 +75,35 @@ export function DecisionCouncilPage(): JSX.Element {
   const roles = roster.data?.data.roles ?? [];
   const thresholds = roster.data?.data.thresholds;
   const decision = data?.decision;
-  const decisionMeta = decision ? DECISION_META[decision.state] : undefined;
+  const expectedRoleIds = COMPANY_PHASES.flatMap((phase) => [...phase.roleIds]);
+  const contractIssue = useMemo(() => {
+    const rosterData = roster.data?.data;
+    if (!rosterData || !data) return "";
+    const roleIds = rosterData.roles.map((item) => item.id);
+    const findingIds = data.findings.map((item) => item.roleId);
+    if (rosterData.protocolVersion !== 2 || data.protocolVersion !== 2) {
+      return "Council protocolVersion 不是 v2；当前裁决不可用于晋级。";
+    }
+    if (rosterData.policyFingerprint !== data.policyFingerprint) {
+      return "Roster 与 review 的 policy fingerprint 不一致；请刷新后重试。";
+    }
+    if (
+      roleIds.length !== expectedRoleIds.length
+      || new Set(roleIds).size !== roleIds.length
+      || roleIds.some((item, index) => item !== expectedRoleIds[index])
+    ) {
+      return "Council v2 必须按固定顺序返回完整 11 岗；当前 roster 缺失、重复或漂移。";
+    }
+    if (
+      findingIds.length !== expectedRoleIds.length
+      || new Set(findingIds).size !== findingIds.length
+      || findingIds.some((item, index) => item !== expectedRoleIds[index])
+    ) {
+      return "Review 未返回完整 11 岗裁决；缺失不能被静默过滤。";
+    }
+    return "";
+  }, [data, roster.data]);
+  const decisionMeta = decision && !contractIssue ? DECISION_META[decision.state] : undefined;
 
   const counts = useMemo(() => {
     const effective = findings.map((item) => item.override?.verdict ?? item.verdict);
@@ -79,17 +115,24 @@ export function DecisionCouncilPage(): JSX.Element {
     };
   }, [findings]);
 
-  const submitOverride = async (roleId: string): Promise<void> => {
+  const submitOverride = async (finding: CouncilFinding): Promise<void> => {
+    if (!data || contractIssue) return;
     setSubmitting(true);
     setError("");
     try {
       await apiPost<CouncilOverride>("/council/overrides", {
         subjectType: "fusion_run",
         subjectId: effectiveRunId,
-        roleId,
+        subjectContentHash: data.subject.contentHash,
+        candidateId: data.subject.candidateId,
+        roleId: finding.roleId,
+        findingHash: finding.findingHash,
+        originalVerdict: finding.verdict,
         verdict: overrideVerdict,
         reason: overrideReason,
         author: overrideAuthor,
+        protocolVersion: data.protocolVersion,
+        policyFingerprint: data.policyFingerprint,
       });
       setOpenOverrideRole("");
       setOverrideReason("");
@@ -110,7 +153,7 @@ export function DecisionCouncilPage(): JSX.Element {
         eyebrow="ATLAS L5 / DECISION COUNCIL"
         title="多 Agent 决策议事会"
         description="每个角色只在自身职责域内审查，只消费结构化证据，并只能否决自己域内的问题。人工可以推翻任一角色，但推翻会写入不可删除的审计日志。"
-        asOf={decision ? decisionMeta?.label ?? decision.state : "等待审查对象"}
+        asOf={contractIssue ? "协议漂移" : decision ? decisionMeta?.label ?? decision.state : "等待审查对象"}
         context="证据缺失记为 unknown，不记为通过"
       />
 
@@ -120,10 +163,10 @@ export function DecisionCouncilPage(): JSX.Element {
             label: "议事会结论",
             value: decisionMeta?.label ?? "—",
             detail: decision?.summary ?? "选择一个搜索产物后生成",
-            tone: decisionMeta?.tone === "danger" ? "danger" : decisionMeta?.tone === "warning" ? "warning" : "positive",
+            tone: !decisionMeta ? "neutral" : decisionMeta.tone === "danger" ? "danger" : decisionMeta.tone === "warning" ? "warning" : "positive",
             icon: Gavel,
           },
-          { label: "通过", value: String(counts.pass), detail: `${roles.length} 个角色`, tone: "positive", icon: CheckCircle },
+          { label: "通过", value: String(counts.pass), detail: `${roles.length} 个角色`, tone: counts.pass ? "positive" : "neutral", icon: CheckCircle },
           { label: "保留意见", value: String(counts.warn), detail: "不阻塞，但需复核", tone: "warning", icon: Warning },
           { label: "否决", value: String(counts.blocked), detail: "阻塞晋级，不阻塞研究", tone: counts.blocked ? "danger" : "neutral", icon: Prohibit },
           { label: "证据不足", value: String(counts.unknown), detail: "缺证据，不计为通过", tone: counts.unknown ? "warning" : "neutral", icon: Question },
@@ -136,6 +179,46 @@ export function DecisionCouncilPage(): JSX.Element {
           },
         ]}
       />
+      <span className="sr-only" role="status" aria-live="polite">
+        {decision ? `议事会结论：${decisionMeta?.label ?? decision.state}。${decision.summary}` : "议事会等待审查对象。"}
+      </span>
+
+      <WorkbenchPanel
+        eyebrow="COMPANY REVIEW CHAIN"
+        title={contractIssue || !roles.length ? "Council 协议不可用" : `${roles.length} 个角色共同协商`}
+        meta={data ? `Council v${data.protocolVersion} · ${data.policyFingerprint.slice(0, 12)}` : "等待协议证据"}
+      >
+        {contractIssue ? <TruthNotice tone="warning">{contractIssue}</TruthNotice> : null}
+        <ol className="council-company-flow" aria-label="公司共同决策流程">
+          {COMPANY_PHASES.map((phase, phaseIndex) => {
+            const phaseRoles = phase.roleIds
+              .map((roleId) => roles.find((role) => role.id === roleId))
+              .filter((role): role is NonNullable<typeof role> => Boolean(role));
+            if (!phaseRoles.length) return null;
+            return (
+              <li key={phase.label}>
+                <strong>{phase.label}</strong>
+                <div>
+                  {phaseRoles.map((role) => {
+                    const finding = findings.find((item) => item.roleId === role.id);
+                    const effective = finding?.override?.verdict ?? finding?.verdict ?? "unknown";
+                    const meta = VERDICT_META[effective];
+                    return (
+                      <span key={role.id} className="atlas-chip" data-tone={meta.tone}>
+                        {role.label} · {meta.label}
+                      </span>
+                    );
+                  })}
+                </div>
+                {phaseIndex < COMPANY_PHASES.length - 1 ? <ArrowRight aria-hidden="true" size={14} /> : null}
+              </li>
+            );
+          })}
+        </ol>
+        <TruthNotice tone="warning">
+          “共同协商”不是多数票：unknown 会阻止晋级但不阻止继续研究；CIO 必须汇总前十岗，不能绕过人工 Gate；liveEligible 永远为 false。
+        </TruthNotice>
+      </WorkbenchPanel>
 
       <section className="atlas-split">
         <div className="atlas-stack">
@@ -160,7 +243,13 @@ export function DecisionCouncilPage(): JSX.Element {
                       <header>
                         <div>
                           <span className="atlas-eyebrow">{role?.vetoScope ?? "review"}</span>
-                          <strong>{roleLabel(finding.roleId)}</strong>
+                          <strong>
+                            <span aria-hidden="true">
+                              {String(findings.findIndex((item) => item.roleId === finding.roleId) + 1).padStart(2, "0")}
+                              /{String(roles.length).padStart(2, "0")} ·{" "}
+                            </span>
+                            <span>{roleLabel(finding.roleId)}</span>
+                          </strong>
                           <small>{role?.domain}</small>
                         </div>
                         <span className="atlas-chip" data-tone={meta.tone}>
@@ -225,7 +314,7 @@ export function DecisionCouncilPage(): JSX.Element {
                           className="council-override-form"
                           onSubmit={(event) => {
                             event.preventDefault();
-                            void submitOverride(finding.roleId);
+                            void submitOverride(finding);
                           }}
                         >
                           <TruthNotice tone="warning">
@@ -238,7 +327,7 @@ export function DecisionCouncilPage(): JSX.Element {
                               onChange={(event) =>
                                 setOverrideVerdict(event.target.value as "pass" | "warn" | "blocked")}
                             >
-                              <option value="pass">通过</option>
+                              <option value="pass" disabled={finding.verdict === "unknown"}>通过</option>
                               <option value="warn">保留意见</option>
                               <option value="blocked">否决</option>
                             </select>
@@ -266,7 +355,7 @@ export function DecisionCouncilPage(): JSX.Element {
                               type="submit"
                               className="atlas-action"
                               data-variant="primary"
-                              disabled={submitting || overrideReason.trim().length < 8 || !overrideAuthor.trim()}
+                              disabled={submitting || Boolean(contractIssue) || overrideReason.trim().length < 8 || !overrideAuthor.trim()}
                             >
                               {submitting ? "记录中" : "记录推翻"}
                             </button>
@@ -335,7 +424,10 @@ export function DecisionCouncilPage(): JSX.Element {
               <ActionableState title="阈值不可用" detail="Quant API 未连接。" compact />
             )}
             {roster.data?.data.protocol ? (
-              <TruthNotice>{roster.data.data.protocol}</TruthNotice>
+              <TruthNotice>
+                Council v{roster.data.data.protocolVersion} · {roster.data.data.policyFingerprint.slice(0, 12)} · {roster.data.data.protocol}
+                {" "}{roster.data.data.migration}
+              </TruthNotice>
             ) : null}
           </WorkbenchPanel>
 
@@ -355,6 +447,9 @@ export function DecisionCouncilPage(): JSX.Element {
                       </span>
                     </div>
                     <small className="mono">{item.author} · {item.recordedAt}</small>
+                    <small className="mono">
+                      {item.effective ? "effective" : item.scopeStatus ?? "historical"}
+                    </small>
                     <p>{item.reason}</p>
                   </li>
                 ))}
