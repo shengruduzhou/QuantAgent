@@ -18,6 +18,8 @@ test("validates, arms and exposes the governed decision council", async () => {
     issues: [],
     data: {
       valid: true,
+      councilProtocolVersion: 2,
+      councilPolicyFingerprint: "a".repeat(64),
       errors: [],
       warnings: ["research only"],
       resolvedInputs: {
@@ -31,10 +33,16 @@ test("validates, arms and exposes the governed decision council", async () => {
         armed: true,
       },
       decisionCouncil: [
-        { id: "data_quality", label: "Data Quality", responsibility: "PIT and coverage", status: "ready", veto: true },
-        { id: "risk", label: "Risk", responsibility: "Drawdown and kill switch", status: "ready", veto: true },
-        { id: "human_gate", label: "Human Gate", responsibility: "Operator approval", status: "approved", veto: true },
-      ],
+        ["data_acquisition", "Data Acquisition"], ["data_quality", "Data Quality"],
+        ["microstructure", "Microstructure"], ["factor_integrity", "Factor Integrity"],
+        ["model_validation", "Model Validation"], ["fusion_search", "Fusion Search"],
+        ["portfolio_risk", "Portfolio Risk"], ["execution_realism", "Execution Realism"],
+        ["challenger", "Challenger"], ["compliance", "Compliance"],
+        ["governance", "Governance"],
+      ].map(([id, label]) => ({
+        id, label, responsibility: `${label} responsibility`,
+        status: id === "governance" ? "approved" : "ready", veto: true,
+      })),
     },
   }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
@@ -45,13 +53,53 @@ test("validates, arms and exposes the governed decision council", async () => {
   expect(screen.getByRole("button", { name: "启动闭环" })).toBeDisabled();
 
   fireEvent.click(screen.getByRole("checkbox"));
-  expect(screen.getByRole("button", { name: "启动闭环" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "启动闭环" })).toBeDisabled();
 
   fireEvent.click(screen.getByRole("button", { name: "校验" }));
   expect(await screen.findByText("Schema 与路径校验通过")).toBeInTheDocument();
   expect(screen.getAllByText("Data Quality").length).toBeGreaterThan(0);
-  expect(screen.getAllByText("Risk").length).toBeGreaterThan(0);
-  expect(screen.getAllByText("Human Gate").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Portfolio Risk").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Governance").length).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: "启动闭环" })).toBeEnabled();
+});
+
+test("fails closed when strategy preflight returns a drifting council contract", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/strategies/validate") && init?.method === "POST") {
+      return new Response(JSON.stringify({
+        status: "ready",
+        issues: [],
+        data: {
+          valid: true,
+          councilProtocolVersion: 2,
+          councilPolicyFingerprint: "a".repeat(64),
+          errors: [], warnings: [], resolvedInputs: {},
+          launch: {
+            jobType: "strategy-pipeline",
+            commandId: "run-full-real-training-v7",
+            parameters: {}, armed: true,
+          },
+          decisionCouncil: [{
+            id: "data_quality", label: "Data Quality",
+            responsibility: "PIT and coverage", status: "ready", veto: true,
+          }],
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ status: "empty", issues: [], data: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={queryClient}><StrategyStudioPage /></QueryClientProvider>);
+
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("button", { name: "校验" }));
+
+  expect(await screen.findByText(/当前协议漂移，不能启动/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "启动闭环" })).toBeDisabled();
 });
 
 test("constrains primary horizon to the declared label horizons", () => {

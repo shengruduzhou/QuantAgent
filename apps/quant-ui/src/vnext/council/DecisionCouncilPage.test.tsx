@@ -9,14 +9,37 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const HASH = "a".repeat(64);
+const FINDING_HASH = "b".repeat(64);
+const ROLE_IDS = [
+  "data_acquisition", "data_quality", "microstructure",
+  "factor_integrity", "model_validation", "fusion_search",
+  "portfolio_risk", "execution_realism", "challenger", "compliance", "governance",
+];
+const ROLE_LABELS: Record<string, string> = {
+  data_acquisition: "数据采购", data_quality: "数据质量", microstructure: "市场微观结构",
+  factor_integrity: "因子完整性", model_validation: "模型验证", fusion_search: "搜索统计",
+  portfolio_risk: "组合风险", execution_realism: "执行可实现性", challenger: "独立挑战者",
+  compliance: "合规与模型风险", governance: "CIO / 决策主席",
+};
 const ROSTER = {
-  roles: [
-    { id: "data_quality", label: "数据质量", domain: "PIT 完整性", vetoScope: "输入数据不可信时阻塞整条链", veto: true },
-    { id: "fusion_search", label: "搜索统计", domain: "试验计数、PBO", vetoScope: "融合候选晋级", veto: true },
-    { id: "execution_realism", label: "执行可实现性", domain: "成本、T+1", vetoScope: "回测可实现性主张", veto: true },
-  ],
+  protocolVersion: 2,
+  policyFingerprint: HASH,
+  protocolEffectiveAt: "2026-08-27",
+  roles: ROLE_IDS.map((id, index) => ({
+    id,
+    label: ROLE_LABELS[id],
+    domain: id === "data_quality" ? "PIT 完整性" : `${id} domain`,
+    vetoScope: id === "data_quality"
+      ? "输入数据不可信时阻塞整条链"
+      : id === "fusion_search" ? "融合候选晋级" : `${id} veto scope`,
+    veto: true,
+    phase: index < 3 ? "data_admission" : index < 6 ? "research_validation" : index < 8 ? "portfolio_delivery" : "independent_decision",
+    introducedInProtocol: ["data_acquisition", "microstructure", "challenger", "compliance"].includes(id) ? 2 : 1,
+  })),
   thresholds: { maxPbo: 0.5, minObservations: 60 },
   protocol: "证据缺失记为 unknown，不记为通过。",
+  migration: "v1 override 仅作历史展示。",
 };
 
 const RUN = {
@@ -39,33 +62,41 @@ const RUN = {
 };
 
 function review(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const special: Record<string, Record<string, unknown>> = {
+    data_quality: {
+      roleId: "data_quality", verdict: "pass", headline: "输入口径可追溯",
+      detail: "基准 index:000300.SH。", evidence: { benchmarkMode: "index:000300.SH", observations: 120 },
+      nextAction: "无", findingHash: FINDING_HASH,
+    },
+    fusion_search: {
+      roleId: "fusion_search", verdict: "unknown", headline: "试验次数未记录",
+      detail: "没有 nTrials 就无法收缩 Sharpe。", evidence: { nTrials: null, pbo: 0.18 },
+      nextAction: "重新运行搜索", findingHash: FINDING_HASH,
+    },
+    execution_realism: {
+      roleId: "execution_realism", verdict: "blocked", headline: "成本假设不成立",
+      detail: "成本 0 bps 低于最低要求。", evidence: { transactionCostBps: 0 },
+      nextAction: "使用真实成本重跑", findingHash: FINDING_HASH,
+    },
+  };
+  const baseFindings = ROLE_IDS.map((roleId) => special[roleId] ?? ({
+    roleId, verdict: "pass", headline: `${ROLE_LABELS[roleId]}通过`, detail: "证据完整。",
+    evidence: { present: true }, nextAction: "无", findingHash: FINDING_HASH,
+  }));
+  const supplied = Array.isArray(overrides.findings) ? overrides.findings as Array<Record<string, unknown>> : null;
+  const findings = supplied
+    ? baseFindings.map((item) => supplied.find((candidate) => candidate.roleId === item.roleId) ?? item)
+    : baseFindings;
   return {
+    protocolVersion: 2,
+    policyFingerprint: HASH,
+    protocolEffectiveAt: "2026-08-27",
     subject: {
       type: "fusion_run", id: "run-1", path: RUN.path,
-      candidateId: "ic_weighted", candidateLabel: "IC 加权",
+      contentHash: HASH, candidateId: "ic_weighted", candidateLabel: "IC 加权",
     },
     roles: ROSTER.roles,
     thresholds: ROSTER.thresholds,
-    findings: [
-      {
-        roleId: "data_quality", verdict: "pass", headline: "输入口径可追溯",
-        detail: "基准 index:000300.SH。",
-        evidence: { benchmarkMode: "index:000300.SH", observations: 120 },
-        nextAction: "无",
-      },
-      {
-        roleId: "fusion_search", verdict: "unknown", headline: "试验次数未记录",
-        detail: "没有 nTrials 就无法收缩 Sharpe。",
-        evidence: { nTrials: null, pbo: 0.18 },
-        nextAction: "重新运行搜索",
-      },
-      {
-        roleId: "execution_realism", verdict: "blocked", headline: "成本假设不成立",
-        detail: "成本 0 bps 低于最低要求。",
-        evidence: { transactionCostBps: 0 },
-        nextAction: "使用真实成本重跑",
-      },
-    ],
     decision: {
       state: "BLOCKED",
       summary: "1 个角色否决：execution_realism",
@@ -73,9 +104,11 @@ function review(overrides: Record<string, unknown> = {}): Record<string, unknown
       unknownRoles: ["fusion_search"],
       warnedRoles: [],
       overriddenRoles: [],
+      researchMayContinue: true, eligibleForHumanGate: false, liveEligible: false,
     },
     overrides: [],
     ...overrides,
+    findings,
   };
 }
 
@@ -141,12 +174,14 @@ test("an override keeps the original verdict visible next to it", async () => {
       detail: "成本 0 bps 低于最低要求。",
       evidence: { transactionCostBps: 0 },
       nextAction: "使用真实成本重跑",
+      findingHash: FINDING_HASH,
       override: {
         verdict: "warn",
         reason: "成本将在下游 A 股回测中重新施加。",
         author: "研究员甲",
         recordedAt: "2026-01-06T01:00:00+00:00",
         replacedVerdict: "blocked",
+        findingHash: FINDING_HASH,
       },
     }],
     decision: {
@@ -156,8 +191,10 @@ test("an override keeps the original verdict visible next to it", async () => {
     },
     overrides: [{
       subjectType: "fusion_run", subjectId: "run-1", roleId: "execution_realism",
+      subjectContentHash: HASH, candidateId: "ic_weighted", findingHash: FINDING_HASH,
+      originalVerdict: "blocked", protocolVersion: 2, policyFingerprint: HASH,
       verdict: "warn", reason: "成本将在下游 A 股回测中重新施加。",
-      author: "研究员甲", recordedAt: "2026-01-06T01:00:00+00:00",
+      author: "研究员甲", recordedAt: "2026-01-06T01:00:00+00:00", effective: true, scopeStatus: "effective",
     }],
   }));
   renderPage();
@@ -202,6 +239,12 @@ test("submitting an override posts the subject, role, reason and author", async 
     const body = JSON.parse(String((call?.[1] as RequestInit).body));
     expect(body.roleId).toBe("execution_realism");
     expect(body.subjectType).toBe("fusion_run");
+    expect(body.subjectContentHash).toBe(HASH);
+    expect(body.candidateId).toBe("ic_weighted");
+    expect(body.findingHash).toBe(FINDING_HASH);
+    expect(body.originalVerdict).toBe("blocked");
+    expect(body.protocolVersion).toBe(2);
+    expect(body.policyFingerprint).toBe(HASH);
     expect(body.author).toBe("研究员甲");
     expect(body.reason.length).toBeGreaterThanOrEqual(8);
   });
@@ -217,4 +260,22 @@ test("shows an actionable empty state when there is nothing to review", async ()
   }));
   renderPage();
   expect(await screen.findByText("没有可审查的研究产物")).toBeInTheDocument();
+});
+
+test("shows protocol drift instead of silently pretending missing roles exist", async () => {
+  const drifted = { ...ROSTER, roles: ROSTER.roles.slice(0, 10) };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const payload = url.includes("/council/roster")
+      ? drifted
+      : url.includes("/council/review")
+        ? review()
+        : url.includes("/fusion/runs") ? [RUN] : {};
+    return new Response(JSON.stringify({ status: "ready", data: payload, issues: [] }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  }));
+  renderPage();
+  expect(await screen.findByText(/必须按固定顺序返回完整 11 岗/)).toBeInTheDocument();
+  expect(screen.getByText("Council 协议不可用")).toBeInTheDocument();
 });

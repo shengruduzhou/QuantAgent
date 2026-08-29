@@ -264,8 +264,9 @@ class RunResultResolver:
         payload = _load_json(root / GOVERNANCE_REPORT)
         if not isinstance(payload, dict):
             return None
+        accepted = payload.get("accepted")
         return {
-            "accepted": payload.get("accepted") is True,
+            "accepted": accepted if isinstance(accepted, bool) else None,
             "pbo": _finite(payload.get("pbo")),
             "dsrProbability": _finite(payload.get("dsr_probability")),
             "spaPValue": _finite(payload.get("spa_pvalue")),

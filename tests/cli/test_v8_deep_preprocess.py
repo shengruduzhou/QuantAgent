@@ -172,6 +172,21 @@ def test_training_contract_and_split_keep_final_test_out_of_validation():
     assert (train["label_end_5d"] < validation["trade_date"].min()).all()
     assert (validation["label_end_5d"] < test["trade_date"].min()).all()
     assert manifest["semantics"] == "train_validation_untouched_test_v1_label_end_purged"
+    assert manifest["purge_sessions"] == 3
+    assert validation["trade_date"].nunique() == 5
+
+    with np.testing.assert_raises_regex(ValueError, "purge_days must be >= 0"):
+        _split_train_validation_test(
+            frame, train_end=dates[24], embargo_days=2, purge_days=-1,
+            validation_days=5, test_end=dates[-1], label_col="forward_return_5d",
+            label_end_col="label_end_5d", session_dates=dates,
+        )
+    with np.testing.assert_raises_regex(ValueError, "validation_days must be >= 1"):
+        _split_train_validation_test(
+            frame, train_end=dates[24], embargo_days=2, purge_days=3,
+            validation_days=0, test_end=dates[-1], label_col="forward_return_5d",
+            label_end_col="label_end_5d", session_dates=dates,
+        )
 
 
 def test_training_contract_rejects_late_availability():

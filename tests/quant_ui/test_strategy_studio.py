@@ -115,7 +115,15 @@ def test_strategy_contract_validates_saves_and_builds_allowlisted_launch(quant_u
     assert data["launch"]["parameters"]["fundamental_blend_candidates"] == [0.2, 0.4, 0.6]
     assert data["launch"]["parameters"]["selection_min_oos_days"] == 80
     assert data["launch"]["parameters"]["max_pbo"] == 0.25
-    assert any(member["id"] == "risk" and member["veto"] for member in data["decisionCouncil"])
+    assert data["councilProtocolVersion"] == 2
+    assert len(data["councilPolicyFingerprint"]) == 64
+    assert [member["id"] for member in data["decisionCouncil"]] == [
+        "data_acquisition", "data_quality", "microstructure",
+        "factor_integrity", "model_validation", "fusion_search",
+        "portfolio_risk", "execution_realism", "challenger",
+        "compliance", "governance",
+    ]
+    assert all(member["veto"] for member in data["decisionCouncil"])
 
     saved = request(app, "POST", "/api/strategies", json=_strategy_payload())
     assert saved.status_code == 200
@@ -217,7 +225,8 @@ def test_strategy_horizon_contract_fails_before_launch_and_checks_label_schema(
     council = {member["id"]: member for member in result["decisionCouncil"]}
     assert council["data_quality"]["status"] == "blocked"
     assert council["model_validation"]["status"] == "blocked"
-    assert council["risk"]["status"] == "ready"
+    assert council["portfolio_risk"]["status"] == "ready"
+    assert council["governance"]["status"] == "blocked"
 
 
 def test_strategy_auto_search_is_bounded_and_gpu_training_is_fail_closed(

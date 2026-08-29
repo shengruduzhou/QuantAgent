@@ -111,6 +111,20 @@ const PIPELINE = [
   { id: "risk", label: "风控 / Paper", icon: ShieldCheck },
 ];
 
+const COUNCIL_V2_ROLE_IDS = [
+  "data_acquisition",
+  "data_quality",
+  "microstructure",
+  "factor_integrity",
+  "model_validation",
+  "fusion_search",
+  "portfolio_risk",
+  "execution_realism",
+  "challenger",
+  "compliance",
+  "governance",
+] as const;
+
 const RESEARCH_PRESETS: Array<{
   id: StrategyDraft["researchPreset"];
   label: string;
@@ -342,6 +356,14 @@ export function StrategyStudioPage(): JSX.Element {
   const warningIssues = validationIssues.filter((item) => item.severity === "warning");
   const infoIssues = validationIssues.filter((item) => item.severity === "info");
   const council = validation?.decisionCouncil ?? [];
+  const councilContractValid = Boolean(
+    validation
+    && validation.councilProtocolVersion === 2
+    && /^[0-9a-f]{64}$/i.test(validation.councilPolicyFingerprint ?? "")
+    && council.length === COUNCIL_V2_ROLE_IDS.length
+    && new Set(council.map((member) => member.id)).size === COUNCIL_V2_ROLE_IDS.length
+    && council.every((member, index) => member.id === COUNCIL_V2_ROLE_IDS[index]),
+  );
   const selectedCouncil = council.find((member) => member.id === selectedCouncilId) ?? council[0];
 
   const resetEvidence = (): void => {
@@ -766,7 +788,19 @@ export function StrategyStudioPage(): JSX.Element {
             <div className="strategy-progress"><i style={{ width: `${Math.round(progress * 100)}%` }} /><span>{Math.round(progress * 100)}%</span></div>
           </WorkbenchPanel>
 
-          <WorkbenchPanel eyebrow="DECISION COUNCIL" title="多 Agent 审查" meta="click to inspect · role-scoped veto" className="strategy-council-panel">
+          <WorkbenchPanel
+            eyebrow="DECISION COUNCIL"
+            title="多 Agent 审查"
+            meta={validation
+              ? `Council v${validation.councilProtocolVersion ?? "?"} · ${validation.councilPolicyFingerprint?.slice(0, 12) ?? "missing fingerprint"}`
+              : "click to inspect · role-scoped veto"}
+            className="strategy-council-panel"
+          >
+            {validation && !councilContractValid ? (
+              <TruthNotice tone="warning">
+                Strategy preflight 必须复用完整 Council v2 的 11 岗 registry；当前协议漂移，不能启动。
+              </TruthNotice>
+            ) : null}
             {council.length ? <>
               <div className="strategy-council" aria-label="多 Agent 审查角色">
                 {council.map((member) => (
@@ -823,7 +857,7 @@ export function StrategyStudioPage(): JSX.Element {
             <div className="strategy-run-actions">
               <button type="button" onClick={validate} disabled={Boolean(busy) || running}><ShieldCheck />{busy === "validate" ? "校验中" : "校验"}</button>
               <button type="button" onClick={save} disabled={Boolean(busy) || running}><FloppyDisk />{busy === "save" ? "保存中" : "保存版本"}</button>
-              <button type="button" className="primary" onClick={launch} disabled={Boolean(busy) || running || !draft.humanApproved}><Play weight="fill" />{busy === "launch" ? "提交中" : "启动闭环"}</button>
+              <button type="button" className="primary" onClick={launch} disabled={Boolean(busy) || running || !draft.humanApproved || !validation?.valid || !validation.launch.armed || !councilContractValid}><Play weight="fill" />{busy === "launch" ? "提交中" : "启动闭环"}</button>
               <button type="button" className="danger" onClick={cancel} disabled={!running || busy === "cancel"}><Stop weight="fill" />取消</button>
             </div>
             <label className="strategy-arm">

@@ -544,3 +544,31 @@ def test_council_review_of_an_unknown_run_is_a_key_error(quant_ui_settings) -> N
         container.council.review_strategy_run(
             "run_nope", container.strategies.results, container.strategies
         )
+
+
+def test_every_strategy_council_role_is_unknown_when_required_evidence_is_absent(
+    quant_ui_settings,
+) -> None:
+    """No role, including the CIO, may turn an empty run into clearance."""
+    from services.quant_api.services.container import ServiceContainer
+    from services.quant_api.services.council import COUNCIL_ROLES
+
+    container = ServiceContainer.create(quant_ui_settings)
+    run = container.strategies.register_run(
+        strategy_id="empty-council",
+        version="v1",
+        job_id="job_empty",
+        output_dir="runtime/reports/never-produced",
+        name="Empty Council",
+    )
+    review = container.council.review_strategy_run(
+        run["runId"], container.strategies.results, container.strategies
+    )
+
+    assert [item["roleId"] for item in review["findings"]] == [
+        role["id"] for role in COUNCIL_ROLES
+    ]
+    assert {item["verdict"] for item in review["findings"]} == {"unknown"}
+    assert review["decision"]["state"] == "INSUFFICIENT_EVIDENCE"
+    assert review["decision"]["eligibleForHumanGate"] is False
+    assert review["decision"]["liveEligible"] is False

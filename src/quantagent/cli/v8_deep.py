@@ -636,6 +636,7 @@ def train_v8_deep(
         "max_epochs": max_epochs, "batch_size": batch_size,
         "d_token": d_token, "n_blocks": n_blocks, "n_heads": n_heads,
         "dates_per_step": dates_per_step, "train_micro_batch": train_micro_batch,
+        "activation_checkpointing": activation_checkpointing,
         "cross_sectional_norm": cross_sectional_norm, "label_norm": label_norm,
         "feature_policy": feature_policy,
         "attention_dropout": attention_dropout, "ffn_dropout": ffn_dropout,

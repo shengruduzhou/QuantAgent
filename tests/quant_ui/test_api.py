@@ -148,6 +148,9 @@ def test_job_validation_is_read_only_and_checks_real_inputs(quant_ui_settings) -
                 "silver_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
                 "output_dir": "runtime/reports/v8/deep/validated_only",
                 "require_gpu": True,
+                "purge_days": 20,
+                "validation_days": 63,
+                "activation_checkpointing": True,
             },
         },
     )

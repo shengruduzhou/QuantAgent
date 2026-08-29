@@ -287,10 +287,16 @@ class CouncilOverrideRequest(ApiModel):
 
     subject_type: str = Field(alias="subjectType", pattern=r"^[a-z_]{3,32}$")
     subject_id: str = Field(alias="subjectId", min_length=1, max_length=128)
+    subject_content_hash: str = Field(alias="subjectContentHash", pattern=r"^[0-9a-f]{64}$")
+    candidate_id: str | None = Field(None, alias="candidateId", max_length=128)
     role_id: str = Field(alias="roleId", pattern=r"^[a-z_]{3,32}$")
+    finding_hash: str = Field(alias="findingHash", pattern=r"^[0-9a-f]{64}$")
+    original_verdict: Literal["pass", "warn", "blocked", "unknown"] = Field(alias="originalVerdict")
     verdict: Literal["pass", "warn", "blocked"]
     reason: str = Field(min_length=8, max_length=2_000)
     author: str = Field(min_length=1, max_length=120)
+    protocol_version: int = Field(alias="protocolVersion", ge=2)
+    policy_fingerprint: str = Field(alias="policyFingerprint", pattern=r"^[0-9a-f]{64}$")
 
 
 def now_iso() -> str:

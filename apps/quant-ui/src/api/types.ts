@@ -379,6 +379,8 @@ export interface StrategyValidationIssue {
 }
 
 export interface StrategyValidation {
+  councilProtocolVersion: number;
+  councilPolicyFingerprint: string;
   valid: boolean;
   errors: string[];
   warnings: string[];
@@ -1069,22 +1071,36 @@ export interface CouncilRole {
   /** What this agent is allowed to block — it may not block outside it. */
   vetoScope: string;
   veto: boolean;
+  phase: "data_admission" | "research_validation" | "portfolio_delivery" | "independent_decision";
+  introducedInProtocol: number;
 }
 
 export interface CouncilRoster {
+  protocolVersion: number;
+  policyFingerprint: string;
+  protocolEffectiveAt: string;
   roles: CouncilRole[];
   thresholds: Record<string, number>;
   protocol: string;
+  migration: string;
 }
 
 export interface CouncilOverride {
   subjectType: string;
   subjectId: string;
+  subjectContentHash: string;
+  candidateId: string | null;
   roleId: string;
+  findingHash: string;
+  originalVerdict: CouncilVerdict;
   verdict: Exclude<CouncilVerdict, "unknown">;
   reason: string;
   author: string;
+  protocolVersion: number;
+  policyFingerprint: string;
   recordedAt: string;
+  effective?: boolean;
+  scopeStatus?: string;
 }
 
 export interface CouncilFinding {
@@ -1094,6 +1110,7 @@ export interface CouncilFinding {
   detail: string;
   evidence: Record<string, unknown>;
   nextAction: string;
+  findingHash: string;
   /** Present when a human overruled this agent; the original verdict is kept. */
   override?: {
     verdict: Exclude<CouncilVerdict, "unknown">;
@@ -1101,14 +1118,19 @@ export interface CouncilFinding {
     author: string;
     recordedAt: string;
     replacedVerdict: CouncilVerdict;
+    findingHash: string;
   };
 }
 
 export interface CouncilReview {
+  protocolVersion: number;
+  policyFingerprint: string;
+  protocolEffectiveAt: string;
   subject: {
     type: string;
     id: string;
     path: string | null;
+    contentHash: string;
     candidateId: string | null;
     candidateLabel: string | null;
   };
@@ -1122,6 +1144,9 @@ export interface CouncilReview {
     unknownRoles: string[];
     warnedRoles: string[];
     overriddenRoles: string[];
+    researchMayContinue: boolean;
+    eligibleForHumanGate: boolean;
+    liveEligible: false;
   };
   overrides: CouncilOverride[];
 }

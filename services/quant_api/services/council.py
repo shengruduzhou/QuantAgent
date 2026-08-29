@@ -12,8 +12,8 @@ Three rules make the council trustworthy rather than decorative:
    was computed from, so an operator can check the reasoning rather than trust
    the badge.
 2. **Absence of evidence is not a pass.** A check whose inputs are missing
-   returns ``unknown``, never ``pass``. ``unknown`` does not block promotion but
-   it is never counted as clearance either.
+   returns ``unknown``, never ``pass``. Research may continue, but ``unknown``
+   blocks promotion clearance until the evidence exists.
 3. **Overrides are recorded, not hidden.** A human can overrule any agent, but
    the override is appended to a durable log with author, timestamp, and the
    verdict it replaced. Nothing in this module can delete that log.
@@ -23,11 +23,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 Verdict = Literal["pass", "warn", "blocked", "unknown"]
+
+COUNCIL_PROTOCOL_VERSION = 2
+COUNCIL_PROTOCOL_EFFECTIVE_AT = "2026-08-27"
 
 # Ordered: the council is read top to bottom, data first and governance last.
 COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
@@ -37,6 +41,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "供应商、抓取批次、时间戳与输入产物完整性",
         "vetoScope": "数据来源与采集证据",
         "veto": True,
+        "phase": "data_admission",
+        "introducedInProtocol": 2,
     },
     {
         "id": "data_quality",
@@ -44,6 +50,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "PIT 完整性、provenance、复权口径、基准口径",
         "vetoScope": "输入数据不可信时阻塞整条链",
         "veto": True,
+        "phase": "data_admission",
+        "introducedInProtocol": 1,
     },
     {
         "id": "microstructure",
@@ -51,6 +59,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "频率、时钟、撮合粒度与日内假设适用边界",
         "vetoScope": "日内或微观结构相关主张",
         "veto": True,
+        "phase": "data_admission",
+        "introducedInProtocol": 2,
     },
     {
         "id": "factor_integrity",
@@ -58,6 +68,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "因子冗余、单因子支配、融合是否带来增量",
         "vetoScope": "因子入池",
         "veto": True,
+        "phase": "research_validation",
+        "introducedInProtocol": 1,
     },
     {
         "id": "model_validation",
@@ -65,6 +77,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "折切分、embargo、训练/测试隔离",
         "vetoScope": "模型与权重晋级",
         "veto": True,
+        "phase": "research_validation",
+        "introducedInProtocol": 1,
     },
     {
         "id": "fusion_search",
@@ -72,6 +86,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "试验计数、PBO、收缩后显著性、前沿合法性",
         "vetoScope": "融合候选晋级",
         "veto": True,
+        "phase": "research_validation",
+        "introducedInProtocol": 1,
     },
     {
         "id": "portfolio_risk",
@@ -79,6 +95,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "回撤、换手、集中度、容量",
         "vetoScope": "目标权重发布",
         "veto": True,
+        "phase": "portfolio_delivery",
+        "introducedInProtocol": 1,
     },
     {
         "id": "execution_realism",
@@ -86,6 +104,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "成本、T+1、涨跌停、可卖库存",
         "vetoScope": "回测可实现性主张",
         "veto": True,
+        "phase": "portfolio_delivery",
+        "introducedInProtocol": 1,
     },
     {
         "id": "challenger",
@@ -93,6 +113,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "基线、随机对照、负面结论与替代解释",
         "vetoScope": "未经过对照挑战的候选晋级",
         "veto": True,
+        "phase": "independent_decision",
+        "introducedInProtocol": 2,
     },
     {
         "id": "compliance",
@@ -100,6 +122,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "研究/生产边界、授权范围、模型风险披露",
         "vetoScope": "越权或 production/live 声明",
         "veto": True,
+        "phase": "independent_decision",
+        "introducedInProtocol": 2,
     },
     {
         "id": "governance",
@@ -107,6 +131,8 @@ COUNCIL_ROLES: tuple[dict[str, Any], ...] = (
         "domain": "汇总各部门裁决、readiness tier、人工 Gate 与审计链",
         "vetoScope": "公司级晋级结论与任何 live 意图",
         "veto": True,
+        "phase": "independent_decision",
+        "introducedInProtocol": 1,
     },
 )
 
@@ -141,6 +167,28 @@ class CouncilThresholds:
         }
 
 
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _policy_fingerprint(thresholds: CouncilThresholds) -> str:
+    return _canonical_hash({
+        "protocolVersion": COUNCIL_PROTOCOL_VERSION,
+        "roles": COUNCIL_ROLES,
+        "thresholds": thresholds.as_dict(),
+    })
+
+
+COUNCIL_POLICY_FINGERPRINT = _policy_fingerprint(CouncilThresholds())
+
+
 def _finding(
     role_id: str,
     verdict: Verdict,
@@ -149,7 +197,7 @@ def _finding(
     evidence: dict[str, Any],
     next_action: str,
 ) -> dict[str, Any]:
-    return {
+    finding = {
         "roleId": role_id,
         "verdict": verdict,
         "headline": headline,
@@ -157,6 +205,8 @@ def _finding(
         "evidence": evidence,
         "nextAction": next_action,
     }
+    finding["findingHash"] = _canonical_hash(finding)
+    return finding
 
 
 class CouncilService:
@@ -168,15 +218,89 @@ class CouncilService:
         self.thresholds = thresholds or CouncilThresholds()
         self._log_path = Path(settings.jobs_root) / "council_overrides.jsonl"
 
+    @property
+    def policy_fingerprint(self) -> str:
+        return _policy_fingerprint(self.thresholds)
+
+    def _protocol_envelope(self) -> dict[str, Any]:
+        return {
+            "protocolVersion": COUNCIL_PROTOCOL_VERSION,
+            "policyFingerprint": self.policy_fingerprint,
+            "protocolEffectiveAt": COUNCIL_PROTOCOL_EFFECTIVE_AT,
+        }
+
+    def _apply_overrides(
+        self,
+        *,
+        findings: list[dict[str, Any]],
+        records: list[dict[str, Any]],
+        subject_content_hash: str,
+        candidate_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Classify every audit row and apply only an exact v2 scope match.
+
+        Historical rows remain visible, but a change to the candidate, artifact,
+        role finding, thresholds, or protocol makes them stale. This prevents an
+        override written for candidate A (or yesterday's bytes) from clearing a
+        different decision merely because the run id is unchanged.
+        """
+        by_role = {item["roleId"]: item for item in findings}
+        annotated: list[dict[str, Any]] = []
+        for source in records:
+            record = dict(source)
+            status = "effective"
+            if record.get("protocolVersion") != COUNCIL_PROTOCOL_VERSION:
+                status = "historical_protocol"
+            elif record.get("policyFingerprint") != self.policy_fingerprint:
+                status = "stale_policy"
+            elif record.get("subjectContentHash") != subject_content_hash:
+                status = "stale_subject"
+            elif record.get("candidateId") != candidate_id:
+                status = "stale_candidate"
+            else:
+                finding = by_role.get(str(record.get("roleId")))
+                if finding is None:
+                    status = "stale_role"
+                elif record.get("findingHash") != finding.get("findingHash"):
+                    status = "stale_finding"
+                elif record.get("originalVerdict") != finding.get("verdict"):
+                    status = "stale_original_verdict"
+                elif finding.get("verdict") == "unknown" and record.get("verdict") == "pass":
+                    status = "inadmissible_missing_evidence"
+            record["scopeStatus"] = status
+            record["effective"] = status == "effective"
+            annotated.append(record)
+
+        latest: dict[str, dict[str, Any]] = {}
+        for record in sorted(annotated, key=lambda row: str(row.get("recordedAt") or "")):
+            if record["effective"]:
+                latest[str(record["roleId"])] = record
+        for finding in findings:
+            override = latest.get(finding["roleId"])
+            if override:
+                finding["override"] = {
+                    "verdict": override["verdict"],
+                    "reason": override["reason"],
+                    "author": override["author"],
+                    "recordedAt": override["recordedAt"],
+                    "replacedVerdict": override["originalVerdict"],
+                    "findingHash": override["findingHash"],
+                }
+        return annotated
+
     # ------------------------------------------------------------- roster --
 
     def roster(self) -> dict[str, Any]:
         return {
+            **self._protocol_envelope(),
             "roles": [dict(role) for role in COUNCIL_ROLES],
             "thresholds": self.thresholds.as_dict(),
             "protocol": (
-                "每个角色只在自身职责域内否决；证据缺失记为 unknown，不记为通过；"
-                "人工推翻会写入不可删除的审计日志。"
+                "Council v2 固定 11 岗与四阶段；证据缺失记为 unknown 并阻止晋级；"
+                "人工推翻只对同一候选、同一产物 hash、同一 finding 与同一 policy 生效。"
+            ),
+            "migration": (
+                "v1 七岗裁决与无版本 override 仅保留为历史记录，不参与 v2 effective decision。"
             ),
         }
 
@@ -189,7 +313,11 @@ class CouncilService:
         # promotion_gate.json is the canonical PBO/DSR/SPA and research/live
         # boundary evidence. Keep it out of persisted summary files but make it
         # available to the role checks in this review invocation.
-        summary = {**summary, "_promotionGate": detail.get("promotionGate")}
+        summary = {
+            **summary,
+            "_promotionGate": detail.get("promotionGate"),
+            "_manifest": detail.get("manifest"),
+        }
         candidates = detail.get("candidates") or []
         frontier = [item for item in candidates if item.get("onFrontier")]
         subject = None
@@ -215,31 +343,34 @@ class CouncilService:
                 _review_execution_realism,
                 _review_challenger,
                 _review_compliance,
-                _review_governance,
             )
         ]
-        overrides = self.overrides(subject_type="fusion_run", subject_id=run_id)
-        latest_override = {
-            item["roleId"]: item
-            for item in sorted(overrides, key=lambda row: str(row.get("recordedAt") or ""))
-        }
-        for finding in findings:
-            override = latest_override.get(finding["roleId"])
-            if override:
-                finding["override"] = {
-                    "verdict": override["verdict"],
-                    "reason": override["reason"],
-                    "author": override["author"],
-                    "recordedAt": override["recordedAt"],
-                    "replacedVerdict": finding["verdict"],
-                }
+        findings.append(
+            _review_governance(summary, subject, candidates, self.thresholds, findings)
+        )
+        subject_content_hash = _canonical_hash({
+            "manifest": detail.get("manifest"),
+            "summary": detail.get("summary"),
+            "promotionGate": detail.get("promotionGate"),
+            "ranking": detail.get("ranking"),
+            "candidates": detail.get("candidates"),
+        })
+        candidate_scope = str(subject.get("id")) if subject and subject.get("id") is not None else None
+        overrides = self._apply_overrides(
+            findings=findings,
+            records=self.overrides(subject_type="fusion_run", subject_id=run_id),
+            subject_content_hash=subject_content_hash,
+            candidate_id=candidate_scope,
+        )
 
         return {
+            **self._protocol_envelope(),
             "subject": {
                 "type": "fusion_run",
                 "id": run_id,
                 "path": detail.get("path"),
-                "candidateId": subject.get("id") if subject else None,
+                "contentHash": subject_content_hash,
+                "candidateId": candidate_scope,
                 "candidateLabel": subject.get("label") if subject else None,
             },
             "roles": [dict(role) for role in COUNCIL_ROLES],
@@ -276,30 +407,26 @@ class CouncilService:
                 _run_execution_realism,
                 _run_challenger,
                 _run_compliance,
-                _run_governance,
             )
         ]
-        overrides = self.overrides(subject_type="strategy_run", subject_id=run_id)
-        latest_override = {
-            item["roleId"]: item
-            for item in sorted(overrides, key=lambda row: str(row.get("recordedAt") or ""))
-        }
-        for finding in findings:
-            override = latest_override.get(finding["roleId"])
-            if override:
-                finding["override"] = {
-                    "verdict": override["verdict"],
-                    "reason": override["reason"],
-                    "author": override["author"],
-                    "recordedAt": override["recordedAt"],
-                    "replacedVerdict": finding["verdict"],
-                }
+        findings.append(_run_governance(result, self.thresholds, findings))
+        subject_content_hash = _canonical_hash({"record": record, "result": result})
+        overrides = self._apply_overrides(
+            findings=findings,
+            records=self.overrides(subject_type="strategy_run", subject_id=run_id),
+            subject_content_hash=subject_content_hash,
+            candidate_id=None,
+        )
 
         return {
+            **self._protocol_envelope(),
             "subject": {
                 "type": "strategy_run",
                 "id": run_id,
                 "path": record["outputDir"],
+                "contentHash": subject_content_hash,
+                "candidateId": None,
+                "candidateLabel": None,
                 "strategyId": record.get("strategyId"),
                 "strategyName": record.get("strategyName"),
                 "outcome": (result.get("conclusion") or {}).get("outcome"),
@@ -322,18 +449,19 @@ class CouncilService:
         if not self._log_path.exists():
             return []
         records: list[dict[str, Any]] = []
-        for line in self._log_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if subject_type and record.get("subjectType") != subject_type:
-                continue
-            if subject_id and record.get("subjectId") != subject_id:
-                continue
-            records.append(record)
+        with self._log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if subject_type and record.get("subjectType") != subject_type:
+                    continue
+                if subject_id and record.get("subjectId") != subject_id:
+                    continue
+                records.append(record)
         return records
 
     def record_override(
@@ -341,16 +469,32 @@ class CouncilService:
         *,
         subject_type: str,
         subject_id: str,
+        subject_content_hash: str,
+        candidate_id: str | None,
         role_id: str,
+        finding_hash: str,
+        original_verdict: str,
         verdict: str,
         reason: str,
         author: str,
+        protocol_version: int,
+        policy_fingerprint: str,
     ) -> dict[str, Any]:
         """Append a human override. The log is append-only by construction."""
         if role_id not in ROLE_IDS:
             raise ValueError(f"unknown council role: {role_id}")
+        if protocol_version != COUNCIL_PROTOCOL_VERSION:
+            raise ValueError("override protocolVersion does not match Council v2")
+        if policy_fingerprint != self.policy_fingerprint:
+            raise ValueError("override policyFingerprint is stale")
+        if len(subject_content_hash) != 64 or len(finding_hash) != 64:
+            raise ValueError("override hashes must be complete SHA-256 values")
+        if original_verdict not in {"pass", "warn", "blocked", "unknown"}:
+            raise ValueError("originalVerdict is invalid")
         if verdict not in {"pass", "warn", "blocked"}:
             raise ValueError("override verdict must be pass, warn or blocked")
+        if original_verdict == "unknown" and verdict == "pass":
+            raise ValueError("missing evidence cannot be overridden into clearance")
         reason = reason.strip()
         if len(reason) < 8:
             raise ValueError("override reason must explain the decision (>= 8 characters)")
@@ -361,10 +505,16 @@ class CouncilService:
         record = {
             "subjectType": subject_type,
             "subjectId": subject_id,
+            "subjectContentHash": subject_content_hash,
+            "candidateId": candidate_id,
             "roleId": role_id,
+            "findingHash": finding_hash,
+            "originalVerdict": original_verdict,
             "verdict": verdict,
             "reason": reason,
             "author": author,
+            "protocolVersion": protocol_version,
+            "policyFingerprint": policy_fingerprint,
             "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -396,6 +546,8 @@ def _promotion_gate(summary: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _review_data_acquisition(summary, subject, candidates, thresholds) -> dict[str, Any]:
+    manifest = summary.get("_manifest")
+    manifest = manifest if isinstance(manifest, dict) else {}
     generated = summary.get("generatedAt")
     factors = summary.get("factorNames")
     declared = summary.get("candidateCount")
@@ -406,8 +558,15 @@ def _review_data_acquisition(summary, subject, candidates, thresholds) -> dict[s
         "declaredCandidateCount": declared,
         "persistedCandidateCount": len(candidates),
         "evaluatedCandidateCount": evaluated,
+        "manifestContentHash": manifest.get("contentHash"),
     }
-    if not generated or not isinstance(factors, list) or not factors:
+    if (
+        not generated
+        or not isinstance(factors, list)
+        or not factors
+        or not isinstance(manifest.get("contentHash"), str)
+        or not manifest["contentHash"].strip()
+    ):
         return _finding(
             "data_acquisition", "unknown", "采集批次证据不完整",
             "缺少生成时间或输入因子清单，无法把本次搜索绑定到一个可审计的数据批次。",
@@ -435,14 +594,39 @@ def _review_data_acquisition(summary, subject, candidates, thresholds) -> dict[s
 def _review_data_quality(summary, subject, candidates, thresholds) -> dict[str, Any]:
     benchmark = summary.get("benchmarkMode")
     observations = _metric(subject, "observations")
-    evidence = {"benchmarkMode": benchmark, "observations": observations}
-    if benchmark is None:
+    promotion = _promotion_gate(summary)
+    checks = {
+        str(item.get("name")): item
+        for item in ((promotion or {}).get("checks") or [])
+        if isinstance(item, dict)
+    }
+    pit = checks.get("point_in_time")
+    benchmark_check = checks.get("explicit_benchmark")
+    evidence = {
+        "benchmarkMode": benchmark,
+        "observations": observations,
+        "pointInTime": pit.get("observed") if pit else None,
+        "explicitBenchmark": benchmark_check.get("observed") if benchmark_check else None,
+    }
+    if benchmark is None or pit is None or benchmark_check is None:
         return _finding(
-            "data_quality", "unknown", "基准口径未记录",
-            "产物没有写入 benchmarkMode，无法判断超额收益相对什么计算。",
-            evidence, "重新运行搜索以写入完整 manifest",
+            "data_quality", "unknown", "PIT 或基准证据未记录",
+            "必须同时记录 benchmarkMode、point_in_time 与 explicit_benchmark 检查。",
+            evidence, "用完整 research promotion gate 重新运行搜索",
         )
-    if observations is None or observations < thresholds.min_observations:
+    if observations is None or pit.get("observed") is None or benchmark_check.get("observed") is None:
+        return _finding(
+            "data_quality", "unknown", "数据质量实测值缺失",
+            "passed 标记不能替代 PIT、基准与样本外观测的实际证据。",
+            evidence, "持久化每项 gate 的 observed 值后重跑",
+        )
+    if pit.get("passed") is not True or benchmark_check.get("passed") is not True:
+        return _finding(
+            "data_quality", "blocked", "PIT 或显式基准检查失败",
+            "输入可得时点或超额收益基准不满足研究晋级契约。",
+            evidence, "修复数据时序与基准输入后重跑",
+        )
+    if observations < thresholds.min_observations:
         return _finding(
             "data_quality", "blocked", "样本外观测不足",
             f"候选只有 {observations if observations is not None else 0} 个样本外观测，"
@@ -465,12 +649,14 @@ def _review_data_quality(summary, subject, candidates, thresholds) -> dict[str, 
 
 def _review_microstructure(summary, subject, candidates, thresholds) -> dict[str, Any]:
     horizon = summary.get("horizonDays")
+    frequency = summary.get("barFrequency")
+    intraday_claim = summary.get("intradayClaim")
     evidence = {
         "horizonDays": horizon,
-        "barFrequency": summary.get("barFrequency"),
-        "intradayClaim": summary.get("intradayClaim"),
+        "barFrequency": frequency,
+        "intradayClaim": intraday_claim,
     }
-    if not isinstance(horizon, int):
+    if not isinstance(horizon, int) or not isinstance(frequency, str) or not isinstance(intraday_claim, bool):
         return _finding(
             "microstructure", "unknown", "研究时钟未声明",
             "没有持有期或频率字段，无法判断需要日频还是日内微观结构证据。",
@@ -482,10 +668,16 @@ def _review_microstructure(summary, subject, candidates, thresholds) -> dict[str
             "持有期小于一个交易日，却没有盘口、成交队列或事件时钟证据。",
             evidence, "使用日内专用数据和撮合协议重新研究",
         )
+    if intraday_claim or frequency.lower() not in {"1d", "daily", "day"}:
+        return _finding(
+            "microstructure", "blocked", "日内能力没有对应证据",
+            "当前 Council 只认证日频边界，不能凭日线产物提出日内成交或排队主张。",
+            evidence, "提交盘口、事件时钟与延迟/冲击证据后走独立协议",
+        )
     return _finding(
-        "microstructure", "warn", "仅完成日频边界审查",
-        "本次证据支持日频研究，不支持日内成交、排队位置或冲击曲线主张；这些能力仍需独立验证。",
-        evidence, "若提出日内主张，提交盘口与事件时钟证据",
+        "microstructure", "pass", "日频研究时钟已明确",
+        "barFrequency 与 intradayClaim 明确限定为日频，不包含日内能力声明。",
+        evidence, "无",
     )
 
 
@@ -513,7 +705,7 @@ def _review_factor_integrity(summary, subject, candidates, thresholds) -> dict[s
                 None if best_other == float("-inf") else best_other,
         }
         return _finding(
-            "factor_integrity", "warn", "候选本身是单因子，不构成融合",
+            "factor_integrity", "blocked", "候选本身是单因子，不构成融合",
             "该候选没有融合任何因子。它可以作为基线结论保留，但不应作为融合策略晋级。",
             evidence, "改用融合候选，或接受单因子这一结论",
         )
@@ -570,9 +762,25 @@ def _review_model_validation(summary, subject, candidates, thresholds) -> dict[s
             "产物没有 foldWindows，无法验证训练与测试是否隔离。",
             evidence, "重新运行搜索以写入折窗口",
         )
+    required_fold_fields = ("trainStart", "trainEnd", "testStart", "testEnd")
+    incomplete: list[dict[str, Any]] = []
+    for fold in folds:
+        if not isinstance(fold, dict):
+            incomplete.append({"foldIndex": None, "missing": list(required_fold_fields)})
+            continue
+        missing = [key for key in required_fold_fields if not fold.get(key)]
+        if missing:
+            incomplete.append({"foldIndex": fold.get("foldIndex"), "missing": missing})
+    evidence["incompleteFolds"] = incomplete
+    if not isinstance(horizon, int) or incomplete:
+        return _finding(
+            "model_validation", "unknown", "折窗口字段不完整",
+            "每折必须记录 train/test 起止日期，且研究必须声明 horizonDays。",
+            evidence, "重新持久化完整折窗口与持有期",
+        )
     if len(folds) < thresholds.min_folds:
         return _finding(
-            "model_validation", "warn", "折数偏少",
+            "model_validation", "blocked", "折数不足",
             f"只有 {len(folds)} 折，低于建议的 {thresholds.min_folds} 折；"
             "折间一致性的统计意义有限。",
             evidence, "提高折数后重跑",
@@ -620,7 +828,7 @@ def _review_fusion_search(summary, subject, candidates, thresholds) -> dict[str,
         )
     if pbo is None:
         return _finding(
-            "fusion_search", "warn", "PBO 无估计",
+            "fusion_search", "unknown", "PBO 无估计",
             "样本外时间切片不足以做组合对称交叉验证；抗过拟合项按无证据计入，"
             "不能当作通过。",
             evidence, "延长样本外区间后重跑",
@@ -663,10 +871,10 @@ def _review_portfolio_risk(summary, subject, candidates, thresholds) -> dict[str
     turnover = _metric(subject, "averageTurnover")
     top_k = summary.get("topK")
     evidence = {"maxDrawdown": drawdown, "averageTurnover": turnover, "topK": top_k}
-    if drawdown is None:
+    if drawdown is None or turnover is None or not isinstance(top_k, int):
         return _finding(
-            "portfolio_risk", "unknown", "无回撤证据",
-            "候选没有可用的回撤指标。", evidence, "检查候选是否产生了样本外观测",
+            "portfolio_risk", "unknown", "风险证据不完整",
+            "候选必须同时记录回撤、换手与 Top-K 集中度口径。", evidence, "检查候选是否产生了完整样本外指标",
         )
     if drawdown > thresholds.max_drawdown:
         return _finding(
@@ -695,10 +903,10 @@ def _review_execution_realism(summary, subject, candidates, thresholds) -> dict[
     horizon = summary.get("horizonDays")
     cost_drag = _metric(subject, "costDrag")
     evidence = {"transactionCostBps": cost, "horizonDays": horizon, "costDrag": cost_drag}
-    if cost is None:
+    if cost is None or not isinstance(horizon, int) or cost_drag is None:
         return _finding(
-            "execution_realism", "unknown", "成本假设未记录",
-            "无法判断结论是否已扣除交易成本。", evidence, "重新运行搜索",
+            "execution_realism", "unknown", "执行成本证据不完整",
+            "必须记录成本假设、持有周期与候选实际 cost drag。", evidence, "重新运行搜索",
         )
     if float(cost) < thresholds.min_transaction_cost_bps:
         return _finding(
@@ -743,7 +951,7 @@ def _review_challenger(summary, subject, candidates, thresholds) -> dict[str, An
         )
     if (subject or {}).get("isControl") is True:
         return _finding(
-            "challenger", "warn", "对照组赢得本轮搜索",
+            "challenger", "blocked", "对照组赢得本轮搜索",
             "这是有效的负面研究结论，但对照组本身不应被包装成可晋级策略。",
             evidence, "保留负面结论并停止本候选晋级",
         )
@@ -755,9 +963,19 @@ def _review_challenger(summary, subject, candidates, thresholds) -> dict[str, An
         )
     if not random_controls or not single_controls:
         return _finding(
-            "challenger", "warn", "挑战集合不完整",
+            "challenger", "blocked", "挑战集合不完整",
             "已有对照，但随机对照与单因子基线没有同时覆盖。",
             evidence, "补齐缺失的一类对照后复核",
+        )
+    controls_have_metrics = all(
+        _metric(item, "observations") is not None and _metric(item, "excessReturn") is not None
+        for item in controls
+    )
+    if not controls_have_metrics:
+        return _finding(
+            "challenger", "unknown", "对照组指标不完整",
+            "对照方案存在，但缺少样本外观测或成本后超额收益，无法完成独立挑战。",
+            evidence, "保留每个对照的完整样本外指标",
         )
     return _finding(
         "challenger", "pass", "候选通过双重对照挑战",
@@ -781,6 +999,18 @@ def _review_compliance(summary, subject, candidates, thresholds) -> dict[str, An
             "没有 promotion_gate.json，无法确认该产物是否明确禁止 production/live 使用。",
             evidence, "生成研究晋级门并保留 production blockers",
         )
+    if (
+        not isinstance(promotion.get("researchOnly"), bool)
+        or not isinstance(promotion.get("productionEligible"), bool)
+        or not isinstance(promotion.get("stage4Governed"), bool)
+        or not isinstance(promotion.get("productionBlockers"), list)
+        or not promotion.get("productionBlockers")
+    ):
+        return _finding(
+            "compliance", "unknown", "权限边界字段不完整",
+            "researchOnly、productionEligible、stage4Governed 与 productionBlockers 必须同时落盘。",
+            evidence, "重新生成完整 promotion_gate.json",
+        )
     if promotion.get("researchOnly") is not True or promotion.get("productionEligible") is not False:
         return _finding(
             "compliance", "blocked", "研究产物出现越权声明",
@@ -794,7 +1024,13 @@ def _review_compliance(summary, subject, candidates, thresholds) -> dict[str, An
     )
 
 
-def _review_governance(summary, subject, candidates, thresholds) -> dict[str, Any]:
+def _review_governance(
+    summary,
+    subject,
+    candidates,
+    thresholds,
+    prior_findings: list[dict[str, Any]],
+) -> dict[str, Any]:
     generated = summary.get("generatedAt")
     promotion = _promotion_gate(summary)
     evidence = {
@@ -805,10 +1041,13 @@ def _review_governance(summary, subject, candidates, thresholds) -> dict[str, An
         "researchPromotionEligible": (
             promotion.get("researchPromotionEligible") if promotion else None
         ),
+        "upstreamVerdicts": {
+            item["roleId"]: item["verdict"] for item in prior_findings
+        },
     }
     if (subject or {}).get("isControl"):
         return _finding(
-            "governance", "warn", "首选候选是对照组",
+            "governance", "blocked", "首选候选是对照组",
             "当前首选是一个不读取训练段的对照方案。这是一个有效的研究结论"
             "（拟合方案没有赢过基线），但它不构成可晋级的策略。",
             evidence, "接受该负面结论，或更换因子集合重跑",
@@ -824,6 +1063,27 @@ def _review_governance(summary, subject, candidates, thresholds) -> dict[str, An
             "统计或 PIT/基准/holdout 门未全部通过，CIO 不得将候选提交到人工晋级 Gate。",
             evidence, "按 promotion_gate.json 的 blockers 修复后重跑",
         )
+    blocked = [item["roleId"] for item in prior_findings if item["verdict"] == "blocked"]
+    unknown = [item["roleId"] for item in prior_findings if item["verdict"] == "unknown"]
+    warned = [item["roleId"] for item in prior_findings if item["verdict"] == "warn"]
+    if blocked:
+        return _finding(
+            "governance", "blocked", "前置部门存在否决",
+            f"CIO 不得绕过前置部门否决：{', '.join(blocked)}。",
+            evidence, "先解决对应部门 blocker 后重新提交",
+        )
+    if unknown:
+        return _finding(
+            "governance", "unknown", "前置部门证据不足",
+            f"以下部门尚不能形成裁决：{', '.join(unknown)}。",
+            evidence, "补齐对应结构化证据后重新提交",
+        )
+    if warned:
+        return _finding(
+            "governance", "warn", "主席附保留意见提交人工 Gate",
+            f"前置部门保留意见：{', '.join(warned)}；人工 Gate 必须逐项复核。",
+            evidence, "人工 Gate 逐项确认保留意见",
+        )
     return _finding(
         "governance", "pass", "主席同意提交人工 Gate",
         "各角色的结构化裁决可供人工复核；该决议仍处于 RESEARCH，未产生任何订单意图。",
@@ -833,10 +1093,15 @@ def _review_governance(summary, subject, candidates, thresholds) -> dict[str, An
 
 def _aggregate_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
     """Council-level outcome. An override replaces the verdict it names."""
-    effective = [
-        (item["override"]["verdict"] if item.get("override") else item["verdict"])
-        for item in findings
-    ]
+    effective = []
+    for item in findings:
+        override = item.get("override")
+        # A reason can change a judgment, but it cannot manufacture evidence.
+        # Keep this defense even though v2 write validation also rejects it.
+        if item["verdict"] == "unknown" and override and override["verdict"] == "pass":
+            effective.append("unknown")
+        else:
+            effective.append(override["verdict"] if override else item["verdict"])
     blocked = [
         item["roleId"]
         for item, verdict in zip(findings, effective)
@@ -867,6 +1132,9 @@ def _aggregate_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "state": state,
         "summary": summary,
+        "researchMayContinue": True,
+        "eligibleForHumanGate": state in {"PROMOTABLE", "PROMOTABLE_WITH_WARNINGS"},
+        "liveEligible": False,
         "blockedRoles": blocked,
         "unknownRoles": unknown,
         "warnedRoles": warned,
@@ -876,7 +1144,15 @@ def _aggregate_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-__all__ = ["COUNCIL_ROLES", "ROLE_IDS", "CouncilService", "CouncilThresholds"]
+__all__ = [
+    "COUNCIL_POLICY_FINGERPRINT",
+    "COUNCIL_PROTOCOL_EFFECTIVE_AT",
+    "COUNCIL_PROTOCOL_VERSION",
+    "COUNCIL_ROLES",
+    "ROLE_IDS",
+    "CouncilService",
+    "CouncilThresholds",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +1189,12 @@ def _run_data_acquisition(result: dict[str, Any], thresholds: CouncilThresholds)
             "运行目录没有 dataset/training_dataset.parquet，无法把后续结果绑定到输入快照。",
             evidence, "恢复数据集产物与其 manifest 后重新提交评审",
         )
+    if not dataset.get("path"):
+        return _finding(
+            "data_acquisition", "unknown", "训练数据集路径缺失",
+            "存在标记不能替代可追溯的 dataset path。",
+            evidence, "重新生成包含 sourcePath 的阶段清单",
+        )
     if not isinstance(dataset.get("sizeBytes"), int) or dataset["sizeBytes"] <= 0:
         return _finding(
             "data_acquisition", "blocked", "训练数据集为空",
@@ -935,13 +1217,19 @@ def _run_data_quality(result: dict[str, Any], thresholds: CouncilThresholds) -> 
         "noMockOrSynthetic": mock.get("actual") if mock else None,
         "trainingSymbols": symbols.get("actual") if symbols else None,
     }
-    if pit is None or mock is None:
+    if pit is None or mock is None or symbols is None:
         return _finding(
             "data_quality", "unknown", "缺少 PIT / 合成数据判定",
             "验收报告没有写入 no_pit_violations 或 no_mock_or_synthetic，无法确认输入可信。",
             evidence, "确认运行是否走完验收阶段",
         )
-    if not pit.get("passed") or not mock.get("passed"):
+    if pit.get("actual") is None or mock.get("actual") is None or symbols.get("actual") is None:
+        return _finding(
+            "data_quality", "unknown", "PIT / 数据来源实测值缺失",
+            "passed=true 不能替代 no_pit_violations、no_mock_or_synthetic 与 training_symbols 的 actual。",
+            evidence, "重新生成包含 actual 的验收报告",
+        )
+    if not pit.get("passed") or not mock.get("passed") or not symbols.get("passed"):
         return _finding(
             "data_quality", "blocked", "输入数据不可信",
             "存在 PIT 违规或使用了 mock/synthetic 数据，整条链的结论都不成立。",
@@ -963,7 +1251,7 @@ def _run_microstructure(result: dict[str, Any], thresholds: CouncilThresholds) -
         "skippedOrderCount": skipped,
         "microstructureArtifact": backtest.get("microstructureSourcePath"),
     }
-    if orders is None:
+    if orders is None or skipped is None or not backtest.get("sourcePath"):
         return _finding(
             "microstructure", "unknown", "缺少市场时钟与撮合证据",
             "没有回测委托记录，无法确认研究是否至少遵循日频交易时钟。",
@@ -984,7 +1272,7 @@ def _run_factor_integrity(result: dict[str, Any], thresholds: CouncilThresholds)
         "threshold": dominance.get("threshold") if dominance else None,
         "featureCount": features,
     }
-    if dominance is None:
+    if dominance is None or dominance.get("actual") is None or dominance.get("threshold") is None:
         return _finding(
             "factor_integrity", "unknown", "未记录单因子支配度",
             "验收报告缺少 single_factor_dominance，无法判断结论是否由单一因子驱动。",
@@ -1010,7 +1298,7 @@ def _run_model_validation(result: dict[str, Any], thresholds: CouncilThresholds)
     days = training.get("evaluatedDays")
     adverse = training.get("adverseRegimePassed")
     evidence = {"foldCount": folds, "evaluatedDays": days, "adverseRegimePassed": adverse}
-    if folds is None or days is None:
+    if folds is None or days is None or adverse is None or not training.get("sourcePath"):
         return _finding(
             "model_validation", "unknown", "缺少训练评估证据",
             "training/metrics.json 缺失或不完整，无法核对折数与评估窗口。",
@@ -1024,9 +1312,9 @@ def _run_model_validation(result: dict[str, Any], thresholds: CouncilThresholds)
         )
     if adverse is not True:
         return _finding(
-            "model_validation", "warn", "逆境区间未通过或未评估",
-            "没有确认模型在不利行情下仍有正向横截面信息。",
-            evidence, "检查 adverse_regime_report 并在结论中说明",
+            "model_validation", "blocked", "逆境区间未通过",
+            "模型在不利行情下没有通过预注册检验。",
+            evidence, "调整研究设计并重跑 adverse regime 检验",
         )
     return _finding(
         "model_validation", "pass", "滚动验证与逆境检验通过",
@@ -1050,6 +1338,12 @@ def _run_search_statistics(result: dict[str, Any], thresholds: CouncilThresholds
         "cumulativeTrials": governance.get("cumulativeTrials"),
         "observedDays": governance.get("observedDays"),
     }
+    if not isinstance(governance.get("accepted"), bool):
+        return _finding(
+            "fusion_search", "unknown", "统计闸门终态缺失",
+            "selection_governance.json 必须显式记录 accepted=true/false。",
+            evidence, "重新生成完整 selection governance",
+        )
     if not governance.get("accepted"):
         return _finding(
             "fusion_search", "blocked", "过拟合治理否决",
@@ -1059,7 +1353,12 @@ def _run_search_statistics(result: dict[str, Any], thresholds: CouncilThresholds
     pbo = governance.get("pbo")
     dsr = governance.get("dsrProbability")
     spa = governance.get("spaPValue")
-    if not all(isinstance(value, (int, float)) for value in (pbo, dsr, spa)):
+    if (
+        not all(isinstance(value, (int, float)) for value in (pbo, dsr, spa))
+        or not isinstance(governance.get("cumulativeTrials"), int)
+        or governance.get("cumulativeTrials", 0) <= 0
+        or not governance.get("sourcePath")
+    ):
         return _finding(
             "fusion_search", "unknown", "统计闸门数值不完整",
             "accepted 标记不能替代 PBO、DSR 与 SPA 三项实测值。",
@@ -1100,13 +1399,14 @@ def _run_portfolio_risk(result: dict[str, Any], thresholds: CouncilThresholds) -
         "backtestMaxDrawdown": measured,
         "councilLimit": thresholds.max_drawdown,
     }
-    if drawdown_gate is None and measured is None:
+    gate_actual = drawdown_gate.get("actual") if drawdown_gate else None
+    if gate_actual is None and measured is None:
         return _finding(
             "portfolio_risk", "unknown", "缺少回撤证据",
             "既没有验收闸门中的 max_drawdown，也没有回测净值序列。",
             evidence, "确认组合与回测阶段是否产出",
         )
-    if drawdown_gate is not None and not drawdown_gate.get("passed"):
+    if drawdown_gate is not None and gate_actual is not None and not drawdown_gate.get("passed"):
         return _finding(
             "portfolio_risk", "blocked", "回撤超过声明上限",
             f"实测 {drawdown_gate.get('actual')}，阈值 {drawdown_gate.get('threshold')}。",
@@ -1129,8 +1429,14 @@ def _run_execution_realism(result: dict[str, Any], thresholds: CouncilThresholds
     backtest = result.get("backtest") or {}
     orders = backtest.get("orderCount")
     skipped = backtest.get("skippedOrderCount")
-    evidence = {"orderCount": orders, "skippedOrderCount": skipped}
-    if orders is None:
+    failed = backtest.get("failedOrderCount")
+    evidence = {
+        "orderCount": orders,
+        "skippedOrderCount": skipped,
+        "failedOrderCount": failed,
+        "sourcePath": backtest.get("sourcePath"),
+    }
+    if orders is None or skipped is None or failed is None or not backtest.get("sourcePath"):
         return _finding(
             "execution_realism", "unknown", "缺少撮合记录",
             "回测报告没有委托计数，无法判断 A 股约束下的可实现性。",
@@ -1166,6 +1472,23 @@ def _run_challenger(result: dict[str, Any], thresholds: CouncilThresholds) -> di
             "没有逐候选 paper report，无法独立复核为什么选择冠军。",
             evidence, "保留每个候选的成本后报告",
         )
+    if trials is None:
+        return _finding(
+            "challenger", "unknown", "挑战试验计数缺失",
+            "候选集合存在，但 cumulativeTrials 未落盘，无法证明所有替代方案均被计数。",
+            evidence, "保留候选计数与 selection governance",
+        )
+    candidate_evidence_complete = all(
+        item.get("sourcePath")
+        and isinstance(item.get("netReturnAfterCosts"), (int, float))
+        for item in candidates
+    )
+    if not candidate_evidence_complete:
+        return _finding(
+            "challenger", "unknown", "候选成本后证据不完整",
+            "每个候选都必须带 sourcePath 与 netReturnAfterCosts。",
+            evidence, "重新生成完整逐候选 paper report",
+        )
     if len(candidates) < 2 or len(selected) != 1:
         return _finding(
             "challenger", "blocked", "候选挑战协议不成立",
@@ -1200,7 +1523,11 @@ def _run_compliance(result: dict[str, Any], thresholds: CouncilThresholds) -> di
             "策略流水线只能产出 research/paper 证据，不能在本层授予生产权限。",
             evidence, "删除越权声明并提交独立生产认证",
         )
-    if conclusion.get("outcome") in {"no_evidence", "incomplete"}:
+    if (
+        conclusion.get("outcome") is None
+        or not isinstance(conclusion.get("promotable"), bool)
+        or pipeline.get("QUANT_ACCEPTANCE_STATUS") not in {"passed", "failed"}
+    ):
         return _finding(
             "compliance", "unknown", "合规边界证据不完整",
             "运行尚未形成完整研究结论，无法完成模型风险披露。",
@@ -1213,21 +1540,57 @@ def _run_compliance(result: dict[str, Any], thresholds: CouncilThresholds) -> di
     )
 
 
-def _run_governance(result: dict[str, Any], thresholds: CouncilThresholds) -> dict[str, Any]:
+def _run_governance(
+    result: dict[str, Any],
+    thresholds: CouncilThresholds,
+    prior_findings: list[dict[str, Any]],
+) -> dict[str, Any]:
     conclusion = result.get("conclusion") or {}
     outcome = conclusion.get("outcome")
-    evidence = {"outcome": outcome, "promotable": conclusion.get("promotable")}
+    promotable = conclusion.get("promotable")
+    evidence = {
+        "outcome": outcome,
+        "promotable": promotable,
+        "upstreamVerdicts": {item["roleId"]: item["verdict"] for item in prior_findings},
+    }
+    if outcome is None or not isinstance(promotable, bool):
+        return _finding(
+            "governance", "unknown", "结论证据不完整",
+            "运行没有产出足以判定的完整证据链。",
+            evidence, "先补齐运行产物再提交评审",
+        )
     if outcome in {"no_evidence", "incomplete"}:
         return _finding(
             "governance", "unknown", "结论证据不完整",
             "运行没有产出足以判定的完整证据链。",
             evidence, "先补齐运行产物再提交评审",
         )
-    if outcome in {"rejected", "not_accepted"}:
+    if outcome in {"rejected", "not_accepted"} or promotable is not True:
         return _finding(
             "governance", "blocked", "未达到晋级条件",
             "运行已完成但闸门未通过；这是有效的研究结论，不能作为晋级依据。",
             evidence, "记录该结论并调整研究设计",
+        )
+    blocked = [item["roleId"] for item in prior_findings if item["verdict"] == "blocked"]
+    unknown = [item["roleId"] for item in prior_findings if item["verdict"] == "unknown"]
+    warned = [item["roleId"] for item in prior_findings if item["verdict"] == "warn"]
+    if blocked:
+        return _finding(
+            "governance", "blocked", "前置部门存在否决",
+            f"CIO 不得绕过前置部门否决：{', '.join(blocked)}。",
+            evidence, "先解决对应部门 blocker 后重新提交",
+        )
+    if unknown:
+        return _finding(
+            "governance", "unknown", "前置部门证据不足",
+            f"以下部门尚不能形成裁决：{', '.join(unknown)}。",
+            evidence, "补齐对应证据后重新提交",
+        )
+    if warned:
+        return _finding(
+            "governance", "warn", "主席附保留意见提交人工 Gate",
+            f"前置部门保留意见：{', '.join(warned)}。",
+            evidence, "人工 Gate 逐项确认保留意见",
         )
     return _finding(
         "governance", "pass", "满足 research/paper 记录要求",

@@ -59,10 +59,13 @@ achieved returns.
 
 ## Multi-agent boundary
 
-The Decision Council exposes structured roles for data quality, factor
-research, model validation, portfolio, backtest, risk, challenger and human
-approval. Data/model/risk/challenger/human roles can veto. Agent output is
-advice/evidence only. It cannot create an order or bypass a Risk Gate.
+Strategy preflight and the completed-run Decision Council both reuse the
+[Council v2 11-role registry](adr-004-council-v2-company-protocol.md). The four
+phases are data admission, research validation, portfolio delivery and
+independent decision; each role only vetoes inside its declared scope, while
+governance aggregates the preceding ten findings. Agent output is
+advice/evidence only. It cannot create an order, turn missing evidence into a
+pass, or bypass a Human/Risk Gate.
 
 ## Realtime contract
 

@@ -4,7 +4,11 @@
 - 日期 / Date: 2026-07-31
 - 关联 / Related: [ADR-001](adr-001-institutional-workstation-shell.md)、
   [ADR-002](adr-002-vnext-only-cutover.md)、
+  [ADR-004 Council v2](adr-004-council-v2-company-protocol.md)、
   [机构量化参考架构](../research/institutional_quant_reference_architecture.md)
+
+> 历史说明 / Historical note：本 ADR 记录 2026-07-31 接受的七岗 Council v1。
+> 当前 effective 协议已由 ADR-004 迁移为 11 岗 Council v2；本文件不回写历史决定。
 
 ## 背景 / Context
 

@@ -13,18 +13,20 @@ from uuid import uuid4
 from quantagent.research.verdict import required_oos_days as _required_oos_days
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
 from services.quant_api.schemas.strategy import StrategyDraft
+from services.quant_api.services.council import (
+    COUNCIL_POLICY_FINGERPRINT,
+    COUNCIL_PROTOCOL_VERSION,
+    COUNCIL_ROLES,
+)
 from services.quant_api.services.run_results import RunResultResolver
 
 
-DECISION_COUNCIL = (
-    ("data_quality", "Data Quality", "PIT、覆盖率、重复键与隔离区"),
-    ("factor_research", "Factor Research", "因子评审、相关性和失效条件"),
-    ("model_validation", "Model Validation", "滚动切分、embargo 与 OOS 证据"),
-    ("portfolio", "Portfolio", "目标权重、集中度与换手约束"),
-    ("backtest", "Backtest", "A股撮合、成本、涨跌停与 T+1"),
-    ("risk", "Risk", "回撤、流动性、kill switch 与否决"),
-    ("challenger", "Challenger", "反证、敏感性与替代解释"),
-    ("human_gate", "Human Gate", "最终研究启动授权"),
+# Strategy preflight is a phase of the same Council v2 protocol, not a second
+# eight-role council with incompatible ids. The canonical registry lives in
+# ``services.quant_api.services.council`` and is reused verbatim here.
+DECISION_COUNCIL = tuple(
+    (role["id"], role["label"], role["domain"], role["veto"])
+    for role in COUNCIL_ROLES
 )
 
 HORIZON_COLUMN = re.compile(r"^forward_return_(\d+)d$")
@@ -959,6 +961,11 @@ class StrategyService:
             if issue["severity"] == "warning"
         ]
         role_issue_codes = {
+            "data_acquisition": {
+                "marketPanelPath_missing",
+                "labelsPath_missing",
+                "labels_unreadable",
+            },
             "data_quality": {
                 "marketPanelPath_missing",
                 "labelsPath_missing",
@@ -966,7 +973,11 @@ class StrategyService:
                 "missing_horizon_columns",
                 "fundamentals_missing",
             },
-            "factor_research": {
+            "microstructure": {
+                "minutePanelPath_missing",
+                "daily_swing_contract",
+            },
+            "factor_integrity": {
                 "fundamentals_missing",
                 "horizon_blend_policy",
             },
@@ -976,53 +987,68 @@ class StrategyService:
                 "overfit_gates",
                 "insufficient_projected_oos_days",
             },
-            "portfolio": {
-                "pareto_top_k_protocol",
+            "fusion_search": {
+                "overfit_gates",
                 "bounded_early_oos_search",
+                "insufficient_projected_oos_days",
+            },
+            "portfolio_risk": {
+                "pareto_top_k_protocol",
                 "benchmark_missing",
                 "benchmark_absent_from_panel",
                 "insufficient_projected_oos_days",
             },
-            "backtest": {
+            "execution_realism": {
                 "minutePanelPath_missing",
                 "daily_swing_contract",
                 "benchmark_missing",
                 "benchmark_absent_from_panel",
-            },
-            "risk": {
-                "overfit_gates",
-                "benchmark_missing",
-                "research_only",
             },
             "challenger": {
                 "bounded_early_oos_search",
                 "overfit_gates",
                 "public_principles_only",
             },
-            "human_gate": {"human_gate_pending"},
+            "compliance": {"research_only", "public_principles_only"},
+            "governance": {
+                "human_gate_pending",
+                "overfit_gates",
+                "benchmark_missing",
+                "benchmark_absent_from_panel",
+            },
         }
         next_actions = {
+            "data_acquisition": "核对数据路径、批次和输入产物",
             "data_quality": "核对 PIT、覆盖率与 Labels schema",
-            "factor_research": "检查融合权重和因子冗余证据",
+            "microstructure": "确认日频边界；日内研究需独立证据",
+            "factor_integrity": "检查融合权重和因子冗余证据",
             "model_validation": "复核滚动切分、embargo 与 holdout 隔离",
-            "portfolio": "复核 Pareto 候选、集中度和换手",
-            "backtest": "复核 A 股撮合、成本、涨跌停与 T+1",
-            "risk": "复核回撤、压力场景与 kill switch",
+            "fusion_search": "复核有界搜索、PBO、DSR 与 SPA 协议",
+            "portfolio_risk": "复核 Pareto 候选、集中度、回撤和换手",
+            "execution_realism": "复核 A 股撮合、成本、涨跌停与 T+1",
             "challenger": "提交反证、敏感性和替代解释",
-            "human_gate": "人工核对研究范围后决定是否授权",
+            "compliance": "确认 research-only 与授权边界",
+            "governance": "人工核对前十岗结论后决定是否授权",
         }
         decision_council: list[dict[str, Any]] = []
-        for role_id, label, responsibility in DECISION_COUNCIL:
-            relevant = [
-                issue
-                for issue in issues
-                if issue["code"] in role_issue_codes[role_id]
-            ]
+        for role_id, label, responsibility, veto in DECISION_COUNCIL:
+            relevant = (
+                list(issues)
+                if role_id == "governance"
+                else [
+                    issue
+                    for issue in issues
+                    if issue["code"] in role_issue_codes[role_id]
+                ]
+            )
             blocking = [
                 issue for issue in relevant if issue["severity"] == "blocking"
             ]
-            if role_id == "human_gate":
-                status = "approved" if draft.human_approved else "waiting"
+            if role_id == "governance":
+                if blocking:
+                    status = "blocked"
+                else:
+                    status = "approved" if draft.human_approved else "waiting"
             else:
                 status = "blocked" if blocking else "ready"
             primary_issue = blocking[0] if blocking else next(
@@ -1039,14 +1065,7 @@ class StrategyService:
                     "label": label,
                     "responsibility": responsibility,
                     "status": status,
-                    "veto": role_id
-                    in {
-                        "data_quality",
-                        "model_validation",
-                        "risk",
-                        "challenger",
-                        "human_gate",
-                    },
+                    "veto": bool(veto),
                     "finding": (
                         primary_issue["title"]
                         if primary_issue
@@ -1063,6 +1082,8 @@ class StrategyService:
             )
 
         return {
+            "councilProtocolVersion": COUNCIL_PROTOCOL_VERSION,
+            "councilPolicyFingerprint": COUNCIL_POLICY_FINGERPRINT,
             "valid": not errors,
             "errors": errors,
             "warnings": warnings,
