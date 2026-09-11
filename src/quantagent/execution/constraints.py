@@ -37,6 +37,7 @@ constraint here:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
 from enum import Enum
@@ -322,6 +323,18 @@ class ExecutionConstraintEvaluator:
 
         ordered = sorted(intents, key=lambda i: (i.timestamp, i.intent_id))
 
+        # NaN comparisons are false and infinity can make measured ratios zero.
+        # Reject explicit non-finite economics before any threshold arithmetic.
+        for it in ordered:
+            for name in ("price", "order_value", "portfolio_nav", "daily_volume_hint"):
+                value = getattr(it, name)
+                if value is not None and not math.isfinite(float(value)):
+                    violations.append(ExecutionConstraintViolation(
+                        intent_id=it.intent_id, symbol=it.symbol,
+                        constraint="finite_order_economics", severity="block",
+                        reason=f"non_finite_{name}",
+                    ))
+
         # Posture: live with dry_run_required_by_default=True must error
         if c.live_trading_enabled and c.qmt_dry_run_required_by_default:
             violations.append(
@@ -387,7 +400,7 @@ class ExecutionConstraintEvaluator:
         if c.max_single_order_value is not None:
             for it in ordered:
                 value = float(it.order_value) if it.order_value > 0 else float(it.quantity) * float(it.price)
-                if value > c.max_single_order_value:
+                if not math.isfinite(value) or value > c.max_single_order_value:
                     violations.append(
                         ExecutionConstraintViolation(
                             intent_id=it.intent_id,
@@ -405,7 +418,7 @@ class ExecutionConstraintEvaluator:
             day_volume_hint: dict[str, float] = {}
             for it in ordered:
                 volume_by_symbol[it.symbol] = volume_by_symbol.get(it.symbol, 0) + max(0, int(it.quantity))
-                if it.daily_volume_hint is not None and it.daily_volume_hint > 0:
+                if it.daily_volume_hint is not None and math.isfinite(it.daily_volume_hint) and it.daily_volume_hint > 0:
                     day_volume_hint[it.symbol] = float(it.daily_volume_hint)
             for symbol, vol in volume_by_symbol.items():
                 dvol = day_volume_hint.get(symbol)
@@ -436,7 +449,7 @@ class ExecutionConstraintEvaluator:
 
         # Daily turnover (as % of NAV)
         if c.max_daily_turnover is not None:
-            navs = [it.portfolio_nav for it in ordered if it.portfolio_nav is not None and it.portfolio_nav > 0]
+            navs = [it.portfolio_nav for it in ordered if it.portfolio_nav is not None and math.isfinite(it.portfolio_nav) and it.portfolio_nav > 0]
             if not navs:
                 unmeasured.append(
                     UnmeasuredConstraint(
@@ -453,7 +466,7 @@ class ExecutionConstraintEvaluator:
                     for it in ordered if it.side in ("buy", "sell")
                 )
                 turnover = gross_value / nav
-                if turnover > c.max_daily_turnover:
+                if not math.isfinite(turnover) or turnover > c.max_daily_turnover:
                     violations.append(
                         ExecutionConstraintViolation(
                             intent_id="<batch>",

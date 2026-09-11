@@ -74,8 +74,8 @@ def test_low_gross_book_is_not_levered_up_to_the_floor() -> None:
     )
     env.reset()
 
-    env.step(np.zeros(env.action_space.shape, dtype=np.float64))
-    held = sum(env._prev_w.values())
+    _, _, _, _, info = env.step(np.zeros(env.action_space.shape, dtype=np.float64))
+    held = sum(info["weights"].values())
 
     assert held == pytest.approx(passive_gross, abs=1e-9), (
         f"a zero action left gross at {held}, not the passive {passive_gross}"

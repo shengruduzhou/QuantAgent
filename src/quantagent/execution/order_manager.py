@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Iterable
@@ -205,10 +206,47 @@ class OrderManager:
         self._wire: dict[str, OrderRecord] = {}
         self._client_order_ids: dict[str, str] = {}
         self._risk_intents_today: list[OrderIntentRecord] = []
+        self._risk_session: str | None = None
+        self._risk_recovery_errors: list[str] = []
 
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
         self._risk_intents_today.clear()
+        self._risk_session = None
+
+    def _restore_daily_risk(self, timestamp: pd.Timestamp) -> None:
+        """Restore consumed limits from the canonical chain, including terminal orders."""
+        local = timestamp.tz_convert("Asia/Shanghai") if timestamp.tzinfo else timestamp
+        session = str(local.date())
+        if session == self._risk_session:
+            return
+        self._risk_session = session
+        self._risk_intents_today.clear()
+        self._risk_recovery_errors.clear()
+        self.counts_today.clear()
+        for order in self.book.orders():
+            if order.trade_date != session:
+                continue
+            history = self.book.history_of(order.order_id)
+            if not any(event.event_type == CanonicalEventType.SUBMITTED for event in history):
+                continue
+            self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
+            decisions = [event.risk_decision for event in history
+                         if event.event_type == CanonicalEventType.RISK_APPROVED and event.risk_decision]
+            try:
+                payload = dict(decisions[-1].measured["risk_intent"])
+                payload["timestamp"] = pd.Timestamp(payload["timestamp"])
+                intent = OrderIntentRecord(**payload)
+                if (intent.symbol != order.symbol or intent.quantity != order.quantity
+                        or intent.side.upper() != order.side.value
+                        or not math.isfinite(intent.order_value) or intent.order_value <= 0
+                        or pd.isna(intent.timestamp)):
+                    raise ValueError("risk intent does not bind to the submitted order")
+            except (IndexError, KeyError, TypeError, ValueError):
+                self._risk_recovery_errors.append(order.order_id)
+                continue
+            self._risk_intents_today.append(intent)
+            self._client_order_ids[order.order_id] = intent.intent_id
 
     def reconcile(
         self,
@@ -539,7 +577,9 @@ class OrderManager:
                 ),
                 None,
             )
-        if order.order_type == OrderType.LIMIT and (order.price is None or float(order.price) <= 0):
+        if order.order_type == OrderType.LIMIT and (
+            order.price is None or not math.isfinite(float(order.price)) or float(order.price) <= 0
+        ):
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -547,7 +587,7 @@ class OrderManager:
                     rule="order_manager_basic_admissibility",
                     threshold="limit_price>0",
                     measured=order.price,
-                    reason="limit order requires a positive price",
+                    reason="limit order requires a finite positive price",
                     lineage=canonical_order.lineage,
                 ),
                 None,
@@ -587,7 +627,10 @@ class OrderManager:
             )
             return order, decision, None
 
-        if order.order_type == OrderType.MARKET or order.price is None or float(order.price) <= 0:
+        if (
+            order.order_type == OrderType.MARKET or order.price is None
+            or not math.isfinite(float(order.price)) or float(order.price) <= 0
+        ):
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -602,10 +645,20 @@ class OrderManager:
             )
 
         timestamp = pd.Timestamp(order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        self._restore_daily_risk(timestamp)
+        if self._risk_recovery_errors:
+            return order, CanonicalRiskDecision.create(
+                approved=False,
+                rule="intraday_risk_recovery",
+                threshold="complete canonical risk-intent history",
+                measured={"unresolved_orders": self._risk_recovery_errors},
+                reason="recovery-required: submitted orders lack bound risk-intent evidence",
+                lineage=canonical_order.lineage,
+            ), None
         nav: float | None = None
         try:
             queried_nav = float(self.broker.query_account_value())
-            if pd.notna(queried_nav) and queried_nav > 0:
+            if math.isfinite(queried_nav) and queried_nav > 0:
                 nav = queried_nav
         except Exception:
             nav = None
@@ -640,7 +693,9 @@ class OrderManager:
             approved=certified,
             rule="execution_constraint_dsl",
             threshold=self.constraint_evaluator.constraints.as_dict(),
-            measured=report.to_dict(),
+            measured={**report.to_dict(), "risk_intent": {
+                **asdict(risk_intent), "timestamp": timestamp.isoformat(),
+            }},
             reason=reason,
             lineage=canonical_order.lineage,
             decided_by="execution_constraint_dsl",
@@ -661,7 +716,7 @@ class OrderManager:
                 value = float(hint)
             except (TypeError, ValueError):
                 return None
-            return value if value > 0 else None
+            return value if math.isfinite(value) and value > 0 else None
         query = getattr(self.broker, "query_daily_volume", None)
         if not callable(query):
             return None
@@ -669,7 +724,7 @@ class OrderManager:
             value = float(query(symbol))
         except Exception:
             return None
-        return value if pd.notna(value) and value > 0 else None
+        return value if math.isfinite(value) and value > 0 else None
 
     def _open_canonical_pending(self, order: Order):
         session = str(order.timestamp)[:10]

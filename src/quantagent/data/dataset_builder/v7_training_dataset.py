@@ -538,6 +538,11 @@ def _append_cached_factors(
                           "columns_added": 0,
                           "warnings": ["wide factor parquet missing trade_date or symbol"]}
     wide["trade_date"] = pd.to_datetime(wide["trade_date"], errors="coerce")
+    # Coverage selection may only see the requested training keys. A cache's
+    # later rows must not change an earlier window's feature contract.
+    wide = features[["trade_date", "symbol"]].drop_duplicates().merge(
+        wide, on=["trade_date", "symbol"], how="left", validate="one_to_one"
+    )
 
     kept: list[str] = []
     dropped: list[str] = []
@@ -624,6 +629,9 @@ def _append_factor_library(
         aggfunc="last",
     ).reset_index()
     wide.columns = [str(column) for column in wide.columns]
+    wide = features[["trade_date", "symbol"]].drop_duplicates().merge(
+        wide, on=["trade_date", "symbol"], how="left", validate="one_to_one"
+    )
     kept = []
     dropped = []
     for column in [c for c in wide.columns if c not in {"trade_date", "symbol"}]:

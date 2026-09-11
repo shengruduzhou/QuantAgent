@@ -89,6 +89,8 @@ def build_market_panel_v7(
     universe: str = typer.Option("", "--universe"),
     region: str = typer.Option("cn", "--region"),
     require_optional_flags: bool = typer.Option(False, "--require-optional-flags"),
+    raw_amount_field: str | None = typer.Option(None, "--raw-amount-field", help="Verified Qlib field containing unadjusted CNY turnover."),
+    volume_scale_to_shares: float | None = typer.Option(None, "--volume-scale-to-shares", help="Verified share-unit scale after multiplying Qlib volume by factor."),
 ) -> None:
     """Export a PIT market panel and close-available-next-day features from local Qlib CN data."""
     from quantagent.data.bootstrap.qlib_bootstrap import QlibBootstrapConfig, build_qlib_market_panel
@@ -104,6 +106,8 @@ def build_market_panel_v7(
             region=region,
             output_root=str(resolved_root),
             require_optional_flags=require_optional_flags,
+            raw_amount_field=raw_amount_field,
+            volume_scale_to_shares=volume_scale_to_shares,
         )
     )
     typer.echo(json_dump(result))

@@ -85,7 +85,9 @@ class TestPITEnvIsExecutable:
         env = PITPortfolioEnv(_book(), _preds(), _panel(), PITPortfolioEnvConfig(max_book=4))
         env.reset()
         _, reward, _, _, _ = env.step(np.array([1.0, -1.0, 0.0, 0.0, 0.0]))
-        assert reward == pytest.approx(8.0, abs=1e-6)
+        # Entry fees reserve cash before buying; equal costs still cancel but
+        # only 1/(1+c) of either fully invested target can earn returns.
+        assert reward == pytest.approx(8.0 / (1.0 + env.config.cost_bps / 1e4), abs=1e-6)
 
     def test_semantics_tag_matches_measured_behaviour(self):
         env = PITPortfolioEnv(_book(), _preds(), _panel(), PITPortfolioEnvConfig(max_book=4))

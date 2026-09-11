@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   CheckCircle,
@@ -49,6 +49,12 @@ const COMPANY_PHASES = [
   { label: "04 独立裁决", roleIds: ["challenger", "compliance", "governance"] },
 ] as const;
 
+function effectiveVerdict(finding?: CouncilFinding): CouncilFinding["verdict"] {
+  if (!finding) return "unknown";
+  if (finding.verdict === "unknown" && finding.override?.verdict !== "blocked") return "unknown";
+  return finding.override?.verdict ?? finding.verdict;
+}
+
 export function DecisionCouncilPage(): JSX.Element {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [openOverrideRole, setOpenOverrideRole] = useState("");
@@ -71,6 +77,11 @@ export function DecisionCouncilPage(): JSX.Element {
   );
 
   const data = review.data?.data;
+  useEffect(() => {
+    setOpenOverrideRole("");
+    setOverrideReason("");
+    setError("");
+  }, [effectiveRunId, data?.subject.contentHash, data?.subject.candidateId, data?.policyFingerprint]);
   const findings = data?.findings ?? [];
   const roles = roster.data?.data.roles ?? [];
   const thresholds = roster.data?.data.thresholds;
@@ -106,7 +117,7 @@ export function DecisionCouncilPage(): JSX.Element {
   const decisionMeta = decision && !contractIssue ? DECISION_META[decision.state] : undefined;
 
   const counts = useMemo(() => {
-    const effective = findings.map((item) => item.override?.verdict ?? item.verdict);
+    const effective = findings.map(effectiveVerdict);
     return {
       pass: effective.filter((item) => item === "pass").length,
       warn: effective.filter((item) => item === "warn").length,
@@ -117,6 +128,10 @@ export function DecisionCouncilPage(): JSX.Element {
 
   const submitOverride = async (finding: CouncilFinding): Promise<void> => {
     if (!data || contractIssue) return;
+    if (finding.verdict === "unknown" && overrideVerdict !== "blocked") {
+      setError("证据不足不能改判为通过或保留意见；请先补充证据并重新审议。");
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
@@ -201,7 +216,7 @@ export function DecisionCouncilPage(): JSX.Element {
                 <div>
                   {phaseRoles.map((role) => {
                     const finding = findings.find((item) => item.roleId === role.id);
-                    const effective = finding?.override?.verdict ?? finding?.verdict ?? "unknown";
+                    const effective = effectiveVerdict(finding);
                     const meta = VERDICT_META[effective];
                     return (
                       <span key={role.id} className="atlas-chip" data-tone={meta.tone}>
@@ -230,7 +245,7 @@ export function DecisionCouncilPage(): JSX.Element {
             {findings.length ? (
               <div className="council-findings">
                 {findings.map((finding) => {
-                  const effective = finding.override?.verdict ?? finding.verdict;
+                  const effective = effectiveVerdict(finding);
                   const meta = VERDICT_META[effective as CouncilFinding["verdict"]];
                   const VerdictIcon = meta.icon;
                   const role = roles.find((item) => item.id === finding.roleId);
@@ -299,10 +314,14 @@ export function DecisionCouncilPage(): JSX.Element {
                         <button
                           type="button"
                           className="atlas-action"
-                          onClick={() =>
+                          onClick={() => {
+                            setOverrideReason("");
+                            setError("");
+                            setOverrideVerdict(finding.verdict === "unknown" ? "blocked" : "warn");
                             setOpenOverrideRole(
                               openOverrideRole === finding.roleId ? "" : finding.roleId,
-                            )}
+                            );
+                          }}
                           aria-expanded={openOverrideRole === finding.roleId}
                         >
                           <Gavel size={12} />人工推翻
@@ -319,6 +338,7 @@ export function DecisionCouncilPage(): JSX.Element {
                         >
                           <TruthNotice tone="warning">
                             推翻不会删除原裁决：原裁决与推翻记录会并列保存，并写入审计日志。
+                            {finding.verdict === "unknown" ? "证据不足仅可改判为否决；请先补充证据并重新审议。" : ""}
                           </TruthNotice>
                           <label className="atlas-field">
                             <span>改判为</span>
@@ -328,7 +348,7 @@ export function DecisionCouncilPage(): JSX.Element {
                                 setOverrideVerdict(event.target.value as "pass" | "warn" | "blocked")}
                             >
                               <option value="pass" disabled={finding.verdict === "unknown"}>通过</option>
-                              <option value="warn">保留意见</option>
+                              <option value="warn" disabled={finding.verdict === "unknown"}>保留意见</option>
                               <option value="blocked">否决</option>
                             </select>
                           </label>

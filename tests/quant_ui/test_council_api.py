@@ -11,6 +11,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from services.quant_api.app import create_app
 from services.quant_api.services.container import ServiceContainer
@@ -366,7 +367,8 @@ def test_a_single_factor_subject_is_not_faulted_for_not_beating_itself(quant_ui_
     assert "不构成融合" in factor["headline"]
 
 
-def test_unknown_cannot_be_overridden_into_clearance(quant_ui_settings) -> None:
+@pytest.mark.parametrize("verdict", ["pass", "warn"])
+def test_unknown_cannot_be_overridden_into_clearance(quant_ui_settings, verdict) -> None:
     app = create_app(quant_ui_settings)
     run_id = _run_id(app)
     run_dir = quant_ui_settings.runtime_root / "reports" / "fusion" / "fixture_search"
@@ -380,7 +382,7 @@ def test_unknown_cannot_be_overridden_into_clearance(quant_ui_settings) -> None:
         app,
         "POST",
         "/api/council/overrides",
-        json=_override_payload(review, "fusion_search", verdict="pass"),
+        json=_override_payload(review, "fusion_search", verdict=verdict),
     )
     assert response.status_code == 422
     assert "missing evidence" in response.text
@@ -434,3 +436,12 @@ def test_cio_never_passes_when_an_upstream_role_is_unknown(quant_ui_settings) ->
     assert _findings(review)["governance"]["verdict"] == "unknown"
     assert review["decision"]["eligibleForHumanGate"] is False
     assert review["decision"]["liveEligible"] is False
+
+
+@pytest.mark.parametrize("verdict", ["pass", "warn"])
+def test_aggregate_cannot_promote_legacy_unknown_overrides(verdict):
+    from services.quant_api.services.council import _aggregate_decision
+    findings = [{"roleId": "legacy", "verdict": "unknown", "override": {"verdict": verdict}}]
+    decision = _aggregate_decision(findings)
+    assert decision["eligibleForHumanGate"] is False
+    assert decision["unknownRoles"] == ["legacy"]

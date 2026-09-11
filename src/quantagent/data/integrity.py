@@ -287,7 +287,7 @@ def validate_daily_ohlcv(
         if not _declared(amount_unit):
             warnings.append("amount_unit_missing")
 
-    adjustment = _metadata_value(result, "adjust", "adjustment")
+    adjustment = _metadata_value(result, "adjustment", "adjust")
     if policy.expected_adjustment is not None:
         if not _declared(adjustment):
             hard.append("adjustment_metadata_missing")

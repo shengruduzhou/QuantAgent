@@ -98,7 +98,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self.config = config or PITPortfolioEnvConfig()
         if self.config.max_book <= 0:
             raise ValueError("PITPortfolioEnv max_book must be positive")
-        for name in ("drawdown_lambda", "volatility_lambda"):
+        for name in ("drawdown_lambda", "volatility_lambda", "cost_bps"):
             value = float(getattr(self.config, name))
             if not np.isfinite(value) or value < 0.0:
                 # A negative lambda would *pay* the agent for running deeper
@@ -108,6 +108,8 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 raise ValueError(
                     f"PITPortfolioEnv {name} must be finite and >= 0, got {value!r}"
                 )
+        if self.config.cost_bps >= 10_000:
+            raise ValueError("PITPortfolioEnv cost_bps must be below 10000")
         self._build_caches(
             book_weights,
             predictions,
@@ -132,6 +134,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self._t = 0
         self._prev_w: dict[str, float] = {}
         self._prev_w_passive: dict[str, float] = {}
+        self._obs_w: dict[str, float] = {}
         self._nav = 1.0
         self._nav_passive = 1.0
         self._peak = 1.0
@@ -168,6 +171,8 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             raise ValueError("PITPortfolioEnv book contains non-finite weights")
         if (bw < -1e-12).any().any():
             raise ValueError("PITPortfolioEnv does not support negative book weights")
+        if (bw.sum(axis=1) > 1.0 + 1e-12).any():
+            raise ValueError("PITPortfolioEnv does not support borrowed cash")
 
         panel = market_panel.copy()
         required_panel = {"trade_date", "symbol", "close", *_REQUIRED_EXECUTION_FLAGS}
@@ -254,6 +259,9 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 "PITPortfolioEnv requires at least 3 signal dates with proven T+1 "
                 "execution and T+2 reward sessions inside the configured boundary"
             )
+
+        if any(previous[2] != following[1] for previous, following in zip(triplets, triplets[1:])):
+            raise ValueError("PITPortfolioEnv requires consecutive execution sessions; sparse books leave unvalued holding returns")
 
         dates = [item[0] for item in triplets]
         execution_dates = [item[1] for item in triplets]
@@ -432,6 +440,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         self._t = 0
         self._prev_w = {}
         self._prev_w_passive = {}
+        self._obs_w = {}
         self._nav = 1.0
         self._nav_passive = 1.0
         self._peak = 1.0
@@ -444,7 +453,10 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         cfg = self.config
         t = self._t
         n = cfg.max_book
-        a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        a = np.asarray(action, dtype=np.float64)
+        if not np.isfinite(a).all():
+            raise ValueError("PITPortfolioEnv action must be finite")
+        a = np.clip(a, -1.0, 1.0)
         if a.shape != (n + 1,):
             raise ValueError(
                 f"PITPortfolioEnv action shape {a.shape} != expected {(n + 1,)}"
@@ -494,6 +506,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             no_increase=self.slot_no_increase[t],
             no_decrease=self.slot_no_decrease[t],
             frozen=self.slot_frozen[t],
+            cost_rate=cfg.cost_bps / 1e4,
         )
         w_passive = _apply_execution_constraints(
             passive,
@@ -501,6 +514,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             no_increase=self.slot_no_increase[t],
             no_decrease=self.slot_no_decrease[t],
             frozen=self.slot_frozen[t],
+            cost_rate=cfg.cost_bps / 1e4,
         )
 
         returns = self.slot_ret[t]
@@ -578,8 +592,15 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         risk_penalty = drawdown_penalty + volatility_penalty
         reward = (value_add - risk_penalty) * cfg.reward_scale
 
-        self._prev_w = current
-        self._prev_w_passive = current_passive
+        # The next signal observes T+1 post-trade holdings, not the T+2 return
+        # already used internally to settle this step's delayed reward.
+        self._obs_w = {symbol: weight / (1.0 - cost_policy) for symbol, weight in current.items()}
+        self._prev_w = {symbol: float(w[i] * (1.0 + returns[i]) / (1.0 + net_policy))
+                        for i, symbol in enumerate(syms)}
+        self._prev_w_passive = {
+            symbol: float(w_passive[i] * (1.0 + returns[i]) / (1.0 + net_passive))
+            for i, symbol in enumerate(syms)
+        }
         self._t += 1
         terminated = self._t >= len(self.dates)
         info = {
@@ -595,6 +616,9 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
             # less is doing something different from one that holds better, and
             # without the passive side there is nothing to compare it to.
             "weights_passive": current_passive,
+            "weights_semantics": "executed_notional_over_pretrade_nav_v2",
+            "cash_weight": 1.0 - sum(self._prev_w.values()),
+            "drift_weights": dict(self._prev_w),
             "net_policy": net_policy,
             "net_passive": net_passive,
             "value_add": value_add,
@@ -641,7 +665,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         t = min(self._t, len(self.dates) - 1)
         syms = self.slot_symbols[t]
         prev_vec = np.array(
-            [self._prev_w.get(symbol, 0.0) for symbol in syms]
+            [self._obs_w.get(symbol, 0.0) for symbol in syms]
             + [0.0] * (n - len(syms)),
             dtype=np.float32,
         )
@@ -660,7 +684,7 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
                 self.regime_vec[t][0],
                 self.regime_vec[t][1],
                 n_book / max(1, n),
-                1.0 - float(sum(self._prev_w.values())),
+                1.0 - float(sum(self._obs_w.values())),
                 t / max(1, len(self.dates) - 1),
             ],
             dtype=np.float32,
@@ -788,12 +812,23 @@ def _apply_execution_constraints(
     no_increase: np.ndarray,
     no_decrease: np.ndarray,
     frozen: np.ndarray,
+    cost_rate: float = 0.0,
 ) -> np.ndarray:
     result = np.asarray(desired, dtype=np.float64).copy()
     result = np.where(no_increase, np.minimum(result, previous), result)
     result = np.where(no_decrease, np.maximum(result, previous), result)
     result = np.where(frozen, previous, result)
-    return result
+    # Sell only feasible shares; buy requests compete for actual residual cash
+    # and sale proceeds after fees. Never rescale a frozen position.
+    sells = np.maximum(previous - result, 0.0)
+    buys = np.maximum(result - previous, 0.0)
+    cash = 1.0 - float(previous.sum())
+    if cash < -1e-10:
+        raise ValueError("PITPortfolioEnv encountered borrowed cash")
+    cash_after_sales = max(0.0, cash) + (1.0 - cost_rate) * float(sells.sum())
+    buy_cost = (1.0 + cost_rate) * float(buys.sum())
+    fraction = min(1.0, cash_after_sales / buy_cost) if buy_cost > 0 else 0.0
+    return previous - sells + fraction * buys
 
 
 def _finite_positive(value: object) -> bool:

@@ -51,6 +51,8 @@ class QlibBootstrapConfig:
     require_optional_flags: bool = False
     use_lake_layout: bool = True
     metadata: dict[str, object] = field(default_factory=dict)
+    raw_amount_field: str | None = None
+    volume_scale_to_shares: float | None = None
 
 
 def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
@@ -66,7 +68,11 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
         symbols=config.symbols,
         universe=config.universe,
     )
-    result = QlibProvider(str(provider_path), config.region).daily_ohlcv(request)
+    result = QlibProvider(
+        str(provider_path), config.region,
+        raw_amount_field=config.raw_amount_field,
+        volume_scale_to_shares=config.volume_scale_to_shares,
+    ).daily_ohlcv(request)
     # Raw daily bars are known at their own session close.  The schema check
     # enforces that coarse-date availability contract; execution latency is
     # applied later by the simulator rather than encoded as a guessed date.

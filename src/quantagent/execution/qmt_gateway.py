@@ -19,6 +19,7 @@ broker order snapshot/callback confirms the terminal state.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha1
@@ -308,8 +309,8 @@ class QMTGateway(BrokerBase):
         )
         if order.order_type == OrderType.LIMIT:
             price_type = getattr(self._xt_const, "FIX_PRICE")
-            if order.price is None or float(order.price) <= 0:
-                raise ValueError("QMT LIMIT order requires price > 0")
+            if order.price is None or not math.isfinite(float(order.price)) or float(order.price) <= 0:
+                raise ValueError("QMT LIMIT order requires finite price > 0")
             price = float(order.price)
         else:
             price_type = getattr(self._xt_const, "MARKET_PEER_PRICE_FIRST")

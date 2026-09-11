@@ -202,7 +202,7 @@ class TestExecutionConstraints:
         env = _env(limit_up={("A", DATES[2]): True})
         env.reset()
         _, _, _, _, info0 = env.step(np.zeros(env.action_space.shape))
-        weight_before = info0["weights"].get("A", 0.0)
+        weight_before = info0["drift_weights"].get("A", 0.0)
         action = np.zeros(env.action_space.shape)
         action[env.slot_symbols[1].index("A")] = 1.0
         _, _, _, _, info1 = env.step(action)
@@ -212,7 +212,7 @@ class TestExecutionConstraints:
         env = _env(limit_down={("A", DATES[2]): True})
         env.reset()
         _, _, _, _, info0 = env.step(np.zeros(env.action_space.shape))
-        weight_before = info0["weights"]["A"]
+        weight_before = info0["drift_weights"]["A"]
 
         increase = np.zeros(env.action_space.shape)
         increase[env.slot_symbols[1].index("A")] = 1.0
@@ -225,13 +225,13 @@ class TestExecutionConstraints:
         decrease = np.zeros(env.action_space.shape)
         decrease[env.slot_symbols[1].index("A")] = -1.0
         _, _, _, _, info1 = env.step(decrease)
-        assert info1["weights"]["A"] >= info0["weights"]["A"] - 1e-12
+        assert info1["weights"]["A"] >= info0["drift_weights"]["A"] - 1e-12
 
     def test_suspended_bar_keeps_previous_weight(self):
         env = _env(suspended={("B", DATES[2]): True})
         env.reset()
         _, _, _, _, info0 = env.step(np.zeros(env.action_space.shape))
-        weight_before = info0["weights"]["B"]
+        weight_before = info0["drift_weights"]["B"]
         action = np.full(env.action_space.shape, -1.0)
         _, _, _, _, info1 = env.step(action)
         assert info1["weights"]["B"] == pytest.approx(weight_before, rel=1e-9)
@@ -257,7 +257,7 @@ class TestExecutionConstraints:
         )
         env.reset()
         _, _, _, _, info0 = env.step(np.zeros(env.action_space.shape))
-        weight_before = info0["weights"]["B"]
+        weight_before = info0["drift_weights"]["B"]
         action = np.full(env.action_space.shape, -1.0)
         _, _, _, _, info1 = env.step(action)
         assert info1["weights"]["B"] == pytest.approx(weight_before, rel=1e-9)
