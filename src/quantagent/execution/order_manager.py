@@ -21,6 +21,7 @@ from quantagent.execution.broker_base import (
 from quantagent.execution.constraints import (
     ExecutionConstraintEvaluator,
     OrderIntentRecord,
+    UnmeasuredConstraint,
 )
 from quantagent.domain.idempotency import IdempotencyStore, order_intent_key
 from quantagent.domain.ledger import CanonicalLedger, mirror_open
@@ -35,6 +36,16 @@ from quantagent.domain.orders import (
 )
 from quantagent.market_rules import ashare as market_rules
 from quantagent.quant_math.ashare import AshareRuleEngine
+
+
+def _exchange_session(timestamp: str | pd.Timestamp) -> str:
+    """Use the same Shanghai session for persistence, claims and risk recovery."""
+    stamp = pd.Timestamp(timestamp)
+    if pd.isna(stamp):
+        raise ValueError("order timestamp must identify a valid session")
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert("Asia/Shanghai")
+    return stamp.date().isoformat()
 
 
 class MissingIdempotencyLineage(RuntimeError):
@@ -216,8 +227,7 @@ class OrderManager:
 
     def _restore_daily_risk(self, timestamp: pd.Timestamp) -> None:
         """Restore consumed limits from the canonical chain, including terminal orders."""
-        local = timestamp.tz_convert("Asia/Shanghai") if timestamp.tzinfo else timestamp
-        session = str(local.date())
+        session = _exchange_session(timestamp)
         if session == self._risk_session:
             return
         self._risk_session = session
@@ -401,6 +411,8 @@ class OrderManager:
     def _submit_all(self, orders: Iterable[Order]) -> Iterable[OrderState]:
         for original_order in orders:
             order = original_order
+            if not order.timestamp:
+                order = replace(order, timestamp=datetime.now(timezone.utc).isoformat())
             if not self.forensic_replay and not self.lineage.run_id:
                 raise MissingIdempotencyLineage(
                     f"order {order.client_order_id} has no lineage.run_id; economic submission requires canonical lineage and an idempotency key"
@@ -411,7 +423,7 @@ class OrderManager:
                 symbol=order.symbol,
                 side=order.side.value,
                 quantity=int(order.quantity),
-                trade_date=str(order.timestamp)[:10],
+                trade_date=_exchange_session(order.timestamp),
             )
             fingerprint = _request_fingerprint(order)
             if not self.forensic_replay:
@@ -674,6 +686,25 @@ class OrderManager:
             daily_volume_hint=self._daily_volume_hint(order.symbol),
         )
         report = self.constraint_evaluator.evaluate([*self._risk_intents_today, risk_intent])
+        # Aggregate history must never substitute for this submission's inputs.
+        constraints = self.constraint_evaluator.constraints
+        missing_current = [
+            UnmeasuredConstraint(
+                constraint=name,
+                missing_input=measurement,
+                reason="current order has no finite positive risk measurement",
+                detail={"intent_id": risk_intent.intent_id},
+            )
+            for name, measurement, enabled, value in (
+                ("max_daily_turnover", "portfolio_nav", constraints.max_daily_turnover, nav),
+                ("max_single_stock_participation_rate", "daily_volume_hint",
+                 constraints.max_single_stock_participation_rate, risk_intent.daily_volume_hint),
+            )
+            if enabled is not None and value is None
+            and name not in report.unmeasured_constraints
+        ]
+        if missing_current:
+            report = replace(report, unmeasured=[*report.unmeasured, *missing_current])
         # A constraint the evaluator could not measure is not a pass.  Production
         # submission requires the whole configured set to have been evaluated,
         # otherwise a broker that cannot answer ``query_account_value`` (NAV) or a
@@ -727,7 +758,7 @@ class OrderManager:
         return value if math.isfinite(value) and value > 0 else None
 
     def _open_canonical_pending(self, order: Order):
-        session = str(order.timestamp)[:10]
+        session = _exchange_session(order.timestamp)
         signal = Signal.create(
             symbol=order.symbol,
             trade_date=f"{session}-{order.signal_id or 'manual'}",

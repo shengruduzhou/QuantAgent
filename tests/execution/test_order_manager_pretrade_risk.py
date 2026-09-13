@@ -204,3 +204,41 @@ def test_legacy_submitted_order_without_risk_snapshot_blocks_recovery(tmp_path) 
     assert state.status == OrderStatus.REJECTED
     assert "recovery-required" in state.last_message
     assert live_broker.submitted == []
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("missing", ["nav", "volume", "both"])
+def test_current_measurements_cannot_be_replaced_by_history(tmp_path, restart, missing) -> None:
+    manager, broker = _manager(tmp_path)
+    constraints = replace(manager.constraint_evaluator.constraints,
+                          max_daily_turnover=2.0, max_single_stock_participation_rate=0.1)
+    manager.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+    broker.query_daily_volume = lambda symbol: 1_000_000.0
+    assert manager.submit_orders([_limit_order("measured")])[0].status == OrderStatus.SUBMITTED
+    if restart:
+        manager, broker = _manager(tmp_path)
+        manager.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+        broker.query_daily_volume = lambda symbol: 1_000_000.0
+    if missing in {"nav", "both"}:
+        broker.query_account_value = lambda: None
+    if missing in {"volume", "both"}:
+        broker.query_daily_volume = lambda symbol: None
+    before = len(broker.submitted)
+    state = manager.submit_orders([_limit_order("unmeasured")])[0]
+    assert state.status == OrderStatus.REJECTED
+    assert "unmeasured" in state.last_message
+    assert len(broker.submitted) == before
+
+
+def test_restart_counts_same_shanghai_session_across_timezones(tmp_path) -> None:
+    manager, broker = _manager(tmp_path)
+    constraints = replace(manager.constraint_evaluator.constraints, max_orders_per_day=1)
+    manager.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+    first = replace(_limit_order("new-york-clock"), timestamp="2026-08-17T22:30:00-04:00")
+    assert manager.submit_orders([first])[0].status == OrderStatus.SUBMITTED
+    assert manager.book.orders()[0].trade_date == "2026-08-18"
+    restored, broker = _manager(tmp_path)
+    restored.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+    second = replace(_limit_order("utc-clock"), timestamp="2026-08-18T02:30:00Z")
+    assert restored.submit_orders([second])[0].status == OrderStatus.REJECTED
+    assert broker.submitted == []
