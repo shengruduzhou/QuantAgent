@@ -126,6 +126,9 @@ def decide_lifecycle_transition(
             last_evidence_digest=evidence.evidence_digest,
         )
 
+    if evidence.evidence_digest and evidence.evidence_digest == current.last_evidence_digest:
+        return current
+
     stage = current.stage
     degraded_count = current.consecutive_degradations
     if stage == "candidate":
@@ -239,12 +242,18 @@ class FactorLifecycleLedger:
         if not self.verify():
             raise RuntimeError("factor lifecycle ledger hash chain is invalid")
         current = self.latest(factor_name, factor_version)
+        records = self.records()
+        if not evidence.severe_semantic_violation and any(
+            record.factor_name == factor_name and record.factor_version == factor_version
+            and record.evidence_digest == evidence.evidence_digest
+            for record in records
+        ):
+            return current
         updated = decide_lifecycle_transition(
             current,
             evidence,
             retire_after_consecutive_degradations=retire_after_consecutive_degradations,
         )
-        records = self.records()
         previous_hash = records[-1].record_hash if records else ""
         timestamp = observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
         payload: dict[str, object] = {

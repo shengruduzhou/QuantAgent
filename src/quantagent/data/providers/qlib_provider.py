@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
@@ -35,8 +37,21 @@ class QlibProvider:
 
     provider_uri: str | None = None
     region: str = "cn"
+    # Bundle-specific contracts: ordinary Qlib amount/volume are not proof of
+    # raw CNY turnover or share units. Callers must supply verified mappings.
+    raw_amount_field: str | None = None
+    volume_scale_to_shares: float | None = None
 
     def daily_ohlcv(self, request: ProviderRequest) -> ProviderResult:
+        if (not self.raw_amount_field or self.volume_scale_to_shares is None
+                or not math.isfinite(self.volume_scale_to_shares)
+                or self.volume_scale_to_shares <= 0):
+            raise ProviderUnavailable(
+                "Qlib normalized bars cannot be used as raw execution prices. "
+                "Supply a verified raw_amount_field (CNY) and volume_scale_to_shares "
+                "contract; $factor is required to restore OHLC and volume. "
+                "Alternatively use build-akshare-market-panel-v7 for raw market bars."
+            )
         try:
             import qlib  # type: ignore
             from qlib.data import D  # type: ignore
@@ -48,7 +63,10 @@ class QlibProvider:
         instruments = [to_qlib_instrument(symbol) for symbol in request.symbols] if request.symbols else request.universe
         if not instruments:
             raise ProviderUnavailable("qlib request requires symbols or universe")
-        fields = ["$open", "$high", "$low", "$close", "$volume", "$amount"]
+        amount_field = "$" + self.raw_amount_field.lstrip("$")
+        if amount_field in {"$open", "$high", "$low", "$close", "$volume", "$factor"}:
+            raise ProviderUnavailable("raw_amount_field must identify independent CNY turnover")
+        fields = ["$open", "$high", "$low", "$close", "$volume", "$factor", amount_field]
         frame = D.features(instruments, fields, start_time=request.start_date, end_time=request.end_date, freq="day")
         if frame.empty:
             return ProviderResult(pd.DataFrame(), source="qlib_provider", quality_score=0.0, warnings=("qlib_empty_daily_ohlcv",))
@@ -61,9 +79,23 @@ class QlibProvider:
                 "$low": "low",
                 "$close": "close",
                 "$volume": "volume",
-                "$amount": "amount",
+                amount_field: "amount",
+                "$factor": "factor",
             }
         )
+        required = ["open", "high", "low", "close", "volume", "amount", "factor"]
+        if any(column not in data for column in required):
+            raise ProviderUnavailable("Qlib bundle is missing raw restoration fields")
+        numeric = data[required].apply(pd.to_numeric, errors="coerce")
+        if (not np.isfinite(numeric.to_numpy()).all()
+                or (numeric[["open", "high", "low", "close", "factor"]] <= 0).any().any()
+                or (numeric[["volume", "amount"]] < 0).any().any()):
+            raise ProviderUnavailable("Qlib bundle has invalid raw restoration values")
+        data[required] = numeric
+        data[["open", "high", "low", "close"]] = numeric[["open", "high", "low", "close"]].div(numeric["factor"], axis=0)
+        data["volume"] = numeric["volume"] * numeric["factor"] * self.volume_scale_to_shares
+        if not np.isfinite(data[required].to_numpy(dtype=float)).all():
+            raise ProviderUnavailable("Qlib raw restoration overflowed")
         if "symbol" in data.columns:
             data["symbol"] = data["symbol"].astype(str).map(from_qlib_instrument)
         # The raw daily bar is known at its own session close.  Execution
@@ -86,7 +118,16 @@ class QlibProvider:
             point_in_time=True,
             quality_score=0.90,
             warnings=(),
-            metadata={"schema_report": schema_report},
+            metadata={
+                "schema_report": schema_report, "adjustment": "raw",
+                "frequency": "1d", "timezone": "Asia/Shanghai",
+                "volume_unit": "shares", "amount_unit": "CNY",
+                "pit_semantics": "daily_session_close",
+                "raw_amount_field": amount_field,
+                "volume_scale_to_shares": self.volume_scale_to_shares,
+                "raw_price_restoration": "qlib_ohlc_div_factor",
+                "production_integrity_certified": False,
+            },
         )
 
     def health_check(self, request: ProviderRequest | None = None) -> dict[str, object]:

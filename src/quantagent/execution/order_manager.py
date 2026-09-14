@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Iterable
@@ -20,6 +21,7 @@ from quantagent.execution.broker_base import (
 from quantagent.execution.constraints import (
     ExecutionConstraintEvaluator,
     OrderIntentRecord,
+    UnmeasuredConstraint,
 )
 from quantagent.domain.idempotency import IdempotencyStore, order_intent_key
 from quantagent.domain.ledger import CanonicalLedger, mirror_open
@@ -34,6 +36,16 @@ from quantagent.domain.orders import (
 )
 from quantagent.market_rules import ashare as market_rules
 from quantagent.quant_math.ashare import AshareRuleEngine
+
+
+def _exchange_session(timestamp: str | pd.Timestamp) -> str:
+    """Use the same Shanghai session for persistence, claims and risk recovery."""
+    stamp = pd.Timestamp(timestamp)
+    if pd.isna(stamp):
+        raise ValueError("order timestamp must identify a valid session")
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert("Asia/Shanghai")
+    return stamp.date().isoformat()
 
 
 class MissingIdempotencyLineage(RuntimeError):
@@ -205,10 +217,46 @@ class OrderManager:
         self._wire: dict[str, OrderRecord] = {}
         self._client_order_ids: dict[str, str] = {}
         self._risk_intents_today: list[OrderIntentRecord] = []
+        self._risk_session: str | None = None
+        self._risk_recovery_errors: list[str] = []
 
     def reset_daily_counters(self) -> None:
         self.counts_today.clear()
         self._risk_intents_today.clear()
+        self._risk_session = None
+
+    def _restore_daily_risk(self, timestamp: pd.Timestamp) -> None:
+        """Restore consumed limits from the canonical chain, including terminal orders."""
+        session = _exchange_session(timestamp)
+        if session == self._risk_session:
+            return
+        self._risk_session = session
+        self._risk_intents_today.clear()
+        self._risk_recovery_errors.clear()
+        self.counts_today.clear()
+        for order in self.book.orders():
+            if order.trade_date != session:
+                continue
+            history = self.book.history_of(order.order_id)
+            if not any(event.event_type == CanonicalEventType.SUBMITTED for event in history):
+                continue
+            self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
+            decisions = [event.risk_decision for event in history
+                         if event.event_type == CanonicalEventType.RISK_APPROVED and event.risk_decision]
+            try:
+                payload = dict(decisions[-1].measured["risk_intent"])
+                payload["timestamp"] = pd.Timestamp(payload["timestamp"])
+                intent = OrderIntentRecord(**payload)
+                if (intent.symbol != order.symbol or intent.quantity != order.quantity
+                        or intent.side.upper() != order.side.value
+                        or not math.isfinite(intent.order_value) or intent.order_value <= 0
+                        or pd.isna(intent.timestamp)):
+                    raise ValueError("risk intent does not bind to the submitted order")
+            except (IndexError, KeyError, TypeError, ValueError):
+                self._risk_recovery_errors.append(order.order_id)
+                continue
+            self._risk_intents_today.append(intent)
+            self._client_order_ids[order.order_id] = intent.intent_id
 
     def reconcile(
         self,
@@ -363,6 +411,8 @@ class OrderManager:
     def _submit_all(self, orders: Iterable[Order]) -> Iterable[OrderState]:
         for original_order in orders:
             order = original_order
+            if not order.timestamp:
+                order = replace(order, timestamp=datetime.now(timezone.utc).isoformat())
             if not self.forensic_replay and not self.lineage.run_id:
                 raise MissingIdempotencyLineage(
                     f"order {order.client_order_id} has no lineage.run_id; economic submission requires canonical lineage and an idempotency key"
@@ -373,7 +423,7 @@ class OrderManager:
                 symbol=order.symbol,
                 side=order.side.value,
                 quantity=int(order.quantity),
-                trade_date=str(order.timestamp)[:10],
+                trade_date=_exchange_session(order.timestamp),
             )
             fingerprint = _request_fingerprint(order)
             if not self.forensic_replay:
@@ -539,7 +589,9 @@ class OrderManager:
                 ),
                 None,
             )
-        if order.order_type == OrderType.LIMIT and (order.price is None or float(order.price) <= 0):
+        if order.order_type == OrderType.LIMIT and (
+            order.price is None or not math.isfinite(float(order.price)) or float(order.price) <= 0
+        ):
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -547,7 +599,7 @@ class OrderManager:
                     rule="order_manager_basic_admissibility",
                     threshold="limit_price>0",
                     measured=order.price,
-                    reason="limit order requires a positive price",
+                    reason="limit order requires a finite positive price",
                     lineage=canonical_order.lineage,
                 ),
                 None,
@@ -587,7 +639,10 @@ class OrderManager:
             )
             return order, decision, None
 
-        if order.order_type == OrderType.MARKET or order.price is None or float(order.price) <= 0:
+        if (
+            order.order_type == OrderType.MARKET or order.price is None
+            or not math.isfinite(float(order.price)) or float(order.price) <= 0
+        ):
             return (
                 order,
                 CanonicalRiskDecision.create(
@@ -602,10 +657,20 @@ class OrderManager:
             )
 
         timestamp = pd.Timestamp(order.timestamp or datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        self._restore_daily_risk(timestamp)
+        if self._risk_recovery_errors:
+            return order, CanonicalRiskDecision.create(
+                approved=False,
+                rule="intraday_risk_recovery",
+                threshold="complete canonical risk-intent history",
+                measured={"unresolved_orders": self._risk_recovery_errors},
+                reason="recovery-required: submitted orders lack bound risk-intent evidence",
+                lineage=canonical_order.lineage,
+            ), None
         nav: float | None = None
         try:
             queried_nav = float(self.broker.query_account_value())
-            if pd.notna(queried_nav) and queried_nav > 0:
+            if math.isfinite(queried_nav) and queried_nav > 0:
                 nav = queried_nav
         except Exception:
             nav = None
@@ -621,6 +686,25 @@ class OrderManager:
             daily_volume_hint=self._daily_volume_hint(order.symbol),
         )
         report = self.constraint_evaluator.evaluate([*self._risk_intents_today, risk_intent])
+        # Aggregate history must never substitute for this submission's inputs.
+        constraints = self.constraint_evaluator.constraints
+        missing_current = [
+            UnmeasuredConstraint(
+                constraint=name,
+                missing_input=measurement,
+                reason="current order has no finite positive risk measurement",
+                detail={"intent_id": risk_intent.intent_id},
+            )
+            for name, measurement, enabled, value in (
+                ("max_daily_turnover", "portfolio_nav", constraints.max_daily_turnover, nav),
+                ("max_single_stock_participation_rate", "daily_volume_hint",
+                 constraints.max_single_stock_participation_rate, risk_intent.daily_volume_hint),
+            )
+            if enabled is not None and value is None
+            and name not in report.unmeasured_constraints
+        ]
+        if missing_current:
+            report = replace(report, unmeasured=[*report.unmeasured, *missing_current])
         # A constraint the evaluator could not measure is not a pass.  Production
         # submission requires the whole configured set to have been evaluated,
         # otherwise a broker that cannot answer ``query_account_value`` (NAV) or a
@@ -640,7 +724,9 @@ class OrderManager:
             approved=certified,
             rule="execution_constraint_dsl",
             threshold=self.constraint_evaluator.constraints.as_dict(),
-            measured=report.to_dict(),
+            measured={**report.to_dict(), "risk_intent": {
+                **asdict(risk_intent), "timestamp": timestamp.isoformat(),
+            }},
             reason=reason,
             lineage=canonical_order.lineage,
             decided_by="execution_constraint_dsl",
@@ -661,7 +747,7 @@ class OrderManager:
                 value = float(hint)
             except (TypeError, ValueError):
                 return None
-            return value if value > 0 else None
+            return value if math.isfinite(value) and value > 0 else None
         query = getattr(self.broker, "query_daily_volume", None)
         if not callable(query):
             return None
@@ -669,10 +755,10 @@ class OrderManager:
             value = float(query(symbol))
         except Exception:
             return None
-        return value if pd.notna(value) and value > 0 else None
+        return value if math.isfinite(value) and value > 0 else None
 
     def _open_canonical_pending(self, order: Order):
-        session = str(order.timestamp)[:10]
+        session = _exchange_session(order.timestamp)
         signal = Signal.create(
             symbol=order.symbol,
             trade_date=f"{session}-{order.signal_id or 'manual'}",

@@ -89,14 +89,16 @@ def factor_ic_series(
     )
     if merged.empty:
         return pd.DataFrame(columns=factor_names, dtype=float)
-    merged["forward_return"] = pd.to_numeric(merged["forward_return"], errors="coerce")
+    merged["forward_return"] = pd.to_numeric(merged["forward_return"], errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    )
     merged = merged.dropna(subset=["forward_return"])
     if merged.empty:
         return pd.DataFrame(columns=factor_names, dtype=float)
 
     records: dict[pd.Timestamp, dict[str, float]] = {}
     for trade_date, group in merged.groupby("trade_date", sort=True):
-        target = group["forward_return"].rank(pct=True)
+        target = group["forward_return"]
         row: dict[str, float] = {}
         for name in factor_names:
             values = pd.to_numeric(group[name], errors="coerce").replace(
@@ -106,7 +108,7 @@ def factor_ic_series(
             if int(usable.sum()) < 3:
                 row[name] = float("nan")
                 continue
-            correlation = values[usable].rank(pct=True).corr(target[usable])
+            correlation = values[usable].rank(pct=True).corr(target[usable].rank(pct=True))
             row[name] = float(correlation) if pd.notna(correlation) else float("nan")
         records[trade_date] = row
     return pd.DataFrame.from_dict(records, orient="index").reindex(columns=factor_names)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -164,6 +165,7 @@ def simulate_ashare_target_weights(
     risk_events: list[dict[str, object]] = []
     trace_rows: list[dict[str, object]] = []
 
+    schedule: dict[pd.Timestamp, tuple[pd.Timestamp, pd.Series]] = {}
     for signal_date, weights in target.iterrows():
         signal_date = pd.Timestamp(signal_date).normalize()
         execution_date = _next_market_session(signal_date, sessions) if signal_date in session_set else None
@@ -192,6 +194,13 @@ def simulate_ashare_target_weights(
             price_source="close",
         ))
 
+        schedule[execution_date] = (signal_date, weights)
+
+    # Signals determine trades, while every observed session in the evaluation
+    # window determines valuation. Do not extend the evaluated window implicitly.
+    valuation_sessions = sessions[(sessions >= min(schedule)) & (sessions <= max(schedule))] if schedule else []
+    for execution_date in valuation_sessions:
+        signal_date, weights = schedule.get(execution_date, (None, pd.Series(dtype=float)))
         day_market = market[market["trade_date"] == execution_date]
         if day_market.empty:
             trace_rows.append(_trace_row(
@@ -257,7 +266,7 @@ def simulate_ashare_target_weights(
         invalid_required = sorted(
             symbol for symbol in required_symbols
             if symbol not in close_by_symbol.index
-            or pd.isna(close_by_symbol.loc[symbol])
+            or not math.isfinite(float(close_by_symbol.loc[symbol]))
             or float(close_by_symbol.loc[symbol]) <= 0
         )
         if invalid_required:
@@ -273,8 +282,7 @@ def simulate_ashare_target_weights(
                 ))
             continue
 
-        # The economic day advances only at the mapped execution session. This
-        # releases T+1-frozen shares before a later-session sell can be routed.
+        # Advance T+1 inventory on valuation sessions as well as execution days.
         broker.advance_trading_day()
         if config.fix_cross_day_order_dedup:
             manager.reset_daily_counters()
@@ -292,11 +300,15 @@ def simulate_ashare_target_weights(
             ))
             continue
 
-        current_weights = _current_weights(broker, prices)
-        adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
-        nav = _mark_to_market_nav(broker, prices)
-        day_signal_id = f"bt-sig-{signal_date:%Y%m%d}-exec-{execution_date:%Y%m%d}"
-        states = manager.reconcile(adjusted, prices, nav, signal_id=day_signal_id)
+        states = []
+        manager.last_skipped_orders.clear()
+        if signal_date is not None:
+            current_weights = _current_weights(broker, prices)
+            adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
+            nav = _mark_to_market_nav(broker, prices)
+            day_signal_id = f"bt-sig-{signal_date:%Y%m%d}-exec-{execution_date:%Y%m%d}"
+            states = manager.reconcile(adjusted, prices, nav, signal_id=day_signal_id)
+
 
         for skipped in manager.last_skipped_orders:
             skipped_row = {
@@ -420,6 +432,9 @@ def simulate_ashare_target_weights(
     metadata["execution_trace_schema"] = TRACE_SCHEMA_VERSION
     metadata["target_index_semantics"] = "signal_date"
     metadata["execution_price_source"] = "close"
+    metadata["valuation_frequency"] = "each_observed_market_session"
+    metadata["valuation_window"] = "first_to_last_mapped_execution"
+    metadata["calendar_source"] = "observed_market_panel"
     return AShareExecutionSimulationResult(
         nav=pd.Series(dict(nav_rows), name="nav").sort_index(),
         order_audit=order_audit,
@@ -462,7 +477,7 @@ def _unmapped_trace_for_all_signals(
 def _trace_row(
     *,
     record_type: str,
-    signal_date: pd.Timestamp,
+    signal_date: pd.Timestamp | None,
     execution_date: pd.Timestamp | None,
     status: str,
     reason: str,
@@ -474,7 +489,7 @@ def _trace_row(
 ) -> dict[str, object]:
     return {
         "record_type": record_type,
-        "signal_date": pd.Timestamp(signal_date).normalize(),
+        "signal_date": None if signal_date is None else pd.Timestamp(signal_date).normalize(),
         "execution_date": None if execution_date is None else pd.Timestamp(execution_date).normalize(),
         "status": status,
         "reason": reason,

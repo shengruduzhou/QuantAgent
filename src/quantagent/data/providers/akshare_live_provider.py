@@ -231,6 +231,12 @@ class AkShareLiveProvider:
             quality_score=quality_score,
             warnings=tuple(dict.fromkeys(warnings)),
             metadata={
+                "frequency": "1d",
+                "timezone": "Asia/Shanghai",
+                "volume_unit": _CANONICAL_VOLUME_UNIT,
+                "amount_unit": _CANONICAL_AMOUNT_UNIT,
+                "adjustment": "raw" if self.adjust == "" else self.adjust,
+                "pit_semantics": "daily_next_session",
                 "schema_report": schema_report,
                 "function_name": "|".join(_SOURCE_FUNCTIONS[source] for source in self.source_order),
                 "source_order": list(self.source_order),

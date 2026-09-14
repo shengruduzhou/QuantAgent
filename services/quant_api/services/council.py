@@ -265,7 +265,7 @@ class CouncilService:
                     status = "stale_finding"
                 elif record.get("originalVerdict") != finding.get("verdict"):
                     status = "stale_original_verdict"
-                elif finding.get("verdict") == "unknown" and record.get("verdict") == "pass":
+                elif finding.get("verdict") == "unknown" and record.get("verdict") in {"pass", "warn"}:
                     status = "inadmissible_missing_evidence"
             record["scopeStatus"] = status
             record["effective"] = status == "effective"
@@ -493,7 +493,7 @@ class CouncilService:
             raise ValueError("originalVerdict is invalid")
         if verdict not in {"pass", "warn", "blocked"}:
             raise ValueError("override verdict must be pass, warn or blocked")
-        if original_verdict == "unknown" and verdict == "pass":
+        if original_verdict == "unknown" and verdict in {"pass", "warn"}:
             raise ValueError("missing evidence cannot be overridden into clearance")
         reason = reason.strip()
         if len(reason) < 8:
@@ -1098,7 +1098,7 @@ def _aggregate_decision(findings: list[dict[str, Any]]) -> dict[str, Any]:
         override = item.get("override")
         # A reason can change a judgment, but it cannot manufacture evidence.
         # Keep this defense even though v2 write validation also rejects it.
-        if item["verdict"] == "unknown" and override and override["verdict"] == "pass":
+        if item["verdict"] == "unknown" and override and override["verdict"] in {"pass", "warn"}:
             effective.append("unknown")
         else:
             effective.append(override["verdict"] if override else item["verdict"])

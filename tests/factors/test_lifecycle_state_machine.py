@@ -34,11 +34,11 @@ def test_validated_can_enter_shadow_but_preliminary_evidence_cannot_activate() -
     snapshot = FactorLifecycleSnapshot("factor_x", "v1")
     snapshot = decide_lifecycle_transition(snapshot, _evidence())
     assert snapshot.stage == "validated"
-    snapshot = decide_lifecycle_transition(snapshot, _evidence(shadow_days=1))
+    snapshot = decide_lifecycle_transition(snapshot, _evidence(evidence_digest="shadow-1", shadow_days=1))
     assert snapshot.stage == "shadow"
     snapshot = decide_lifecycle_transition(
         snapshot,
-        _evidence(shadow_days=30, promotion_candidate_ready=True),
+        _evidence(evidence_digest="shadow-30", shadow_days=30, promotion_candidate_ready=True),
     )
     assert snapshot.stage == "shadow"
 
@@ -56,21 +56,21 @@ def test_degradation_requires_repeated_observations_before_retirement() -> None:
     active = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
     degraded = decide_lifecycle_transition(
         active,
-        _evidence(core_validity_passed=False),
+        _evidence(core_validity_passed=False, evidence_digest="independent-window-0"),
     )
     assert degraded.stage == "degraded"
     assert degraded.consecutive_degradations == 1
 
     still_degraded = decide_lifecycle_transition(
         degraded,
-        _evidence(core_validity_passed=False),
+        _evidence(core_validity_passed=False, evidence_digest="independent-window-1"),
     )
     assert still_degraded.stage == "degraded"
     assert still_degraded.consecutive_degradations == 2
 
     retired = decide_lifecycle_transition(
         still_degraded,
-        _evidence(core_validity_passed=False),
+        _evidence(core_validity_passed=False, evidence_digest="independent-window-2"),
     )
     assert retired.stage == "retired"
     assert retired.consecutive_degradations == 3
@@ -117,3 +117,19 @@ def test_hash_chained_ledger_persists_state_and_detects_tamper(tmp_path) -> None
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace('"evidence_digest": "e1"', '"evidence_digest": "evil"', 1), encoding="utf-8")
     assert ledger.verify() is False
+
+
+def test_replayed_evidence_does_not_advance_or_retire(tmp_path) -> None:
+    active = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
+    evidence = _evidence(core_validity_passed=False)
+    degraded = decide_lifecycle_transition(active, evidence)
+    for _ in range(4):
+        degraded = decide_lifecycle_transition(degraded, evidence)
+    assert degraded.stage == "degraded"
+    assert degraded.consecutive_degradations == 1
+    ledger = FactorLifecycleLedger(tmp_path / "ledger.jsonl")
+    ledger.observe("factor_x", "v1", _evidence(evidence_digest="first"))
+    state = ledger.observe("factor_x", "v1", _evidence(evidence_digest="second", shadow_days=1))
+    before = ledger.path.read_bytes()
+    assert ledger.observe("factor_x", "v1", _evidence(evidence_digest="first")) == state
+    assert ledger.path.read_bytes() == before

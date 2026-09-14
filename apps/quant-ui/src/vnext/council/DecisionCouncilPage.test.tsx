@@ -279,3 +279,29 @@ test("shows protocol drift instead of silently pretending missing roles exist", 
   expect(await screen.findByText(/必须按固定顺序返回完整 11 岗/)).toBeInTheDocument();
   expect(screen.getByText("Council 协议不可用")).toBeInTheDocument();
 });
+
+
+test("unknown evidence only permits blocking overrides and rejects a stale draft", async () => {
+  const fetchMock = stubApi();
+  renderPage();
+  await screen.findByText("成本假设不成立");
+  const blocked = screen.getByText("成本假设不成立").closest("article") as HTMLElement;
+  fireEvent.click(within(blocked).getByRole("button", { name: /人工推翻/ }));
+  fireEvent.change(within(blocked).getByLabelText("改判为"), { target: { value: "pass" } });
+  const card = screen.getByText("试验次数未记录").closest("article") as HTMLElement;
+  fireEvent.click(within(card).getByRole("button", { name: /人工推翻/ }));
+  expect(within(card).getByLabelText("改判为")).toHaveValue("blocked");
+  expect(within(card).getByRole("option", { name: "通过" })).toBeDisabled();
+  expect(within(card).getByRole("option", { name: "保留意见" })).toBeDisabled();
+  fireEvent.change(within(card).getByLabelText("决策人"), { target: { value: "研究员甲" } });
+  fireEvent.change(within(card).getByLabelText(/理由/), { target: { value: "缺少试验记录，等待补齐后重新审议。" } });
+  // Synthetic DOM event bypasses the disabled option to exercise submit defence.
+  fireEvent.change(within(card).getByLabelText("改判为"), { target: { value: "warn" } });
+  fireEvent.click(within(card).getByRole("button", { name: "记录推翻" }));
+  expect(await screen.findByText(/证据不足不能改判为通过或保留意见/)).toBeInTheDocument();
+  const posted = () => fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST");
+  expect(posted()).toHaveLength(0);
+  fireEvent.change(within(card).getByLabelText("改判为"), { target: { value: "blocked" } });
+  fireEvent.click(within(card).getByRole("button", { name: "记录推翻" }));
+  await waitFor(() => expect(posted()).toHaveLength(1));
+});
