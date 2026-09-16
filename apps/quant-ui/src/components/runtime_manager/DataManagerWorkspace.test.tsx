@@ -122,6 +122,58 @@ test("submits AKShare daily data as raw instead of future-adjusted qfq", async (
   expect(JSON.stringify(submittedBody)).not.toContain('"adjust":"qfq"');
 });
 
+test("requires explicit Qlib raw mappings and forwards them to the governed job", async () => {
+  const submittedBodies: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/data/providers")) {
+      return jsonResponse({
+        providers: [
+          { id: "qlib_local", label: "Qlib 本地数据", module: "qlib", commandId: "build-market-panel-v7", assetClasses: ["A股"], intervals: ["1d"], operations: ["download"], requires: [], note: "Local bundle", installed: true, configured: true, status: "ready", missingRequirements: [], missingOptionalRequirements: [] },
+        ],
+        constraints: [], jobEndpoint: "/api/jobs/data", coverageEndpoint: "/api/data/coverage", quarantineEndpoint: "/api/data/quarantine", supportsCancellation: true, runtimeRoot: "runtime", serverPaths: { quarantine: "runtime/import_quarantine", imports: "runtime/data/imported", exports: "runtime/exports" },
+      });
+    }
+    if (url.endsWith("/jobs/data")) {
+      submittedBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ id: "job_qlib", type: "data", status: "queued", commandId: "build-market-panel-v7", createdAt: "2026-07-22T00:00:00Z", outputPaths: [] });
+    }
+    return jsonResponse([]);
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MemoryRouter><QueryClientProvider client={queryClient}><DataManagerWorkspace /></QueryClientProvider></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: /Qlib 本地数据/ }));
+  const launch = screen.getByRole("button", { name: /启动任务/ });
+  const field = screen.getByRole("textbox", { name: /原始成交额字段/ });
+  const scale = screen.getByRole("spinbutton", { name: /成交量换算为股的比例/ });
+  expect(field).toHaveValue("");
+  expect(scale).toHaveValue(null);
+  expect(launch).toBeDisabled();
+  fireEvent.change(field, { target: { value: "$turnover_raw_cny" } });
+  for (const value of ["", "0", "-1", "1e999"]) {
+    fireEvent.change(scale, { target: { value } });
+    expect(launch).toBeDisabled();
+    fireEvent.click(launch);
+  }
+  fireEvent.change(scale, { target: { value: "100" } });
+  for (const value of [" ", "$close", "$$amount", "Mean($amount, 5)"]) {
+    fireEvent.change(field, { target: { value } });
+    expect(launch).toBeDisabled();
+    fireEvent.click(launch);
+  }
+  expect(submittedBodies).toHaveLength(0);
+  fireEvent.change(field, { target: { value: " $turnover_raw_cny " } });
+  expect(launch).toBeEnabled();
+  expect(screen.queryByRole("checkbox", { name: /确认允许本次真实 provider 任务访问网络/ })).not.toBeInTheDocument();
+  fireEvent.click(launch);
+  await waitFor(() => expect(submittedBodies).toHaveLength(1));
+  expect(submittedBodies[0]).toMatchObject({
+    commandId: "build-market-panel-v7",
+    parameters: { raw_amount_field: "turnover_raw_cny", volume_scale_to_shares: 100, provider_uri: "runtime/data/v7/raw/qlib/cn_data" },
+  });
+  expect(JSON.stringify(submittedBodies)).not.toContain("allow_network");
+});
+
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify({ status: "ready", data, issues: [] }), {
     status: 200,

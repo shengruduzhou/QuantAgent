@@ -55,6 +55,8 @@ def check_qlib_v7(
     symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
     universe: str = typer.Option("", "--universe", help="Optional qlib universe name."),
     region: str = typer.Option("cn", "--region"),
+    raw_amount_field: str | None = typer.Option(None, "--raw-amount-field", help="Verified Qlib field containing unadjusted CNY turnover."),
+    volume_scale_to_shares: float | None = typer.Option(None, "--volume-scale-to-shares", help="Verified share-unit scale after multiplying Qlib volume by factor."),
 ) -> None:
     """Check local Qlib CN provider readiness and PIT market schema.
 
@@ -74,7 +76,11 @@ def check_qlib_v7(
             symbols=symbol_tuple,
             universe=universe or None,
         )
-    result = QlibProvider(provider_uri=provider_uri, region=region).health_check(request)
+    result = QlibProvider(
+        provider_uri=provider_uri, region=region,
+        raw_amount_field=raw_amount_field,
+        volume_scale_to_shares=volume_scale_to_shares,
+    ).health_check(request)
     typer.echo(json_dump(result))
 
 
@@ -94,7 +100,12 @@ def build_market_panel_v7(
 ) -> None:
     """Export a PIT market panel and close-available-next-day features from local Qlib CN data."""
     from quantagent.data.bootstrap.qlib_bootstrap import QlibBootstrapConfig, build_qlib_market_panel
+    from quantagent.data.providers.qlib_provider import validate_qlib_raw_contract
 
+    try:
+        raw_amount_field, volume_scale_to_shares = validate_qlib_raw_contract(raw_amount_field, volume_scale_to_shares)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     resolved_root = Path(output_root) if output_root is not None else default_v7_lake_root()
     result = build_qlib_market_panel(
         QlibBootstrapConfig(

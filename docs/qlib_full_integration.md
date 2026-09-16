@@ -34,6 +34,22 @@
 
 ## 2. 现在的融合边界
 
+### 本地 daily market panel 的 raw contract
+
+`check-qlib-v7 --symbols ...`、`build-market-panel-v7` 与 `auto-train-v7`
+的 Qlib bootstrap 分支都要求显式声明 `--raw-amount-field` 和
+`--volume-scale-to-shares`。Web 数据管理页也必须填写这两个值；API 在
+排队前拒绝缺失字段、OHLC/volume/factor 别名、表达式和非有限或非正比例。
+仅检查安装/目录的 `check-qlib-v7`（无 symbols/universe）不验证 market schema；
+使用已有 market panel 的自动训练不需要 Qlib restoration 参数。
+
+字段名必须来自该 bundle 已核验的未复权成交额（CNY），可带一个 `$` 前缀。
+换算关系为 `raw OHLC = Qlib OHLC / factor`、
+`volume in shares = Qlib volume × factor × volume_scale_to_shares`。
+系统不为所有 bundle 假定字段名或比例；通过参数校验也不代表数据已经达到
+production-ready。字段/单位的外部核验证据和数据质量闸门仍然必需。
+上游口径参考：[Qlib Data Layer](https://qlib.readthedocs.io/en/latest/component/data.html)。
+
 ### QuantAgent 保留控制权
 
 Qlib 不覆盖或不能替代下列 QuantAgent 规则：
