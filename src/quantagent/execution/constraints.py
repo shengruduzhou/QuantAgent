@@ -38,7 +38,7 @@ constraint here:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dtime, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
@@ -48,6 +48,14 @@ import pandas as pd
 
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _exchange_timestamp(ts: datetime | pd.Timestamp) -> pd.Timestamp:
+    """Interpret naive wall clocks as Shanghai; preserve aware instants."""
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None:
+        return stamp.tz_localize(_SHANGHAI_TZ)
+    return stamp.tz_convert(_SHANGHAI_TZ)
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +83,7 @@ def classify_auction_phase(ts: datetime | pd.Timestamp) -> AuctionPhase:
     """
     if not isinstance(ts, (pd.Timestamp, datetime)):
         raise TypeError(f"unsupported timestamp type: {type(ts)!r}")
-    stamp = pd.Timestamp(ts)
-    if stamp.tzinfo is not None:
-        stamp = stamp.tz_convert(_SHANGHAI_TZ)
+    stamp = _exchange_timestamp(ts)
     wall = stamp.tz_localize(None).to_pydatetime()
     t = wall.time()
     if dtime(9, 15) <= t < dtime(9, 25):
@@ -321,7 +327,12 @@ class ExecutionConstraintEvaluator:
         if n_total == 0:
             return ExecutionConstraintReport(0, 0, 0)
 
-        ordered = sorted(intents, key=lambda i: (i.timestamp, i.intent_id))
+        # Use one clock for sorting, rate windows and elapsed-time arithmetic.
+        # Copy the records so canonical evidence retains its original timestamps.
+        ordered = sorted(
+            (replace(it, timestamp=_exchange_timestamp(it.timestamp)) for it in intents),
+            key=lambda i: (i.timestamp, i.intent_id),
+        )
 
         # NaN comparisons are false and infinity can make measured ratios zero.
         # Reject explicit non-finite economics before any threshold arithmetic.

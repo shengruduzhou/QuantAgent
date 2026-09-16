@@ -109,6 +109,30 @@ def test_max_orders_per_second_block():
     assert any(v.constraint == "max_orders_per_second" for v in rep.violations)
 
 
+def test_mixed_clocks_share_one_rate_window_without_mutating_evidence():
+    stamps = [pd.Timestamp("2024-03-01 10:30:00"),
+              pd.Timestamp("2024-03-01 02:30:00Z")]
+    intents = [_intent(str(i), timestamp=stamp) for i, stamp in enumerate(stamps)]
+    report = ExecutionConstraintEvaluator(
+        ExecutionConstraintSet(max_orders_per_second=1)
+    ).evaluate(intents)
+    assert any(v.constraint == "max_orders_per_second" for v in report.violations)
+    assert [intent.timestamp for intent in intents] == stamps
+    assert intents[0].timestamp.tzinfo is None
+
+
+def test_mixed_clocks_preserve_cancel_resting_duration():
+    intents = [
+        _intent("submit", timestamp=pd.Timestamp("2024-03-01 02:30:00Z")),
+        _intent("cancel", side="cancel", parent="submit",
+                timestamp=pd.Timestamp("2024-03-01 10:30:00.100")),
+    ]
+    report = ExecutionConstraintEvaluator().evaluate(intents)
+    violation = next(v for v in report.violations
+                     if v.constraint == "min_order_resting_time_seconds")
+    assert violation.detail["rest_seconds"] == pytest.approx(0.1)
+
+
 def test_max_single_order_value_block():
     constraints = ExecutionConstraintSet(max_single_order_value=1_000.0)
     rep = ExecutionConstraintEvaluator(constraints).evaluate(

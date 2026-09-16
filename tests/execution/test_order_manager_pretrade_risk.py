@@ -242,3 +242,27 @@ def test_restart_counts_same_shanghai_session_across_timezones(tmp_path) -> None
     second = replace(_limit_order("utc-clock"), timestamp="2026-08-18T02:30:00Z")
     assert restored.submit_orders([second])[0].status == OrderStatus.REJECTED
     assert broker.submitted == []
+
+
+@pytest.mark.parametrize("first_stamp,second_stamp", [
+    ("2026-08-18T02:30:00Z", "2026-08-18T10:31:00"),
+    ("2026-08-18T10:30:00", "2026-08-18T02:31:00Z"),
+])
+def test_restart_mixed_naive_aware_timestamps_rejects_canonically(
+    tmp_path, first_stamp, second_stamp,
+) -> None:
+    manager, _ = _manager(tmp_path)
+    constraints = replace(manager.constraint_evaluator.constraints, max_orders_per_day=1)
+    manager.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+    first = replace(_limit_order("first-clock"), timestamp=first_stamp)
+    assert manager.submit_orders([first])[0].status == OrderStatus.SUBMITTED
+    restored, broker = _manager(tmp_path)
+    restored.constraint_evaluator = ExecutionConstraintEvaluator(constraints)
+    second = replace(_limit_order("second-clock"), timestamp=second_stamp)
+    state = restored.submit_orders([second])[0]
+    assert state.status == OrderStatus.REJECTED
+    assert "max_orders_per_day" in state.last_message
+    assert broker.submitted == []
+    events = [event for order in restored.book.orders()
+              for event in restored.book.history_of(order.order_id)]
+    assert any(event.event_type == CanonicalEventType.RISK_REJECTED for event in events)
