@@ -112,6 +112,9 @@ def build_qlib_market_panel(config: QlibBootstrapConfig) -> dict[str, object]:
         pit_violation_count=int(report.get("pit_violation_count", 0)),
         warnings=tuple(result.warnings),
         extra={
+            # Preserve the provider's observed contract beside the saved bars.
+            # Caller metadata must not replace unit or certification evidence.
+            **result.metadata,
             "provider_uri": str(provider_path),
             "region": config.region,
             "feature_rows": int(feature_rows),
