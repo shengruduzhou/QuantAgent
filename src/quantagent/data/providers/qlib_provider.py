@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,31 @@ QLIB_MARKET_OPTIONAL_COLUMNS: tuple[str, ...] = (
 )
 
 
+def validate_qlib_raw_contract(
+    raw_amount_field: str | None, volume_scale_to_shares: float | str | None,
+) -> tuple[str, float]:
+    """Validate explicit bundle mappings without importing Qlib or reading data."""
+    field = raw_amount_field.strip() if isinstance(raw_amount_field, str) else ""
+    if not re.fullmatch(r"\$?[A-Za-z_][A-Za-z0-9_]*", field):
+        raise ValueError(
+            "Qlib normalized bars require a verified raw_amount_field "
+            "(--raw-amount-field): a single field containing unadjusted CNY turnover."
+        )
+    field = field.removeprefix("$")
+    if field.lower() in {"open", "high", "low", "close", "volume", "factor"}:
+        raise ValueError("raw_amount_field must identify independent CNY turnover, not OHLC, volume or factor")
+    try:
+        scale = float(volume_scale_to_shares) if not isinstance(volume_scale_to_shares, bool) else float("nan")
+    except (TypeError, ValueError, OverflowError):
+        scale = float("nan")
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            "Qlib volume_scale_to_shares (--volume-scale-to-shares) must be an explicitly "
+            "verified finite positive share-unit scale after multiplying volume by factor."
+        )
+    return field, scale
+
+
 @dataclass
 class QlibProvider:
     """Optional qlib adapter for local PIT market data."""
@@ -43,15 +69,12 @@ class QlibProvider:
     volume_scale_to_shares: float | None = None
 
     def daily_ohlcv(self, request: ProviderRequest) -> ProviderResult:
-        if (not self.raw_amount_field or self.volume_scale_to_shares is None
-                or not math.isfinite(self.volume_scale_to_shares)
-                or self.volume_scale_to_shares <= 0):
-            raise ProviderUnavailable(
-                "Qlib normalized bars cannot be used as raw execution prices. "
-                "Supply a verified raw_amount_field (CNY) and volume_scale_to_shares "
-                "contract; $factor is required to restore OHLC and volume. "
-                "Alternatively use build-akshare-market-panel-v7 for raw market bars."
+        try:
+            raw_amount_field, volume_scale = validate_qlib_raw_contract(
+                self.raw_amount_field, self.volume_scale_to_shares,
             )
+        except ValueError as exc:
+            raise ProviderUnavailable(str(exc)) from exc
         try:
             import qlib  # type: ignore
             from qlib.data import D  # type: ignore
@@ -63,9 +86,7 @@ class QlibProvider:
         instruments = [to_qlib_instrument(symbol) for symbol in request.symbols] if request.symbols else request.universe
         if not instruments:
             raise ProviderUnavailable("qlib request requires symbols or universe")
-        amount_field = "$" + self.raw_amount_field.lstrip("$")
-        if amount_field in {"$open", "$high", "$low", "$close", "$volume", "$factor"}:
-            raise ProviderUnavailable("raw_amount_field must identify independent CNY turnover")
+        amount_field = "$" + raw_amount_field
         fields = ["$open", "$high", "$low", "$close", "$volume", "$factor", amount_field]
         frame = D.features(instruments, fields, start_time=request.start_date, end_time=request.end_date, freq="day")
         if frame.empty:
@@ -93,7 +114,7 @@ class QlibProvider:
             raise ProviderUnavailable("Qlib bundle has invalid raw restoration values")
         data[required] = numeric
         data[["open", "high", "low", "close"]] = numeric[["open", "high", "low", "close"]].div(numeric["factor"], axis=0)
-        data["volume"] = numeric["volume"] * numeric["factor"] * self.volume_scale_to_shares
+        data["volume"] = numeric["volume"] * numeric["factor"] * volume_scale
         if not np.isfinite(data[required].to_numpy(dtype=float)).all():
             raise ProviderUnavailable("Qlib raw restoration overflowed")
         if "symbol" in data.columns:
@@ -124,7 +145,7 @@ class QlibProvider:
                 "volume_unit": "shares", "amount_unit": "CNY",
                 "pit_semantics": "daily_session_close",
                 "raw_amount_field": amount_field,
-                "volume_scale_to_shares": self.volume_scale_to_shares,
+                "volume_scale_to_shares": volume_scale,
                 "raw_price_restoration": "qlib_ohlc_div_factor",
                 "production_integrity_certified": False,
             },

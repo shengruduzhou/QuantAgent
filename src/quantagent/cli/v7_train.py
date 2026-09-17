@@ -273,6 +273,8 @@ def auto_train_v7(
     max_symbols: int = typer.Option(0, "--max-symbols", help="0 means no cap when --symbols=auto."),
     include_indices: bool = typer.Option(False, "--include-indices"),
     provider_uri: Path | None = typer.Option(None, "--provider-uri", help="Local Qlib provider_uri for calendar and symbol discovery."),
+    raw_amount_field: str | None = typer.Option(None, "--raw-amount-field", help="Verified Qlib field containing unadjusted CNY turnover; required when building a Qlib market panel."),
+    volume_scale_to_shares: float | None = typer.Option(None, "--volume-scale-to-shares", help="Verified share-unit scale after multiplying Qlib volume by factor; required when building a Qlib market panel."),
     market_panel_path: Path | None = typer.Option(None, "--market-panel"),
     refresh_akshare_market: bool = typer.Option(False, "--refresh-akshare-market"),
     allow_network: bool = typer.Option(False, "--allow-network"),
@@ -366,6 +368,12 @@ def auto_train_v7(
         resolved_market_panel = _existing_table_path(lake.silver_market_panel / "market_panel.parquet")
         stages["market"] = {"status": "existing_lake", "output": str(resolved_market_panel)}
     else:
+        from quantagent.data.providers.qlib_provider import validate_qlib_raw_contract
+
+        try:
+            raw_amount_field, volume_scale_to_shares = validate_qlib_raw_contract(raw_amount_field, volume_scale_to_shares)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         qlib_range = read_qlib_calendar_range(resolved_provider_uri)
         if qlib_range is None:
             raise typer.BadParameter(
@@ -379,6 +387,8 @@ def auto_train_v7(
                 symbols=symbol_tuple,
                 output_root=str(lake.root),
                 metadata={"auto_train": True},
+                raw_amount_field=raw_amount_field,
+                volume_scale_to_shares=volume_scale_to_shares,
             )
         )
         resolved_market_panel = Path(str(market_result["market_path"]))

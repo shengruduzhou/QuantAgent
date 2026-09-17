@@ -79,6 +79,8 @@ export function DataManagerWorkspace(): JSX.Element {
   const [endDate, setEndDate] = useState(() => shanghaiDate());
   const [outputPath, setOutputPath] = useState(DEFAULT_OUTPUTS.tickflow);
   const [providerUri, setProviderUri] = useState("runtime/data/v7/raw/qlib/cn_data");
+  const [rawAmountField, setRawAmountField] = useState("");
+  const [volumeScaleToShares, setVolumeScaleToShares] = useState("");
   const [networkApproved, setNetworkApproved] = useState(false);
   const [coveragePath, setCoveragePath] = useState("runtime/data/v7/silver/market_panel/market_panel.parquet");
   const [dateColumn, setDateColumn] = useState("trade_date");
@@ -106,6 +108,12 @@ export function DataManagerWorkspace(): JSX.Element {
   const needsNetwork = providerId !== "qlib_local";
   const tickflowCredentialMissing = tickflowProvider?.missingOptionalRequirements?.includes("TICKFLOW_API_KEY") ?? false;
   const selectedModeNeedsKey = providerId === "tickflow" && tickflowMode !== "daily";
+  const qlibAmountField = rawAmountField.trim().replace(/^\$/, "");
+  const qlibContractValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(qlibAmountField)
+    && !["open", "high", "low", "close", "volume", "factor"].includes(qlibAmountField.toLowerCase())
+    && volumeScaleToShares.trim() !== ""
+    && Number.isFinite(Number(volumeScaleToShares))
+    && Number(volumeScaleToShares) > 0;
   const canAcquire = Boolean(
     currentProvider?.installed
     && symbols.trim()
@@ -114,6 +122,7 @@ export function DataManagerWorkspace(): JSX.Element {
     && (!selectedModeNeedsKey || !tickflowCredentialMissing)
     && (!needsNetwork || networkApproved)
     && (providerId !== "tushare_fundamentals" || currentProvider.configured)
+    && (providerId !== "qlib_local" || (providerUri.trim() && qlibContractValid))
     && (providerId === "tickflow" && tickflowMode !== "daily" ? true : outputPath.trim()),
   );
 
@@ -159,7 +168,11 @@ export function DataManagerWorkspace(): JSX.Element {
     } else if (providerId === "akshare_market") {
       await launch("build-akshare-market-panel-v7", { ...common, start_date: startDate, end_date: endDate, output: outputPath.trim(), adjust: "" });
     } else if (providerId === "qlib_local") {
-      await launch("build-market-panel-v7", { symbols: symbols.trim(), start_date: startDate, end_date: endDate, provider_uri: providerUri.trim(), output_root: outputPath.trim(), region: "cn" });
+      await launch("build-market-panel-v7", {
+        symbols: symbols.trim(), start_date: startDate, end_date: endDate,
+        provider_uri: providerUri.trim(), output_root: outputPath.trim(), region: "cn",
+        raw_amount_field: qlibAmountField, volume_scale_to_shares: Number(volumeScaleToShares),
+      });
     } else {
       await launch("build-fundamentals-v7", { ...common, start_date: startDate, end_date: endDate, provider: "tushare", fundamentals_root: outputPath.trim(), token_env: "TUSHARE_TOKEN" });
     }
@@ -257,7 +270,12 @@ export function DataManagerWorkspace(): JSX.Element {
           <Panel title="获取与增量更新" eyebrow="Explicit provider contract · no browser upload" className="data-operation-panel">
             {providerId === "tickflow" ? <div className="segmented-control" role="radiogroup" aria-label="TickFlow 数据粒度">{(["daily", "minute", "tick", "depth"] as TickflowMode[]).map((mode) => <label key={mode} className={tickflowMode === mode ? "active" : ""}><input type="radio" name="tickflow-mode" value={mode} checked={tickflowMode === mode} onChange={() => setTickflowMode(mode)} /><span>{mode === "daily" ? "日线（免费）" : mode === "minute" ? "分钟线" : mode === "tick" ? "Tick 行情" : "Level-2 盘口"}</span></label>)}</div> : null}
             <DataFields symbols={symbols} setSymbols={setSymbols} startDate={startDate} setStartDate={setStartDate} endDate={endDate} setEndDate={setEndDate} />
-            {providerId === "qlib_local" ? <label className="field-row"><span>Qlib provider URI</span><input value={providerUri} onChange={(event) => setProviderUri(event.target.value)} /></label> : null}
+            {providerId === "qlib_local" ? <>
+              <label className="field-row"><span>Qlib provider URI</span><input value={providerUri} onChange={(event) => setProviderUri(event.target.value)} /></label>
+              <label className="field-row"><span>原始成交额字段（CNY）</span><input value={rawAmountField} onChange={(event) => setRawAmountField(event.target.value)} /><small>填写此 bundle 中已核验的未复权成交额字段；必须独立于 OHLC、volume 和 factor。</small></label>
+              <label className="field-row"><span>成交量换算为股的比例</span><input type="number" step="any" value={volumeScaleToShares} onChange={(event) => setVolumeScaleToShares(event.target.value)} /><small>volume × factor × 此比例 = 股数。请按 bundle 的实际单位核验后填写有限正数。</small></label>
+              {!qlibContractValid ? <Notice tone="warning" text="填写已核验的成交额字段和成交量比例后才能启动；系统不推测 bundle 单位。" /> : null}
+            </> : null}
             {!(providerId === "tickflow" && tickflowMode !== "daily") ? <label className="field-row"><span>Runtime 输出</span><input value={outputPath} onChange={(event) => setOutputPath(event.target.value)} /><small>只接受 Runtime 内路径；分钟线和盘口沿用项目已有 canonical 目录。</small></label> : null}
             {needsNetwork ? <NetworkApproval checked={networkApproved} setChecked={setNetworkApproved} /> : <div className="local-provider-notice"><Database size={17} />本地 provider 不访问网络。</div>}
             {selectedModeNeedsKey && tickflowCredentialMissing ? <Notice tone="warning" text="分钟线与 Level-2 需要后端 TICKFLOW_API_KEY；凭据不会进入浏览器。" /> : null}

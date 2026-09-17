@@ -543,11 +543,12 @@ COMMANDS: dict[str, dict[str, Any]] = {
     },
     "build-market-panel-v7": {
         "type": "data",
-        "required": {"provider_uri", "start_date", "end_date", "output_root"},
+        "required": {"provider_uri", "start_date", "end_date", "output_root", "raw_amount_field", "volume_scale_to_shares"},
         "required_any": (("symbols", "symbols_file", "universe"),),
         "allowed": {
             "provider_uri", "start_date", "end_date", "output_root", "symbols",
             "symbols_file", "universe", "region", "require_optional_flags",
+            "raw_amount_field", "volume_scale_to_shares",
         },
         "path_inputs": {"provider_uri", "symbols_file"},
         "path_outputs": {"output_root"},
@@ -1188,6 +1189,13 @@ class JobManager:
         for group in spec.get("required_any", ()):
             if not any(parameters.get(key) not in (None, "", []) for key in group):
                 raise ValueError(f"one of {sorted(group)} is required")
+        if command_id == "build-market-panel-v7":
+            from quantagent.data.providers.qlib_provider import validate_qlib_raw_contract
+
+            raw_amount_field, volume_scale_to_shares = validate_qlib_raw_contract(
+                parameters.get("raw_amount_field"), parameters.get("volume_scale_to_shares"),
+            )
+            parameters = {**parameters, "raw_amount_field": raw_amount_field, "volume_scale_to_shares": volume_scale_to_shares}
         normalized = self._normalize_parameters(spec, parameters)
         return spec, normalized
 
