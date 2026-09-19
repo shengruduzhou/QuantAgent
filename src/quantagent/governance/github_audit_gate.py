@@ -39,8 +39,9 @@ AUDIT_MARKER = "quantagent-post-change-audit:v1"
 AUDIT_CHECK_NAME = "isolated-multi-role-audit"
 ALLOWED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_BLOCK_START_RE = re.compile(rf"<!--\s*{re.escape(AUDIT_MARKER)}")
 _BLOCK_RE = re.compile(
-    rf"<!--\s*{re.escape(AUDIT_MARKER)}\s*(\{{.*?\}})\s*-->",
+    rf"<!--\s*{re.escape(AUDIT_MARKER)}\s*(.*?)\s*-->",
     re.DOTALL,
 )
 
@@ -110,6 +111,10 @@ def _association(comment: Mapping[str, object]) -> str:
 def _extract_payload(body: str) -> dict[str, object] | None:
     if AUDIT_MARKER not in body:
         return None
+    # Count framing before interpreting JSON so a malformed or unterminated
+    # second record cannot disappear from the exactly-one-record check.
+    if len(_BLOCK_START_RE.findall(body)) != 1:
+        raise AuditCommentError("audit comment must contain exactly one complete v1 marker block")
     matches = _BLOCK_RE.findall(body)
     if len(matches) != 1:
         raise AuditCommentError("audit comment must contain exactly one complete v1 marker block")

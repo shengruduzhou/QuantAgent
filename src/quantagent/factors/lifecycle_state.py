@@ -64,12 +64,17 @@ class FactorLifecycleSnapshot:
     stage: str = "candidate"
     consecutive_degradations: int = 0
     last_evidence_digest: str = ""
+    seen_evidence_digests: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.stage not in FACTOR_STAGES:
             raise ValueError(f"unknown factor lifecycle stage {self.stage!r}")
         if int(self.consecutive_degradations) < 0:
             raise ValueError("consecutive_degradations cannot be negative")
+        # Retain known history across pure transitions, including legacy
+        # snapshots that only supplied their most recent digest.
+        history = dict.fromkeys((*self.seen_evidence_digests, self.last_evidence_digest))
+        object.__setattr__(self, "seen_evidence_digests", tuple(digest for digest in history if digest))
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,10 @@ def decide_lifecycle_transition(
     ACTIVE is preserved only for already-active factors whose validity remains
     healthy.  Re-activation of a degraded factor also returns to SHADOW until a
     separate promotion certificate is verified.
+
+    Returned snapshots retain consumed evidence digests. A legacy snapshot
+    without history can only deduplicate its last digest; load ledger.latest()
+    or replay_lifecycle() to reconstruct older observations before continuing.
     """
 
     if retire_after_consecutive_degradations < 2:
@@ -124,9 +133,10 @@ def decide_lifecycle_transition(
             stage="quarantined",
             consecutive_degradations=current.consecutive_degradations,
             last_evidence_digest=evidence.evidence_digest,
+            seen_evidence_digests=current.seen_evidence_digests,
         )
 
-    if evidence.evidence_digest and evidence.evidence_digest == current.last_evidence_digest:
+    if evidence.evidence_digest in current.seen_evidence_digests:
         return current
 
     stage = current.stage
@@ -176,6 +186,7 @@ def decide_lifecycle_transition(
         stage=next_stage,
         consecutive_degradations=degraded_count,
         last_evidence_digest=evidence.evidence_digest,
+        seen_evidence_digests=current.seen_evidence_digests,
     )
 
 
@@ -227,6 +238,7 @@ class FactorLifecycleLedger:
             stage=record.to_stage,
             consecutive_degradations=int(record.consecutive_degradations),
             last_evidence_digest=record.evidence_digest,
+            seen_evidence_digests=tuple(item.evidence_digest for item in relevant),
         )
 
     def observe(
@@ -285,12 +297,14 @@ def replay_lifecycle(records: Iterable[FactorLifecycleTransition]) -> dict[tuple
     snapshots: dict[tuple[str, str], FactorLifecycleSnapshot] = {}
     for record in records:
         key = (record.factor_name, record.factor_version)
+        previous = snapshots.get(key)
         snapshots[key] = FactorLifecycleSnapshot(
             factor_name=record.factor_name,
             factor_version=record.factor_version,
             stage=record.to_stage,
             consecutive_degradations=record.consecutive_degradations,
             last_evidence_digest=record.evidence_digest,
+            seen_evidence_digests=previous.seen_evidence_digests if previous else (),
         )
     return snapshots
 
