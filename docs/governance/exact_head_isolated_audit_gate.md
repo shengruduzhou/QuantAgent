@@ -16,8 +16,13 @@ exactly one marker block:
 ```
 
 Free-form prose is not parsed as approval.  Stale SHA records are ignored.
-Malformed/unauthorised markers fail the gate.  Duplicate logical roles fail the
-gate through `IsolatedAuditBoard`.
+Malformed trusted markers fail the gate. Unauthorised comments are ignored
+before parsing, so public comments cannot manufacture approvals or veto a PR.
+Duplicate logical roles fail the gate through `IsolatedAuditBoard`.
+
+一条 trusted comment 只能包含一个完整 v1 marker；额外的非法 JSON、空块或
+未闭合 marker 均使整条评论无效。先检查 framing，再解码 JSON，不能只统计
+看似 JSON object 的块。正文提及 marker 名称本身不构成第二条记录。
 
 Required repository-owned policy remains:
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+import json
+
 from quantagent.factors.lifecycle_state import (
     FactorLifecycleLedger,
     FactorLifecycleSnapshot,
     LifecycleEvidence,
     decide_lifecycle_transition,
+    replay_lifecycle,
 )
 
 
@@ -133,3 +137,61 @@ def test_replayed_evidence_does_not_advance_or_retire(tmp_path) -> None:
     before = ledger.path.read_bytes()
     assert ledger.observe("factor_x", "v1", _evidence(evidence_digest="first")) == state
     assert ledger.path.read_bytes() == before
+
+
+def test_nonconsecutive_evidence_replay_does_not_retire_a_pure_snapshot() -> None:
+    state = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
+    for digest in ("window-a", "window-b", "window-a"):
+        state = decide_lifecycle_transition(state, _evidence(core_validity_passed=False, evidence_digest=digest))
+    assert (state.stage, state.consecutive_degradations) == ("degraded", 2)
+    assert state.seen_evidence_digests == ("window-a", "window-b")
+    state = decide_lifecycle_transition(state, _evidence(core_validity_passed=False, evidence_digest="window-c"))
+    assert (state.stage, state.consecutive_degradations) == ("retired", 3)
+
+
+def test_old_failure_cannot_degrade_a_recovered_snapshot_again() -> None:
+    state = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
+    failure = _evidence(core_validity_passed=False, evidence_digest="failure")
+    state = decide_lifecycle_transition(state, failure)
+    recovered = decide_lifecycle_transition(state, _evidence(evidence_digest="recovery"))
+    assert (recovered.stage, recovered.consecutive_degradations) == ("shadow", 0)
+    assert decide_lifecycle_transition(recovered, failure) == recovered
+
+
+def test_ledger_and_replay_snapshots_preserve_factor_version_evidence_history(tmp_path) -> None:
+    ledger = FactorLifecycleLedger(tmp_path / "ledger.jsonl")
+    for digest in ("validity", "shadow"):
+        ledger.observe("factor_x", "v1", _evidence(evidence_digest=digest, shadow_days=1))
+    failure = _evidence(core_validity_passed=False, evidence_digest="failure-a")
+    ledger.observe("factor_x", "v1", failure)
+    ledger.observe("factor_x", "v1", _evidence(core_validity_passed=False, evidence_digest="failure-b"))
+    other = ledger.observe("factor_x", "v2", _evidence(evidence_digest="failure-a"))
+    assert other.stage == "validated"
+    latest = ledger.latest("factor_x", "v1")
+    replayed = replay_lifecycle(ledger.records())[("factor_x", "v1")]
+    restored = FactorLifecycleSnapshot(**json.loads(json.dumps(asdict(latest))))
+    for snapshot in (latest, replayed, restored):
+        assert snapshot == latest
+        assert decide_lifecycle_transition(snapshot, failure) == snapshot
+        assert (snapshot.stage, snapshot.consecutive_degradations) == ("degraded", 2)
+    before = ledger.path.read_bytes()
+    assert ledger.observe("factor_x", "v1", failure) == latest
+    assert ledger.path.read_bytes() == before
+    assert ledger.verify() is True
+
+
+def test_reused_digest_does_not_suppress_a_severe_semantic_violation() -> None:
+    state = FactorLifecycleSnapshot("factor_x", "v1", stage="active")
+    state = decide_lifecycle_transition(state, _evidence(evidence_digest="seen"))
+    quarantined = decide_lifecycle_transition(
+        state, _evidence(evidence_digest="seen", severe_semantic_violation=True)
+    )
+    assert quarantined.stage == "quarantined"
+    assert quarantined.seen_evidence_digests == ("seen",)
+
+
+def test_legacy_snapshot_still_deduplicates_its_last_known_digest() -> None:
+    state = FactorLifecycleSnapshot(
+        "factor_x", "v1", stage="degraded", consecutive_degradations=1, last_evidence_digest="known"
+    )
+    assert decide_lifecycle_transition(state, _evidence(core_validity_passed=False, evidence_digest="known")) == state

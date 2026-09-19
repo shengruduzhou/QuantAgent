@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from quantagent.governance.github_audit_gate import (
     AUDIT_MARKER,
     audit_comment_template,
@@ -176,3 +178,44 @@ def test_unknown_fields_are_rejected_to_keep_schema_closed() -> None:
     )
     assert evaluation.passed is False
     assert "102" in evaluation.malformed_comment_ids
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+@pytest.mark.parametrize("extra_payload", ["not-json", "", "null", "[]", "{}", "{\"broken\":"])
+def test_extra_marker_blocks_cannot_hide_beside_a_valid_approval(position, extra_payload) -> None:
+    comments = _accepted_set()
+    valid = str(comments[0]["body"])
+    extra = f"<!-- {AUDIT_MARKER}\n{extra_payload}\n-->"
+    comments[0]["body"] = f"{extra}\n{valid}" if position == "before" else f"{valid}\n{extra}"
+    evaluation = evaluate_audit_comments(comments, head_sha=HEAD)
+    assert evaluation.passed is False
+    assert evaluation.malformed_comment_ids == ("1",)
+    assert TESTING_ROLE not in evaluation.disposition.approvals
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_unterminated_extra_marker_invalidates_the_entire_trusted_comment(position) -> None:
+    comments = _accepted_set()
+    valid = str(comments[0]["body"])
+    extra = f"<!-- {AUDIT_MARKER}\n"
+    comments[0]["body"] = f"{extra}{valid}" if position == "before" else f"{valid}\n{extra}"
+    evaluation = evaluate_audit_comments(comments, head_sha=HEAD)
+    assert evaluation.passed is False
+    assert evaluation.malformed_comment_ids == ("1",)
+
+
+def test_multiple_malformed_markers_from_public_commenter_cannot_veto() -> None:
+    comments = _accepted_set()
+    untrusted = _comment(TESTING_ROLE, comment_id=104, association="NONE")
+    untrusted["body"] = str(untrusted["body"]) + f"\n<!-- {AUDIT_MARKER}\nnot-json\n-->"
+    comments.append(untrusted)
+    evaluation = evaluate_audit_comments(comments, head_sha=HEAD)
+    assert evaluation.passed is True
+    assert evaluation.unauthorized_comment_ids == ("104",)
+    assert evaluation.malformed_comment_ids == ()
+
+
+def test_marker_name_in_explanatory_prose_does_not_count_as_an_extra_block() -> None:
+    comments = _accepted_set()
+    comments[0]["body"] = f"Record format: {AUDIT_MARKER}\n" + str(comments[0]["body"])
+    assert evaluate_audit_comments(comments, head_sha=HEAD).passed is True
