@@ -75,7 +75,10 @@ def build_pit_evidence_slice(
     if evidence_frame is None or evidence_frame.empty:
         return evidence_frame
     if available_column not in evidence_frame.columns:
-        return evidence_frame
+        raise ValueError(
+            f"PIT evidence requires availability column {available_column!r}; "
+            "rows without availability evidence cannot be made visible"
+        )
     parsed = pd.to_datetime(evidence_frame[available_column], errors="coerce")
     visible_mask = parsed.notna() & (parsed <= pd.Timestamp(as_of_date))
     return evidence_frame.loc[visible_mask].reset_index(drop=True)
