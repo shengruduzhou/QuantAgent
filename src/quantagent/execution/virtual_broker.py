@@ -56,7 +56,11 @@ class VirtualBroker(BrokerBase):
             else 0.0
         )
         costs = self.cost_model.calculate(
-            order.side, fill.quantity, fill.price, participation_rate=participation
+            order.side,
+            fill.quantity,
+            fill.price,
+            participation_rate=participation,
+            trade_date=self.market_state.get(order.symbol, {}).get("trade_date"),
         )
         if order.side == OrderSide.BUY and self.ledger.cash < fill.quantity * fill.price + costs["total"]:
             state = OrderState(order.client_order_id, None, OrderStatus.REJECTED, 0, fill.price, "insufficient_cash")

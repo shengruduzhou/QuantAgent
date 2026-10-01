@@ -182,8 +182,8 @@ def test_realized_round_trip_pnl_matches_known_trade():
     # cost = buy fees + sell fees from the engine's own model (>0, includes stamp)
     cm = AShareCostModel()
     from quantagent.execution.broker_base import OrderSide
-    expected_cost = (cm.calculate(OrderSide("buy"), 1000, 10.0)["total"]
-                     + cm.calculate(OrderSide("sell"), 1000, 11.0)["total"])
+    expected_cost = (cm.calculate(OrderSide("buy"), 1000, 10.0, trade_date="2024-03-01")["total"]
+                     + cm.calculate(OrderSide("sell"), 1000, 11.0, trade_date="2024-03-05")["total"])
     assert abs(row["cost"] - expected_cost) < 1e-6
     assert abs(row["net_pnl"] - (1000.0 - expected_cost)) < 1e-6
 

@@ -166,10 +166,9 @@ def _realized_round_trip_pnl(
         ).iloc[0]
         if pd.notna(audited) and float(audited) >= 0:
             return float(audited) / qty
-        try:
-            total = cm.calculate(OrderSide(side), int(qty), float(price))["total"]
-        except Exception:  # noqa: BLE001 — unknown side ⇒ no fee rather than crash
-            return 0.0
+        total = cm.calculate(
+            OrderSide(side), int(qty), float(price), trade_date=row.get("trade_date")
+        )["total"]
         return total / qty
 
     trades: list[dict] = []

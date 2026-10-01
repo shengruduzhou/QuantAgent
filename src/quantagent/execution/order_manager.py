@@ -367,6 +367,10 @@ class OrderManager:
                     timestamp=now,
                 )
             )
+        # Sells first: A-share sell proceeds fund same-session buys, so a
+        # rotation must not depend on whether the new name sorts before the
+        # old one. Stable sort keeps the deterministic symbol order per side.
+        intents.sort(key=lambda intent: intent.side != OrderSide.SELL)
         return intents
 
     def _skip(

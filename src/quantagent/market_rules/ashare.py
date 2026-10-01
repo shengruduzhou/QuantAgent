@@ -63,6 +63,12 @@ ORDINARY_LIMIT: dict[str, float] = {
     BSE: 0.30,
 }
 
+#: SZSE 创业板注册制改革: ChiNext moved from 10% (ST 5%) to 20% for every
+#: stock, and from a first-day 44%/-36% band to a five-session no-limit window.
+CHINEXT_REGISTRATION_REFORM = date(2020, 8, 24)
+CHINEXT_LEGACY_LIMIT = 0.10
+CHINEXT_LEGACY_ST_LIMIT = 0.05
+
 MAIN_BOARD_ST_LIMIT_REFORM = date(2026, 7, 6)
 ST_LIMIT_LEGACY: dict[str, float] = {
     SH_MAIN: 0.05,
@@ -187,7 +193,24 @@ def max_order_quantity(board: str, order_type: str = "LIMIT") -> int | None:
     return MAX_ORDER_QUANTITY.get(board, {}).get(str(order_type).upper())
 
 
+def _chinext_pre_reform(board: str, when: date | None) -> bool:
+    return board == CHINEXT and when is not None and when < CHINEXT_REGISTRATION_REFORM
+
+
+def ordinary_limit_ratio(board: str, trade_date: Any) -> float | None:
+    """Ordinary (non-ST, post-IPO-window) band for a board on a date.
+
+    A missing date resolves to the current rule; historical callers must pass
+    the session date so pre-2020-08-24 ChiNext rows keep their 10% band.
+    """
+    if _chinext_pre_reform(board, _as_date(trade_date)):
+        return CHINEXT_LEGACY_LIMIT
+    return ORDINARY_LIMIT.get(board)
+
+
 def _st_limit_ratio(board: str, when: date | None) -> float | None:
+    if _chinext_pre_reform(board, when):
+        return CHINEXT_LEGACY_ST_LIMIT
     if board in (SH_MAIN, SZ_MAIN):
         if when is None:
             raise ValueError(
@@ -222,8 +245,20 @@ def price_limits(
     unlimited_days = IPO_UNLIMITED_DAYS.get(board, 0)
     if sessions_since_listing is not None and sessions_since_listing < unlimited_days:
         main_board = board in (SH_MAIN, SZ_MAIN)
-        pre_reform = when is not None and when < REGISTRATION_SYSTEM_MAIN_BOARD
-        if main_board and pre_reform:
+        approval_system = (
+            main_board and when is not None and when < REGISTRATION_SYSTEM_MAIN_BOARD
+        ) or _chinext_pre_reform(board, when)
+        if not approval_system:
+            return PriceLimits(
+                limit_up=None,
+                limit_down=None,
+                ratio=None,
+                regime="IPO_NO_LIMIT_WINDOW",
+                reference_close=previous_close,
+            )
+        if sessions_since_listing == 0:
+            # Under the approval system only the listing day had the
+            # 44%/-36% band; sessions 2-5 traded under the ordinary band.
             return PriceLimits(
                 limit_up=_round_tick(previous_close * (1 + LEGACY_IPO_UP)),
                 limit_down=_round_tick(previous_close * (1 + LEGACY_IPO_DOWN)),
@@ -231,15 +266,8 @@ def price_limits(
                 regime="IPO_LEGACY_APPROVAL_SYSTEM",
                 reference_close=previous_close,
             )
-        return PriceLimits(
-            limit_up=None,
-            limit_down=None,
-            ratio=None,
-            regime="IPO_NO_LIMIT_WINDOW",
-            reference_close=previous_close,
-        )
 
-    ratio = _st_limit_ratio(board, when) if is_st else ORDINARY_LIMIT.get(board)
+    ratio = _st_limit_ratio(board, when) if is_st else ordinary_limit_ratio(board, when)
     if ratio is None:
         return PriceLimits(None, None, None, "UNKNOWN_BOARD", previous_close)
     return PriceLimits(
@@ -399,6 +427,8 @@ __all__ = [
     "ST_LIMIT_CURRENT", "ST_LIMIT", "IPO_UNLIMITED_DAYS",
     "REGISTRATION_SYSTEM_MAIN_BOARD", "LEGACY_IPO_UP", "LEGACY_IPO_DOWN",
     "IPO_HALT_THRESHOLDS", "IPO_HALT_MINUTES", "STAMP_DUTY_CURRENT",
+    "CHINEXT_REGISTRATION_REFORM", "CHINEXT_LEGACY_LIMIT", "CHINEXT_LEGACY_ST_LIMIT",
+    "ordinary_limit_ratio",
     "STAMP_DUTY_LEGACY", "STAMP_DUTY_HALVED_FROM", "TRANSFER_FEE",
     "DEFAULT_COMMISSION_RATE", "COMMISSION_MINIMUM_CNY", "LOT_RULES",
     "MAX_ORDER_QUANTITY", "PriceLimits", "TradingCosts", "TradabilityVerdict",
