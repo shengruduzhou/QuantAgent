@@ -1347,7 +1347,10 @@ def _apply_executable_backtest_metrics(metrics: dict[str, object], exec_summary:
     if "total_return_pct" in exec_summary:
         metrics["turnover_adjusted_net_return"] = float(exec_summary["total_return_pct"]) / 100.0
     if "excess_annualised_pct" in exec_summary:
-        metrics["excess_return_after_costs"] = float(exec_summary["excess_annualised_pct"]) / 100.0
+        excess = exec_summary["excess_annualised_pct"]
+        # No benchmark (or a gappy one) means excess is unmeasured, not raw return.
+        metrics["excess_return_after_costs"] = None if excess is None else float(excess) / 100.0
+        metrics["excess_return_status"] = exec_summary.get("benchmark_status", "ok")
     if "max_drawdown_target_passed" in exec_summary:
         metrics["max_drawdown_target_passed"] = bool(exec_summary["max_drawdown_target_passed"])
 
@@ -1728,13 +1731,101 @@ def _apply_turnover_limit(target: pd.Series, previous: pd.Series, cap: float) ->
     return limited[limited.abs() > 1e-12]
 
 
-def _aligned_benchmark_daily_returns(benchmark: pd.DataFrame | None, dates: pd.Series) -> pd.Series:
+def _aligned_benchmark_daily_returns(
+    benchmark: pd.DataFrame | None, dates: pd.Series
+) -> pd.Series | None:
+    """Benchmark forward returns on the strategy's dates, or None when absent.
+
+    Gaps stay NaN: a missing benchmark day is not a 0% benchmark day, and
+    filling it would inflate every excess figure built on top (DEF-022 class).
+    """
     if benchmark is None or benchmark.empty:
-        return pd.Series(0.0, index=dates.index)
+        return None
     b = benchmark.set_index("trade_date").sort_index()
     forward = b["close"].shift(-1) / b["close"] - 1.0
     aligned = pd.to_datetime(dates).map(forward)
-    return aligned.fillna(0.0).reset_index(drop=True)
+    return aligned.reset_index(drop=True)
+
+
+def _executable_headline(
+    daily_frame: pd.DataFrame,
+    *,
+    initial_capital: float,
+    bench_daily: pd.Series | None,
+    max_dd_target: float,
+) -> dict[str, object]:
+    """Headline numbers for an executable backtest, measured the standard way.
+
+    * max drawdown is against the ALL-TIME peak of the reported NAV (a rolling
+      peak is a legitimate control input for a de-risk ladder, but reporting it
+      truncates any drawdown longer than the window);
+    * annualised return is the geometric CAGR of that NAV, not (1+mean)^252-1,
+      which overstates growth by roughly sigma^2/2;
+    * benchmark-relative fields are None, with a reason, when the benchmark is
+      absent or has gaps on the strategy's dates.
+    """
+    n = len(daily_frame)
+    rets = daily_frame["daily_eq_return"].astype(float)
+    nav = daily_frame["nav"].astype(float)
+    std_daily = float(rets.std(ddof=1)) if n > 1 else 0.0
+    ending = float(nav.iloc[-1])
+    growth = ending / float(initial_capital)
+    cagr = growth ** (252.0 / n) - 1.0 if n > 0 and growth > 0 else -1.0
+    underwater = nav / nav.cummax() - 1.0
+    run = longest = 0
+    for value in underwater.to_numpy():
+        run = run + 1 if value < 0 else 0
+        longest = max(longest, run)
+    max_dd = float(underwater.min())
+    out: dict[str, object] = {
+        "annualised_return_pct": float(cagr * 100),
+        "annualised_return_method": "geometric_cagr_252",
+        "annualised_vol_pct": float(std_daily * (252 ** 0.5) * 100),
+        "sharpe": float(rets.mean() / (std_daily + 1e-12) * (252 ** 0.5)) if n > 1 else 0.0,
+        "max_drawdown_pct": max_dd * 100,
+        "max_drawdown_method": "all_time_peak",
+        "max_drawdown_duration_days": int(longest),
+        "max_drawdown_target_passed": bool(abs(max_dd) < max_dd_target),
+        "ending_capital": ending,
+        "benchmark_status": "ok",
+        "benchmark_annualised_pct": None,
+        "excess_annualised_pct": None,
+        "tracking_error_ann_pct": None,
+        "information_ratio": None,
+        "hit_vs_benchmark_pct": None,
+    }
+    if bench_daily is None:
+        out["benchmark_status"] = "absent"
+        return out
+    bench = pd.Series(np.asarray(bench_daily, dtype=float), index=daily_frame.index)
+    missing = int(bench.isna().sum())
+    if missing:
+        out["benchmark_status"] = f"incomplete:{missing}_of_{n}_dates_missing"
+        return out
+    bench_growth = float((1.0 + bench).prod())
+    bench_cagr = bench_growth ** (252.0 / n) - 1.0 if bench_growth > 0 else -1.0
+    excess = rets - bench
+    out.update(
+        {
+            "benchmark_annualised_pct": float(bench_cagr * 100),
+            "excess_annualised_pct": float((cagr - bench_cagr) * 100),
+            "tracking_error_ann_pct": float(excess.std(ddof=1) * (252 ** 0.5) * 100) if n > 1 else 0.0,
+            "information_ratio": (
+                float(excess.mean() * 252 / (excess.std(ddof=1) * (252 ** 0.5) + 1e-12))
+                if n > 1 else 0.0
+            ),
+            "hit_vs_benchmark_pct": float((rets > bench).mean() * 100),
+        }
+    )
+    return out
+
+
+def _fmt_pct(value: object) -> str:
+    return "n/a" if value is None else f"{float(value):.2f} %"
+
+
+def _fmt_num(value: object) -> str:
+    return "n/a" if value is None else f"{float(value):.2f}"
 
 
 def _compute_horizon_sleeve_backtest(
@@ -1947,7 +2038,7 @@ def _compute_horizon_sleeve_backtest(
                 "trade_cost_return": trade_cost,
                 "daily_eq_return": net_daily_return,
                 "nav": nav,
-                "drawdown": drawdown,
+                "control_drawdown": drawdown,
                 "gross_exposure": float(current_weights.abs().sum()) if not current_weights.empty else 0.0,
                 "regime_exposure": regime_mult,
                 "regime_state": state,
@@ -1975,27 +2066,34 @@ def _compute_horizon_sleeve_backtest(
     if daily_frame.empty:
         return {"executable_backtest_status": "skipped_no_rows"}
 
+    # Reported drawdown is against the all-time peak; the rolling-peak value
+    # that drove the de-risk ladder stays in ``control_drawdown``.
+    daily_frame["drawdown"] = daily_frame["nav"] / daily_frame["nav"].cummax() - 1.0
     bench_daily_eq = _aligned_benchmark_daily_returns(benchmark, daily_frame["trade_date"])
-    daily_frame["bench_daily_eq_return"] = bench_daily_eq.to_numpy()
+    daily_frame["bench_daily_eq_return"] = (
+        bench_daily_eq.to_numpy() if bench_daily_eq is not None else np.nan
+    )
     daily_frame["bench_nav"] = (1.0 + daily_frame["bench_daily_eq_return"]).cumprod() * initial_capital
 
     n = len(daily_frame)
-    avg_daily = float(daily_frame["daily_eq_return"].mean())
-    std_daily = float(daily_frame["daily_eq_return"].std(ddof=1)) if n > 1 else 0.0
-    annualised_return_pct = float(((1.0 + avg_daily) ** 252 - 1.0) * 100)
-    annualised_vol_pct = float(std_daily * (252 ** 0.5) * 100)
-    sharpe = float(avg_daily / (std_daily + 1e-12) * (252 ** 0.5)) if n > 1 else 0.0
-    max_dd_pct = float(daily_frame["drawdown"].min() * 100)
     max_dd_target = float(getattr(config, "target_max_drawdown", 0.10))
-    target_passed = bool(abs(max_dd_pct / 100.0) < max_dd_target)
-    ending_capital = float(daily_frame["nav"].iloc[-1])
-    bench_avg_daily = float(daily_frame["bench_daily_eq_return"].mean())
-    bench_ann_pct = float(((1.0 + bench_avg_daily) ** 252 - 1.0) * 100)
-    excess_daily = daily_frame["daily_eq_return"] - daily_frame["bench_daily_eq_return"]
-    excess_ann_pct = float(((1.0 + excess_daily.mean()) ** 252 - 1.0) * 100)
-    tracking_err_ann_pct = float(excess_daily.std(ddof=1) * (252 ** 0.5) * 100) if n > 1 else 0.0
-    info_ratio = float(excess_daily.mean() * 252 / (excess_daily.std(ddof=1) * (252 ** 0.5) + 1e-12)) if n > 1 else 0.0
-    hit_vs_bench_pct = float((daily_frame["daily_eq_return"] > daily_frame["bench_daily_eq_return"]).mean() * 100)
+    headline = _executable_headline(
+        daily_frame,
+        initial_capital=initial_capital,
+        bench_daily=bench_daily_eq,
+        max_dd_target=max_dd_target,
+    )
+    annualised_return_pct = headline["annualised_return_pct"]
+    annualised_vol_pct = headline["annualised_vol_pct"]
+    sharpe = headline["sharpe"]
+    max_dd_pct = headline["max_drawdown_pct"]
+    target_passed = headline["max_drawdown_target_passed"]
+    ending_capital = headline["ending_capital"]
+    bench_ann_pct = headline["benchmark_annualised_pct"]
+    excess_ann_pct = headline["excess_annualised_pct"]
+    tracking_err_ann_pct = headline["tracking_error_ann_pct"]
+    info_ratio = headline["information_ratio"]
+    hit_vs_bench_pct = headline["hit_vs_benchmark_pct"]
 
     monthly = daily_frame.set_index("trade_date").resample("ME").agg(
         strat_return=("daily_eq_return", lambda s: (1.0 + s).prod() - 1.0),
@@ -2005,8 +2103,14 @@ def _compute_horizon_sleeve_backtest(
         n_rebalance_days=("daily_eq_return", "count"),
     )
     monthly["excess_return"] = monthly["strat_return"] - monthly["bench_return"]
-    monthly["beat_bench"] = (monthly["strat_return"] > monthly["bench_return"]).astype(int)
-    win_months = int(monthly["beat_bench"].sum())
+    if headline["benchmark_status"] == "ok":
+        monthly["beat_bench"] = (monthly["strat_return"] > monthly["bench_return"]).astype(int)
+        win_months: int | None = int(monthly["beat_bench"].sum())
+    else:
+        monthly["bench_return"] = np.nan
+        monthly["excess_return"] = np.nan
+        monthly["beat_bench"] = np.nan
+        win_months = None
     total_months = int(len(monthly))
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2037,17 +2141,17 @@ def _compute_horizon_sleeve_backtest(
 | **Initial capital** | {initial_capital:,.0f} RMB |
 | **Ending capital** | {ending_capital:,.0f} RMB |
 | **Total return** | {(ending_capital / initial_capital - 1.0) * 100:.2f} % |
-| **Annualised return** | {annualised_return_pct:.2f} % |
+| **Annualised return (geometric CAGR)** | {annualised_return_pct:.2f} % |
 | Annualised vol | {annualised_vol_pct:.2f} % |
 | Sharpe (rf=0) | {sharpe:.2f} |
-| Max drawdown | {max_dd_pct:.2f} % |
+| Max drawdown (vs all-time peak) | {max_dd_pct:.2f} % ({headline['max_drawdown_duration_days']} days underwater at most) |
 | Max DD target passed | {target_passed} |
-| Benchmark ({bench_label}) annualised | {bench_ann_pct:.2f} % |
-| Excess vs benchmark (ann.) | {excess_ann_pct:.2f} % |
-| Information ratio | {info_ratio:.2f} |
-| Tracking error (ann.) | {tracking_err_ann_pct:.2f} % |
-| Hit-rate vs benchmark (daily) | {hit_vs_bench_pct:.2f} % |
-| Monthly win rate | {win_months}/{total_months} = {(win_months / max(total_months, 1)) * 100:.1f} % |
+| Benchmark ({bench_label}) annualised | {_fmt_pct(bench_ann_pct)} ({headline['benchmark_status']}) |
+| Excess vs benchmark (ann., CAGR difference) | {_fmt_pct(excess_ann_pct)} |
+| Information ratio | {_fmt_num(info_ratio)} |
+| Tracking error (ann.) | {_fmt_pct(tracking_err_ann_pct)} |
+| Hit-rate vs benchmark (daily) | {_fmt_pct(hit_vs_bench_pct)} |
+| Monthly win rate vs benchmark | {'n/a' if win_months is None else f'{win_months}/{total_months} = {(win_months / max(total_months, 1)) * 100:.1f} %'} |
 
 Generated files in this directory:
 - `equity_curve.csv` — daily NAV, exposure, strategy vs benchmark, drawdown
@@ -2073,6 +2177,10 @@ Generated files in this directory:
         "annualised_vol_pct": annualised_vol_pct,
         "sharpe": sharpe,
         "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_method": headline["max_drawdown_method"],
+        "max_drawdown_duration_days": headline["max_drawdown_duration_days"],
+        "annualised_return_method": headline["annualised_return_method"],
+        "benchmark_status": headline["benchmark_status"],
         "target_max_drawdown_pct": max_dd_target * 100.0,
         "max_drawdown_target_passed": target_passed,
         "benchmark_label": str(getattr(config, "benchmark_label", "csi300")),
@@ -2204,31 +2312,34 @@ def _compute_primary_horizon_backtest(
         b["bench_h_return"] = b["close"].shift(-H) / b["close"] - 1.0
         bench_lookup = b["bench_h_return"]
         aligned_bench = daily_frame["trade_date"].map(bench_lookup)
-        bench_daily_eq = (aligned_bench / H).fillna(0.0)
+        bench_daily_eq = (aligned_bench / H).reset_index(drop=True)
     else:
-        bench_daily_eq = pd.Series(0.0, index=daily_frame.index)
-    daily_frame["bench_daily_eq_return"] = bench_daily_eq.to_numpy()
+        bench_daily_eq = None
+    daily_frame["bench_daily_eq_return"] = (
+        bench_daily_eq.to_numpy() if bench_daily_eq is not None else np.nan
+    )
     daily_frame["bench_nav"] = (1.0 + daily_frame["bench_daily_eq_return"]).cumprod() * initial_capital
 
     # ---- Headline stats ----
     n = len(daily_frame)
-    avg_daily = float(daily_frame["daily_eq_return"].mean())
-    std_daily = float(daily_frame["daily_eq_return"].std(ddof=1)) if n > 1 else 0.0
-    annualised_return_pct = float(((1.0 + avg_daily) ** 252 - 1.0) * 100)
-    annualised_vol_pct = float(std_daily * (252 ** 0.5) * 100)
-    sharpe = float(avg_daily / (std_daily + 1e-12) * (252 ** 0.5)) if n > 1 else 0.0
-    max_dd_pct = float(daily_frame["drawdown"].min() * 100)
-    ending_capital = float(daily_frame["nav"].iloc[-1])
-    bench_avg_daily = float(daily_frame["bench_daily_eq_return"].mean())
-    bench_ann_pct = float(((1.0 + bench_avg_daily) ** 252 - 1.0) * 100)
-    excess_daily = daily_frame["daily_eq_return"] - daily_frame["bench_daily_eq_return"]
-    excess_ann_pct = float(((1.0 + excess_daily.mean()) ** 252 - 1.0) * 100)
-    tracking_err_ann_pct = float(excess_daily.std(ddof=1) * (252 ** 0.5) * 100) if n > 1 else 0.0
-    info_ratio = (
-        float(excess_daily.mean() * 252 / (excess_daily.std(ddof=1) * (252 ** 0.5) + 1e-12))
-        if n > 1 else 0.0
+    max_dd_target = float(getattr(config, "target_max_drawdown", 0.10))
+    headline = _executable_headline(
+        daily_frame,
+        initial_capital=initial_capital,
+        bench_daily=bench_daily_eq,
+        max_dd_target=max_dd_target,
     )
-    hit_vs_bench_pct = float((daily_frame["daily_eq_return"] > daily_frame["bench_daily_eq_return"]).mean() * 100)
+    target_passed = headline["max_drawdown_target_passed"]
+    annualised_return_pct = headline["annualised_return_pct"]
+    annualised_vol_pct = headline["annualised_vol_pct"]
+    sharpe = headline["sharpe"]
+    max_dd_pct = headline["max_drawdown_pct"]
+    ending_capital = headline["ending_capital"]
+    bench_ann_pct = headline["benchmark_annualised_pct"]
+    excess_ann_pct = headline["excess_annualised_pct"]
+    tracking_err_ann_pct = headline["tracking_error_ann_pct"]
+    info_ratio = headline["information_ratio"]
+    hit_vs_bench_pct = headline["hit_vs_benchmark_pct"]
 
     # ---- Monthly aggregation ----
     monthly = daily_frame.set_index("trade_date").resample("ME").agg(
@@ -2238,8 +2349,14 @@ def _compute_primary_horizon_backtest(
         n_rebalance_days=("daily_eq_return", "count"),
     )
     monthly["excess_return"] = monthly["strat_return"] - monthly["bench_return"]
-    monthly["beat_bench"] = (monthly["strat_return"] > monthly["bench_return"]).astype(int)
-    win_months = int(monthly["beat_bench"].sum())
+    if headline["benchmark_status"] == "ok":
+        monthly["beat_bench"] = (monthly["strat_return"] > monthly["bench_return"]).astype(int)
+        win_months: int | None = int(monthly["beat_bench"].sum())
+    else:
+        monthly["bench_return"] = np.nan
+        monthly["excess_return"] = np.nan
+        monthly["beat_bench"] = np.nan
+        win_months = None
     total_months = int(len(monthly))
 
     # ---- Write artefacts ----
@@ -2272,17 +2389,17 @@ def _compute_primary_horizon_backtest(
 | **Initial capital** | {initial_capital:,.0f} RMB |
 | **Ending capital** | {ending_capital:,.0f} RMB |
 | **Total return** | {(ending_capital / initial_capital - 1.0) * 100:.2f} % |
-| **Annualised return** | {annualised_return_pct:.2f} % |
+| **Annualised return (geometric CAGR)** | {annualised_return_pct:.2f} % |
 | Annualised vol | {annualised_vol_pct:.2f} % |
 | Sharpe (rf=0) | {sharpe:.2f} |
-| Max drawdown | {max_dd_pct:.2f} % |
+| Max drawdown (vs all-time peak) | {max_dd_pct:.2f} % ({headline['max_drawdown_duration_days']} days underwater at most) |
 | Max DD target passed | {target_passed} |
-| Benchmark ({bench_label}) annualised | {bench_ann_pct:.2f} % |
-| Excess vs benchmark (ann.) | {excess_ann_pct:.2f} % |
-| Information ratio | {info_ratio:.2f} |
-| Tracking error (ann.) | {tracking_err_ann_pct:.2f} % |
-| Hit-rate vs benchmark (daily) | {hit_vs_bench_pct:.2f} % |
-| Monthly win rate | {win_months}/{total_months} = {(win_months / max(total_months, 1)) * 100:.1f} % |
+| Benchmark ({bench_label}) annualised | {_fmt_pct(bench_ann_pct)} ({headline['benchmark_status']}) |
+| Excess vs benchmark (ann., CAGR difference) | {_fmt_pct(excess_ann_pct)} |
+| Information ratio | {_fmt_num(info_ratio)} |
+| Tracking error (ann.) | {_fmt_pct(tracking_err_ann_pct)} |
+| Hit-rate vs benchmark (daily) | {_fmt_pct(hit_vs_bench_pct)} |
+| Monthly win rate vs benchmark | {'n/a' if win_months is None else f'{win_months}/{total_months} = {(win_months / max(total_months, 1)) * 100:.1f} %'} |
 
 Generated files in this directory:
 - `equity_curve.csv` — daily NAV, exposure, strategy vs benchmark, drawdown
@@ -2307,6 +2424,10 @@ Generated files in this directory:
         "annualised_vol_pct": annualised_vol_pct,
         "sharpe": sharpe,
         "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_method": headline["max_drawdown_method"],
+        "max_drawdown_duration_days": headline["max_drawdown_duration_days"],
+        "annualised_return_method": headline["annualised_return_method"],
+        "benchmark_status": headline["benchmark_status"],
         "target_max_drawdown_pct": max_dd_target * 100.0,
         "max_drawdown_target_passed": target_passed,
         "benchmark_label": str(getattr(config, "benchmark_label", "csi300")),
