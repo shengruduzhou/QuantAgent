@@ -5,6 +5,8 @@ import re
 _FUTURE_NAME = re.compile(r"(?:^|[^a-z0-9])(?:forward[_-]?returns?|future[_-]?returns?|future|lead|label|target)(?:[^a-z0-9]|$)", re.IGNORECASE)
 _Q_LIB_NEGATIVE_REF = re.compile(r"\b(?:Ref|Shift)\s*\([^,]+,\s*-(?:0*[1-9]\d*)\s*\)", re.IGNORECASE)
 _EXPLICIT_LEAD = re.compile(r"\b(?:Lead|Future|LookAhead)\s*\(", re.IGNORECASE)
+# QuantAgent DSL keyword form, e.g. ``Delay(expr=..., periods=-1)``.
+_DSL_NON_POSITIVE_LAG = re.compile(r"\b(?:periods|window)\s*=\s*(?:-\s*\d|0+(?:\.0*)?\s*[,)])")
 
 
 def expression_leakage_reasons(expression: str) -> tuple[str, ...]:
@@ -19,6 +21,8 @@ def expression_leakage_reasons(expression: str) -> tuple[str, ...]:
         reasons.append("negative_ref_is_future")
     if _EXPLICIT_LEAD.search(text):
         reasons.append("explicit_lead_operator")
+    if _DSL_NON_POSITIVE_LAG.search(text):
+        reasons.append("non_positive_lag_or_window")
     return tuple(dict.fromkeys(reasons))
 
 

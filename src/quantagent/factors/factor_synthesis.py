@@ -1983,13 +1983,53 @@ _PARSE_NAMESPACE = {
 }
 
 
+_MAX_EXPRESSION_CHARS = 20_000
+
+
 def parse_expression(expr_repr: str) -> E.Expr:
     """Reconstruct an :class:`Expr` from its ``repr()``.
 
-    Safe because the eval namespace is restricted to the DSL classes above —
-    no builtins, no arbitrary import paths.
+    The text often comes straight from an LLM, so it is never executed: it is
+    parsed with :mod:`ast` and only DSL constructor calls with literal
+    arguments are rebuilt. ``eval`` with empty builtins is not a sandbox —
+    attribute access alone reaches every class in the interpreter.
     """
-    return eval(expr_repr, {"__builtins__": {}}, _PARSE_NAMESPACE)  # noqa: S307
+    import ast
+
+    if not isinstance(expr_repr, str) or len(expr_repr) > _MAX_EXPRESSION_CHARS:
+        raise ValueError("factor expression must be a string of bounded length")
+    tree = ast.parse(expr_repr.strip(), mode="eval")
+    return _build_expression_node(tree.body)
+
+
+def _build_expression_node(node):  # noqa: ANN001 - ast node
+    import ast
+
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _PARSE_NAMESPACE:
+            raise ValueError(f"call outside the factor DSL: {ast.dump(node.func)[:80]}")
+        factory = _PARSE_NAMESPACE[node.func.id]
+        if not callable(factory):
+            raise ValueError(f"{node.func.id!r} is not a DSL constructor")
+        if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
+            keyword.arg is None for keyword in node.keywords
+        ):
+            raise ValueError("star-arguments are not part of the factor DSL")
+        args = [_build_expression_node(arg) for arg in node.args]
+        kwargs = {keyword.arg: _build_expression_node(keyword.value) for keyword in node.keywords}
+        return factory(*args, **kwargs)
+    if isinstance(node, ast.Constant) and (
+        node.value is None or isinstance(node.value, (bool, int, float, str))
+    ):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        operand = _build_expression_node(node.operand)
+        if isinstance(operand, bool) or not isinstance(operand, (int, float)):
+            raise ValueError("unary sign applies only to numeric literals")
+        return -operand if isinstance(node.op, ast.USub) else operand
+    if isinstance(node, ast.Name) and node.id in ("nan", "inf"):
+        return _PARSE_NAMESPACE[node.id]
+    raise ValueError(f"syntax outside the factor DSL: {type(node).__name__}")
 
 
 def load_definitions(path: str | Path) -> list[E.FactorDefinition]:

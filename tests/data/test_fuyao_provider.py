@@ -116,7 +116,9 @@ def test_financial_available_at_uses_disclosure_date_not_period_end(monkeypatch:
     assert set(result.frame["statement_type"]) == {"income", "balance", "cashflow"}
     assert (result.frame["report_period"] == pd.Timestamp("2024-03-31")).all()
     assert (result.frame["ann_date"] == pd.Timestamp("2024-04-29")).all()
-    assert (result.frame["available_at"] == pd.Timestamp("2024-04-29")).all()
+    # Keyed on the disclosure date, never the period end, and one session
+    # after it: a date-only disclosure is usually filed after the close.
+    assert (result.frame["available_at"] == pd.Timestamp("2024-04-30")).all()
     assert result.metadata["pit_key"] == "report_date_ms"
 
 
