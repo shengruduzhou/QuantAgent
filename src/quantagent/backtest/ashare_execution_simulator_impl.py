@@ -9,7 +9,7 @@ trusting a summary boolean.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 from pathlib import Path
@@ -286,6 +286,12 @@ def simulate_ashare_target_weights(
         broker.advance_trading_day()
         if config.fix_cross_day_order_dedup:
             manager.reset_daily_counters()
+        # Raw-price panels carry dated corporate-action credits; without them an
+        # ex-rights date would be booked as a loss on every held name.
+        _apply_corporate_actions(
+            broker, day_market, signal_date=signal_date,
+            execution_date=execution_date, trace_rows=trace_rows,
+        )
         broker.set_market_state(day_market.to_dict("records"))
         prices = close_by_symbol.dropna()
         prices = prices[prices > 0]
@@ -501,6 +507,70 @@ def _trace_row(
         "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
         "trace_schema": TRACE_SCHEMA_VERSION,
     }
+
+
+def _apply_corporate_actions(
+    broker: VirtualBroker,
+    day_market: pd.DataFrame,
+    *,
+    signal_date: pd.Timestamp | None,
+    execution_date: pd.Timestamp,
+    trace_rows: list[dict[str, object]],
+) -> None:
+    """Credit held positions with the session's dividend cash and bonus shares.
+
+    Only panels that publish ``ca_cash_per_share`` / ``ca_share_ratio`` (the
+    certified raw execution panel) trigger this; adjusted legacy panels carry
+    neither column and are unaffected. Bonus/transfer shares settle as frozen
+    (tradeable next session, as 红股 list the day after the ex-date); the
+    fractional remainder is paid as cash in lieu at the session close.
+    Dividends are credited gross of the holding-period dividend tax.
+    """
+    if "ca_cash_per_share" not in day_market.columns and "ca_share_ratio" not in day_market.columns:
+        return
+    held = {
+        str(position.symbol): position
+        for position in broker.query_positions()
+        if int(position.available_shares) + int(position.frozen_shares) > 0
+    }
+    if not held:
+        return
+    rows = day_market[day_market["symbol"].astype(str).isin(held)]
+    for row in rows.to_dict("records"):
+        cash_per_share = float(row.get("ca_cash_per_share") or 0.0)
+        share_ratio = float(row.get("ca_share_ratio") or 0.0)
+        if not (math.isfinite(cash_per_share) and math.isfinite(share_ratio)):
+            continue
+        if cash_per_share == 0.0 and share_ratio == 0.0:
+            continue
+        symbol = str(row["symbol"])
+        position = held[symbol]
+        shares = int(position.available_shares) + int(position.frozen_shares)
+        exact_new = shares * share_ratio
+        new_shares = int(math.floor(exact_new + 1e-9))
+        close = float(row.get("close") or 0.0)
+        credit = shares * cash_per_share + (exact_new - new_shares) * close
+        broker.ledger.cash += credit
+        total = shares + new_shares
+        avg_cost = (
+            (float(position.avg_cost) * shares - credit) / total if total else 0.0
+        )
+        broker.ledger.positions[symbol] = replace(
+            position, frozen_shares=int(position.frozen_shares) + new_shares, avg_cost=avg_cost,
+        )
+        trace_rows.append(_trace_row(
+            record_type="corporate_action",
+            signal_date=signal_date,
+            execution_date=execution_date,
+            status="applied",
+            reason=(
+                f"cash_credit={credit:.4f};bonus_shares={new_shares};"
+                f"basis={row.get('ca_basis', '')}"
+            ),
+            symbol=symbol,
+            price_source="close",
+            reference_price=close,
+        ))
 
 
 def _current_weights(broker: VirtualBroker, prices: pd.Series) -> pd.Series:
