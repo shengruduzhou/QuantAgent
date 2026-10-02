@@ -679,6 +679,11 @@ export interface BacktestSummary {
   validationStatus?: ArtifactValidationStatus;
   manifestPath?: string | null;
   capabilities?: Record<string, boolean | string | null>;
+  /** Clock stamp the run declared; "unstamped_pre_timing_fix" when absent. */
+  timingSemantics?: string;
+  timingCanonical?: boolean;
+  /** Quarantined holdout windows the evaluation window overlaps. */
+  quarantineOverlap?: string[];
 }
 
 export interface EquityPoint {

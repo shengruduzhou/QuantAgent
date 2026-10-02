@@ -16,14 +16,22 @@ export function DecisionStateStrip({ overview, latestPoint, jobs }: DecisionStat
   const activeJobs = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status));
   const failedJobs = jobs.filter((job) => job.status === "failed");
   const staleArtifacts = overview.runtime.byFreshness?.stale ?? 0;
+  const backtestCaveats = backtest
+    ? [
+        backtest.timingCanonical ? null : "pre-timing-fix clock",
+        backtest.quarantineOverlap?.length ? `overlaps holdout ${backtest.quarantineOverlap.join(", ")}` : null,
+        backtest.trustClass && backtest.trustClass !== "production_ready" ? `trust: ${backtest.trustClass}` : null,
+      ].filter((item): item is string => Boolean(item))
+    : [];
 
   return (
     <section className="vnext-decision-strip" aria-label="系统决策状态">
       <article className="vnext-decision-state state-portfolio">
-        <header><span><Briefcase size={17} /> Portfolio State</span><em>{backtest ? "PERSISTED" : "UNAVAILABLE"}</em></header>
+        <header><span><Briefcase size={17} /> Portfolio State</span><em>{backtest ? (backtestCaveats.length ? "RESEARCH · NOT CITABLE" : "RESEARCH BACKTEST") : "UNAVAILABLE"}</em></header>
         <div className="vnext-state-primary"><strong>{latestPoint?.nav?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? "—"}</strong><span className={toneClass(latestPoint?.dailyReturn)} title={latestPoint?.dailyReturn == null ? UNMEASURED_TITLE : undefined}>{formatPercent(latestPoint?.dailyReturn)}</span></div>
         <dl><div><dt>区间收益</dt><dd>{formatPercent(backtest?.totalReturn)}</dd></div><div><dt>Benchmark excess</dt><dd>{formatPercent(latestPoint?.excessNav == null ? null : latestPoint.excessNav - 1)}</dd></div><div><dt>当前回撤</dt><dd>{formatPercent(latestPoint?.drawdown ?? backtest?.maxDrawdown)}</dd></div></dl>
-        <p>{backtest ? `${backtest.name ?? backtest.id} · ${backtest.endDate ?? "unknown as-of"}` : "没有可验证回测，无法判断当前组合。"}</p>
+        <p>{backtest ? `${backtest.name ?? backtest.id} · ${backtest.endDate ?? "unknown as-of"} · 回测净值，不是纸面账户` : "没有可验证回测，无法判断当前组合。"}</p>
+        {backtestCaveats.length ? <p className="vnext-state-caveat" role="note">不可引用：{backtestCaveats.join(" · ")}</p> : null}
         <Link to="/backtests">检查组合与回测 <ArrowRight size={14} /></Link>
       </article>
 

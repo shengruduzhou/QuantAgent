@@ -705,3 +705,15 @@
   .vnext-action-queue { order: -1; }
   .vnext-action-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
 }
+
+/* A research backtest that cannot be cited (pre-fix clock, holdout overlap or
+   unclassified trust) says so on the card itself, in the governance colour
+   family with a text label (status colours never stand alone). */
+.vnext-state-caveat {
+  margin: 0;
+  padding: 4px 8px;
+  border-left: 2px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--text);
+  font-size: 12px;
+}

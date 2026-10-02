@@ -183,7 +183,14 @@ def governance_status(request: Request) -> dict:
 @router.get("/system/overview")
 def system_overview(request: Request) -> dict:
     svc = services(request)
-    backtests = svc.backtests.list()
+    listed = svc.backtests.list()
+    # A headline must come from a run on the canonical next-session clock that
+    # reads no quarantined holdout; pre-fix or holdout runs are shown only when
+    # nothing else exists, and then carry their caveats to the UI.
+    backtests = sorted(
+        listed,
+        key=lambda item: not (item.get("timingCanonical") and not item.get("quarantineOverlap")),
+    )
     models = svc.models.list()
     selections = svc.selections.list()
     latest_backtest = next(
