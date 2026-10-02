@@ -7,6 +7,7 @@ import { StateView } from "../../components/StateView";
 import { formatDate } from "../../utils/format";
 import { ActionQueue } from "./ActionQueue";
 import { DecisionStateStrip } from "./DecisionStateStrip";
+import { PaperAccountRiskCard } from "../paper/PaperAccountRiskCard";
 import { PrimaryDecisionCanvas } from "./PrimaryDecisionCanvas";
 import type { ActionQueueItem, DecisionView, RiskRuleView } from "./types";
 
@@ -90,6 +91,9 @@ export function VNextDashboard(): JSX.Element {
         <div><span>INSTITUTIONAL DECISION DASHBOARD</span><h1>今日决策总览</h1><p>发现异常、判断可信状态并进入对应工作站；复杂操作不在 Dashboard 内展开。</p></div>
         <div><strong>{formatDate(data.runtime.indexedAt)}</strong><span>Runtime decision as-of</span></div>
       </header>
+      {/* The paper venue's own account leads: it is the only state here that
+          is an account rather than a research artifact. */}
+      <PaperAccountRiskCard variant="overview" />
       <DecisionStateStrip overview={data} latestPoint={latestPoint} jobs={jobItems} />
       <section className="vnext-dashboard-main">
         <PrimaryDecisionCanvas

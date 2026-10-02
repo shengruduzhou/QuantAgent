@@ -1,4 +1,5 @@
 import { TPlusOnePage } from "../../pages/TPlusOnePage";
+import { PaperAccountRiskCard } from "../paper/PaperAccountRiskCard";
 import { PaperExecutionEvidencePanel } from "./PaperExecutionEvidencePanel";
 
 /**
@@ -11,6 +12,7 @@ export function TPlusOneExecutionWorkspace(): JSX.Element {
   return (
     <>
       <div className="institutional-workbench t1-execution-evidence-shell">
+        <PaperAccountRiskCard variant="execution" />
         <PaperExecutionEvidencePanel />
       </div>
       <TPlusOnePage />

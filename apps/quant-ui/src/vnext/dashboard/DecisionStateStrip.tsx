@@ -27,7 +27,7 @@ export function DecisionStateStrip({ overview, latestPoint, jobs }: DecisionStat
   return (
     <section className="vnext-decision-strip" aria-label="系统决策状态">
       <article className="vnext-decision-state state-portfolio">
-        <header><span><Briefcase size={17} /> Portfolio State</span><em>{backtest ? (backtestCaveats.length ? "RESEARCH · NOT CITABLE" : "RESEARCH BACKTEST") : "UNAVAILABLE"}</em></header>
+        <header><span><Briefcase size={17} /> Latest Backtest · research</span><em>{backtest ? (backtestCaveats.length ? "RESEARCH · NOT CITABLE" : "RESEARCH BACKTEST") : "UNAVAILABLE"}</em></header>
         <div className="vnext-state-primary"><strong>{latestPoint?.nav?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? "—"}</strong><span className={toneClass(latestPoint?.dailyReturn)} title={latestPoint?.dailyReturn == null ? UNMEASURED_TITLE : undefined}>{formatPercent(latestPoint?.dailyReturn)}</span></div>
         <dl><div><dt>区间收益</dt><dd>{formatPercent(backtest?.totalReturn)}</dd></div><div><dt>Benchmark excess</dt><dd>{formatPercent(latestPoint?.excessNav == null ? null : latestPoint.excessNav - 1)}</dd></div><div><dt>当前回撤</dt><dd>{formatPercent(latestPoint?.drawdown ?? backtest?.maxDrawdown)}</dd></div></dl>
         <p>{backtest ? `${backtest.name ?? backtest.id} · ${backtest.endDate ?? "unknown as-of"} · 回测净值，不是纸面账户` : "没有可验证回测，无法判断当前组合。"}</p>

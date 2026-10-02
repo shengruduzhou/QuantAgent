@@ -5,14 +5,17 @@ import {
   Database,
   Gear,
   HardDrives,
+  LockKey,
   MagnifyingGlass,
   ShieldCheck,
+  ShieldWarning,
   SidebarSimple,
   UserCircle,
   WarningCircle,
   WifiHigh,
   WifiSlash,
 } from "@phosphor-icons/react";
+import type { PaperAccount } from "../../api/paperAccount";
 import type { JobSummary, SystemOverview } from "../../api/types";
 import type { JobEventStreamState } from "../../hooks/useJobEvents";
 import type { WorkspaceTab } from "../workspace/types";
@@ -23,6 +26,9 @@ interface GlobalCommandBarProps {
   activeTab: WorkspaceTab;
   overview?: SystemOverview;
   apiState: "loading" | "ready" | "error";
+  /** `/api/paper/account`; undefined while loading or when it failed. */
+  paperAccount?: PaperAccount;
+  paperAccountState: "loading" | "ready" | "error";
   jobs: JobSummary[];
   realtime: JobEventStreamState;
   railExpanded: boolean;
@@ -39,6 +45,8 @@ export function GlobalCommandBar({
   activeTab,
   overview,
   apiState,
+  paperAccount,
+  paperAccountState,
   jobs,
   realtime,
   railExpanded,
@@ -85,11 +93,11 @@ export function GlobalCommandBar({
           {apiState === "loading" ? <CircleNotch size={14} className="spin" /> : apiState === "ready" ? <Database size={14} /> : <WarningCircle size={14} />}
           API {apiState.toUpperCase()}
         </span>
-        <span className={`vnext-status-chip state-${realtime.status === "live" ? "ready" : "warning"}`} title={`WebSocket ${realtime.status}`}>
+        <span className={`vnext-status-chip vnext-collapsible-chip state-${realtime.status === "live" ? "ready" : "warning"}`} title={`WebSocket ${realtime.status}`}>
           {realtime.status === "live" ? <WifiHigh size={14} /> : <WifiSlash size={14} />}
           WS {realtime.status.toUpperCase()}
         </span>
-        <button type="button" className="vnext-status-button" onClick={() => openPath("/settings?view=jobs")} title="打开任务中心">
+        <button type="button" className="vnext-status-button vnext-collapsible-chip" onClick={() => openPath("/settings?view=jobs")} title="打开任务中心">
           <HardDrives size={14} /> {activeJobs} JOBS
         </button>
         <button type="button" className={`vnext-status-button ${riskEvents ? "warning" : "safe"}`} onClick={() => openPath("/risk")} title="打开风险管理">
@@ -97,7 +105,8 @@ export function GlobalCommandBar({
           {/* No overview yet means risk is unmeasured, not clear. */}
           RISK {!overview ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NO EVENTS"}
         </button>
-        <span className="vnext-status-chip state-ready" title="Live trading is disabled by policy"><ShieldCheck size={14} /> KILL LOCKED</span>
+        <LiveChip account={paperAccount} state={paperAccountState} />
+        <KillSwitchChip account={paperAccount} state={paperAccountState} onOpen={() => openPath("/t-plus-one")} />
         <ThemeSwitcher theme={theme} onChange={onSetTheme} />
         <button type="button" className="vnext-icon-button" onClick={onToggleDensity} aria-label={`切换为${density === "compact" ? "舒适" : "紧凑"}密度`} title={`Density: ${density}`}>
           <ArrowsInLineHorizontal size={17} />
@@ -106,5 +115,49 @@ export function GlobalCommandBar({
         <button type="button" className="vnext-icon-button" onClick={() => openPath("/help")} aria-label="打开用户与帮助"><UserCircle size={18} /></button>
       </div>
     </header>
+  );
+}
+
+/**
+ * Both safety chips are read from `/api/paper/account`. They used to be one
+ * string literal, "KILL LOCKED", painted green whatever the venue said — so a
+ * tripped (or never-attached) kill switch read exactly like a healthy one.
+ */
+function LiveChip({ account, state }: { account?: PaperAccount; state: "loading" | "ready" | "error" }): JSX.Element {
+  const live = account?.mode?.live_trading_available;
+  if (state !== "ready" || live === undefined) {
+    return <span className="vnext-status-chip state-warning vnext-safety-chip" title="Paper policy unavailable: live-trading state unknown">{state === "loading" ? <CircleNotch size={14} className="spin" /> : <WarningCircle size={14} />} LIVE UNKNOWN</span>;
+  }
+  return live
+    ? <span className="vnext-status-chip state-error vnext-safety-chip" title={account?.mode?.banner}><WarningCircle size={14} /> LIVE AVAILABLE</span>
+    : <span className="vnext-status-chip state-ready vnext-safety-chip" title={account?.mode?.banner ?? "Live trading is disabled by policy"}><LockKey size={14} /> LIVE DISABLED</span>;
+}
+
+function KillSwitchChip({ account, state, onOpen }: { account?: PaperAccount; state: "loading" | "ready" | "error"; onOpen: () => void }): JSX.Element {
+  const risk = account?.riskState;
+  let label: string;
+  let tone: "ready" | "warning" | "error";
+  let title: string;
+  if (state !== "ready" || !risk) {
+    label = "KILL UNKNOWN";
+    tone = "warning";
+    title = "Paper account unavailable: kill-switch state unknown";
+  } else if (risk.killSwitch.active) {
+    label = `KILL ACTIVE · ${risk.killSwitch.scope ?? "?"}`;
+    tone = "error";
+    title = `${risk.killSwitch.reason ?? "no reason recorded"}${risk.killSwitch.reduceOnly ? " (reduce-only)" : ""}`;
+  } else if (!risk.riskEngineAttached) {
+    label = "KILL UNARMED";
+    tone = "error";
+    title = risk.reasons.riskEngine ?? "no risk engine attached";
+  } else {
+    label = "KILL ARMED";
+    tone = "ready";
+    title = "Risk engine attached; kill switch not tripped";
+  }
+  return (
+    <button type="button" className={`vnext-status-chip vnext-status-button state-${tone} vnext-safety-chip`} onClick={onOpen} title={title}>
+      {tone === "ready" ? <ShieldCheck size={14} /> : tone === "error" ? <ShieldWarning size={14} /> : <WarningCircle size={14} />} {label}
+    </button>
   );
 }

@@ -1,0 +1,253 @@
+/* ===========================================================================
+   Paper Account & Risk card (vnext/paper/PaperAccountRiskCard.tsx).
+   Composed from ATLAS primitives; every colour is a tokens.css token.
+   =========================================================================== */
+
+.vnext-shell .paper-risk-card {
+  margin-bottom: 14px;
+}
+
+.vnext-shell .paper-risk-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--vnx-space-4);
+  padding: var(--vnx-space-3) var(--vnx-space-4) var(--vnx-space-2);
+  border-bottom: 1px solid var(--vnx-line-soft);
+  background: linear-gradient(var(--vnx-surface-2), var(--vnx-surface-1));
+}
+
+.vnext-shell .paper-risk-head h2 {
+  margin: 2px 0 2px;
+  color: var(--vnx-text-bright);
+  font-size: var(--vnx-text-lead);
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.vnext-shell .paper-risk-head p {
+  margin: 0;
+  max-width: 78ch;
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-small);
+  line-height: 1.45;
+}
+
+.vnext-shell .paper-risk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--vnx-space-1);
+  padding-top: 2px;
+}
+
+.vnext-shell .paper-risk-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--vnx-space-2) var(--vnx-space-5);
+  margin: 0;
+  padding: var(--vnx-space-2) var(--vnx-space-4);
+  border-bottom: 1px solid var(--vnx-line-soft);
+}
+
+.vnext-shell .paper-risk-identity > svg {
+  margin-top: 6px;
+  color: var(--vnx-primary);
+  flex: none;
+}
+
+.vnext-shell .paper-risk-identity > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.vnext-shell .paper-risk-identity dt,
+.vnext-shell .paper-risk-kill dt {
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+}
+
+.vnext-shell .paper-risk-identity dd,
+.vnext-shell .paper-risk-kill dd {
+  margin: 0;
+  color: var(--vnx-text);
+  font-size: var(--vnx-text-small);
+}
+
+.vnext-shell .paper-risk-identity code,
+.vnext-shell .paper-risk-unmeasured code {
+  font-family: var(--vnx-font-mono);
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .paper-risk-identity small {
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .paper-risk-path {
+  max-width: 100%;
+}
+
+.vnext-shell .paper-risk-path code {
+  display: block;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vnext-shell .paper-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--vnx-line-soft);
+}
+
+.vnext-shell .paper-risk-measure {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--vnx-space-3) var(--vnx-space-3) var(--vnx-space-2);
+  background: var(--vnx-surface-1);
+}
+
+.vnext-shell .paper-risk-measure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.vnext-shell .paper-risk-vs {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vnext-shell .paper-risk-vs > span {
+  color: var(--vnx-muted);
+  font: var(--vnx-text-small) var(--vnx-font-mono);
+}
+
+.vnext-shell .paper-risk-foot,
+.vnext-shell .paper-risk-detail {
+  color: var(--vnx-muted);
+  overflow-wrap: anywhere;
+}
+
+.vnext-shell .paper-risk-unmeasured {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.vnext-shell .paper-risk-unmeasured > b {
+  color: var(--vnx-warning);
+  font: 700 var(--vnx-text-small) var(--vnx-font-mono);
+  letter-spacing: .04em;
+}
+
+.vnext-shell .paper-risk-unmeasured > small {
+  color: var(--vnx-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.vnext-shell .paper-risk-unmeasured > code {
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-micro);
+  overflow-wrap: anywhere;
+}
+
+.vnext-shell .paper-risk-state {
+  font: 700 var(--vnx-text-small) var(--vnx-font-mono);
+  letter-spacing: .04em;
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .paper-risk-state.tone-primary { color: var(--vnx-primary-strong); }
+.vnext-shell .paper-risk-state.tone-success { color: var(--vnx-success); }
+.vnext-shell .paper-risk-state.tone-warning { color: var(--vnx-warning); }
+.vnext-shell .paper-risk-state.tone-danger { color: var(--vnx-danger); }
+
+.vnext-shell .paper-risk-kill {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, auto));
+  gap: 4px var(--vnx-space-3);
+  margin: 0;
+}
+
+.vnext-shell .paper-risk-kill .wide {
+  grid-column: 1 / -1;
+}
+
+.vnext-shell .paper-risk-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vnx-space-2) var(--vnx-space-5);
+  padding: var(--vnx-space-2) var(--vnx-space-4);
+  border-top: 1px solid var(--vnx-line-soft);
+  font-size: var(--vnx-text-small);
+  color: var(--vnx-text-soft);
+}
+
+.vnext-shell .paper-risk-footer > span {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vnext-shell .paper-risk-footer > span > b {
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+}
+
+.vnext-shell .paper-risk-footer .paper-risk-unmeasured {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.vnext-shell .paper-risk-link {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--vnx-primary-strong);
+  text-decoration: none;
+}
+
+.vnext-shell .paper-risk-link:hover {
+  text-decoration: underline;
+}
+
+.vnext-shell .t1-execution-evidence-shell .paper-risk-card {
+  margin-bottom: var(--vnx-space-3);
+}
+
+@media (max-width: 1360px) {
+  .vnext-shell .paper-risk-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .vnext-shell .paper-risk-head { flex-direction: column; }
+  .vnext-shell .paper-risk-chips { justify-content: flex-start; }
+  .vnext-shell .paper-risk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .vnext-shell .paper-risk-path code { max-width: 32ch; }
+}

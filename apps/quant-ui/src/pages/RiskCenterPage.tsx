@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { ChartLineDown, Drop, ShieldCheck, ShieldWarning, TrendDown, WarningCircle } from "@phosphor-icons/react";
+import { ChartLineDown, Drop, ShieldWarning, TrendDown, WarningCircle } from "@phosphor-icons/react";
 import type { EChartsOption } from "echarts";
 import type { Page, RiskOverview } from "../api/types";
 import { useApi } from "../hooks/useApi";
@@ -12,6 +12,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { UNMEASURED_TITLE, formatCompact, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { marketPalette } from "../theme/marketPalette";
 import { ActionableState, WorkbenchHeader, WorkbenchMetricStrip } from "../vnext/workbench/InstitutionalWorkbench";
+import { PaperKillSwitchChip } from "../vnext/paper/PaperAccountRiskCard";
 
 interface RiskEvent {
   id: string;
@@ -121,11 +122,11 @@ export function RiskCenterPage(): JSX.Element {
   ], []);
 
   if (overview.isLoading) return <StateView state="loading" />;
-  if (!risk) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="规则、阈值、事件、单票暴露与审计回放。" context="kill locked" /><ActionableState title="没有风险概览" detail="风险数据缺失时系统保持 fail-closed；请检查 risk event 与回测产物。" icon={ShieldWarning} tone="danger" /></div>;
+  if (!risk) return <div className="institutional-workbench"><WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="规则、阈值、事件、单票暴露与审计回放。" actions={<PaperKillSwitchChip />} /><ActionableState title="没有风险概览" detail="风险数据缺失时系统保持 fail-closed；请检查 risk event 与回测产物。" icon={ShieldWarning} tone="danger" /></div>;
 
   return (
     <div className="page institutional-workbench risk-page">
-      <WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="硬约束、阈值、风险事件和人工处置队列共享同一证据链；雷达图仅作辅助。" asOf={eventItems[0]?.datetime?.slice(0, 10) ?? "as-of unavailable"} context={`${eventCountLabel} persisted events`} actions={<><span className="status-badge status-warning"><WarningCircle size={12} />{eventCountLabel} alerts</span><span className="status-badge status-success"><ShieldCheck size={12} />KILL LOCKED</span></>} />
+      <WorkbenchHeader eyebrow="RISK CONTROL / FAIL CLOSED" title="风险管理工作站" description="硬约束、阈值、风险事件和人工处置队列共享同一证据链；雷达图仅作辅助。" asOf={eventItems[0]?.datetime?.slice(0, 10) ?? "as-of unavailable"} context={`${eventCountLabel} persisted events`} actions={<><span className="status-badge status-warning"><WarningCircle size={12} />{eventCountLabel} alerts</span><PaperKillSwitchChip /></>} />
       <WorkbenchMetricStrip metrics={[
         { label: "最大回撤", value: formatPercent(risk.maxDrawdown), detail: "portfolio NAV", tone: "danger", icon: ChartLineDown },
         { label: "单票最大亏损", value: formatNumber(risk.maxSingleStockLoss), detail: "realized PnL", tone: "danger", icon: TrendDown },
