@@ -64,6 +64,9 @@ class AShareExecutionSimulationResult:
     risk_events: list[dict] = field(default_factory=list)
     config: dict[str, object] = field(default_factory=dict)
     execution_trace: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: Dividend cash / bonus shares credited to held positions (raw-price panels
+    #: that publish corporate-action columns only; empty otherwise).
+    corporate_action_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def write_risk_events(self, path: str | Path) -> Path:
         target = Path(path)
@@ -164,6 +167,7 @@ def simulate_ashare_target_weights(
     position_rows: list[dict[str, object]] = []
     risk_events: list[dict[str, object]] = []
     trace_rows: list[dict[str, object]] = []
+    ca_rows: list[dict[str, object]] = []
 
     schedule: dict[pd.Timestamp, tuple[pd.Timestamp, pd.Series]] = {}
     for signal_date, weights in target.iterrows():
@@ -289,8 +293,7 @@ def simulate_ashare_target_weights(
         # Raw-price panels carry dated corporate-action credits; without them an
         # ex-rights date would be booked as a loss on every held name.
         _apply_corporate_actions(
-            broker, day_market, signal_date=signal_date,
-            execution_date=execution_date, trace_rows=trace_rows,
+            broker, day_market, execution_date=execution_date, audit_rows=ca_rows,
         )
         broker.set_market_state(day_market.to_dict("records"))
         prices = close_by_symbol.dropna()
@@ -450,6 +453,7 @@ def simulate_ashare_target_weights(
         risk_events=risk_events,
         config=metadata,
         execution_trace=pd.DataFrame(trace_rows),
+        corporate_action_audit=pd.DataFrame(ca_rows),
     )
 
 
@@ -513,9 +517,8 @@ def _apply_corporate_actions(
     broker: VirtualBroker,
     day_market: pd.DataFrame,
     *,
-    signal_date: pd.Timestamp | None,
     execution_date: pd.Timestamp,
-    trace_rows: list[dict[str, object]],
+    audit_rows: list[dict[str, object]],
 ) -> None:
     """Credit held positions with the session's dividend cash and bonus shares.
 
@@ -558,19 +561,19 @@ def _apply_corporate_actions(
         broker.ledger.positions[symbol] = replace(
             position, frozen_shares=int(position.frozen_shares) + new_shares, avg_cost=avg_cost,
         )
-        trace_rows.append(_trace_row(
-            record_type="corporate_action",
-            signal_date=signal_date,
-            execution_date=execution_date,
-            status="applied",
-            reason=(
-                f"cash_credit={credit:.4f};bonus_shares={new_shares};"
-                f"basis={row.get('ca_basis', '')}"
-            ),
-            symbol=symbol,
-            price_source="close",
-            reference_price=close,
-        ))
+        # Not a trace row: the timing trace proves signal->execution mapping and
+        # requires a signal date on every record; credits happen on any session.
+        audit_rows.append({
+            "trade_date": execution_date,
+            "symbol": symbol,
+            "shares_before": shares,
+            "cash_per_share": cash_per_share,
+            "share_ratio": share_ratio,
+            "bonus_shares": new_shares,
+            "cash_credit": credit,
+            "close": close,
+            "basis": str(row.get("ca_basis", "") or ""),
+        })
 
 
 def _current_weights(broker: VirtualBroker, prices: pd.Series) -> pd.Series:

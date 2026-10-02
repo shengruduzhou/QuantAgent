@@ -508,6 +508,9 @@ class StrictBacktestArtifactSet:
     # Set when the simulated window overlaps a quarantined holdout: merged into
     # metrics.json so direct callers cannot emit trusted-looking numbers there.
     trust_stamp: dict[str, object] | None = None
+    # Dividend cash / bonus shares the simulator credited (raw execution panels
+    # only). Kept in memory for callers that report on it.
+    corporate_action_audit: pd.DataFrame | None = None
 
     def write(self, output_dir: str | Path) -> dict[str, Path]:
         out = Path(output_dir)
@@ -636,6 +639,7 @@ def run_strict_backtest_v8(
         factor_weights=dict(factor_weights or {}),
         config=artifact_config,
         trust_stamp=trust_stamp,
+        corporate_action_audit=getattr(sim, "corporate_action_audit", None),
     )
 
 

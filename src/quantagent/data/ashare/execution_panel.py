@@ -202,8 +202,10 @@ def build_execution_panel(
     keep_cols = ["symbol", "trade_date", "open", "high", "low", "close", "volume",
                  "amount", "available_at", "serving_provider", "gap_classification",
                  "suspension_status", "st_status", "limit_up_status", "limit_down_status"]
-    panel = pd.concat([bars[keep_cols], gap_rows.reindex(columns=keep_cols)],
-                      ignore_index=True)
+    parts = [bars[keep_cols]]
+    if len(gap_rows):
+        parts.append(gap_rows.reindex(columns=keep_cols))
+    panel = pd.concat(parts, ignore_index=True)
     panel = panel.sort_values(["symbol", "trade_date"], kind="mergesort").reset_index(drop=True)
     del bars, gap_rows
 
