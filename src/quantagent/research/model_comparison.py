@@ -61,6 +61,7 @@ selection is not a holdout.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -382,7 +383,10 @@ def _topk_daily_returns(
     gross: dict[pd.Timestamp, float] = {}
     turnover: dict[pd.Timestamp, float] = {}
     untradable: dict[pd.Timestamp, float] = {}
-    previous: set[str] = set()
+    # Each day's tranche replaces the tranche formed H selections earlier, so
+    # that - not yesterday's - is the book it trades against. Day-over-day
+    # churn understated the cost of an H-day book roughly by half at H=5.
+    history: deque[set[str]] = deque(maxlen=horizon)
     tradability_columns = [
         column
         for column in ("is_suspended", "is_limit_up", "is_st")
@@ -397,10 +401,11 @@ def _topk_daily_returns(
             continue
 
         names = set(picked["symbol"].astype(str))
+        replaced = history[0] if len(history) == horizon else None
         target_turnover = (
-            1.0 if not previous else len(names - previous) / max(1, len(names))
+            1.0 if replaced is None else len(names - replaced) / max(1, len(names))
         )
-        previous = names
+        history.append(names)
 
         if tradability_columns:
             blocked = np.zeros(len(picked), dtype=bool)
