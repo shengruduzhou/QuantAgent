@@ -13,16 +13,23 @@ class RiskAdapter:
         runs = self.backtests.list()
         if not runs:
             return self._empty()
-        run = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        run = _requested_run(runs, backtest_id)
         equity = self.backtests.equity(run["id"])
         daily_returns = [point["dailyReturn"] for point in equity if point.get("dailyReturn") is not None]
-        consecutive = _max_consecutive_losses(daily_returns)
-        events = self.backtests.risk_events(run["id"], page=1, page_size=1_000)["items"]
+        # No measured daily return means the streak is unknown, not 0 days.
+        consecutive = _max_consecutive_losses(daily_returns) if daily_returns else None
+        page = self.backtests.risk_events(run["id"], page=1, page_size=1_000)
+        events = page["items"]
         counts: dict[str, int] = {}
         for event in events:
             counts[event["type"]] = counts.get(event["type"], 0) + 1
         return {
             "backtestId": run["id"],
+            "backtestName": run.get("name"),
+            # Persisted events of this backtest (e.g. skipped orders), counted
+            # over the first page only when the page was full.
+            "eventCountsExact": bool(page.get("totalIsExact", not page.get("hasNext", False))),
+            "eventCountsBasis": "persisted_backtest_events",
             "maxDrawdown": run.get("maxDrawdown"),
             "maxSingleStockLoss": self._max_stock_loss(run["id"]),
             "maxDailyLoss": min(daily_returns) if daily_returns else None,
@@ -42,14 +49,14 @@ class RiskAdapter:
         runs = self.backtests.list()
         if not runs:
             return {"items": [], "total": 0, "page": page, "pageSize": page_size, "hasNext": False}
-        selected = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        selected = _requested_run(runs, backtest_id)
         return self.backtests.risk_events(selected["id"], page=page, page_size=page_size)
 
     def stocks(self, backtest_id: str | None = None) -> list[dict[str, Any]]:
         runs = self.backtests.list()
         if not runs:
             return []
-        selected = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        selected = _requested_run(runs, backtest_id)
         directory = self.backtests._resolve(selected["id"])
         from services.quant_api.adapters.utils import read_csv_rows
 
@@ -187,3 +194,17 @@ def _int(value: Any) -> int | None:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _requested_run(runs: list[dict[str, Any]], backtest_id: str | None) -> dict[str, Any]:
+    """The run the caller asked for; KeyError for an unknown id.
+
+    Falling back to ``runs[0]`` for an unknown id returned another backtest's
+    risk numbers under status "ready" - the wrong subject, presented as valid.
+    """
+    if backtest_id is None:
+        return runs[0]
+    for item in runs:
+        if item["id"] == backtest_id:
+            return item
+    raise KeyError(backtest_id)

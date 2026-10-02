@@ -94,7 +94,8 @@ export function GlobalCommandBar({
         </button>
         <button type="button" className={`vnext-status-button ${riskEvents ? "warning" : "safe"}`} onClick={() => openPath("/risk")} title="打开风险管理">
           {riskEvents ? <WarningCircle size={14} /> : <ShieldCheck size={14} />}
-          RISK {riskEvents || "CLEAR"}
+          {/* No overview yet means risk is unmeasured, not clear. */}
+          RISK {!overview ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NO EVENTS"}
         </button>
         <span className="vnext-status-chip state-ready" title="Live trading is disabled by policy"><ShieldCheck size={14} /> KILL LOCKED</span>
         <ThemeSwitcher theme={theme} onChange={onSetTheme} />

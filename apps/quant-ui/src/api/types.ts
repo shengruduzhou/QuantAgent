@@ -920,6 +920,10 @@ export interface RiskOverview {
   suspensionRisk?: number | null;
   doTFailureRisk?: number | null;
   eventCounts: Record<string, number>;
+  /** False when the counts cover only the first page of persisted events. */
+  eventCountsExact?: boolean;
+  eventCountsBasis?: string;
+  backtestName?: string | null;
   rules: Array<Record<string, unknown>>;
 }
 

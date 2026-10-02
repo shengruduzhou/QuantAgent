@@ -781,7 +781,12 @@ def factor_stock_trades(request: Request, factor_name: str, symbol: str) -> dict
 def factor_ic(request: Request, factor_name: str) -> dict:
     if services(request).factors.get(factor_name) is None:
         raise HTTPException(404, "factor not found")
-    return response(services(request).factors.ic(factor_name))
+    data = services(request).factors.ic(factor_name)
+    measured = any(data.get(key) is not None for key in ("ic", "rankIc", "icir", "rankIcir")) or bool(
+        data.get("icSeries") or data.get("rankIcSeries")
+    )
+    # A payload whose every statistic is null is "empty", not "ready".
+    return response(data, status="ready" if measured else "empty")
 
 
 @router.get("/factors/{factor_name}/quantile-returns")
@@ -825,7 +830,10 @@ def selection_ranking(request: Request, run_id: str, limit: int = Query(500, le=
 
 @router.get("/selection/runs/{run_id}/stocks/{symbol}/decision-chain")
 def selection_decision_chain(request: Request, run_id: str, symbol: str) -> dict:
-    data = services(request).selections.decision_chain(run_id, symbol)
+    try:
+        data = services(request).selections.decision_chain(run_id, symbol)
+    except KeyError:
+        raise HTTPException(404, "selection run not found")
     if data is None:
         return response(
             {"gates": [], "finalDecision": None, "issues": [{
@@ -910,18 +918,27 @@ def model_stock_predictions(request: Request, model_id: str, symbol: str, limit:
 
 @router.get("/risk/overview")
 def risk_overview(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
-    return response(services(request).risk.overview(backtest_id))
+    try:
+        return response(services(request).risk.overview(backtest_id))
+    except KeyError:
+        raise HTTPException(404, "backtest not found")
 
 
 @router.get("/risk/events")
 def risk_events(request: Request, backtest_id: str | None = Query(None, alias="backtestId"), page: int = 1, page_size: int = Query(100, alias="pageSize", le=1_000)) -> dict:
-    data = services(request).risk.events(backtest_id, page, page_size)
+    try:
+        data = services(request).risk.events(backtest_id, page, page_size)
+    except KeyError:
+        raise HTTPException(404, "backtest not found")
     return response(data, status="ready" if data["items"] else "empty")
 
 
 @router.get("/risk/stocks")
 def risk_stocks(request: Request, backtest_id: str | None = Query(None, alias="backtestId")) -> dict:
-    data = services(request).risk.stocks(backtest_id)
+    try:
+        data = services(request).risk.stocks(backtest_id)
+    except KeyError:
+        raise HTTPException(404, "backtest not found")
     return response(data, status="ready" if data else "empty")
 
 
