@@ -3072,19 +3072,23 @@ def _load_env_config(path: Path | None) -> dict[str, object]:
     env = payload.get("rl_env", payload.get("env", payload))
     if not isinstance(env, dict):
         raise typer.BadParameter("env config must contain an object")
-    allowed = set(PITPortfolioEnvConfig.__dataclass_fields__) if "PITPortfolioEnvConfig" in globals() else {
-        "top_n",
-        "max_delta",
-        "max_weight_per_name",
-        "max_gross",
-        "max_turnover",
-        "cost_bps",
-        "drawdown_lambda",
-        "drawdown_limit",
-        "kill_switch_drawdown",
-        "initial_nav",
-    }
-    return {str(k): v for k, v in env.items() if str(k) in allowed}
+    # The allow-list used to be `__dataclass_fields__ if "PITPortfolioEnvConfig"
+    # in globals() else {legacy PortfolioEnv keys}`. The class is imported only
+    # inside `train_rl_agent`, so the legacy set always won: real fields such as
+    # max_book, volatility_lambda and reward_end_date_limit were silently dropped
+    # and stale ones such as max_turnover reached the constructor as a TypeError.
+    from dataclasses import fields
+
+    from quantagent.rl.pit_portfolio_env import PITPortfolioEnvConfig
+
+    allowed = {item.name for item in fields(PITPortfolioEnvConfig)}
+    unknown = sorted(str(key) for key in env if str(key) not in allowed)
+    if unknown:
+        raise typer.BadParameter(
+            f"env config keys {unknown} are not PITPortfolioEnvConfig fields; "
+            f"allowed: {sorted(allowed)}"
+        )
+    return {str(k): v for k, v in env.items()}
 
 
 def _write_autopilot_report(path: Path, payload: dict[str, object]) -> None:
