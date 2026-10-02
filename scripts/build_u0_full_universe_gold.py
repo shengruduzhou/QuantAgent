@@ -58,6 +58,9 @@ U0 = REPO / "runtime" / "data" / "u0"
 IPO_SEASONING_TRADING_DAYS = 60
 #: Label horizons in trading days.
 HORIZONS = (1, 5, 20)
+#: Calendar days of history kept before --start-date so the first in-window
+#: session has a previous close for its price-limit reference.
+LIMIT_LOOKBACK_DAYS = 45
 #: Embargo must be at least the longest label horizon, or a fold's training data
 #: overlaps the very returns the next fold is scored on.
 EMBARGO_DAYS = max(HORIZONS)
@@ -372,7 +375,10 @@ def main() -> int:
     parser.add_argument("--adjustment", default=contracts.ADJUST_HFQ,
                         choices=list(gold_bridge.ADJUSTMENT_METHODS))
     parser.add_argument("--folds", type=int, default=6)
+    parser.add_argument("--u0-root", default=str(U0),
+                        help="U0 data root (read-only inputs); defaults to the repo runtime")
     args = parser.parse_args()
+    u0 = Path(args.u0_root)
 
     target = Path(args.output)
     target.mkdir(parents=True, exist_ok=True)
@@ -380,21 +386,33 @@ def main() -> int:
 
     print("[1/8] loading U0 inputs ...", flush=True)
     panel = pd.read_parquet(
-        U0 / "panel/daily_bars_raw.parquet",
+        u0 / "panel/daily_bars_raw.parquet",
         columns=["symbol", "trade_date", "open", "high", "low", "close",
                  "volume", "amount", "serving_provider"])
-    if args.start_date:
-        panel = panel[panel["trade_date"] >= args.start_date]
     if args.end_date:
         panel = panel[panel["trade_date"] <= args.end_date]
 
-    master = _read(U0 / "security_master.parquet")
-    factors = _read(U0 / "pit/adjust_factors.parquet")
-    suspension = _read(U0 / "pit/suspension_intervals.parquet")
-    st = _read(U0 / "pit/st_intervals.parquet")
+    master = _read(u0 / "security_master.parquet")
+    # Session counts since listing come from the FULL history, before any date
+    # cut: the IPO no-limit window and the seasoning rule are anchored on the
+    # listing session, not on whichever row the build happens to start at.
+    panel["sessions_since_listing"] = gold_bridge.sessions_since_listing(panel, master)
+    in_window_symbols = (
+        panel.loc[panel["trade_date"] >= args.start_date, "symbol"].unique()
+        if args.start_date else panel["symbol"].unique()
+    )
+    if args.start_date:
+        # Keep a short look-back so the first in-window session still has a
+        # previous close to anchor its price limit; trimmed again after masking.
+        lookback = pd.Timestamp(args.start_date) - pd.Timedelta(days=LIMIT_LOOKBACK_DAYS)
+        panel = panel[(panel["trade_date"] >= lookback)
+                      & panel["symbol"].isin(in_window_symbols)]
+    factors = _read(u0 / "pit/adjust_factors.parquet")
+    suspension = _read(u0 / "pit/suspension_intervals.parquet")
+    st = _read(u0 / "pit/st_intervals.parquet")
 
-    pit_certificate = json.loads((U0 / "u0_strict_pit_certificate.json").read_text("utf-8"))
-    st_manifest_path = U0 / "pit/st_manifest.json"
+    pit_certificate = json.loads((u0 / "u0_strict_pit_certificate.json").read_text("utf-8"))
+    st_manifest_path = u0 / "pit/st_manifest.json"
     st_manifest = (json.loads(st_manifest_path.read_text("utf-8"))
                    if st_manifest_path.exists() else None)
     # Coverage is per exchange. One boolean ("is the register complete?") made the
@@ -405,7 +423,7 @@ def main() -> int:
     st_available = set(st_coverage) >= set(gold_bridge.EXCHANGE_SUFFIXES)
 
     if args.max_symbols:
-        merged = master.merge(panel[["symbol"]].drop_duplicates(), on="symbol")
+        merged = master.merge(pd.DataFrame({"symbol": in_window_symbols}), on="symbol")
         per_board = max(1, args.max_symbols // max(1, merged["board"].nunique()))
         picks: list[str] = []
         for _, group in merged.groupby("board"):
@@ -419,6 +437,10 @@ def main() -> int:
     masked = gold_bridge.build_masks(
         adjusted, master=master, suspension=suspension, st=st,
         st_available=st_coverage, seasoning_days=IPO_SEASONING_TRADING_DAYS)
+    price_limit_stats = dict(masked.attrs.get("price_limit_stats", {}))
+    if args.start_date:
+        masked = masked[masked["trade_date"] >= args.start_date]
+    masked = masked.drop(columns=["sessions_since_listing"])
     mask_rows_by_exchange = gold_bridge.mask_rows_by_exchange(
         masked, [c for c in masked.columns if c.startswith("mask_")])
 
@@ -549,6 +571,10 @@ def main() -> int:
         "label_columns": label_columns,
         "mask_columns": mask_columns,
         "rows_dropped": dropped,
+        "mask_distribution": {
+            column: {str(k): int(v) for k, v in dataset[column].value_counts().items()}
+            for column in mask_columns
+        },
         "dataset_hash": dataset_hash,
         # Alias consumed by ReadinessEvaluator, which names this field
         # content_hash. Emitting both keeps one source of truth for the value.
@@ -558,6 +584,13 @@ def main() -> int:
         "label_hash": label_hash,
         "fold_hash": fold_hash,
         "st_pit_complete": st_available,
+        "price_limit_mask_stats_incl_lookback": price_limit_stats,
+        "price_limit_convention": (
+            "mask_limit_up/down = raw close (adjusted / adjust_factor) at the half-up "
+            "0.01-rounded limit of the ex-rights reference (adjusted prev close / today's "
+            "factor) x (1 +/- dated board band; ST band where mask_is_st is TRUE); "
+            "UNKNOWN when no previous close, undetermined IPO window, ST unknown between "
+            "the bands, close beyond every band, or a one-tick miss on an ex-rights day"),
         "st_coverage_exchanges": sorted(st_coverage),
         "st_coverage_basis": st_coverage_basis,
         "mask_rows_by_exchange_before_label_drop": mask_rows_by_exchange,

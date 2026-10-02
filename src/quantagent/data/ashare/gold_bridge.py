@@ -347,6 +347,276 @@ def resolve_listing_status(master: pd.DataFrame) -> tuple[pd.Series, str]:
     return resolved, basis
 
 
+def sessions_since_listing(panel: pd.DataFrame, master: pd.DataFrame) -> pd.Series:
+    """Exact per-row trading-session count since listing, or NaN when unknowable.
+
+    Counted on the panel the caller passes -- pass the *full* U0 history, then cut
+    the date window, so a start-date filter cannot restart the count. A symbol
+    whose first bar is after its listing date (provider history truncated) has no
+    exact count and gets NaN; `build_masks` then falls back to a lower bound.
+    """
+    identity = master.set_index("symbol")
+    listing = pd.to_datetime(
+        panel["symbol"].map(identity.get("listing_date", pd.Series(dtype=object))),
+        errors="coerce",
+    )
+    dates = pd.to_datetime(panel["trade_date"])
+    known, _ = _sessions_since_listing(panel.drop(columns=["sessions_since_listing"],
+                                                  errors="ignore"), listing, dates)
+    return pd.Series(known, index=panel.index, dtype="float64")
+
+
+def _sessions_since_listing(
+    frame: pd.DataFrame, listing: pd.Series, dates: pd.Series
+) -> tuple[np.ndarray, np.ndarray]:
+    """(exact sessions since listing or NaN, a guaranteed lower bound).
+
+    Exact only when the panel holds the listing session itself (first bar on or
+    before the listing date). Otherwise the stock traded at least once before the
+    panel's first bar, so ``row_index + 1`` is a lower bound; with no listing
+    date at all, ``row_index`` is.
+    """
+    order = np.lexsort((dates.to_numpy(), frame["symbol"].astype(str).to_numpy()))
+    symbols = frame["symbol"].astype(str).to_numpy()[order]
+    ordered_dates = dates.to_numpy()[order]
+    ordered_listing = listing.to_numpy()[order]
+    on_or_after = ~pd.isna(ordered_listing) & (ordered_dates >= ordered_listing)
+    starts = np.r_[True, symbols[1:] != symbols[:-1]]
+    group = np.cumsum(starts) - 1
+    first_index = np.flatnonzero(starts)
+    row_index = np.arange(len(symbols)) - first_index[group]
+    after_count = np.cumsum(on_or_after.astype(np.int64))
+    after_base = np.r_[0, after_count][first_index][group]
+    count_after = after_count - after_base - 1  # index among on/after-listing rows
+    first_date = ordered_dates[first_index][group]
+    covers_listing = ~pd.isna(ordered_listing) & (first_date <= ordered_listing)
+
+    exact = np.where(covers_listing & on_or_after, count_after, np.nan).astype(float)
+    if "sessions_since_listing" in frame.columns:
+        supplied = pd.to_numeric(frame["sessions_since_listing"], errors="coerce").to_numpy()[order]
+        exact = np.where(np.isfinite(supplied), supplied, exact)
+    lower = np.where(
+        np.isfinite(exact), exact,
+        np.where(~pd.isna(ordered_listing), row_index + 1, row_index),
+    ).astype(float)
+
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(len(order))
+    return exact[inverse], lower[inverse]
+
+
+def _half_up_cents(value: np.ndarray) -> np.ndarray:
+    """Round a CNY price (or a cents product) half-up to whole cents.
+
+    Exchange price limits are rounded 四舍五入 to 0.01; Python's ``round`` is
+    banker's rounding on binary floats and is not the exchange rule.
+    """
+    return np.floor(np.asarray(value, dtype=float) * 100.0 + 0.5 + 1e-6)
+
+
+#: Codes used while combining possible worlds (ST vs not ST).
+_FALSE, _UNKNOWN, _TRUE = 0, 1, 2
+_CODE_TO_MASK = np.array([MASK_FALSE, MASK_UNKNOWN, MASK_TRUE], dtype=object)
+
+
+def price_limit_masks(
+    frame: pd.DataFrame,
+    *,
+    master: pd.DataFrame | None = None,
+    sessions_known: np.ndarray | None = None,
+    sessions_lower_bound: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Tri-state "closed at the limit-up / limit-down price" for every row.
+
+    Computed on **raw** traded prices, the scale the exchange enforces:
+
+    * raw close = adjusted close / ``adjust_factor`` (1.0 when the panel is raw);
+    * the reference is the ex-rights reference price -- the previous traded
+      close re-based to today's factor (``adjusted prev close / today's factor``),
+      rounded to 0.01 as the exchange publishes it;
+    * limit = half-up 0.01 rounding of reference x (1 +/- band), with the band
+      from the dated board rules in :mod:`quantagent.market_rules.ashare`
+      (ChiNext 10% before 2020-08-24, main-board ST 5% before 2026-07-06, IPO
+      windows anchored on the listing session).
+
+    UNKNOWN, never a guess, when: there is no previous close; the board is
+    unknown; the IPO window cannot be ruled in or out; a legacy listing-day band
+    whose reference (the issue price) is not in the panel; ST is UNKNOWN and the
+    close sits between the ST and ordinary limits; the close lies *beyond* every
+    possible band (the reference is wrong -- e.g. a vendor gap or a no-limit
+    resumption); or an ex-rights day puts the close within one tick of a limit
+    computed from a factor-derived reference. A known IPO no-limit session is
+    FALSE: there is no limit to be sealed at.
+    """
+    from quantagent.market_rules import ashare as rules
+
+    n = len(frame)
+    stats: dict[str, int] = {}
+    if n == 0:
+        empty = np.array([], dtype=object)
+        return empty, empty, stats
+    if "close" not in frame.columns:
+        unknown = np.full(n, MASK_UNKNOWN, dtype=object)
+        return unknown, unknown.copy(), {"rows": int(n), "no_close_column": int(n)}
+    if "adjust_factor" in frame.columns:
+        factor = pd.to_numeric(frame["adjust_factor"], errors="coerce").to_numpy(dtype=float)
+    else:
+        methods = (
+            set(frame["adjustment_method"].dropna().astype(str).unique())
+            if "adjustment_method" in frame.columns else set()
+        )
+        if methods - {contracts.ADJUST_NONE}:
+            raise GoldBridgeError(
+                "price-limit masks need raw prices: the panel declares adjustment "
+                f"{sorted(methods)} but carries no adjust_factor to undo it"
+            )
+        factor = np.ones(n)
+
+    dates = pd.to_datetime(frame["trade_date"]).to_numpy()
+    symbols = frame["symbol"].astype(str).to_numpy()
+    order = np.lexsort((dates, symbols))
+    sym_o = symbols[order]
+    starts = np.r_[True, sym_o[1:] != sym_o[:-1]]
+    adj_close = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)[order]
+    fac = factor[order]
+    prev_adj_close = np.r_[np.nan, adj_close[:-1]]
+    prev_fac = np.r_[np.nan, fac[:-1]]
+    prev_adj_close[starts] = np.nan
+    prev_fac[starts] = np.nan
+
+    raw_close = adj_close / fac
+    reference = prev_adj_close / fac
+    close_c = _half_up_cents(raw_close)
+    ref_c = _half_up_cents(reference)
+    ex_rights = np.isfinite(prev_fac) & (np.abs(prev_fac / fac - 1.0) > 1e-9)
+
+    if master is not None and "board" in master.columns:
+        board_map = master.drop_duplicates("symbol").set_index("symbol")["board"].astype(str)
+        board = pd.Series(sym_o).map(board_map).to_numpy(dtype=object)
+    else:
+        board = np.full(len(sym_o), None, dtype=object)
+    missing_board = pd.isna(board) | ~np.isin(board.astype(str), list(rules.BOARDS))
+    if missing_board.any():
+        board[missing_board] = [rules.exchange_board_for_symbol(s) for s in sym_o[missing_board]]
+
+    if sessions_known is None or sessions_lower_bound is None:
+        identity = (master.set_index("symbol") if master is not None
+                    else pd.DataFrame(columns=["listing_date"]))
+        listing = pd.to_datetime(
+            frame["symbol"].map(identity.get("listing_date", pd.Series(dtype=object))),
+            errors="coerce",
+        )
+        sessions_known, sessions_lower_bound = _sessions_since_listing(
+            frame, listing, pd.to_datetime(frame["trade_date"])
+        )
+    s_known = np.asarray(sessions_known, dtype=float)[order]
+    s_lower = np.asarray(sessions_lower_bound, dtype=float)[order]
+    window = np.array([rules.IPO_UNLIMITED_DAYS.get(b, 0) for b in board], dtype=float)
+    # Sessions used to resolve the band. Rows provably past the IPO window use the
+    # ordinary band; rows that may still be inside it are UNKNOWN unless exact.
+    in_window_unknown = ~np.isfinite(s_known) & (s_lower < window)
+    session_key = np.where(np.isfinite(s_known), np.minimum(s_known, 99), 99).astype(int)
+
+    st_values = (frame["mask_is_st"].astype(str).to_numpy()[order]
+                 if "mask_is_st" in frame.columns
+                 else np.full(len(sym_o), MASK_UNKNOWN, dtype=object))
+
+    keys = pd.DataFrame({
+        "board": board.astype(str),
+        "date": pd.to_datetime(dates[order]).normalize(),
+        "session": np.minimum(session_key, 6),
+    })
+    unique = keys.drop_duplicates().reset_index(drop=True)
+    resolved = {}
+    for row in unique.itertuples(index=False):
+        for is_st in (False, True):
+            try:
+                limits = rules.price_limits(
+                    board=row.board, previous_close=1.0, trade_date=row.date.date(),
+                    sessions_since_listing=int(row.session), is_st=is_st,
+                )
+                resolved[(row.board, row.date, row.session, is_st)] = (
+                    limits.ratio, limits.regime)
+            except ValueError:
+                resolved[(row.board, row.date, row.session, is_st)] = (None, "UNKNOWN_BOARD")
+    lookup = keys.merge(unique.assign(_k=np.arange(len(unique))), how="left",
+                        on=["board", "date", "session"])["_k"].to_numpy()
+    ratio_o = np.empty(len(unique)); regime_o = np.empty(len(unique), dtype=object)
+    ratio_s = np.empty(len(unique)); regime_s = np.empty(len(unique), dtype=object)
+    for i, row in enumerate(unique.itertuples(index=False)):
+        r, g = resolved[(row.board, row.date, row.session, False)]
+        ratio_o[i] = np.nan if r is None else r; regime_o[i] = g
+        r, g = resolved[(row.board, row.date, row.session, True)]
+        ratio_s[i] = np.nan if r is None else r; regime_s[i] = g
+    ratio_o, regime_o = ratio_o[lookup], regime_o[lookup]
+    ratio_s, regime_s = ratio_s[lookup], regime_s[lookup]
+
+    tol = np.where(ex_rights, 1.0, 0.0)
+
+    def world(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        up_c = _half_up_cents(ref_c * (1.0 + ratio) / 100.0)
+        dn_c = _half_up_cents(ref_c * (1.0 - ratio) / 100.0)
+        up_diff = close_c - up_c
+        dn_diff = dn_c - close_c
+        valid = (up_diff <= tol) & (dn_diff <= tol) & np.isfinite(up_c)
+        def code(diff: np.ndarray) -> np.ndarray:
+            # diff > tol is outside this world (invalid); diff == 0 is at the
+            # limit; on ex-rights days a one-tick miss is undecidable.
+            out = np.full(len(diff), _FALSE, dtype=np.int8)
+            out[(tol > 0) & (np.abs(diff) <= tol)] = _UNKNOWN
+            out[diff == 0] = _TRUE
+            return out
+        return valid, code(up_diff), code(dn_diff)
+
+    valid_o, up_o, dn_o = world(ratio_o)
+    valid_s, up_s, dn_s = world(ratio_s)
+    may_be_st = np.isin(st_values, [MASK_TRUE, MASK_UNKNOWN])
+    may_be_ordinary = np.isin(st_values, [MASK_FALSE, MASK_UNKNOWN])
+    use_o = may_be_ordinary & valid_o
+    use_s = may_be_st & valid_s
+
+    def combine(code_o: np.ndarray, code_s: np.ndarray) -> np.ndarray:
+        out = np.full(len(code_o), _UNKNOWN, dtype=np.int8)
+        only_o = use_o & ~use_s
+        only_s = use_s & ~use_o
+        both = use_o & use_s
+        out[only_o] = code_o[only_o]
+        out[only_s] = code_s[only_s]
+        agree = both & (code_o == code_s)
+        out[agree] = code_o[agree]
+        return out
+
+    up = combine(up_o, up_s)
+    down = combine(dn_o, dn_s)
+
+    no_reference = ~np.isfinite(ref_c) | ~np.isfinite(close_c)
+    no_limit = (regime_o == "IPO_NO_LIMIT_WINDOW") & np.isfinite(s_known)
+    legacy_listing_day = regime_o == "IPO_LEGACY_APPROVAL_SYSTEM"
+    unknown_board = (regime_o == "UNKNOWN_BOARD") | ~np.isfinite(ratio_o)
+    contradiction = ~(may_be_ordinary & valid_o) & ~(may_be_st & valid_s) & ~no_reference
+    for target in (up, down):
+        target[no_reference | unknown_board | in_window_unknown | legacy_listing_day] = _UNKNOWN
+        target[no_limit] = _FALSE
+
+    stats = {
+        "rows": int(n),
+        "no_previous_close": int((no_reference & ~no_limit).sum()),
+        "ipo_no_limit_window": int(no_limit.sum()),
+        "ipo_window_undetermined": int((in_window_unknown & ~no_limit).sum()),
+        "legacy_listing_day": int(legacy_listing_day.sum()),
+        "close_beyond_every_band": int((contradiction & ~unknown_board & ~no_limit
+                                        & ~in_window_unknown & ~legacy_listing_day).sum()),
+        "ex_rights_rows": int(ex_rights.sum()),
+        "limit_up_true": int((up == _TRUE).sum()),
+        "limit_up_unknown": int((up == _UNKNOWN).sum()),
+        "limit_down_true": int((down == _TRUE).sum()),
+        "limit_down_unknown": int((down == _UNKNOWN).sum()),
+    }
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(n)
+    return _CODE_TO_MASK[up[inverse]], _CODE_TO_MASK[down[inverse]], stats
+
+
 def build_masks(
     panel: pd.DataFrame,
     *,
@@ -418,11 +688,33 @@ def build_masks(
     result["listing_status"] = status.fillna(LISTING_STATUS_UNKNOWN)
 
     # Seasoning counts *trading sessions observed in the panel*, not calendar
-    # days, so holidays cannot shorten the window.
-    session_index = result.sort_values("trade_date").groupby("symbol").cumcount()
-    seasoning = pd.Series(MASK_FALSE, index=result.index, dtype="object")
-    seasoning.loc[session_index.index[session_index < seasoning_days]] = MASK_TRUE
-    result["mask_seasoning"] = seasoning
+    # days, so holidays cannot shorten the window. A caller that knows each row's
+    # session count since listing (computed on the full history, see
+    # `sessions_since_listing`) passes it as a column; otherwise the count restarts
+    # at the panel's first row, which marks every old name's first sessions after a
+    # start-date cut as "unseasoned".
+    sessions_known, sessions_lower_bound = _sessions_since_listing(result, listing, dates)
+    if "sessions_since_listing" in result.columns:
+        seasoning_count = sessions_lower_bound
+    else:
+        seasoning_count = (
+            result.assign(_d=dates).sort_values("_d").groupby("symbol").cumcount()
+            .reindex(result.index).to_numpy(dtype=float)
+        )
+    result["mask_seasoning"] = np.where(
+        seasoning_count < seasoning_days, MASK_TRUE, MASK_FALSE
+    ).astype(object)
+
+    # Price-limit state at the close, from raw prices and dated board rules. It is
+    # an *entry-feasibility* fact consumed by `build_labels` at t+1, not an
+    # eligibility mask at t, so it stays out of `eligible_for_training`.
+    limit_up, limit_down, limit_stats = price_limit_masks(
+        result, master=master, sessions_known=sessions_known,
+        sessions_lower_bound=sessions_lower_bound,
+    )
+    result["mask_limit_up"] = limit_up
+    result["mask_limit_down"] = limit_down
+    result.attrs["price_limit_stats"] = limit_stats
 
     mask_columns = [
         "mask_is_suspended", "mask_is_st", "mask_pre_listing",
@@ -580,14 +872,29 @@ LABEL_CONVENTION = (
 
 
 def build_labels(
-    panel: pd.DataFrame, *, horizons: Sequence[int] = DEFAULT_HORIZONS
+    panel: pd.DataFrame,
+    *,
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    allow_unmeasured_limit_up: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Attach delay-1 executable forward returns and drop infeasible entries.
 
     Entry is infeasible when the security is suspended at ``t`` or ``t+1``, is
     ST at ``t``, or is sealed at limit-up at ``t+1`` -- you cannot buy a locked
     limit-up, and pretending otherwise is where the old phantom alpha came from.
+
+    ``mask_limit_up`` is required. Its absence used to skip the check silently
+    and nothing produced the column, so the certified 10.9M-row panel kept
+    every sealed limit-up entry (R3-F01: 144,840 rows, mean 5-day forward
+    return 27x the rest). A caller that genuinely cannot measure it must say so
+    with ``allow_unmeasured_limit_up=True``; the unmeasured rows are counted.
     """
+    if "mask_limit_up" not in panel.columns and not allow_unmeasured_limit_up:
+        raise GoldBridgeError(
+            "build_labels needs mask_limit_up (from build_masks) to drop sealed "
+            "limit-up entries at t+1; pass allow_unmeasured_limit_up=True only if "
+            "the limit state genuinely cannot be measured"
+        )
     result = panel.sort_values(["symbol", "trade_date"]).copy()
     grouped = result.groupby("symbol", sort=False)
 
@@ -612,12 +919,21 @@ def build_labels(
         reasons["st_at_t"] = int(is_st.sum())
         infeasible |= is_st
     if "mask_limit_up" in result.columns:
-        sealed = grouped["mask_limit_up"].shift(-1) == MASK_TRUE
+        next_limit = grouped["mask_limit_up"].shift(-1)
+        sealed = next_limit == MASK_TRUE
         reasons["limit_up_at_t1"] = int(sealed.sum())
         infeasible |= sealed
+    else:
+        reasons["limit_up_unmeasured_rows"] = int(len(result))
 
     reasons["entry_price_missing"] = int(entry_price.isna().sum())
     infeasible |= entry_price.isna()
+    if "mask_limit_up" in result.columns:
+        # Not dropped (not *known* infeasible) but counted, so the share of the
+        # kept domain whose entry feasibility is undecided stays visible.
+        reasons["limit_up_unknown_at_t1_kept"] = int(
+            ((next_limit == MASK_UNKNOWN) & ~infeasible).sum()
+        )
 
     result["entry_feasible"] = ~infeasible
     kept = result.loc[~infeasible].copy()
