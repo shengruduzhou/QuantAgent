@@ -590,6 +590,9 @@ def price_limit_masks(
     down = combine(dn_o, dn_s)
 
     no_reference = ~np.isfinite(ref_c) | ~np.isfinite(close_c)
+    # SSE B shares quote in USD with a 0.001 tick; the cent arithmetic above is
+    # not their exchange rounding, so their limit state is not claimed.
+    sub_cent_tick = np.char.startswith(sym_o.astype(str), "900")
     no_limit = (regime_o == "IPO_NO_LIMIT_WINDOW") & np.isfinite(s_known)
     legacy_listing_day = regime_o == "IPO_LEGACY_APPROVAL_SYSTEM"
     unknown_board = (regime_o == "UNKNOWN_BOARD") | ~np.isfinite(ratio_o)
@@ -597,6 +600,7 @@ def price_limit_masks(
     for target in (up, down):
         target[no_reference | unknown_board | in_window_unknown | legacy_listing_day] = _UNKNOWN
         target[no_limit] = _FALSE
+        target[sub_cent_tick] = _UNKNOWN
 
     stats = {
         "rows": int(n),
@@ -607,6 +611,7 @@ def price_limit_masks(
         "close_beyond_every_band": int((contradiction & ~unknown_board & ~no_limit
                                         & ~in_window_unknown & ~legacy_listing_day).sum()),
         "ex_rights_rows": int(ex_rights.sum()),
+        "sub_cent_tick_rows": int(sub_cent_tick.sum()),
         "limit_up_true": int((up == _TRUE).sum()),
         "limit_up_unknown": int((up == _UNKNOWN).sum()),
         "limit_down_true": int((down == _TRUE).sum()),

@@ -371,6 +371,52 @@ def run_quality_checks(
     }
 
 
+def _write_execution_panel(masked: pd.DataFrame, *, raw_columns: list[str], u0: Path,
+                           target: Path, factors: pd.DataFrame, st: pd.DataFrame,
+                           st_coverage, start, end) -> None:
+    """Raw execution panel next to the dataset (masks shared with the dataset)."""
+    print("      building the certified raw execution panel ...", flush=True)
+    traded = masked[["symbol", "trade_date", *raw_columns, "volume", "amount",
+                     "serving_provider", "mask_is_suspended", "mask_is_st",
+                     "mask_limit_up", "mask_limit_down"]].rename(
+        columns={f"raw_{c}": c for c in gold_bridge.PRICE_COLUMNS})
+    traded["available_at"] = pd.to_datetime(traded["trade_date"]) + pd.Timedelta(hours=15)
+    execution, execution_stats = execution_panel.build_execution_panel(
+        traded,
+        session_gaps=_read(u0 / "panel/session_gaps.parquet"),
+        factors=factors,
+        corporate_actions=_read(u0 / "pit/corporate_actions.parquet"),
+        st=st, st_coverage=st_coverage,
+        start=start, end=end, copy=False,
+    )
+    del traded
+    execution_panel.verify_execution_panel(execution)
+    execution.to_parquet(target / "execution_panel.parquet", index=False)
+    execution_hash = _frame_hash(execution)
+    (target / "execution_panel_manifest.json").write_text(json.dumps({
+        "generated": _now(),
+        "source_commit": _source_commit(),
+        "schema": execution_panel.EXECUTION_PANEL_SCHEMA,
+        "content_hash": execution_hash,
+        "file_sha256_16": _file_sha256(target / "execution_panel.parquet"),
+        "adjustment_method": contracts.ADJUST_NONE,
+        "columns": list(execution.columns),
+        "inputs": {
+            "panel": "runtime/data/u0/panel/daily_bars_raw.parquet",
+            "session_gaps": "runtime/data/u0/panel/session_gaps.parquet",
+            "adjust_factors": "runtime/data/u0/pit/adjust_factors.parquet",
+            "corporate_actions": "runtime/data/u0/pit/corporate_actions.parquet",
+            "st_intervals": "runtime/data/u0/pit/st_intervals.parquet",
+            "suspension_intervals": "runtime/data/u0/pit/suspension_intervals.parquet",
+        },
+        "st_coverage_exchanges": sorted(st_coverage),
+        "available_at_rule": "trade_date 15:00 Asia/Shanghai (close of the session)",
+        **execution_stats,
+    }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    print(f"      {execution_panel.execution_panel_summary(execution_stats)}", flush=True)
+    del execution
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -386,6 +432,10 @@ def main() -> int:
     parser.add_argument("--folds", type=int, default=6)
     parser.add_argument("--u0-root", default=str(U0),
                         help="U0 data root (read-only inputs); defaults to the repo runtime")
+    parser.add_argument("--phase", default="all", choices=["all", "dataset", "execution"],
+                        help=("'execution' writes only the raw execution panel, 'dataset' only "
+                              "the training artifacts; run them as two processes to bound "
+                              "peak memory on the full universe (same masks either way)"))
     args = parser.parse_args()
     u0 = Path(args.u0_root)
 
@@ -445,8 +495,11 @@ def main() -> int:
     # The raw traded prices travel beside the adjusted ones so the execution
     # panel takes them verbatim (no adjusted/factor round trip, which would
     # corrupt 3-decimal B-share ticks).
-    for column in gold_bridge.PRICE_COLUMNS:
-        panel[f"raw_{column}"] = panel[column]
+    want_execution = args.phase in ("all", "execution")
+    want_dataset = args.phase in ("all", "dataset")
+    if want_execution:
+        for column in gold_bridge.PRICE_COLUMNS:
+            panel[f"raw_{column}"] = panel[column]
     adjusted = gold_bridge.apply_adjustment(panel, factors, method=args.adjustment)
     del panel
     masked = gold_bridge.build_masks(
@@ -455,51 +508,19 @@ def main() -> int:
     del adjusted
     price_limit_stats = dict(masked.attrs.get("price_limit_stats", {}))
 
-    print("      building the certified raw execution panel ...", flush=True)
     raw_columns = [f"raw_{c}" for c in gold_bridge.PRICE_COLUMNS]
-    traded = masked[["symbol", "trade_date", *raw_columns, "volume", "amount",
-                     "serving_provider", "mask_is_suspended", "mask_is_st",
-                     "mask_limit_up", "mask_limit_down"]].rename(
-        columns={f"raw_{c}": c for c in gold_bridge.PRICE_COLUMNS})
-    traded["available_at"] = pd.to_datetime(traded["trade_date"]) + pd.Timedelta(hours=15)
-    execution, execution_stats = execution_panel.build_execution_panel(
-        traded,
-        session_gaps=_read(u0 / "panel/session_gaps.parquet"),
-        factors=factors,
-        corporate_actions=_read(u0 / "pit/corporate_actions.parquet"),
-        st=st, st_coverage=st_coverage,
-        start=args.start_date or None, end=args.end_date or None,
-    )
-    del traded
-    execution_panel.verify_execution_panel(execution)
-    execution.to_parquet(target / "execution_panel.parquet", index=False)
-    execution_hash = _frame_hash(execution)
-    (target / "execution_panel_manifest.json").write_text(json.dumps({
-        "generated": _now(),
-        "source_commit": _source_commit(),
-        "schema": execution_panel.EXECUTION_PANEL_SCHEMA,
-        "content_hash": execution_hash,
-        "file_sha256_16": _file_sha256(target / "execution_panel.parquet"),
-        "adjustment_method": contracts.ADJUST_NONE,
-        "columns": list(execution.columns),
-        "inputs": {
-            "panel": "runtime/data/u0/panel/daily_bars_raw.parquet",
-            "session_gaps": "runtime/data/u0/panel/session_gaps.parquet",
-            "adjust_factors": "runtime/data/u0/pit/adjust_factors.parquet",
-            "corporate_actions": "runtime/data/u0/pit/corporate_actions.parquet",
-            "st_intervals": "runtime/data/u0/pit/st_intervals.parquet",
-            "suspension_intervals": "runtime/data/u0/pit/suspension_intervals.parquet",
-        },
-        "st_coverage_exchanges": sorted(st_coverage),
-        "available_at_rule": "trade_date 15:00 Asia/Shanghai (close of the session)",
-        **execution_stats,
-    }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    print(f"      {execution_panel.execution_panel_summary(execution_stats)}", flush=True)
-    del execution
+    if want_execution:
+        _write_execution_panel(masked, raw_columns=raw_columns, u0=u0, target=target,
+                               factors=factors, st=st, st_coverage=st_coverage,
+                               start=args.start_date or None, end=args.end_date or None)
+        masked = masked.drop(columns=raw_columns)
+    if not want_dataset:
+        print("[8/8] done (execution phase only)", flush=True)
+        return 0
 
     if args.start_date:
         masked = masked[masked["trade_date"] >= args.start_date]
-    masked = masked.drop(columns=["sessions_since_listing", *raw_columns])
+    masked = masked.drop(columns=["sessions_since_listing"])
     mask_rows_by_exchange = gold_bridge.mask_rows_by_exchange(
         masked, [c for c in masked.columns if c.startswith("mask_")])
 

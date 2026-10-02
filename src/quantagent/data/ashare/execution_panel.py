@@ -128,6 +128,7 @@ def build_execution_panel(
     st_coverage: RegisterCoverage = False,
     start: Any = None,
     end: Any = None,
+    copy: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Assemble the execution panel from raw traded bars + U0 gap/CA tables.
 
@@ -136,7 +137,8 @@ def build_execution_panel(
     the gold masks ``mask_is_suspended / mask_is_st / mask_limit_up /
     mask_limit_down`` (see :func:`gold_bridge.build_masks`). It may include a
     look-back before ``start`` so the first in-window gap can carry a close;
-    rows outside ``[start, end]`` are trimmed at the end.
+    rows outside ``[start, end]`` are trimmed at the end. ``copy=False`` lets a
+    caller that hands over a frame it no longer needs avoid a full-panel copy.
     """
     required = {"symbol", "trade_date", "open", "high", "low", "close", "volume",
                 "amount", "mask_is_suspended", "mask_is_st", "mask_limit_up",
@@ -151,7 +153,7 @@ def build_execution_panel(
                 f"execution panel needs raw traded prices; got adjustment {sorted(methods)}")
 
     stats: dict[str, Any] = {}
-    bars = traded.copy()
+    bars = traded.copy() if copy else traded
     bars["trade_date"] = pd.to_datetime(bars["trade_date"]).dt.normalize()
     bars["gap_classification"] = GAP_TRADED
     bars["suspension_status"] = bars["mask_is_suspended"].astype(str)

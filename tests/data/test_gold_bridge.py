@@ -436,6 +436,12 @@ class TestPriceLimitMasks:
         assert (masked["mask_seasoning"] == "FALSE").all()
         assert full["sessions_since_listing"].tolist() == list(range(30))
 
+    def test_usd_b_shares_with_a_sub_cent_tick_are_not_claimed(self):
+        masked = self._masks([0.500, 0.550], symbol="900901.SH",
+                             master=_limit_master("900901.SH", "SH_Main"))
+        assert masked["mask_limit_up"].iloc[1] == "UNKNOWN"
+        assert masked.attrs["price_limit_stats"]["sub_cent_tick_rows"] == 2
+
     def test_adjusted_prices_without_a_factor_are_refused(self):
         panel = _with_sessions(_limit_panel([10.0, 11.0]))
         panel["adjustment_method"] = contracts.ADJUST_HFQ
