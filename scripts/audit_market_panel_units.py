@@ -84,7 +84,16 @@ def _markdown(report: dict, panel: Path, elapsed: float) -> str:
             f"{f('median_amount_ratio_vs_u0')} | {row.get('rows_qfq_as_of_fetch', 'n/a')} | "
             f"{row.get('pit_stamped_rows_refuted', 'n/a')} |"
         )
-    lines += ["", "Adjustment basis, (symbol, source) groups:", ""]
+    lines += [
+        "",
+        "价格口径 price basis: `raw` = ratio to U0 raw ≈ 1; `qfq_*` = ratio (or difference) "
+        "constant between and stepping AT U0 ex-dates, i.e. forward-adjusted as of the fetch "
+        "date; `constant_scaled` = non-1 ratio with no step in window. Any non-raw basis "
+        "under a point_in_time_valid=True stamp refutes that stamp.",
+        "",
+        "Adjustment basis, (symbol, source) groups:",
+        "",
+    ]
     for source, counts in report["adjustment_basis_symbol_counts_by_source"].items():
         lines.append(f"- {source}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     lines += ["", "Per-board detail is in the JSON report (`by_source_board`)."]
@@ -115,6 +124,9 @@ def main(argv=None) -> int:
     reference = None
     if args.u0 and args.u0.exists():
         reference = _load(args.u0, ("symbol", "trade_date", "close", "volume", "amount"), start, end)
+    else:
+        print(f"WARNING: U0 raw reference not found at {args.u0}; adjustment basis and the "
+              "PIT claim will be reported UNVERIFIABLE (pass --u0)", file=sys.stderr)
     ex_dates = (pd.read_parquet(args.ex_dates, columns=["symbol", "effective_date"])
                 if args.ex_dates and args.ex_dates.exists() else None)
     report = audit_market_panel(panel, reference, ex_dates)

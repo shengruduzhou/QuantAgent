@@ -97,7 +97,11 @@ def classify_adjustment_basis(
                   & frame["source"].eq(frame["source"].shift()))
     dlog = np.log(frame["ratio"]).diff().where(same_group)
     ddiff = frame["diff"].diff().where(same_group)
-    frame["mult_step"] = dlog.abs() > tol.step_log
+    # Vendor-adjusted prices are rounded to the 0.01 tick, so on a 4-CNY stock
+    # the ratio jitters by ~0.25% from rounding alone. A step must exceed that
+    # rounding noise (one tick relative to the smaller adjusted close).
+    rounding = 0.01 / pd.concat([frame["close"], frame["close"].shift()], axis=1).min(axis=1)
+    frame["mult_step"] = dlog.abs() > (tol.step_log + rounding)
     frame["sub_step"] = ddiff.abs() > tol.step_abs
     frame["pair"] = same_group
 

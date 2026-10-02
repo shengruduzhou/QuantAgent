@@ -88,8 +88,8 @@ def _with_ex_date(kind: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         panel.loc[before, ["open", "high", "low", "close"]] *= 0.95
         panel.loc[~before, ["open", "high", "low", "close"]] *= 0.99
     else:
-        panel.loc[before, ["open", "high", "low", "close"]] -= 0.50
-        panel.loc[~before, ["open", "high", "low", "close"]] -= 0.10
+        panel.loc[before, ["open", "high", "low", "close"]] -= 3.00
+        panel.loc[~before, ["open", "high", "low", "close"]] -= 1.00
     joined = panel.merge(u0[["trade_date", "close"]].rename(columns={"close": "close_ref"}),
                          on="trade_date")
     joined["source"] = "vendor"
