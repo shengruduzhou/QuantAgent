@@ -151,6 +151,16 @@ class TestPortfolioRisk:
         assert "daily_loss" in decision.failed
         assert engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
 
+    def test_default_daily_loss_breaker_is_a_fraction_of_opening_equity(self, portfolio):
+        engine = rk.RiskEngine(rk.RiskLimits())
+        engine.check_portfolio(portfolio, {})
+        opening = engine.session_start_equity
+        portfolio.cash -= 0.03 * opening  # an ordinary bad day
+        assert "daily_loss" not in engine.check_portfolio(portfolio, {}).failed
+        portfolio.cash -= 0.03 * opening  # now 6% down on the session
+        assert "daily_loss" in engine.check_portfolio(portfolio, {}).failed
+        assert engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+
     def test_drawdown_triggers_kill_switch(self, portfolio):
         engine = rk.RiskEngine(rk.RiskLimits(max_drawdown=0.05,
                                              max_daily_loss=1e12))

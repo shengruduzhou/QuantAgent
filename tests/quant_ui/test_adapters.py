@@ -134,8 +134,8 @@ def test_risk_rules_are_the_limits_the_paper_venue_enforces(quant_ui_settings) -
 
     assert rules["max_single_name_weight"]["threshold"] == enforced.max_single_name_weight
     assert rules["max_drawdown"]["threshold"] == enforced.max_drawdown
-    assert rules["max_daily_loss"]["threshold"] == enforced.max_daily_loss
-    assert rules["max_daily_loss"]["unit"] == "cny"
+    assert rules["max_daily_loss"]["threshold"] == enforced.max_daily_loss_fraction
+    assert rules["max_daily_loss"]["unit"] == "fraction_of_session_opening_equity"
     assert all(rule["codeLocation"].startswith("src/quantagent/paper/") for rule in rules.values())
 
 

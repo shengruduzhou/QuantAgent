@@ -88,7 +88,13 @@ class RiskLimits:
     max_industry_weight: float = 0.30
     max_gross_exposure: float = 1.0
     max_daily_turnover: float = 2.0
-    max_daily_loss: float = 20_000.0
+    #: Daily-loss breaker as a fraction of the session's opening equity. A
+    #: diversified long-only book loses 5% in a day only on tail days (the
+    #: certified-panel top-50 book's 99% one-day VaR was 5.86%); a fixed 20,000
+    #: CNY on a 1M book (2%) latched reduce-only on roughly one day in ten.
+    max_daily_loss_fraction: float = 0.05
+    #: Optional absolute CNY cap applied in addition to the fraction.
+    max_daily_loss: float | None = None
     max_drawdown: float = 0.20
     max_participation: float = 0.10
     #: A quote older than this is not a price, it is a memory.
@@ -268,6 +274,15 @@ class RiskEngine:
         self._state_portfolio_id = "risk"
         if state_ledger is not None:
             self.bind_state_ledger(state_ledger)
+
+    def daily_loss_limit_cny(self) -> float:
+        """Tightest of the fractional and (optional) absolute daily-loss caps."""
+        caps = []
+        if self.session_start_equity is not None and self.limits.max_daily_loss_fraction is not None:
+            caps.append(float(self.limits.max_daily_loss_fraction) * float(self.session_start_equity))
+        if self.limits.max_daily_loss is not None:
+            caps.append(float(self.limits.max_daily_loss))
+        return min(caps) if caps else float("inf")
 
     # -- durable state -----------------------------------------------------
     def bind_state_ledger(self, ledger: lg.EventLedger, *, portfolio_id: str = "risk") -> None:
@@ -592,9 +607,10 @@ class RiskEngine:
                     self.limits.max_industry_weight, value / equity))
 
         daily_loss = self.session_start_equity - equity
+        loss_limit = self.daily_loss_limit_cny()
         checks.append(RiskCheck(
-            "daily_loss", daily_loss <= self.limits.max_daily_loss,
-            "daily loss within limit", self.limits.max_daily_loss, daily_loss))
+            "daily_loss", daily_loss <= loss_limit,
+            "daily loss within limit", loss_limit, daily_loss))
 
         drawdown = (self.peak_equity - equity) / self.peak_equity if self.peak_equity else 0.0
         checks.append(RiskCheck(

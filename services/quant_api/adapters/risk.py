@@ -121,9 +121,9 @@ class RiskAdapter:
             {
                 "id": "max_daily_loss",
                 "name": "Daily loss kill switch",
-                "description": "单个交易日亏损超过阈值后锁定，只允许减仓，需人工解除。",
-                "threshold": limits.max_daily_loss,
-                "unit": "cny",
+                "description": "单个交易日亏损超过开盘权益的该比例后锁定，只允许减仓，需人工解除。",
+                "threshold": limits.max_daily_loss_fraction,
+                "unit": "fraction_of_session_opening_equity",
                 "enforcedAt": "portfolio_after_fill_and_session_open",
                 "enabled": True,
                 "codeLocation": venue,
