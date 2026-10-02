@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 import math
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from quantagent.paper import ledger as lg
 from quantagent.paper.orders import BUY, SELL, Order
@@ -139,20 +139,51 @@ class RiskDecision:
 
 
 class KillSwitch:
-    """Scoped, latching kill switch. Only a human clears it."""
+    """Scoped, latching kill switch. Only a human clears it.
+
+    With a ``journal`` attached every trigger and clear is appended to a
+    durable ledger, and `restore` rebuilds the latched set from it. Without
+    that a restart (crash, deploy, OOM) silently cleared every switch, which
+    made a restart the easiest kill-switch bypass there was.
+    """
 
     def __init__(self) -> None:
         self._triggered: dict[str, dict[str, Any]] = {}
+        #: ``journal(event_type, payload)`` persists a state change, or None.
+        self.journal: Callable[[str, dict[str, Any]], Any] | None = None
 
     def trigger(self, scope: str, reason: str, *, key: str | None = None) -> dict[str, Any]:
         if scope not in SCOPES:
             raise ValueError(f"unknown kill-switch scope {scope!r}; known: {list(SCOPES)}")
+        existing = self._triggered.get(self._id(scope, key))
+        if existing is not None:
+            # Latched: the first breach is the record; a repeat adds nothing.
+            return existing
         record = {
             "scope": scope, "key": key, "reason": reason,
             "triggered_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        # In memory first: if persisting fails the switch is still on here,
+        # which is the safe direction.
         self._triggered[self._id(scope, key)] = record
+        if self.journal is not None:
+            self.journal(lg.KILL_SWITCH_TRIGGERED, dict(record))
         return record
+
+    def restore(self, events: Iterable[lg.Event]) -> None:
+        """Rebuild the latched set from durable trigger/clear events."""
+        for event in events:
+            payload = event.payload
+            scope = str(payload.get("scope") or SCOPE_GLOBAL)
+            key = payload.get("key")
+            if event.event_type == lg.KILL_SWITCH_TRIGGERED:
+                self._triggered.setdefault(self._id(scope, key), {
+                    "scope": scope, "key": key,
+                    "reason": str(payload.get("reason") or "unknown"),
+                    "triggered_at": payload.get("triggered_at") or event.event_time,
+                })
+            elif event.event_type == lg.KILL_SWITCH_CLEARED:
+                self._triggered.pop(self._id(scope, key), None)
 
     def is_triggered(self, scope: str, key: str | None = None) -> bool:
         if self._id(SCOPE_GLOBAL, None) in self._triggered:
@@ -191,7 +222,13 @@ class KillSwitch:
                 "clearing a kill switch requires explicit human confirmation; "
                 "an automatic reset would defeat the control entirely",
             )
-        return self._triggered.pop(self._id(scope, key), None) is not None
+        cleared = self._triggered.pop(self._id(scope, key), None) is not None
+        if cleared and self.journal is not None:
+            self.journal(lg.KILL_SWITCH_CLEARED, {
+                "scope": scope, "key": key, "human_confirmation": True,
+                "cleared_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            })
+        return cleared
 
     @staticmethod
     def _id(scope: str, key: str | None) -> str:
@@ -208,15 +245,117 @@ class RiskEngine:
         kill_switch: KillSwitch | None = None,
         event_ledger: lg.EventLedger | None = None,
         run_id: str = "risk",
+        state_ledger: lg.EventLedger | None = None,
     ) -> None:
         self.limits = limits or RiskLimits()
         self.kill_switch = kill_switch or KillSwitch()
         self.ledger = event_ledger
         self.run_id = run_id
+        #: Exchange session (YYYY-MM-DD) the turnover and daily-loss figures
+        #: below belong to. None until a venue starts a session.
+        self.session_date: str | None = None
         self.session_turnover: float = 0.0
         self.session_start_equity: float | None = None
+        #: All-time peak equity; drawdown is measured against it.
         self.peak_equity: float | None = None
+        self.last_portfolio_decision: RiskDecision | None = None
         self._seen_orders: set[str] = set()
+        self._turnover_by_session: dict[str, float] = {}
+        self._start_equity_by_session: dict[str, float] = {}
+        #: (session, equity) of the newest durable mark-to-market.
+        self._last_close: tuple[str | None, float] | None = None
+        self.state_ledger: lg.EventLedger | None = None
+        self._state_portfolio_id = "risk"
+        if state_ledger is not None:
+            self.bind_state_ledger(state_ledger)
+
+    # -- durable state -----------------------------------------------------
+    def bind_state_ledger(self, ledger: lg.EventLedger, *, portfolio_id: str = "risk") -> None:
+        """Persist risk state to ``ledger`` and rebuild it from what is there.
+
+        Kill switches, per-session turnover, session-start equity and the peak
+        equity were in-memory only: a restart cleared a latched switch, forgot
+        today's consumed turnover and reset the drawdown reference. They are now
+        ledger events, replayed here on construction.
+        """
+        if self.state_ledger is not None:
+            if self.state_ledger.path.resolve() != ledger.path.resolve():
+                raise ValueError(
+                    "risk state is already bound to another ledger; two records of "
+                    "one account's risk state cannot both be authoritative"
+                )
+            return
+        self.state_ledger = ledger
+        self._state_portfolio_id = portfolio_id
+        events = list(ledger.read())
+        self.kill_switch.restore(events)
+        self.kill_switch.journal = self._journal
+        for event in events:
+            payload = event.payload
+            if event.event_type == lg.RISK_STATE_UPDATED:
+                session = payload.get("session")
+                if session and _finite(payload.get("session_turnover")):
+                    self._turnover_by_session[session] = float(payload["session_turnover"])
+                if session and _finite(payload.get("session_start_equity")):
+                    self._start_equity_by_session.setdefault(
+                        session, float(payload["session_start_equity"])
+                    )
+                if _finite(payload.get("peak_equity")):
+                    self._observe_peak(float(payload["peak_equity"]))
+            elif event.event_type == lg.MARK_TO_MARKET and _finite(payload.get("equity")):
+                equity = float(payload["equity"])
+                self._observe_peak(equity)
+                self._last_close = ((event.market_time or "")[:10] or None, equity)
+
+    def _journal(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if self.state_ledger is None:
+            return
+        self.state_ledger.append(
+            event_type, run_id=self.run_id, portfolio_id=self._state_portfolio_id,
+            payload=dict(payload),
+        )
+
+    def _observe_peak(self, equity: float) -> bool:
+        if self.peak_equity is None or equity > self.peak_equity:
+            self.peak_equity = equity
+            return True
+        return False
+
+    def observe_inception_equity(self, equity: float) -> None:
+        """The account's opening capital is a NAV observation like any other."""
+        if _finite(equity) and float(equity) > 0:
+            self._observe_peak(float(equity))
+
+    def begin_session(self, session: str, *, opening_equity: float | None = None) -> None:
+        """Key turnover and daily loss to an exchange session, not process life.
+
+        A long-lived process used to refuse day-2 orders on day-1 turnover, and
+        a restart forgot turnover consumed today. Opening equity is the persisted
+        figure for this session if any, else the caller's valuation at the marks
+        known before the session's first quote, else the newest durable close.
+        """
+        session = str(session)[:10]
+        if session == self.session_date:
+            return
+        self.session_date = session
+        self.session_turnover = self._turnover_by_session.get(session, 0.0)
+        start = self._start_equity_by_session.get(session)
+        if start is None and opening_equity is not None and _finite(opening_equity):
+            start = float(opening_equity)
+        if (
+            start is None and self._last_close is not None
+            and self._last_close[0] is not None and self._last_close[0] < session
+        ):
+            start = self._last_close[1]
+        self.session_start_equity = start
+        if start is not None:
+            self._record_session_start(session, start)
+
+    def _record_session_start(self, session: str, equity: float) -> None:
+        if session in self._start_equity_by_session:
+            return
+        self._start_equity_by_session[session] = equity
+        self._journal(lg.RISK_STATE_UPDATED, {"session": session, "session_start_equity": equity})
 
     # -- pre-trade ---------------------------------------------------------
     def check_order(
@@ -352,6 +491,11 @@ class RiskEngine:
         if decision.approved:
             self._seen_orders.add(order.order_id)
             self.session_turnover += notional
+            if self.session_date is not None:
+                self._turnover_by_session[self.session_date] = self.session_turnover
+                self._journal(lg.RISK_STATE_UPDATED, {
+                    "session": self.session_date, "session_turnover": self.session_turnover,
+                })
         self._emit(decision, order)
         return decision
 
@@ -401,6 +545,7 @@ class RiskEngine:
                 "book_priceable", False,
                 "held positions without a mark; portfolio limits are unmeasurable",
                 measured=list(unpriceable))])
+            self.last_portfolio_decision = decision
             self._emit(decision, None)
             return decision
         checks: list[RiskCheck] = []
@@ -408,7 +553,12 @@ class RiskEngine:
 
         if self.session_start_equity is None:
             self.session_start_equity = equity
-        self.peak_equity = max(self.peak_equity or equity, equity)
+            if self.session_date is not None:
+                self._record_session_start(self.session_date, equity)
+        if self._observe_peak(equity):
+            self._journal(lg.RISK_STATE_UPDATED, {
+                "session": self.session_date, "peak_equity": equity,
+            })
 
         gross = portfolio.gross_exposure(prices) / equity
         checks.append(RiskCheck(
@@ -466,6 +616,7 @@ class RiskEngine:
                 self.kill_switch.trigger(SCOPE_PORTFOLIO,
                                          f"drawdown {check.measured:.2%} exceeds "
                                          f"{check.limit:.2%}")
+        self.last_portfolio_decision = decision
         self._emit(decision, None)
         return decision
 

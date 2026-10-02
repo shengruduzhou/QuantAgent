@@ -59,6 +59,7 @@ from quantagent.paper.portfolio import (
     InsufficientSellable,
     Portfolio,
 )
+from quantagent.paper.risk import SCOPE_GLOBAL, KillSwitch, RiskDecision, RiskEngine
 
 
 class InvalidMarketSnapshot(ValueError):
@@ -264,9 +265,23 @@ class PaperBroker:
         )
         self.lineage = lineage or Lineage(run_id=run_id)
         self._canonical_ids: dict[str, str] = {}
-        self.killed: bool = False
-        self.kill_reason: str | None = None
         self.last_order_decision = None
+        #: Exchange session the venue is in (newest quote date observed).
+        self.session: str | None = None
+        # One kill switch for the venue: the risk engine's when attached, so a
+        # switch latched by a portfolio breach and one pulled by an operator are
+        # the same object. Both are journalled to this venue's operational
+        # ledger and rebuilt from it here — a restart used to clear them.
+        if self.risk_engine is not None:
+            self.risk_engine.bind_state_ledger(
+                self.ledger, portfolio_id=self.portfolio.portfolio_id
+            )
+            self.risk_engine.observe_inception_equity(self.portfolio.initial_cash)
+            self.kill_switch = self.risk_engine.kill_switch
+        else:
+            self.kill_switch = KillSwitch()
+            self.kill_switch.restore(self.ledger.read())
+            self.kill_switch.journal = self._emit
 
     # -- ledger helper -----------------------------------------------------
     def _emit(self, event_type: str, payload: Mapping[str, Any], *,
@@ -354,9 +369,23 @@ class PaperBroker:
         self._emit(lg.KILL_SWITCH_ARMED, {"scope": scope, "reason": reason})
 
     def trigger_kill_switch(self, reason: str, *, scope: str = "GLOBAL") -> None:
-        self.killed = True
-        self.kill_reason = reason
-        self._emit(lg.KILL_SWITCH_TRIGGERED, {"scope": scope, "reason": reason})
+        """Latch a switch; persisted as `lg.KILL_SWITCH_TRIGGERED` by the journal."""
+        self.kill_switch.trigger(scope, reason)
+
+    def clear_kill_switch(self, scope: str = "GLOBAL", *, key: str | None = None,
+                          human_confirmation: bool = False) -> bool:
+        """Clear a latched switch. Refuses without explicit human confirmation."""
+        return self.kill_switch.clear(scope, key, human_confirmation=human_confirmation)
+
+    @property
+    def killed(self) -> bool:
+        """Whether a GLOBAL switch halts this venue entirely."""
+        return any(r["scope"] == SCOPE_GLOBAL for r in self.kill_switch.active())
+
+    @property
+    def kill_reason(self) -> str | None:
+        active = self.kill_switch.active()
+        return active[0]["reason"] if active else None
 
     # -- validation --------------------------------------------------------
     def _reject(self, order: Order, reason: str, market: MarketSnapshot | None) -> Order:
@@ -373,8 +402,10 @@ class PaperBroker:
 
     def _validate(self, order: Order, market: MarketSnapshot) -> str | None:
         """Return a rejection reason, or None when the order may proceed."""
-        if self.killed:
-            return f"kill switch active: {self.kill_reason}"
+        blocking = self.kill_switch.blocking(order.side, order.strategy_id)
+        if blocking:
+            # PORTFOLIO scope is reduce-only: a SELL passes, a BUY does not.
+            return f"kill switch active: {blocking[0]['reason']}"
 
         invalid = market.invalid_reason()
         if invalid is not None:
@@ -447,13 +478,21 @@ class PaperBroker:
 
         return None
 
-    # -- marks -------------------------------------------------------------
+    # -- marks and sessions ------------------------------------------------
     def observe(self, market: MarketSnapshot) -> None:
-        """Record a snapshot's price as the symbol's mark if it is the newest."""
+        """Record a snapshot's price as the symbol's mark if it is the newest.
+
+        The first quote of a later exchange session starts that session: the
+        risk engine re-keys turnover and daily loss to it and the portfolio
+        limits (drawdown, daily loss, gross, concentration) are evaluated.
+        """
         stamp = market.observed_at
         if stamp is None or market.invalid_reason() is not None:
             return
+        session = str(market.trade_date)[:10]
+        opening = self._opening_equity(session)
         self._record_mark(market.symbol, float(market.last_price), stamp)
+        self._enter_session(session, opening)
 
     def observe_marks(self, prices: Mapping[str, float], *, trade_date: str,
                       clock: str) -> None:
@@ -463,11 +502,45 @@ class PaperBroker:
         session; handing the venue the whole map is what lets the risk engine
         value the entire book rather than only the order's own symbol.
         """
-        stamp = datetime.fromisoformat(f"{str(trade_date)[:10]}T{str(clock)[:8]}")
+        session = str(trade_date)[:10]
+        stamp = datetime.fromisoformat(f"{session}T{str(clock)[:8]}")
+        opening = self._opening_equity(session)
         for symbol, price in prices.items():
             value = float(price)
             if math.isfinite(value) and value > 0:
                 self._record_mark(str(symbol), value, stamp)
+        self._enter_session(session, opening)
+
+    def _opening_equity(self, session: str) -> float | None:
+        """Book value at the marks known before ``session``'s first quote."""
+        if self.session is not None and session <= self.session:
+            return None
+        if self.portfolio.unpriceable(self.marks):
+            return None
+        return self.portfolio.equity(self.marks)
+
+    def _enter_session(self, session: str, opening_equity: float | None) -> None:
+        if self.session is not None and session <= self.session:
+            return
+        self.session = session
+        if self.risk_engine is not None:
+            self.risk_engine.begin_session(session, opening_equity=opening_equity)
+            self.check_portfolio()
+
+    def check_portfolio(self) -> RiskDecision | None:
+        """Evaluate portfolio limits on the book at the venue's marks.
+
+        Runs at the start of every session and after every fill. A drawdown or
+        daily-loss breach latches the PORTFOLIO kill switch, which refuses
+        risk-increasing orders and still lets the book be reduced. Before this
+        was wired nothing called `check_portfolio`, and a book down 24% kept
+        buying.
+        """
+        if self.risk_engine is None:
+            return None
+        return self.risk_engine.check_portfolio(
+            self.portfolio, dict(self.marks), industry_map=self.industry_map or None
+        )
 
     def _record_mark(self, symbol: str, price: float, stamp: datetime) -> None:
         previous = self._mark_times.get(symbol)
@@ -622,6 +695,7 @@ class PaperBroker:
             order.transition(FILLED)
         else:
             order.transition(PARTIALLY_FILLED)
+        self.check_portfolio()
         return True
 
     def submit_parent(

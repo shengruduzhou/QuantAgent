@@ -153,7 +153,7 @@ def test_portfolio_kill_switch_is_reduce_only(tmp_path) -> None:
         po.Order(symbol=A, side=po.SELL, quantity=1_000, limit_price=10.0), snapshot(A)
     )
 
-    assert refused.state == po.REJECTED and "kill_switch" in refused.reject_reason
+    assert refused.state == po.REJECTED and "kill switch" in refused.reject_reason
     assert allowed.state == po.FILLED
 
 
@@ -168,4 +168,4 @@ def test_global_kill_switch_blocks_sells_too(tmp_path) -> None:
         po.Order(symbol=A, side=po.SELL, quantity=1_000, limit_price=10.0), snapshot(A)
     )
 
-    assert order.state == po.REJECTED and "kill_switch" in order.reject_reason
+    assert order.state == po.REJECTED and "kill switch" in order.reject_reason
