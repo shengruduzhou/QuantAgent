@@ -270,6 +270,7 @@ class PaperOrderService:
         broker_config: BrokerConfig | None = None,
         risk_limits: RiskLimits | None = None,
         acquire_writer_lock: bool = True,
+        industry_map: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -326,6 +327,10 @@ class PaperOrderService:
                 ),
                 run_id="paper_api",
             ),
+            # Without a map, a BUY is refused `industry_unmeasured` while the
+            # industry limit is below 1.0: unmeasured concentration is not
+            # "within limit".
+            industry_map=industry_map,
         )
         self.adapter = PaperBrokerAdapter(self.broker, self._market_for)
         self.manager = OrderManager(
@@ -480,6 +485,26 @@ class PaperOrderService:
             )
         return snapshot
 
+    def _mark_held_positions(self, trade_date: str) -> None:
+        """Give the venue a mark for every held name on the order's session.
+
+        The risk engine values the whole book. A held name the venue has never
+        seen a quote for (e.g. after a restart) leaves the book unvaluable, and
+        a BUY is then refused `book_priceable` rather than sized against a
+        partial book. A missing quote here is left missing, never invented.
+        """
+        if self.market_source is None:
+            return
+        for symbol, position in list(self.broker.portfolio.positions.items()):
+            if position.is_flat:
+                continue
+            try:
+                snapshot = self.market_source(symbol, trade_date)
+            except InvalidMarketSnapshot:
+                continue
+            if snapshot is not None:
+                self.broker.observe(snapshot)
+
     def _restore_portfolio(self) -> None:
         _, account = self.ledger.replay(initial_cash=self.initial_cash)
         portfolio = self.broker.portfolio
@@ -628,6 +653,7 @@ class PaperOrderService:
             # venue used to leave CREATED + RISK_APPROVED + SUBMITTED behind with
             # no working order anywhere.
             self._market_for(request.symbol, request.trade_date)
+            self._mark_held_positions(request.trade_date)
             states = self.manager.submit_orders([wire])
         except SubmissionRejected as exc:
             # No market data: nothing economic happened, and saying so is more

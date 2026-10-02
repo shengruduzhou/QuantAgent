@@ -30,6 +30,12 @@ def order(qty=10_000, price=9.00, side=BUY, **kw):
                  order_type=MARKETABLE_LIMIT, limit_price=price, **kw)
 
 
+#: A BUY must now say which industry it joins: an unmeasured industry is
+#: refused (`industry_unmeasured`) instead of the old silent skip, so tests that
+#: expect an approval supply the measurement explicitly.
+MEASURED_INDUSTRY = {"industry": "银行", "industry_weights": {}}
+
+
 class TestRejectionIsFinal:
     def test_enforce_raises_and_offers_no_override(self, engine, portfolio):
         decision = engine.check_order(order(qty=1_000_000), portfolio,
@@ -105,8 +111,10 @@ class TestPreTradeRisk:
 
     def test_duplicate_order_id_rejected(self, engine, portfolio):
         first = order(qty=100)
-        assert engine.check_order(first, portfolio, reference_price=9.00).approved
-        again = engine.check_order(first, portfolio, reference_price=9.00)
+        assert engine.check_order(first, portfolio, reference_price=9.00,
+                                  **MEASURED_INDUSTRY).approved
+        again = engine.check_order(first, portfolio, reference_price=9.00,
+                                   **MEASURED_INDUSTRY)
         assert "duplicate_order" in again.failed
 
     def test_unapproved_model_rejected(self, engine, portfolio):
@@ -129,7 +137,8 @@ class TestPreTradeRisk:
 
     def test_clean_order_approved(self, engine, portfolio):
         decision = engine.check_order(order(qty=1_000), portfolio,
-                                      reference_price=9.00, session_volume=10_000_000)
+                                      reference_price=9.00, session_volume=10_000_000,
+                                      **MEASURED_INDUSTRY)
         assert decision.approved, decision.failed
 
 
@@ -248,7 +257,8 @@ class TestKillSwitch:
     def test_decisions_are_written_to_the_ledger(self, tmp_path, portfolio):
         ledger = lg.EventLedger(tmp_path / "l.jsonl")
         engine = rk.RiskEngine(rk.RiskLimits(), event_ledger=ledger, run_id="R")
-        engine.check_order(order(qty=1_000), portfolio, reference_price=9.00)
+        engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                           **MEASURED_INDUSTRY)
         engine.check_order(order(qty=999_999), portfolio, reference_price=9.00)
         kinds = [e.event_type for e in ledger.read()]
         assert lg.RISK_APPROVED in kinds

@@ -150,6 +150,18 @@ class MarketSnapshot:
     def phase(self) -> str:
         return mc.session_phase(self.clock[:5], board=self.board)
 
+    @property
+    def observed_at(self) -> datetime | None:
+        """Exchange-local (Asia/Shanghai, naive) time of this quote, or None."""
+        try:
+            return datetime.fromisoformat(f"{str(self.trade_date)[:10]}T{str(self.clock)[:8]}")
+        except ValueError:
+            return None
+
+
+#: Industry bucket for held names missing from the venue's industry map.
+UNKNOWN_INDUSTRY = "__unknown__"
+
 
 @dataclass
 class BrokerConfig:
@@ -180,6 +192,7 @@ class PaperBroker:
         canonical_ledger: CanonicalLedger | None = None,
         book: OrderBook | None = None,
         risk_engine: "RiskEngine | None" = None,
+        industry_map: Mapping[str, str] | None = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = event_ledger
@@ -199,6 +212,17 @@ class PaperBroker:
         # in, so "no portfolio risk was applied" is readable from the run rather
         # than assumed from the absence of rejections.
         self.risk_engine = risk_engine
+        # symbol -> industry, used to measure industry concentration. Absent or
+        # incomplete while the industry limit is below 1.0 means a BUY of an
+        # unmapped name is refused as `industry_unmeasured`, never waved through.
+        self.industry_map: dict[str, str] = dict(industry_map or {})
+        # Last mark per symbol from every snapshot this venue has seen, and the
+        # venue's simulated clock (the newest quote time observed). The risk
+        # engine values the *whole* book against these; valuing it with only the
+        # order's own price raised UnpriceablePosition on the second name held.
+        self.marks: dict[str, float] = {}
+        self._mark_times: dict[str, datetime] = {}
+        self.clock: datetime | None = None
         self.orders: dict[str, Order] = {}
         self.fills: list[Fill] = []
         #: Execution ids already booked. A set rather than a scan over `fills`
@@ -242,6 +266,7 @@ class PaperBroker:
         self._canonical_ids: dict[str, str] = {}
         self.killed: bool = False
         self.kill_reason: str | None = None
+        self.last_order_decision = None
 
     # -- ledger helper -----------------------------------------------------
     def _emit(self, event_type: str, payload: Mapping[str, Any], *,
@@ -404,16 +429,84 @@ class PaperBroker:
         # join. A rejection here is final -- `RiskDecision` deliberately carries
         # no override path.
         if self.risk_engine is not None:
+            prices = dict(self.marks)
+            prices.setdefault(order.symbol, market.last_price)
             decision = self.risk_engine.check_order(
                 order,
                 self.portfolio,
                 reference_price=market.last_price,
                 session_volume=market.session_volume,
+                prices=prices,
+                quote_age_seconds=self.quote_age_seconds(market),
+                industry=self.industry_map.get(order.symbol),
+                industry_weights=self.industry_weights(prices),
             )
+            self.last_order_decision = decision
             if not decision.approved:
                 return "portfolio risk rejected: " + ",".join(decision.failed)
 
         return None
+
+    # -- marks -------------------------------------------------------------
+    def observe(self, market: MarketSnapshot) -> None:
+        """Record a snapshot's price as the symbol's mark if it is the newest."""
+        stamp = market.observed_at
+        if stamp is None or market.invalid_reason() is not None:
+            return
+        self._record_mark(market.symbol, float(market.last_price), stamp)
+
+    def observe_marks(self, prices: Mapping[str, float], *, trade_date: str,
+                      clock: str) -> None:
+        """Record a full mark map observed at one exchange time.
+
+        The continuous loop knows every held and target symbol's price for the
+        session; handing the venue the whole map is what lets the risk engine
+        value the entire book rather than only the order's own symbol.
+        """
+        stamp = datetime.fromisoformat(f"{str(trade_date)[:10]}T{str(clock)[:8]}")
+        for symbol, price in prices.items():
+            value = float(price)
+            if math.isfinite(value) and value > 0:
+                self._record_mark(str(symbol), value, stamp)
+
+    def _record_mark(self, symbol: str, price: float, stamp: datetime) -> None:
+        previous = self._mark_times.get(symbol)
+        if previous is None or stamp >= previous:
+            self.marks[symbol] = price
+            self._mark_times[symbol] = stamp
+        if self.clock is None or stamp > self.clock:
+            self.clock = stamp
+
+    def quote_age_seconds(self, market: MarketSnapshot) -> float:
+        """Age of this quote against the venue clock (newest quote observed).
+
+        A quote older than something the venue has already seen is measured as
+        that much older; a quote whose time cannot be read is infinitely old.
+        """
+        stamp = market.observed_at
+        if stamp is None:
+            return math.inf
+        if self.clock is None or stamp >= self.clock:
+            return 0.0
+        return (self.clock - stamp).total_seconds()
+
+    def unpriceable_symbols(self) -> tuple[str, ...]:
+        return self.portfolio.unpriceable(self.marks)
+
+    def industry_weights(self, prices: Mapping[str, float]) -> dict[str, float] | None:
+        """Held weight per industry, or None when the book cannot be valued."""
+        if self.portfolio.unpriceable(prices):
+            return None
+        equity = max(self.portfolio.equity(prices), 1e-9)
+        weights: dict[str, float] = {}
+        for symbol, position in self.portfolio.positions.items():
+            if position.is_flat:
+                continue
+            industry = self.industry_map.get(symbol, UNKNOWN_INDUSTRY)
+            weights[industry] = weights.get(industry, 0.0) + abs(
+                position.market_value(prices[symbol])
+            ) / equity
+        return weights
 
     # -- pricing -----------------------------------------------------------
     def _execution_price(self, order: Order, market: MarketSnapshot,
@@ -451,6 +544,7 @@ class PaperBroker:
     def submit(self, order: Order, market: MarketSnapshot) -> Order:
         """Validate, accept and attempt to fill a single order."""
         self.orders[order.order_id] = order
+        self.observe(market)
         if order.order_id not in self._canonical_ids:
             self._canonical_open(order, trade_date=getattr(market, 'trade_date', None))
 

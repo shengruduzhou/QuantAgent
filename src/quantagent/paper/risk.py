@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
+import math
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from quantagent.paper import ledger as lg
@@ -36,6 +38,36 @@ SCOPE_GLOBAL = "GLOBAL"
 SCOPES: tuple[str, ...] = (SCOPE_ORDER, SCOPE_STRATEGY, SCOPE_PORTFOLIO, SCOPE_GLOBAL)
 
 
+def _finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def load_industry_map(path: str | Path) -> dict[str, str]:
+    """symbol -> industry from a sector map (``symbol`` + ``industry`` columns).
+
+    Same rule as the target-weight optimiser's sector lookup (last row per
+    symbol), so the venue and the optimiser measure the same industries. For
+    forward paper trading the current snapshot is the point-in-time map; it is
+    not valid for historical replay.
+    """
+    import pandas as pd
+
+    source = Path(path)
+    frame = (
+        pd.read_parquet(source) if source.suffix.lower() == ".parquet" else pd.read_csv(source)
+    )
+    missing = {"symbol", "industry"} - set(frame.columns)
+    if missing:
+        raise ValueError(f"sector map {source} lacks columns {sorted(missing)}")
+    frame = frame.dropna(subset=["symbol", "industry"])
+    if frame.empty:
+        raise ValueError(f"sector map {source} has no symbol/industry rows")
+    return frame.groupby("symbol")["industry"].last().astype(str).to_dict()
+
+
 class RiskRejection(RuntimeError):
     """Raised when risk refuses an action. Deliberately has no override path."""
 
@@ -51,6 +83,8 @@ class RiskLimits:
     max_order_notional: float = 200_000.0
     max_order_shares: float = 1_000_000.0
     max_single_name_weight: float = 0.10
+    #: While below 1.0 a BUY whose industry is unknown is refused
+    #: (`industry_unmeasured`). 1.0 is the explicit opt-out, never an absent map.
     max_industry_weight: float = 0.30
     max_gross_exposure: float = 1.0
     max_daily_turnover: float = 2.0
@@ -128,6 +162,26 @@ class KillSwitch:
     def active(self) -> list[dict[str, Any]]:
         return list(self._triggered.values())
 
+    def blocking(self, side: str, strategy_id: str | None = None) -> list[dict[str, Any]]:
+        """Switches that refuse an order on ``side``.
+
+        GLOBAL refuses everything. PORTFOLIO is reduce-only: it refuses a
+        risk-increasing BUY and lets a SELL through, because a breached
+        drawdown limit that also froze exits would hold the very loss it exists
+        to cap. STRATEGY refuses that strategy's orders, and every strategy's
+        when triggered without a key.
+        """
+        found: list[dict[str, Any]] = []
+        for record in self._triggered.values():
+            scope, key = record["scope"], record.get("key")
+            if scope == SCOPE_GLOBAL:
+                found.append(record)
+            elif scope == SCOPE_PORTFOLIO and side == BUY:
+                found.append(record)
+            elif scope == SCOPE_STRATEGY and (key is None or key == strategy_id):
+                found.append(record)
+        return found
+
     def clear(self, scope: str, key: str | None = None, *,
               human_confirmation: bool = False) -> bool:
         """Clear a switch. Refuses without explicit human confirmation."""
@@ -173,38 +227,58 @@ class RiskEngine:
         reference_price: float,
         session_volume: float = 0.0,
         prices: Mapping[str, float] | None = None,
-        quote_age_seconds: float = 0.0,
+        quote_age_seconds: float | None = None,
         industry: str | None = None,
         industry_weights: Mapping[str, float] | None = None,
-        model_approved: bool = True,
-        dataset_approved: bool = True,
+        model_approved: bool | None = None,
+        dataset_approved: bool | None = None,
     ) -> RiskDecision:
+        """Pre-trade decision. Never raises for a book it cannot value.
+
+        ``prices`` must be the venue's full mark map. A held position without a
+        mark makes every weight-based limit unmeasurable, so the order is
+        REJECTED with ``book_priceable`` naming the unpriced symbols. Valuing
+        the book with the order's own price only (the previous behaviour)
+        raised ``UnpriceablePosition`` out of the venue on the second name.
+
+        ``model_approved`` / ``dataset_approved`` / ``quote_age_seconds`` left
+        as None mean "not measured by this caller": the check is omitted from
+        the decision record rather than recorded as passed.
+        """
         checks: list[RiskCheck] = []
         prices = dict(prices or {})
         prices.setdefault(order.symbol, reference_price)
-        equity = max(portfolio.equity(prices), 1e-9)
+        unpriceable = portfolio.unpriceable(prices)
+        equity = None if unpriceable else max(portfolio.equity(prices), 1e-9)
         notional = order.quantity * (order.limit_price or reference_price)
 
+        blocking = self.kill_switch.blocking(order.side, order.strategy_id)
         checks.append(RiskCheck(
-            "kill_switch", not self.kill_switch.is_triggered(
-                SCOPE_STRATEGY, order.strategy_id),
-            "no kill switch active for this scope"))
+            "kill_switch", not blocking,
+            "no kill switch blocks this order (PORTFOLIO scope is reduce-only)",
+            measured=[
+                {"scope": r["scope"], "key": r.get("key"), "reason": r["reason"]}
+                for r in blocking
+            ] or None))
 
         checks.append(RiskCheck(
             "duplicate_order", order.order_id not in self._seen_orders,
             "order id has not been submitted before", measured=order.order_id))
 
-        checks.append(RiskCheck(
-            "model_approved", bool(model_approved),
-            "signal comes from an approved model"))
-        checks.append(RiskCheck(
-            "dataset_approved", bool(dataset_approved),
-            "signal comes from an approved dataset"))
+        if model_approved is not None:
+            checks.append(RiskCheck(
+                "model_approved", bool(model_approved),
+                "signal comes from an approved model"))
+        if dataset_approved is not None:
+            checks.append(RiskCheck(
+                "dataset_approved", bool(dataset_approved),
+                "signal comes from an approved dataset"))
 
-        checks.append(RiskCheck(
-            "stale_data", quote_age_seconds <= self.limits.max_quote_age_seconds,
-            "quote is fresh enough to price against",
-            self.limits.max_quote_age_seconds, quote_age_seconds))
+        if quote_age_seconds is not None:
+            checks.append(RiskCheck(
+                "stale_data", quote_age_seconds <= self.limits.max_quote_age_seconds,
+                "quote is fresh enough to price against",
+                self.limits.max_quote_age_seconds, quote_age_seconds))
 
         checks.append(RiskCheck(
             "order_notional", notional <= self.limits.max_order_notional,
@@ -221,12 +295,22 @@ class RiskEngine:
                 "limit price is near the reference price",
                 self.limits.max_price_deviation, deviation))
 
-        if session_volume > 0:
+        if not (_finite(session_volume) and float(session_volume) >= 0):
+            checks.append(RiskCheck(
+                "participation", False,
+                "session volume is not a measurement; participation cannot be bounded",
+                self.limits.max_participation, session_volume))
+        elif session_volume > 0:
             participation = order.quantity / session_volume
             checks.append(RiskCheck(
                 "participation", participation <= self.limits.max_participation,
                 "order participation within limit",
                 self.limits.max_participation, participation))
+
+        checks.append(RiskCheck(
+            "book_priceable", not unpriceable,
+            "every held position has a mark, so book weights are measurable",
+            measured=list(unpriceable)))
 
         if order.side == BUY:
             projected = portfolio.cash - notional
@@ -235,22 +319,19 @@ class RiskEngine:
                 "sufficient cash after this order",
                 self.limits.min_cash_buffer, projected))
 
-            position_value = (
-                portfolio.position(order.symbol).market_value(reference_price) + notional
-            )
-            weight = position_value / equity
-            checks.append(RiskCheck(
-                "single_name_weight", weight <= self.limits.max_single_name_weight,
-                "single-name weight within limit",
-                self.limits.max_single_name_weight, weight))
-
-            if industry and industry_weights is not None:
-                projected_industry = industry_weights.get(industry, 0.0) + notional / equity
+            if equity is not None:
+                position_value = (
+                    portfolio.position(order.symbol).market_value(reference_price) + notional
+                )
+                weight = position_value / equity
                 checks.append(RiskCheck(
-                    "industry_weight",
-                    projected_industry <= self.limits.max_industry_weight,
-                    "industry weight within limit",
-                    self.limits.max_industry_weight, projected_industry))
+                    "single_name_weight", weight <= self.limits.max_single_name_weight,
+                    "single-name weight within limit",
+                    self.limits.max_single_name_weight, weight))
+                checks.extend(self._industry_checks(
+                    order, notional=notional, equity=equity,
+                    industry=industry, industry_weights=industry_weights,
+                ))
         else:
             checks.append(RiskCheck(
                 "position_available",
@@ -258,10 +339,11 @@ class RiskEngine:
                 "sufficient T+1-settled shares",
                 portfolio.sellable(order.symbol), order.quantity))
 
-        turnover = (self.session_turnover + notional) / equity
-        checks.append(RiskCheck(
-            "daily_turnover", turnover <= self.limits.max_daily_turnover,
-            "daily turnover within limit", self.limits.max_daily_turnover, turnover))
+        if equity is not None:
+            turnover = (self.session_turnover + notional) / equity
+            checks.append(RiskCheck(
+                "daily_turnover", turnover <= self.limits.max_daily_turnover,
+                "daily turnover within limit", self.limits.max_daily_turnover, turnover))
 
         decision = RiskDecision(
             verdict=APPROVED if all(c.passed for c in checks) else REJECTED,
@@ -273,6 +355,36 @@ class RiskEngine:
         self._emit(decision, order)
         return decision
 
+    def _industry_checks(
+        self,
+        order: Order,
+        *,
+        notional: float,
+        equity: float,
+        industry: str | None,
+        industry_weights: Mapping[str, float] | None,
+    ) -> list[RiskCheck]:
+        limit = self.limits.max_industry_weight
+        if limit >= 1.0:
+            # The explicit opt-out: no claim about industry concentration.
+            return []
+        if not industry or industry_weights is None:
+            # Unmeasured is not "within limit". Skipping here is what let a
+            # 100% single-sector book through every production venue.
+            return [RiskCheck(
+                "industry_unmeasured", False,
+                "industry limit cannot be measured: the symbol has no industry or "
+                "the book's industry weights were not supplied (a limit of 1.0 is "
+                "the explicit opt-out)",
+                limit,
+                {"symbol": order.symbol, "industry": industry,
+                 "industry_weights_supplied": industry_weights is not None},
+            )]
+        projected_industry = industry_weights.get(industry, 0.0) + notional / equity
+        return [RiskCheck(
+            "industry_weight", projected_industry <= limit,
+            "industry weight within limit", limit, projected_industry)]
+
     # -- portfolio ---------------------------------------------------------
     def check_portfolio(
         self,
@@ -281,6 +393,16 @@ class RiskEngine:
         *,
         industry_map: Mapping[str, str] | None = None,
     ) -> RiskDecision:
+        unpriceable = portfolio.unpriceable(prices)
+        if unpriceable:
+            # Unmeasured is neither a breach nor a pass: no kill switch latches
+            # on it, and no limit is reported as satisfied.
+            decision = RiskDecision(verdict=REJECTED, checks=[RiskCheck(
+                "book_priceable", False,
+                "held positions without a mark; portfolio limits are unmeasurable",
+                measured=list(unpriceable))])
+            self._emit(decision, None)
+            return decision
         checks: list[RiskCheck] = []
         equity = max(portfolio.equity(prices), 1e-9)
 
