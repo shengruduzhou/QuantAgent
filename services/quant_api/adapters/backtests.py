@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import polars as pl
 
 from services.quant_api.adapters.utils import (
@@ -20,6 +21,40 @@ from services.quant_api.adapters.utils import (
 )
 from services.quant_api.config import ApiSettings, safe_project_path, stable_id
 from services.quant_api.runtime_indexer import RuntimeIndexer
+from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
+from quantagent.backtest.quarantine import load_windows
+
+
+def _is_voided(directory: Path) -> bool:
+    """Directories an audit voided (``_VOID_*``) are evidence, not results."""
+    return any(part.startswith("_VOID") for part in directory.parts)
+
+
+def _evaluation_caveats(metrics: dict[str, Any], start: object, end: object) -> dict[str, Any]:
+    """What a reader must know before trusting this backtest's numbers.
+
+    ``timingSemantics`` is the clock stamp the run declared; runs without the
+    canonical stamp predate the next-session execution fix and their headline
+    numbers cannot be cited. ``quarantineOverlap`` names every quarantined
+    holdout the evaluation window touches.
+    """
+    stamp = metrics.get("execution_timing_semantics")
+    overlap: list[str] = []
+    try:
+        windows, _ = load_windows()
+        if start is not None:
+            first = pd.Timestamp(str(start))
+            last = pd.Timestamp(str(end)) if end is not None else None
+            for window in windows:
+                if first <= window.end and (last is None or last >= window.start):
+                    overlap.append(f"{window.start.date()}..{window.end.date()}")
+    except (ValueError, TypeError):
+        overlap.append("unparseable_window")
+    return {
+        "timingSemantics": stamp or "unstamped_pre_timing_fix",
+        "timingCanonical": stamp == EXECUTION_TIMING_SEMANTICS,
+        "quarantineOverlap": overlap,
+    }
 
 
 class BacktestAdapter:
@@ -44,6 +79,8 @@ class BacktestAdapter:
         for artifact in metric_artifacts:
             metrics_path = safe_project_path(self.settings, artifact["path"])
             directory = metrics_path.parent
+            if _is_voided(directory):
+                continue
             if not ((directory / "nav.csv").exists() or (directory / "trades.csv").exists()):
                 continue
             seen_directories.add(directory.resolve())
@@ -89,6 +126,11 @@ class BacktestAdapter:
                 "validationStatus": artifact.get("validationStatus", "unverified"),
                 "manifestPath": artifact.get("manifestPath"),
                 "capabilities": capabilities,
+                **_evaluation_caveats(
+                    metrics,
+                    self._metric(metrics, "start_date"),
+                    self._metric(metrics, "end_date"),
+                ),
             })
         summaries.extend(self._discover_summary_backtests(seen_directories, runs))
         with self._runs_lock:
@@ -505,7 +547,7 @@ class BacktestAdapter:
         for artifact in summary_artifacts:
             summary_path = safe_project_path(self.settings, artifact["path"])
             directory = summary_path.parent
-            if directory.resolve() in seen_directories:
+            if directory.resolve() in seen_directories or _is_voided(directory):
                 continue
             if not any(
                 (directory / name).exists()
@@ -553,6 +595,7 @@ class BacktestAdapter:
                 "validationStatus": artifact.get("validationStatus", "unverified"),
                 "manifestPath": artifact.get("manifestPath"),
                 "capabilities": capabilities,
+                **_evaluation_caveats(metrics or {}, start_date, end_date),
             })
         return summaries
 
