@@ -251,3 +251,85 @@
   .vnext-shell .paper-risk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .vnext-shell .paper-risk-path code { max-width: 32ch; }
 }
+
+/* ---------------------------------------------- venue rule table (shared) */
+
+.vnext-shell .venue-rule-table td {
+  vertical-align: top;
+}
+
+.vnext-shell .venue-rule-table td > span,
+.vnext-shell .venue-rule-table td > strong {
+  display: block;
+}
+
+.vnext-shell .venue-rule-name {
+  color: var(--vnx-text-bright);
+  font-weight: 600;
+}
+
+.vnext-shell .venue-rule-limit {
+  color: var(--vnx-text-bright);
+  font-weight: 600;
+}
+
+.vnext-shell .venue-rule-desc {
+  display: block;
+  margin-top: 2px;
+  color: var(--vnx-muted);
+  max-width: 48ch;
+}
+
+.vnext-shell .venue-rule-table td.num .venue-rule-desc {
+  margin-left: auto;
+}
+
+.vnext-shell .venue-rule-ratio {
+  color: var(--vnx-muted);
+  font-style: normal;
+}
+
+.vnext-shell .venue-rule-muted {
+  color: var(--vnx-muted);
+}
+
+.vnext-shell .venue-rule-unmeasured {
+  color: var(--vnx-warning);
+  font-weight: 600;
+}
+
+.vnext-shell .venue-rule-chips {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.vnext-shell .venue-rule-table tr[data-state="breach"] td:first-child {
+  box-shadow: inset 2px 0 var(--vnx-danger);
+}
+
+.vnext-shell .venue-rule-table tr[data-state="warning"] td:first-child {
+  box-shadow: inset 2px 0 var(--vnx-warning);
+}
+
+.vnext-shell .vnext-venue-risk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-2);
+}
+
+.vnext-shell .vnext-venue-risk-caption {
+  margin: 0;
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-small);
+}
+
+.vnext-shell .vnext-venue-risk > a {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--vnx-primary-strong);
+  font-size: var(--vnx-text-small);
+  text-decoration: none;
+}

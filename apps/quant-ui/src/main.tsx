@@ -22,6 +22,7 @@ import "./vnext/styles/training.css";
 import "./vnext/styles/workbench.css";
 import "./vnext/styles/paper-execution.css";
 import "./vnext/styles/paper-account.css";
+import "./vnext/styles/risk.css";
 import "./vnext/styles/market-workbench.css";
 import "./vnext/styles/market-intelligence.css";
 import "./vnext/styles/market-playbooks.css";

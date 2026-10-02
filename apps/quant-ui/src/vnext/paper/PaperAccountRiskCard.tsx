@@ -41,12 +41,12 @@ function reasonCode(reason: string): string {
 }
 
 /** The single rendering of "the venue did not measure this". */
-export function Unmeasured({ reason, label = "未测量" }: { reason?: string | null; label?: string }): JSX.Element {
+export function Unmeasured({ reason, label = "未测量", codeOnly = false }: { reason?: string | null; label?: string; codeOnly?: boolean }): JSX.Element {
   const text = describeReason(reason);
   return (
     <span className="paper-risk-unmeasured" title={reason ?? "producer gave no reason"}>
       <b>{label}</b>
-      <small>{text ?? reason ?? "生产者未给出原因"}</small>
+      {codeOnly && reason && text ? null : <small>{text ?? reason ?? "生产者未给出原因"}</small>}
       {reason && text ? <code>{reasonCode(reason)}</code> : null}
     </span>
   );
@@ -165,7 +165,7 @@ export function PaperAccountRiskView({ account, variant = "overview" }: { accoun
           <dt>Identity SHA-256</dt>
           <dd>{identity.identitySha256
             ? <code title={identity.identitySha256}>{shortHash(identity.identitySha256)}</code>
-            : <Unmeasured label="未记录" reason={identity.reasons.identitySha256} />}</dd>
+            : <Unmeasured label="未记录" reason={identity.reasons.identitySha256} codeOnly={identity.reasons.identitySha256 === identity.reasons.accountInstanceId} />}</dd>
         </div>
         <div>
           <dt>Initial cash CNY</dt>
