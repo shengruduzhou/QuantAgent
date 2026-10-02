@@ -108,6 +108,25 @@ _SUPPORTED_OBJECTIVES: tuple[str, ...] = (
 )
 
 
+
+def normalise_sector_map(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return ``symbol`` + ``industry`` from either sector-map convention.
+
+    The canonical silver map written by ``cli/v7_sector.py`` names the level-1
+    sector ``sector_level_1``; provider/legacy maps call it ``industry``. Reading
+    only ``industry`` made the repository's own sector map raise KeyError in
+    the optimiser and the paper venue.
+    """
+    if "symbol" not in frame.columns:
+        raise ValueError("sector map lacks a 'symbol' column")
+    if "industry" in frame.columns:
+        column = "industry"
+    elif "sector_level_1" in frame.columns:
+        column = "sector_level_1"
+    else:
+        raise ValueError("sector map needs an 'industry' or 'sector_level_1' column")
+    return frame[["symbol", column]].rename(columns={column: "industry"})
+
 def _effective_participation_rate(config: V7TargetWeightsConfig) -> float:
     """Derive the effective liquidity participation rate from the
     capital-tier ladder. Returns ``config.liquidity_participation``
@@ -223,7 +242,7 @@ def build_v7_target_weights(
     sector_lookup: dict[str, str] = {}
     if sector_map is not None and not sector_map.empty:
         sector_lookup = (
-            sector_map.dropna(subset=["symbol"])
+            normalise_sector_map(sector_map).dropna(subset=["symbol"])
             .groupby("symbol")["industry"]
             .last()
             .astype(str)

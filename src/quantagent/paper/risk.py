@@ -55,13 +55,16 @@ def load_industry_map(path: str | Path) -> dict[str, str]:
     """
     import pandas as pd
 
+    from quantagent.portfolio.v7_target_weights import normalise_sector_map
+
     source = Path(path)
     frame = (
         pd.read_parquet(source) if source.suffix.lower() == ".parquet" else pd.read_csv(source)
     )
-    missing = {"symbol", "industry"} - set(frame.columns)
-    if missing:
-        raise ValueError(f"sector map {source} lacks columns {sorted(missing)}")
+    try:
+        frame = normalise_sector_map(frame)
+    except ValueError as exc:
+        raise ValueError(f"sector map {source}: {exc}") from exc
     frame = frame.dropna(subset=["symbol", "industry"])
     if frame.empty:
         raise ValueError(f"sector map {source} has no symbol/industry rows")
