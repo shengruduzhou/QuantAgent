@@ -30,13 +30,11 @@ export function VNextDashboard(): JSX.Element {
     if (!riskData) return [];
     return (riskData.rules ?? []).map((rule) => {
     const id = String(rule.id ?? rule.name ?? "rule");
-    const currentMap: Record<string, number | null | undefined> = {
-      max_drawdown: riskData.maxDrawdown,
-      max_daily_loss: riskData.maxDailyLoss,
-      max_name_weight: riskData.concentration,
-      max_sector_weight: riskData.sectorConcentration,
-      max_turnover: latestBacktest?.turnover,
-    };
+    // These rules govern the paper account's venue. A backtest's drawdown or
+    // daily return is a different subject (and daily loss a different unit,
+    // CNY), so no backtest figure is compared against them here; the paper
+    // account's own risk state supplies the current value when available.
+    const currentMap: Record<string, number | null | undefined> = {};
     const current = currentMap[id] ?? null;
     const threshold = typeof rule.threshold === "number" || typeof rule.threshold === "string" ? rule.threshold : null;
     const warning = current !== null && typeof threshold === "number" && Math.abs(current) >= Math.abs(threshold) * 0.8;

@@ -123,13 +123,20 @@ def test_research_event_table_is_not_mapped_to_fake_trades(quant_ui_settings) ->
     assert trades["issues"][0]["code"] == "unsupported_trade_schema"
 
 
-def test_risk_rules_use_code_defaults(quant_ui_settings) -> None:
+def test_risk_rules_are_the_limits_the_paper_venue_enforces(quant_ui_settings) -> None:
+    """Round-29 R8: the UI used to show V6RiskLimits/KillSwitchLimits (5% / 15% /
+    3%), config no order path reads, while the venue enforced its own RiskLimits."""
+    from quantagent.paper.risk import RiskLimits
+
     services = ServiceContainer.create(quant_ui_settings)
     rules = {item["id"]: item for item in services.risk.rules()}
+    enforced = RiskLimits()
 
-    assert rules["max_name_weight"]["threshold"] == 0.05
-    assert rules["max_drawdown"]["threshold"] == 0.15
-    assert rules["max_daily_loss"]["threshold"] == 0.03
+    assert rules["max_single_name_weight"]["threshold"] == enforced.max_single_name_weight
+    assert rules["max_drawdown"]["threshold"] == enforced.max_drawdown
+    assert rules["max_daily_loss"]["threshold"] == enforced.max_daily_loss
+    assert rules["max_daily_loss"]["unit"] == "cny"
+    assert all(rule["codeLocation"].startswith("src/quantagent/paper/") for rule in rules.values())
 
 
 def test_runtime_cleanup_requires_confirmation_and_writes_audit(quant_ui_settings) -> None:
