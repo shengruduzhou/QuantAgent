@@ -94,9 +94,13 @@ def apply_stock_pool_gate(
         if not survives:
             drop_log[member.symbol] = f"bucket:{member.watchlist_status.value}"
             continue
-        if config.require_factor_coverage and not factor_coverage_by_theme.get(member.theme, True):
-            drop_log[member.symbol] = "no_factor_coverage_for_theme"
-            continue
+        if config.require_factor_coverage:
+            if member.theme not in factor_coverage_by_theme:
+                drop_log[member.symbol] = "missing_factor_coverage_report"
+                continue
+            if not factor_coverage_by_theme[member.theme]:
+                drop_log[member.symbol] = "no_factor_coverage_for_theme"
+                continue
         kept.append(member)
     return kept, drop_log
 

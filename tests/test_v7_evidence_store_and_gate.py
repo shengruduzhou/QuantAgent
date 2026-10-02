@@ -122,6 +122,23 @@ def test_stock_pool_gate_blocks_when_no_factor_coverage():
     assert "no_factor_coverage_for_theme" in drop_log["600001.SH"]
 
 
+@pytest.mark.parametrize("reports", [[], [_report("other_theme")]])
+def test_stock_pool_gate_blocks_missing_theme_coverage_report(reports):
+    member = _member("600001.SH", "ai_compute", UniverseBucket.CORE_BENEFICIARY)
+    kept, drop_log = apply_stock_pool_gate([member], reports)
+    assert kept == []
+    assert drop_log == {"600001.SH": "missing_factor_coverage_report"}
+
+
+def test_stock_pool_gate_preserves_explicit_coverage_opt_out():
+    member = _member("600001.SH", "ai_compute", UniverseBucket.CORE_BENEFICIARY)
+    kept, drop_log = apply_stock_pool_gate(
+        [member], [], StockPoolGateConfig(require_factor_coverage=False)
+    )
+    assert kept == [member]
+    assert drop_log == {}
+
+
 def test_evidence_store_round_trip(tmp_path):
     frame = pd.DataFrame(
         [
@@ -207,6 +224,25 @@ def test_build_pit_evidence_slice_drops_future_rows():
     )
     sliced = build_pit_evidence_slice(frame, "2026-05-14")
     assert list(sliced["evidence_id"]) == ["a"]
+
+
+@pytest.mark.parametrize("available_column", ["available_at", "known_at"])
+def test_build_pit_evidence_slice_requires_availability_column(available_column):
+    frame = pd.DataFrame([{"symbol": "600001.SH", "report_period": "2024-12-31"}])
+    with pytest.raises(ValueError, match=f"availability column '{available_column}'"):
+        build_pit_evidence_slice(frame, "2025-01-15", available_column)
+
+
+def test_build_pit_evidence_slice_keeps_only_proven_available_rows():
+    frame = pd.DataFrame(
+        {"evidence_id": ["past", "boundary", "future", "missing", "invalid"],
+         "known_at": ["2025-01-01", "2025-01-15", "2025-02-01", None, "invalid"]}
+    )
+    original = frame.copy(deep=True)
+    sliced = build_pit_evidence_slice(frame, "2025-01-15", "known_at")
+    assert list(sliced["evidence_id"]) == ["past", "boundary"]
+    pd.testing.assert_frame_equal(frame, original)
+    assert build_pit_evidence_slice(frame.iloc[:0], "2025-01-15").empty
 
 
 def test_evidence_quality_report_counts_duplicates_missing_columns_and_pit():
