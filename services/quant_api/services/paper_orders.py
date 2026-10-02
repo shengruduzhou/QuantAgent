@@ -66,6 +66,11 @@ from quantagent.execution.order_manager import (
 )
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
 from quantagent.paper import ledger as paper_ledger
+from quantagent.paper.account_identity import (
+    PaperAccountIdentityError,
+    PaperAccountIdentityStore,
+    account_identity_path_for_canonical,
+)
 from quantagent.paper.broker import (
     BrokerConfig,
     InvalidMarketSnapshot,
@@ -864,6 +869,141 @@ class PaperOrderService:
             "mode": self.mode.to_dict(),
             "writable": self.writable,
             "writerLockError": self.writer_lock_error,
+            "accountIdentity": self.account_identity(),
+            "riskState": self.risk_state(),
+        }
+
+    def account_identity(self) -> dict[str, Any]:
+        """Which paper account this is. Absent identity fields are null with a reason."""
+        path = account_identity_path_for_canonical(self.ledger_path)
+        reasons: dict[str, str] = {}
+        identity = None
+        try:
+            identity = PaperAccountIdentityStore(path).read()
+        except PaperAccountIdentityError as exc:
+            reasons["accountInstanceId"] = reasons["identitySha256"] = (
+                f"identity_record_unreadable: {exc}"
+            )
+        if identity is None and not reasons:
+            reasons["accountInstanceId"] = reasons["identitySha256"] = (
+                "no_identity_record: this HTTP paper account has no immutable identity "
+                "file; portfolioId and initialCash are process configuration"
+            )
+        return {
+            "portfolioId": self.broker.portfolio.portfolio_id,
+            "initialCash": self.initial_cash,
+            "accountInstanceId": identity.account_instance_id if identity else None,
+            "identitySha256": identity.payload_sha256 if identity else None,
+            "identityPath": str(path),
+            "reasons": reasons,
+        }
+
+    def risk_state(self) -> dict[str, Any]:
+        """What the venue's risk engine sees, measured from its own last marks.
+
+        Every value the engine has not measured is null with an entry in
+        `reasons` — never 0, which would read as "no drawdown" or "no turnover".
+        """
+        broker = self.broker
+        engine = broker.risk_engine
+        reasons: dict[str, str] = {}
+        portfolio = broker.portfolio
+        marks = dict(broker.marks)
+        unpriceable = list(broker.unpriceable_symbols())
+        nav = None if unpriceable else float(portfolio.equity(marks))
+        if nav is None:
+            reasons["nav"] = "unpriceable_positions: " + ",".join(unpriceable)
+
+        switches = [
+            {"scope": r["scope"], "key": r.get("key"), "reason": r["reason"],
+             "triggeredAt": r.get("triggered_at")}
+            for r in broker.kill_switch.active()
+        ]
+        first = switches[0] if switches else None
+        kill_switch = {
+            "active": bool(switches),
+            "scope": first["scope"] if first else None,
+            "reason": first["reason"] if first else None,
+            "triggeredAt": first["triggeredAt"] if first else None,
+            "reduceOnly": bool(switches) and all(s["scope"] == "PORTFOLIO" for s in switches),
+            "switches": switches,
+        }
+        if not switches:
+            reasons["killSwitch"] = "no_active_kill_switch"
+
+        if engine is None:
+            reasons["riskEngine"] = "no_risk_engine_attached: no portfolio limit is applied"
+            return {
+                "riskEngineAttached": False, "limits": None, "killSwitch": kill_switch,
+                "peakEquity": None, "drawdownFromPeak": None, "nav": nav,
+                "sessionTurnover": None, "sessionStartEquity": None,
+                "unpriceableSymbols": unpriceable, "industryLimitEnforced": False,
+                "industryLimit": None, "lastPortfolioCheck": None,
+                "valuationMarks": {"source": "venue_last_observed", "count": len(marks)},
+                "reasons": reasons,
+            }
+
+        peak = engine.peak_equity
+        if peak is None:
+            reasons["peakEquity"] = "no_equity_observation"
+        drawdown = None
+        if nav is not None and peak:
+            drawdown = max(0.0, 1.0 - nav / peak)
+        else:
+            reasons["drawdownFromPeak"] = (
+                "nav_unavailable" if nav is None else "peak_equity_unavailable"
+            )
+
+        session_turnover = None
+        if engine.session_date is None:
+            reasons["sessionTurnover"] = "no_session_observed_by_this_process"
+        else:
+            session_turnover = {
+                "session": engine.session_date,
+                "notional": float(engine.session_turnover),
+                "fractionOfNav": (float(engine.session_turnover) / nav) if nav else None,
+                "limit": engine.limits.max_daily_turnover,
+            }
+        if engine.session_start_equity is None:
+            reasons["sessionStartEquity"] = "no_session_start_valuation"
+
+        limit = float(engine.limits.max_industry_weight)
+        map_loaded = bool(broker.industry_map)
+        if limit >= 1.0:
+            mode = "opt_out"
+        elif map_loaded:
+            mode = "measured_with_map"
+        else:
+            mode = "refuse_unmeasured"
+            reasons["industryLimit"] = (
+                "no industry map: every BUY is refused industry_unmeasured"
+                + (f" ({self.industry_map_error})" if self.industry_map_error else "")
+            )
+        decision = engine.last_portfolio_decision
+        if decision is None:
+            reasons["lastPortfolioCheck"] = "no_portfolio_check_run_in_this_process"
+        return {
+            "riskEngineAttached": True,
+            "limits": engine.limits.to_dict(),
+            "killSwitch": kill_switch,
+            "peakEquity": peak,
+            "drawdownFromPeak": drawdown,
+            "nav": nav,
+            "sessionTurnover": session_turnover,
+            "sessionStartEquity": engine.session_start_equity,
+            "unpriceableSymbols": unpriceable,
+            "industryLimitEnforced": limit < 1.0,
+            "industryLimit": {
+                "limit": limit,
+                "mode": mode,
+                "mapLoaded": map_loaded,
+                "mapSymbolCount": len(broker.industry_map),
+                "source": self.industry_map_source,
+                "error": self.industry_map_error,
+            },
+            "lastPortfolioCheck": decision.to_dict() if decision is not None else None,
+            "valuationMarks": {"source": "venue_last_observed", "count": len(marks)},
+            "reasons": reasons,
         }
 
 
