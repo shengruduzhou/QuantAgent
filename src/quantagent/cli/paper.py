@@ -73,6 +73,16 @@ def paper_execute_session(
     execution_clock: str = typer.Option("14:59:00+08:00", "--execution-clock"),
     max_participation_rate: float = typer.Option(0.05, "--max-participation-rate", min=0.0, max=1.0),
     min_order_value_yuan: float = typer.Option(100.0, "--min-order-value-yuan", min=0.0),
+    sector_map: Path | None = typer.Option(
+        None, "--sector-map",
+        help="symbol/industry table for the venue's industry limit. The current "
+             "snapshot is point-in-time for forward paper. Without it every BUY is "
+             "refused industry_unmeasured unless --max-industry-weight 1.0.",
+    ),
+    max_industry_weight: float = typer.Option(
+        0.30, "--max-industry-weight", min=0.0, max=1.0,
+        help="Venue industry concentration limit; 1.0 is the explicit opt-out.",
+    ),
 ) -> None:
     """Consume frozen targets on one observed session using the canonical paper account.
 
@@ -93,6 +103,7 @@ def paper_execute_session(
         execute_pending_for_session,
     )
     from quantagent.paper.daily_loop import DailyPaperLoopConfig
+    from quantagent.paper.risk import RiskLimits
     from quantagent.paper.runtime_paths import paper_runtime_paths
 
     defaults = DailyPaperLoopConfig(as_of_date=date)
@@ -100,6 +111,11 @@ def paper_execute_session(
     frame = read_frame(market_path)
     paths = paper_runtime_paths().ensure()
     config = ContinuousPaperExecutionConfig(
+        sector_map_path=str(sector_map) if sector_map else None,
+        # Production defaults (pre-trade participation at a full bar: the
+        # venue's participation cap meters fills) with the industry limit the
+        # operator chose; 1.0 is an explicit, visible opt-out.
+        risk_limits=RiskLimits(max_participation=1.0, max_industry_weight=max_industry_weight),
         pending_signal_dir=str(paths.pending_signals),
         execution_journal_path=str(paths.execution_journal),
         canonical_ledger_path=str(paths.canonical_ledger),
@@ -129,6 +145,8 @@ def paper_execute_session(
                     "initialCash": initial_cash,
                     "identityPath": str(paths.account_identity),
                 },
+                "riskLimits": config.risk_limits.to_dict(),
+                "sectorMap": str(sector_map) if sector_map else None,
                 "calendarAssurance": "observed_market_panel_only",
                 "shadowAcceptanceCalendarEligible": False,
                 "results": [result.to_dict() for result in results],
@@ -183,6 +201,11 @@ def paper_run_loop(
     date: str = typer.Option("today", "--date"),
     initial_cash: float = typer.Option(1_000_000.0, "--initial-cash", min=0.01),
     portfolio_id: str = typer.Option("v7-paper", "--portfolio-id"),
+    sector_map: Path | None = typer.Option(
+        None, "--sector-map",
+        help="symbol/industry table; without it the optimiser's sector cap is "
+             "published as unenforced (sector_map_absent).",
+    ),
 ) -> None:
     """Minimal restartable target-generation loop.
 
@@ -202,6 +225,7 @@ def paper_run_loop(
                         as_of_date=date,
                         portfolio_id=portfolio_id,
                         initial_cash=initial_cash,
+                        sector_map_path=str(sector_map) if sector_map else None,
                     )
                 ).to_dict()
             )

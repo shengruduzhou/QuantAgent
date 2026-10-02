@@ -709,8 +709,16 @@ def build_v7_target_weights(
         "average_gross_exposure": float(pivot.abs().sum(axis=1).mean()),
         "average_turnover": average_turnover,
         "supported_objectives": list(_SUPPORTED_OBJECTIVES),
+        # Without a sector map the cap is never applied; publishing the
+        # configured 0.30 here made "not enforced" indistinguishable from
+        # "enforced and nothing bound" (a 100% one-sector book read as capped).
+        "sector_cap_enforced": bool(sector_lookup),
+        "sector_cap_unenforced": (
+            None if sector_lookup
+            else {"reason": "sector_map_absent", "requested": config.max_sector_weight}
+        ),
         "constraint_surface": {
-            "sector_cap": config.max_sector_weight,
+            "sector_cap": config.max_sector_weight if sector_lookup else None,
             "single_name_cap": config.max_weight_per_name,
             "liquidity_cap": config.liquidity_participation,
             "cash_floor": config.cash_floor,
@@ -726,6 +734,7 @@ def build_v7_target_weights(
         "config": {
             **asdict(config),
             **{attr: False for attr in unenforced_tradability},
+            **({} if sector_lookup else {"max_sector_weight": None}),
         },
         "config_requested": asdict(config),
         "tradability_enforced": sorted(enforced_tradability),

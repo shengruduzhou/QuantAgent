@@ -152,8 +152,17 @@ def recover(
             state.sessions_closed += 1
 
         elif event.event_type == lg.KILL_SWITCH_TRIGGERED:
-            state.killed = True
-            state.kill_reason = payload.get("reason")
+            # Only GLOBAL halts the whole account. A PORTFOLIO switch (latched
+            # by a drawdown or daily-loss breach) is reduce-only and is enforced
+            # by the venue, so the book can still be sold down; treating it as
+            # a full halt here would freeze the exits it exists to allow.
+            if str(payload.get("scope") or "GLOBAL") == "GLOBAL":
+                state.killed = True
+                state.kill_reason = payload.get("reason")
+        elif event.event_type == lg.KILL_SWITCH_CLEARED:
+            if str(payload.get("scope") or "GLOBAL") == "GLOBAL":
+                state.killed = False
+                state.kill_reason = None
 
     return state
 
