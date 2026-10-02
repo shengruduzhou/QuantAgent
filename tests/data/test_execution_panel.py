@@ -317,3 +317,34 @@ class TestBaselineProtocolPanelOption:
             bp.evaluate(pred_path, top_k=1, start=str(sessions[0].date()),
                         end=str(sessions[-1].date()), slippage_bps=0.0,
                         variants=["C_flags_eligible_delay1"], panel_path=panel_path)
+
+
+class TestDelistingWriteOff:
+    def _panel(self):
+        held = _bars("600485.SH", [5.0, 5.0, 5.0, None, None, None])
+        other = _bars("600000.SH", [20.0] * 6)
+        return ep.build_execution_panel(
+            pd.concat([held, other], ignore_index=True),
+            session_gaps=_gaps("600485.SH", SESSIONS[3:4]), factors=None,
+            delisting_dates={"600485.SH": SESSIONS[3], "600000.SH": None})
+
+    def test_one_writeoff_row_follows_the_delisting_session(self):
+        panel, stats = self._panel()
+        rows = panel[panel["symbol"] == "600485.SH"]
+        assert rows["trade_date"].max() == SESSIONS[4]
+        last = rows.iloc[-1]
+        assert last["gap_classification"] == ep.GAP_DELISTED
+        assert bool(last["delisting_writeoff"]) and bool(last["is_suspended"])
+        assert stats["delisting_writeoff_rows"] == 1
+        assert not panel.loc[panel["symbol"] == "600000.SH", "delisting_writeoff"].any()
+
+    def test_a_name_held_into_delisting_is_written_off_not_fatal(self):
+        panel, _ = self._panel()
+        weights = pd.DataFrame({"600485.SH": [0.5, 0.0], "600000.SH": [0.0, 0.5]},
+                               index=SESSIONS[[0, 4]])
+        result = _sim(weights, panel)
+        audit = result.corporate_action_audit
+        writeoff = audit[audit["basis"] == "delisting_writeoff"]
+        assert len(writeoff) == 1 and writeoff["written_off_value"].iloc[0] > 0
+        drop = result.nav.loc[SESSIONS[3]] - result.nav.loc[SESSIONS[4]]
+        assert drop == pytest.approx(writeoff["written_off_value"].iloc[0], rel=1e-6)

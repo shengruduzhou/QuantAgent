@@ -373,7 +373,7 @@ def run_quality_checks(
 
 def _write_execution_panel(masked: pd.DataFrame, *, raw_columns: list[str], u0: Path,
                            target: Path, factors: pd.DataFrame, st: pd.DataFrame,
-                           st_coverage, start, end) -> None:
+                           st_coverage, start, end, master: pd.DataFrame) -> None:
     """Raw execution panel next to the dataset (masks shared with the dataset)."""
     print("      building the certified raw execution panel ...", flush=True)
     traded = masked[["symbol", "trade_date", *raw_columns, "volume", "amount",
@@ -388,6 +388,9 @@ def _write_execution_panel(masked: pd.DataFrame, *, raw_columns: list[str], u0: 
         corporate_actions=_read(u0 / "pit/corporate_actions.parquet"),
         st=st, st_coverage=st_coverage,
         start=start, end=end, copy=False,
+        delisting_dates=(master.dropna(subset=["delisting_date"])
+                         .drop_duplicates("symbol").set_index("symbol")["delisting_date"]
+                         if "delisting_date" in master.columns else None),
     )
     del traded
     execution_panel.verify_execution_panel(execution)
@@ -408,6 +411,7 @@ def _write_execution_panel(masked: pd.DataFrame, *, raw_columns: list[str], u0: 
             "corporate_actions": "runtime/data/u0/pit/corporate_actions.parquet",
             "st_intervals": "runtime/data/u0/pit/st_intervals.parquet",
             "suspension_intervals": "runtime/data/u0/pit/suspension_intervals.parquet",
+            "security_master": "runtime/data/u0/security_master.parquet",
         },
         "st_coverage_exchanges": sorted(st_coverage),
         "available_at_rule": "trade_date 15:00 Asia/Shanghai (close of the session)",
@@ -512,7 +516,8 @@ def main() -> int:
     if want_execution:
         _write_execution_panel(masked, raw_columns=raw_columns, u0=u0, target=target,
                                factors=factors, st=st, st_coverage=st_coverage,
-                               start=args.start_date or None, end=args.end_date or None)
+                               start=args.start_date or None, end=args.end_date or None,
+                               master=master)
         masked = masked.drop(columns=raw_columns)
     if not want_dataset:
         print("[8/8] done (execution phase only)", flush=True)

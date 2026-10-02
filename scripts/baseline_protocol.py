@@ -370,9 +370,13 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         m = res.metrics
         ca_audit = getattr(res, "corporate_action_audit", None)
         corporate_actions = (
-            {"credits": int(len(ca_audit)),
+            {"credits": int((ca_audit["basis"] != "delisting_writeoff").sum()),
              "cash_credit_cny": round(float(ca_audit["cash_credit"].sum()), 2),
-             "bonus_shares": int(ca_audit["bonus_shares"].sum())}
+             "bonus_shares": int(ca_audit.loc[ca_audit["basis"] != "delisting_writeoff",
+                                              "bonus_shares"].sum()),
+             "delisting_writeoffs": int((ca_audit["basis"] == "delisting_writeoff").sum()),
+             "delisting_writeoff_value_cny": round(float(
+                 ca_audit.get("written_off_value", pd.Series(dtype=float)).fillna(0.0).sum()), 2)}
             if isinstance(ca_audit, pd.DataFrame) and not ca_audit.empty
             else {"credits": 0}
         )

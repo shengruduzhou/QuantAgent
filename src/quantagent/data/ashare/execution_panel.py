@@ -36,6 +36,14 @@ security-session:
     the factor step it is used as-is (cash + bonus/transfer shares); otherwise
     the step is credited as its cash value (``factor_value_equivalent``).
 
+``delisting_writeoff``
+    One ``DELISTED`` row on the first session after a dated delisting. The
+    strict simulator writes a position still held then off at zero proceeds
+    (a conservative bound -- delisted A-shares move to the 退市板块 at a deep
+    discount, not to their last close) and reports the value written off.
+    Without the row a name held into its delisting has no next bar and the
+    simulation stops.
+
 Provenance: ``serving_provider`` per row and a single provider per symbol --
 :func:`verify_execution_panel` refuses a panel that stitches vendors without a
 :class:`~quantagent.data.ashare.contracts.SourceBoundary`.
@@ -62,6 +70,7 @@ GAP_TRADED = "TRADED"
 GAP_CLASSES: tuple[str, ...] = (
     "SUSPENDED", "MISSING_UNEXPLAINED", "PROVIDER_HISTORY_TRUNCATED",
 )
+GAP_DELISTED = "DELISTED"
 CA_BASIS_NONE = ""
 CA_BASIS_CORPORATE_ACTION = "corporate_action"
 CA_BASIS_FACTOR_VALUE = "factor_value_equivalent"
@@ -75,7 +84,7 @@ EXECUTION_PANEL_COLUMNS: tuple[str, ...] = (
     "is_suspended", "is_st", "is_limit_up", "is_limit_down",
     "suspension_status", "st_status", "limit_up_status", "limit_down_status",
     "gap_classification", "ca_cash_per_share", "ca_share_ratio", "ca_basis",
-    "serving_provider",
+    "delisting_writeoff", "serving_provider",
 )
 
 #: Without these a raw-price panel cannot be marked through an ex-rights date.
@@ -129,6 +138,7 @@ def build_execution_panel(
     start: Any = None,
     end: Any = None,
     copy: bool = True,
+    delisting_dates: Mapping[str, Any] | pd.Series | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Assemble the execution panel from raw traded bars + U0 gap/CA tables.
 
@@ -201,12 +211,51 @@ def build_execution_panel(
         provider = bars.drop_duplicates("symbol").set_index("symbol")["serving_provider"]
         gap_rows["serving_provider"] = gap_rows["symbol"].map(provider)
 
+    # ---- one write-off row on the first session after a dated delisting ----
+    delisted_rows = pd.DataFrame()
+    if delisting_dates is not None and len(bars):
+        dated = pd.to_datetime(pd.Series(delisting_dates), errors="coerce").dropna()
+        dated.index = dated.index.astype(str)
+        calendar = pd.DatetimeIndex(sorted(set(bars["trade_date"]) | set(gap_rows.get(
+            "trade_date", pd.Series(dtype="datetime64[ns]")))))
+        present = set(bars["symbol"].astype(str))
+        records = []
+        for symbol, when in dated.items():
+            if symbol not in present:
+                continue
+            position = calendar.searchsorted(pd.Timestamp(when).normalize(), side="right")
+            if position >= len(calendar):
+                continue
+            records.append({"symbol": symbol, "trade_date": calendar[position]})
+        if records:
+            delisted_rows = pd.DataFrame(records)
+            last_seen = pd.concat([
+                bars[["symbol", "trade_date"]],
+                gap_rows[["symbol", "trade_date"]] if len(gap_rows) else None,
+            ]).groupby("symbol")["trade_date"].max()
+            # Only names whose rows really end by the delisting session.
+            delisted_rows = delisted_rows[
+                delisted_rows["trade_date"] > delisted_rows["symbol"].map(last_seen)]
+            delisted_rows["gap_classification"] = GAP_DELISTED
+            delisted_rows["st_status"] = MASK_UNKNOWN
+            delisted_rows["suspension_status"] = MASK_TRUE
+            delisted_rows["limit_up_status"] = "NOT_TRADED"
+            delisted_rows["limit_down_status"] = "NOT_TRADED"
+            delisted_rows["volume"] = 0.0
+            delisted_rows["amount"] = 0.0
+            delisted_rows["available_at"] = delisted_rows["trade_date"] + pd.Timedelta(hours=15)
+            provider = bars.drop_duplicates("symbol").set_index("symbol")["serving_provider"]
+            delisted_rows["serving_provider"] = delisted_rows["symbol"].map(provider)
+    stats["delisting_writeoff_rows"] = int(len(delisted_rows))
+
     keep_cols = ["symbol", "trade_date", "open", "high", "low", "close", "volume",
                  "amount", "available_at", "serving_provider", "gap_classification",
                  "suspension_status", "st_status", "limit_up_status", "limit_down_status"]
     parts = [bars[keep_cols]]
     if len(gap_rows):
         parts.append(gap_rows.reindex(columns=keep_cols))
+    if len(delisted_rows):
+        parts.append(delisted_rows.reindex(columns=keep_cols))
     panel = pd.concat(parts, ignore_index=True)
     panel = panel.sort_values(["symbol", "trade_date"], kind="mergesort").reset_index(drop=True)
     del bars, gap_rows
@@ -303,6 +352,7 @@ def build_execution_panel(
     panel["is_limit_down"] = traded_row & _status_flag(panel["limit_down_status"], fail_closed=True)
     amount = pd.to_numeric(panel["amount"], errors="coerce")
     panel["amount_measured"] = amount.notna().to_numpy()
+    panel["delisting_writeoff"] = panel["gap_classification"].to_numpy() == GAP_DELISTED
     panel["adjustment_method"] = contracts.ADJUST_NONE
 
     panel = panel[~no_prior]
@@ -336,6 +386,7 @@ def build_execution_panel(
             "is_limit_up/is_limit_down": "TRUE or UNKNOWN status blocks that side (fail-closed)",
             "is_st": "TRUE only where the dated register says so; UNKNOWN kept in st_status",
             "gap rows": "valued at the carried raw close; volume=amount=0; never tradeable",
+            "DELISTED row": "held position written off at zero proceeds (conservative)",
         },
     })
     return panel, stats
@@ -410,6 +461,6 @@ def execution_panel_summary(stats: Mapping[str, Any]) -> str:
 __all__ = [
     "CA_BASIS_CORPORATE_ACTION", "CA_BASIS_FACTOR_VALUE", "CORPORATE_ACTION_COLUMNS",
     "EXECUTION_PANEL_COLUMNS", "EXECUTION_PANEL_SCHEMA", "ExecutionPanelError",
-    "GAP_CLASSES", "GAP_TRADED", "build_execution_panel", "execution_panel_summary",
+    "GAP_CLASSES", "GAP_DELISTED", "GAP_TRADED", "build_execution_panel", "execution_panel_summary",
     "verify_execution_panel",
 ]

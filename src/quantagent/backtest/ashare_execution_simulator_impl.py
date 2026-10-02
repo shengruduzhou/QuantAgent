@@ -527,9 +527,10 @@ def _apply_corporate_actions(
     neither column and are unaffected. Bonus/transfer shares settle as frozen
     (tradeable next session, as 红股 list the day after the ex-date); the
     fractional remainder is paid as cash in lieu at the session close.
-    Dividends are credited gross of the holding-period dividend tax.
+    Dividends are credited gross of the holding-period dividend tax. A
+    ``delisting_writeoff`` row removes a still-held position at zero proceeds.
     """
-    if "ca_cash_per_share" not in day_market.columns and "ca_share_ratio" not in day_market.columns:
+    if not {"ca_cash_per_share", "ca_share_ratio", "delisting_writeoff"} & set(day_market.columns):
         return
     held = {
         str(position.symbol): position
@@ -540,6 +541,19 @@ def _apply_corporate_actions(
         return
     rows = day_market[day_market["symbol"].astype(str).isin(held)]
     for row in rows.to_dict("records"):
+        if bool(row.get("delisting_writeoff") or False):
+            symbol = str(row["symbol"])
+            position = held[symbol]
+            shares = int(position.available_shares) + int(position.frozen_shares)
+            close = float(row.get("close") or 0.0)
+            broker.ledger.positions.pop(symbol, None)
+            audit_rows.append({
+                "trade_date": execution_date, "symbol": symbol, "shares_before": shares,
+                "cash_per_share": 0.0, "share_ratio": -1.0, "bonus_shares": -shares,
+                "cash_credit": 0.0, "close": close, "basis": "delisting_writeoff",
+                "written_off_value": shares * close,
+            })
+            continue
         cash_per_share = float(row.get("ca_cash_per_share") or 0.0)
         share_ratio = float(row.get("ca_share_ratio") or 0.0)
         if not (math.isfinite(cash_per_share) and math.isfinite(share_ratio)):
