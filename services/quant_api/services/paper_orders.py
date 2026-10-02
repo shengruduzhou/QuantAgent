@@ -502,6 +502,17 @@ class PaperOrderService:
             )
         return snapshot
 
+    def _roll_session(self, trade_date: str) -> None:
+        """Close the venue's previous session before trading a later one.
+
+        Closing settles T+1 purchases. A long-lived API process never closed a
+        session, so shares bought through this endpoint stayed pending forever
+        and became sellable only after a restart rebuilt them from the ledger.
+        """
+        current = self.broker.session
+        if current is not None and str(trade_date)[:10] > current:
+            self.broker.close_session(current)
+
     def _mark_held_positions(self, trade_date: str) -> None:
         """Give the venue a mark for every held name on the order's session.
 
@@ -670,6 +681,7 @@ class PaperOrderService:
             # venue used to leave CREATED + RISK_APPROVED + SUBMITTED behind with
             # no working order anywhere.
             self._market_for(request.symbol, request.trade_date)
+            self._roll_session(request.trade_date)
             self._mark_held_positions(request.trade_date)
             states = self.manager.submit_orders([wire])
         except SubmissionRejected as exc:
