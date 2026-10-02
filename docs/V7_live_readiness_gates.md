@@ -55,7 +55,7 @@ quantagent evaluate-alpha-v7 \
 - partial fills
 - failed order audit
 - reconciliation report（位于 `execution/reconciliation.py`）
-- kill switch audit（位于 `execution/risk_kill_switch.py`、`risk/kill_switch.py`）
+- kill switch audit（位于 `risk/kill_switch.py`；paper venue 的分级 latching kill switch 位于 `paper/risk.py` / `paper/broker.py`。原 `execution/risk_kill_switch.py` 兼容 wrapper 零调用，Round 29 已删除）
 
 ## Stock Pool Gate
 
