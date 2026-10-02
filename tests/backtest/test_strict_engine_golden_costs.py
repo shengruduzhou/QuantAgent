@@ -97,3 +97,16 @@ def test_rotation_outcome_must_not_depend_on_symbol_sort_order():
     b_filled, b_rej = run(old="600000.SH", new="000001.SZ")   # buy sorts first -> rejected
     print("old<new:", a_filled, a_rej, " new<old:", b_filled, b_rej)
     assert (a_filled, a_rej) == (b_filled, b_rej)
+
+
+def test_total_cost_includes_slippage_and_open_lot_fees():
+    """Round-29 R1-F14: total_cost used to cover only fees on matched round trips."""
+    buy, sell, res = _round_trip(["2023-09-01", "2023-09-04", "2023-09-05", "2023-09-06"])
+    fees = sum(float(row[c]) for row in (buy, sell) for c in ("commission", "stamp_duty", "transfer_fee"))
+    impact = float(buy["impact_cost"]) + float(sell["impact_cost"])
+    slippage = (float(buy["avg_price"]) - 10.0) * float(buy["filled_quantity"]) + (
+        10.0 - float(sell["avg_price"])
+    ) * float(sell["filled_quantity"])
+    metrics = res.metrics
+    assert metrics.slippage_cost == pytest.approx(slippage)
+    assert metrics.total_cost == pytest.approx(fees + impact + slippage)

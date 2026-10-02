@@ -124,7 +124,12 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
     d.mkdir(parents=True, exist_ok=True)
     nav = res.nav.copy()
     nav.index = pd.to_datetime(nav.index)
-    bnav = (1.0 + bench.reindex(nav.index).fillna(0.0)).cumprod()
+    aligned = bench.reindex(nav.index)
+    # A missing benchmark session is unmeasured, not a 0% day: leave the
+    # benchmark/excess columns empty from the first gap on instead of compounding
+    # a fabricated flat return into the comparison (DEF-022 shape).
+    benchmark_gaps = int(aligned.isna().sum())
+    bnav = (1.0 + aligned).cumprod()
     navdf = pd.DataFrame({
         "trade_date": nav.index.strftime("%Y-%m-%d"),
         "nav": nav.to_numpy(),
@@ -146,6 +151,9 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
         "sharpe": round(float(m.sharpe), 4),
         "calmar": round(float(calmar), 4) if calmar is not None else None,
         "benchmark_annualized_return": round(float(bench_ann), 6),
+        "benchmark_nav_gap_sessions": benchmark_gaps,
+        "total_cost_cny": round(float(m.total_cost), 2),
+        "slippage_cost_cny": round(float(m.slippage_cost), 2),
         "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
         "target_index_semantics": "signal_date_not_pre_shifted",
     }

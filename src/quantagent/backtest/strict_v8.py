@@ -89,7 +89,7 @@ class StrictBacktestMetrics:
     profit_factor: float            # gross_profit / gross_loss
     gross_profit: float
     gross_loss: float
-    total_cost: float               # commission+stamp+transfer on matched trades
+    total_cost: float               # all fills: explicit fees + impact + slippage (CNY)
     n_trades: int                   # number of CLOSED round-trip trades
     n_fills: int                    # number of individual fills (was the old n_trades)
     start_date: str
@@ -99,6 +99,12 @@ class StrictBacktestMetrics:
     #: ensemble/strict_policy_search._score_metrics, which scores such a trial
     #: -inf so a book that never traded cannot win a search.
     evaluated: float = 1.0
+    #: Cost breakdown over every fill (open lots included), in CNY. Slippage is
+    #: baked into the fill price, so it is measured against the decision
+    #: reference price; it used to be absent from ``total_cost`` entirely.
+    explicit_fees: float = float("nan")
+    impact_cost: float = float("nan")
+    slippage_cost: float = float("nan")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -116,6 +122,10 @@ class StrictBacktestMetrics:
             "gross_profit": self.gross_profit,
             "gross_loss": self.gross_loss,
             "total_cost": self.total_cost,
+            "total_cost_basis": "all_fills_explicit_fees_plus_impact_plus_slippage",
+            "explicit_fees": self.explicit_fees,
+            "impact_cost": self.impact_cost,
+            "slippage_cost": self.slippage_cost,
             "n_trades": int(self.n_trades),
             "n_fills": int(self.n_fills),
             "start_date": self.start_date,
@@ -124,6 +134,36 @@ class StrictBacktestMetrics:
             "metric_semantics_version": METRIC_SEMANTICS_VERSION,
             "nav_baseline": "configured_initial_cash",
         }
+
+
+def _fill_cost_breakdown(order_audit: pd.DataFrame | None) -> tuple[float, float, float]:
+    """(explicit fees, impact, slippage) in CNY over every fill.
+
+    A column the audit does not carry is unmeasured, so the corresponding
+    component is NaN rather than a flattering 0.
+    """
+    if order_audit is None or order_audit.empty or "filled_quantity" not in order_audit.columns:
+        return 0.0, 0.0, 0.0
+    fills = order_audit[pd.to_numeric(order_audit["filled_quantity"], errors="coerce").abs() > 0]
+    if fills.empty:
+        return 0.0, 0.0, 0.0
+
+    def _sum(column: str) -> float:
+        if column not in fills.columns:
+            return float("nan")
+        return float(pd.to_numeric(fills[column], errors="coerce").sum())
+
+    explicit = _sum("commission") + _sum("stamp_duty") + _sum("transfer_fee")
+    impact = _sum("impact_cost")
+    if {"reference_price", "avg_price", "side"} <= set(fills.columns):
+        quantity = pd.to_numeric(fills["filled_quantity"], errors="coerce").abs()
+        reference = pd.to_numeric(fills["reference_price"], errors="coerce")
+        executed = pd.to_numeric(fills["avg_price"], errors="coerce")
+        direction = np.where(fills["side"].astype(str).str.lower() == "buy", 1.0, -1.0)
+        slippage = float(((executed - reference) * direction * quantity).sum(min_count=1))
+    else:
+        slippage = float("nan")
+    return explicit, impact, slippage
 
 
 def _realized_round_trip_pnl(
@@ -301,13 +341,17 @@ def _compute_metrics(
         profit_factor = float(gross_profit / gross_loss) if gross_loss > 1e-9 else (
             float("inf") if gross_profit > 0 else 0.0
         )
-        total_cost = float(rt["cost"].astype(float).sum())
     else:
         n_trades = 0
         win_rate = avg_profit = median_profit = 0.0
-        gross_profit = gross_loss = profit_factor = total_cost = 0.0
+        gross_profit = gross_loss = profit_factor = 0.0
+    explicit_fees, impact_cost, slippage_cost = _fill_cost_breakdown(order_audit)
+    total_cost = explicit_fees + impact_cost + slippage_cost
 
     return StrictBacktestMetrics(
+        explicit_fees=explicit_fees,
+        impact_cost=impact_cost,
+        slippage_cost=slippage_cost,
         total_return=total_return,
         annualized_return=ann_return,
         max_drawdown=max_dd,
