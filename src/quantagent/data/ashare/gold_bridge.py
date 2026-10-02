@@ -100,6 +100,10 @@ class GoldBuildManifest:
     label_convention: str = ""
     feature_coverage: dict[str, float] = field(default_factory=dict)
     mask_distribution: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Per-exchange TRUE/FALSE/UNKNOWN counts on the masked panel *before* the
+    #: label step drops infeasible rows -- what each register actually measured.
+    mask_rows_by_exchange: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    st_coverage: list[str] = field(default_factory=list)
     rows_dropped: dict[str, int] = field(default_factory=dict)
     content_hash: str = ""
     rebuild_command: str = ""
@@ -188,13 +192,70 @@ def apply_adjustment(
 # ---------------------------------------------------------------------------
 # eligibility masks
 # ---------------------------------------------------------------------------
+#: Exchange suffixes of mainland cash-equity symbols (``000001.SZ``).
+EXCHANGE_SUFFIXES: tuple[str, ...] = ("SH", "SZ", "BJ")
+
+#: Exchange names as U0 PIT manifests spell them -> symbol suffix.
+EXCHANGE_NAME_TO_SUFFIX: dict[str, str] = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}
+
+#: What a register may cover: every exchange (``True``), none (``False``), or a
+#: named subset of symbol suffixes such as ``{"SZ"}``.
+RegisterCoverage = bool | Iterable[str]
+
+
+def exchange_suffix(symbols: pd.Series) -> pd.Series:
+    """``000001.SZ`` -> ``SZ``. A symbol without a suffix maps to ``""``."""
+    text = symbols.astype(str).str.upper()
+    return text.str.rpartition(".")[2].where(text.str.contains(".", regex=False), "")
+
+
+def normalise_coverage(available: RegisterCoverage | None) -> frozenset[str]:
+    """Resolve a coverage declaration to the exchange suffixes it measures.
+
+    ``True`` keeps its historical meaning (the register is complete for every
+    exchange) and ``False``/``None`` means nothing is measured. A collection
+    names the exchanges whose rows the register can answer for; exchange names
+    (``SZSE``) and suffixes (``SZ``) are both accepted.
+    """
+    if available is None or available is False:
+        return frozenset()
+    if available is True:
+        return frozenset(EXCHANGE_SUFFIXES)
+    if isinstance(available, str):
+        available = [available]
+    resolved: set[str] = set()
+    for item in available:
+        token = str(item).strip().upper()
+        token = EXCHANGE_NAME_TO_SUFFIX.get(token, token)
+        if token not in EXCHANGE_SUFFIXES:
+            raise GoldBridgeError(
+                f"unknown exchange {item!r} in register coverage; expected one of "
+                f"{list(EXCHANGE_SUFFIXES)} or {list(EXCHANGE_NAME_TO_SUFFIX)}"
+            )
+        resolved.add(token)
+    return frozenset(resolved)
+
+
 def _interval_mask(
-    panel: pd.DataFrame, intervals: pd.DataFrame, *, available: bool
+    panel: pd.DataFrame, intervals: pd.DataFrame, *, available: RegisterCoverage | None
 ) -> pd.Series:
-    """Tri-state membership of each panel row in a set of dated intervals."""
-    if not available:
+    """Tri-state membership of each panel row in a set of dated intervals.
+
+    Only rows on an exchange the register covers can be answered. A partial
+    register (U0's ST history is SZSE-only) answers TRUE/FALSE for its exchange
+    and UNKNOWN for the rest; it must neither blank out the exchange it does
+    cover nor lend a confident FALSE to the ones it does not.
+    """
+    covered = normalise_coverage(available)
+    if not covered:
         return pd.Series(MASK_UNKNOWN, index=panel.index, dtype="object")
-    mask = pd.Series(MASK_FALSE, index=panel.index, dtype="object")
+    on_covered = exchange_suffix(panel["symbol"]).isin(covered).to_numpy()
+    mask = pd.Series(
+        np.where(on_covered, MASK_FALSE, MASK_UNKNOWN), index=panel.index, dtype="object"
+    )
+    if intervals.empty:
+        return mask
+    intervals = intervals[exchange_suffix(intervals["symbol"]).isin(covered).to_numpy()]
     if intervals.empty:
         return mask
 
@@ -292,7 +353,7 @@ def build_masks(
     master: pd.DataFrame,
     suspension: pd.DataFrame | None = None,
     st: pd.DataFrame | None = None,
-    st_available: bool = False,
+    st_available: RegisterCoverage = False,
     seasoning_days: int = DEFAULT_SEASONING_DAYS,
 ) -> pd.DataFrame:
     """Attach the tri-state eligibility masks to the panel.
@@ -300,7 +361,10 @@ def build_masks(
     ``st_available`` is a deliberate parameter rather than an inference from
     whether the frame is empty: U0's ST register covers SZSE only, so a partial
     source must produce UNKNOWN for the exchanges it does not cover instead of
-    a confident FALSE.
+    a confident FALSE. Pass the covered exchanges (``{"SZ"}``) to measure those
+    rows; ``True`` still means "complete for every exchange" and ``False`` means
+    "nothing measured". Before Round 29 the only choices were all-or-nothing,
+    so the SZSE register measured nothing and known ST names stayed trainable.
     """
     result = panel.copy()
     dates = pd.to_datetime(result["trade_date"])
@@ -394,7 +458,80 @@ def build_masks(
             ~is_unknown, unknown_parts.str.cat(pd.Series(name, index=result.index), sep=",")
         )
     result["unknown_masks"] = unknown_parts.str.lstrip(",")
+    result.attrs["st_coverage"] = sorted(normalise_coverage(st_available))
     return result
+
+
+def mask_rows_by_exchange(
+    frame: pd.DataFrame, columns: Sequence[str]
+) -> dict[str, dict[str, dict[str, int]]]:
+    """``{mask: {exchange: {TRUE|FALSE|UNKNOWN: rows}}}`` -- measured, not presence.
+
+    A mask column that exists but is UNKNOWN on every row of an exchange has
+    measured nothing there. Counting rows per value per exchange is what lets a
+    certificate tell "the SZSE register was applied" from "the column exists".
+    """
+    if frame.empty:
+        return {}
+    exchange = exchange_suffix(frame["symbol"])
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        table = pd.crosstab(exchange, frame[column].astype(str))
+        out[column] = {
+            str(ex): {
+                value: int(table.loc[ex].get(value, 0))
+                for value in (MASK_TRUE, MASK_FALSE, MASK_UNKNOWN)
+            }
+            for ex in table.index
+        }
+    return out
+
+
+def st_coverage_from_pit_evidence(
+    pit_certificate: Mapping[str, Any] | None,
+    st_manifest: Mapping[str, Any] | None = None,
+    st_intervals: pd.DataFrame | None = None,
+) -> tuple[frozenset[str], dict[str, Any]]:
+    """Which exchanges the U0 ST register can answer for, and why.
+
+    A field the PIT certificate marks ``AVAILABLE`` covers every exchange. A
+    partial register covers the exchanges its manifest names as having dated
+    history -- intersected with the exchanges actually present in the interval
+    table, so a manifest claim with no rows behind it measures nothing.
+    """
+    field_text = str(
+        ((pit_certificate or {}).get("pit_field_availability") or {}).get("st_intervals", "")
+    )
+    basis: dict[str, Any] = {"pit_certificate_st_field": field_text}
+    if field_text.startswith("AVAILABLE"):
+        basis["basis"] = "pit_certificate_available"
+        return frozenset(EXCHANGE_SUFFIXES), basis
+
+    declared: set[str] = set()
+    for name in (st_manifest or {}).get("exchanges_with_dated_history", []) or []:
+        suffix = EXCHANGE_NAME_TO_SUFFIX.get(str(name).upper())
+        if suffix:
+            declared.add(suffix)
+    if not declared and "PARTIAL" in field_text.upper():
+        # "... dated episodes over N securities from SZSE; no dated register for BSE, SSE"
+        head = field_text.split(";", 1)[0]
+        for name, suffix in EXCHANGE_NAME_TO_SUFFIX.items():
+            if f"from {name}" in head:
+                declared.add(suffix)
+    observed: set[str] = set()
+    if st_intervals is not None and not st_intervals.empty:
+        observed = set(exchange_suffix(st_intervals["symbol"]).unique()) & set(EXCHANGE_SUFFIXES)
+    covered = frozenset(declared & observed)
+    basis.update({
+        "basis": "st_manifest_exchanges_with_dated_history ∩ exchanges_in_register",
+        "declared": sorted(declared),
+        "observed_in_register": sorted(observed),
+        "covered": sorted(covered),
+        "uncovered": sorted(set(EXCHANGE_SUFFIXES) - covered),
+    })
+    return covered, basis
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +635,7 @@ def build_gold_dataset(
     factors: pd.DataFrame | None = None,
     suspension: pd.DataFrame | None = None,
     st: pd.DataFrame | None = None,
-    st_available: bool = False,
+    st_available: RegisterCoverage = False,
     observed_families: Mapping[str, pd.DataFrame] | None = None,
     adjustment_method: str = contracts.ADJUST_HFQ,
     horizons: Sequence[int] = DEFAULT_HORIZONS,
@@ -533,12 +670,22 @@ def build_gold_dataset(
     }
     feature_columns = [c for c in labelled.columns if c not in reserved]
 
+    st_coverage = normalise_coverage(st_available)
+    # Only exchanges the panel actually trades on can leave a hole in the mask.
+    present = set(exchange_suffix(masked["symbol"]).unique())
+    uncovered = sorted((set(EXCHANGE_SUFFIXES) & present) - st_coverage)
     warnings: list[str] = []
-    if not st_available:
+    if not st_coverage:
         warnings.append(
             "ST intervals were not available as a complete dated register, so "
             "mask_is_st is UNKNOWN and no row can be excluded on ST grounds; "
             "any dataset built this way is NOT point-in-time complete"
+        )
+    elif uncovered:
+        warnings.append(
+            f"ST register covers only {sorted(st_coverage)}; mask_is_st is UNKNOWN for "
+            f"{uncovered}, so ST rows there cannot be excluded; any dataset built "
+            "this way is NOT point-in-time complete"
         )
     if adjustment_method == contracts.ADJUST_NONE:
         warnings.append(
@@ -577,6 +724,10 @@ def build_gold_dataset(
             }
             for column in mask_columns
         },
+        mask_rows_by_exchange=mask_rows_by_exchange(
+            masked, [c for c in masked.columns if c.startswith("mask_")]
+        ),
+        st_coverage=sorted(st_coverage),
         rows_dropped=dropped,
         content_hash=_frame_hash(labelled),
         rebuild_command=rebuild_command,
@@ -630,6 +781,24 @@ def certify_training_slice(
                 f"(blocked fields: {u0_pit_certificate.get('blocked_pit_fields')})"
             )
 
+    st_rows = (manifest.mask_rows_by_exchange or {}).get("mask_is_st", {})
+    if st_rows:
+        evidence["st_measured_rows_by_exchange"] = {
+            ex: counts.get(MASK_TRUE, 0) + counts.get(MASK_FALSE, 0)
+            for ex, counts in st_rows.items()
+        }
+        evidence["st_unknown_rows_by_exchange"] = {
+            ex: counts.get(MASK_UNKNOWN, 0) for ex, counts in st_rows.items()
+        }
+        unmeasured = sorted(
+            ex for ex, n in evidence["st_unknown_rows_by_exchange"].items() if n
+        )
+        if unmeasured:
+            blockers.append(
+                "mask_is_st is unmeasured on exchange(s) "
+                + ", ".join(f"{ex} ({evidence['st_unknown_rows_by_exchange'][ex]:,} rows)"
+                            for ex in unmeasured)
+            )
     if any("NOT point-in-time complete" in w for w in manifest.warnings):
         blockers.append("gold build reported an incomplete PIT mask")
     if manifest.rows == 0:

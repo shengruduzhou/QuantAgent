@@ -82,16 +82,22 @@ def main() -> int:
     suspension = _read(U0 / "pit" / "suspension_intervals.parquet")
     st = _read(U0 / "pit" / "st_intervals.parquet")
 
-    # The U0 PIT certificate is the authority on whether the ST register is a
-    # complete dated source. It is not, so st_available stays False and the
-    # masks record UNKNOWN rather than a confident FALSE.
+    # The U0 PIT certificate and the ST manifest decide which exchanges the ST
+    # register answers for. It is SZSE-only, so SZ rows get a measured TRUE/FALSE
+    # and SH/BJ rows stay UNKNOWN rather than a confident FALSE.
     pit_certificate_path = U0 / "u0_strict_pit_certificate.json"
     pit_certificate = (
         json.loads(pit_certificate_path.read_text(encoding="utf-8"))
         if pit_certificate_path.exists() else None
     )
-    st_field = (pit_certificate or {}).get("pit_field_availability", {}).get("st_intervals", "")
-    st_available = st_field.startswith("AVAILABLE")
+    st_manifest_path = U0 / "pit" / "st_manifest.json"
+    st_manifest = (
+        json.loads(st_manifest_path.read_text(encoding="utf-8"))
+        if st_manifest_path.exists() else None
+    )
+    st_available, _ = gold_bridge.st_coverage_from_pit_evidence(
+        pit_certificate, st_manifest, st
+    )
 
     observed: dict[str, pd.DataFrame] = {}
     store = RawEventStore(args.journal)

@@ -200,8 +200,22 @@ def build_folds(dates: pd.Series, *, n_folds: int, embargo: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 # structural checks
 # ---------------------------------------------------------------------------
-def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
-    """Structural checks that gate FULL_UNIVERSE_GOLD_READY."""
+def run_quality_checks(
+    dataset: pd.DataFrame,
+    master: pd.DataFrame,
+    *,
+    st_coverage=None,
+    mask_rows_by_exchange: dict | None = None,
+) -> dict:
+    """Structural checks that gate FULL_UNIVERSE_GOLD_READY.
+
+    ``st_coverage`` (the exchanges the ST register answers for) turns the mask
+    check from "the column exists" into "the register measured the rows it
+    claims to": every row on a covered exchange must be TRUE/FALSE and no row on
+    an uncovered exchange may carry a fabricated FALSE. ``mask_rows_by_exchange``
+    are the counts *before* label filtering (ST rows are dropped as infeasible
+    entries, so the dataset alone under-reports what was measured).
+    """
     checks: list[dict] = []
 
     def add(name: str, ok: bool, detail: str, evidence=None) -> None:
@@ -278,6 +292,35 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
     add("masks_present", bool(mask_columns), "explicit eligibility masks emitted",
         {"masks": mask_columns})
 
+    if st_coverage is not None:
+        covered = gold_bridge.normalise_coverage(st_coverage)
+        counts = (mask_rows_by_exchange or gold_bridge.mask_rows_by_exchange(
+            dataset, ["mask_is_st"])).get("mask_is_st", {})
+        unmeasured_on_covered = {
+            ex: c.get(gold_bridge.MASK_UNKNOWN, 0) for ex, c in counts.items()
+            if ex in covered and c.get(gold_bridge.MASK_UNKNOWN, 0)
+        }
+        fabricated_on_uncovered = {
+            ex: c.get(gold_bridge.MASK_TRUE, 0) + c.get(gold_bridge.MASK_FALSE, 0)
+            for ex, c in counts.items()
+            if ex not in covered
+            and c.get(gold_bridge.MASK_TRUE, 0) + c.get(gold_bridge.MASK_FALSE, 0)
+        }
+        covered_without_rows = sorted(
+            ex for ex in covered
+            if ex in counts and not (counts[ex].get(gold_bridge.MASK_TRUE, 0)
+                                     + counts[ex].get(gold_bridge.MASK_FALSE, 0))
+        )
+        add("st_mask_measured_per_exchange",
+            not unmeasured_on_covered and not fabricated_on_uncovered
+            and not covered_without_rows and "mask_is_st" in dataset.columns,
+            "mask_is_st is TRUE/FALSE on every row of a covered exchange and "
+            "UNKNOWN elsewhere (counted per exchange, not inferred from column presence)",
+            {"covered": sorted(covered), "rows_by_exchange": counts,
+             "unmeasured_on_covered": unmeasured_on_covered,
+             "fabricated_on_uncovered": fabricated_on_uncovered,
+             "covered_without_measured_rows": covered_without_rows})
+
     infeasible_kept = (
         int((~dataset["entry_feasible"]).sum()) if "entry_feasible" in dataset else 0
     )
@@ -351,8 +394,15 @@ def main() -> int:
     st = _read(U0 / "pit/st_intervals.parquet")
 
     pit_certificate = json.loads((U0 / "u0_strict_pit_certificate.json").read_text("utf-8"))
-    st_field = pit_certificate.get("pit_field_availability", {}).get("st_intervals", "")
-    st_available = st_field.startswith("AVAILABLE")
+    st_manifest_path = U0 / "pit/st_manifest.json"
+    st_manifest = (json.loads(st_manifest_path.read_text("utf-8"))
+                   if st_manifest_path.exists() else None)
+    # Coverage is per exchange. One boolean ("is the register complete?") made the
+    # SZSE-only register measure nothing at all, so known SZ ST names were
+    # trainable (R1-F05). The certificate/register decide which exchanges answer.
+    st_coverage, st_coverage_basis = gold_bridge.st_coverage_from_pit_evidence(
+        pit_certificate, st_manifest, st)
+    st_available = set(st_coverage) >= set(gold_bridge.EXCHANGE_SUFFIXES)
 
     if args.max_symbols:
         merged = master.merge(panel[["symbol"]].drop_duplicates(), on="symbol")
@@ -368,7 +418,9 @@ def main() -> int:
     adjusted = gold_bridge.apply_adjustment(panel, factors, method=args.adjustment)
     masked = gold_bridge.build_masks(
         adjusted, master=master, suspension=suspension, st=st,
-        st_available=st_available, seasoning_days=IPO_SEASONING_TRADING_DAYS)
+        st_available=st_coverage, seasoning_days=IPO_SEASONING_TRADING_DAYS)
+    mask_rows_by_exchange = gold_bridge.mask_rows_by_exchange(
+        masked, [c for c in masked.columns if c.startswith("mask_")])
 
     print("[3/8] computing features ...", flush=True)
     featured = build_features(masked)
@@ -428,7 +480,8 @@ def main() -> int:
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("[7/8] running structural quality checks ...", flush=True)
-    quality = run_quality_checks(dataset, master)
+    quality = run_quality_checks(dataset, master, st_coverage=st_coverage,
+                                 mask_rows_by_exchange=mask_rows_by_exchange)
 
     dataset_hash = _frame_hash(dataset)
     schema_hash = _schema_hash(dataset)
@@ -441,9 +494,12 @@ def main() -> int:
 
     warnings: list[str] = []
     if not st_available:
+        st_rows = mask_rows_by_exchange.get("mask_is_st", {})
         warnings.append(
-            "ST intervals are not a complete dated register (SZSE only); mask_is_st "
-            "is UNKNOWN for exchanges without one. This dataset is therefore NOT "
+            f"ST intervals are a dated register only for {sorted(st_coverage) or 'no exchange'}; "
+            f"mask_is_st is measured (TRUE/FALSE) there and UNKNOWN for "
+            f"{st_coverage_basis.get('uncovered', [])} "
+            f"(rows by exchange: {st_rows}). This dataset is therefore NOT "
             "point-in-time complete for ST, and FULL_UNIVERSE_RESEARCH_READY must "
             "stay withheld.")
 
@@ -502,6 +558,9 @@ def main() -> int:
         "label_hash": label_hash,
         "fold_hash": fold_hash,
         "st_pit_complete": st_available,
+        "st_coverage_exchanges": sorted(st_coverage),
+        "st_coverage_basis": st_coverage_basis,
+        "mask_rows_by_exchange_before_label_drop": mask_rows_by_exchange,
         "warnings": warnings,
     }
     (target / "manifest.json").write_text(

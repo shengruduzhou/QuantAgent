@@ -153,6 +153,111 @@ class TestMasks:
         assert masked["eligible_for_training"].sum() == 25
 
 
+class TestPerExchangeStCoverage:
+    """R1-F05: a SZSE-only register must measure SZ rows, not blank everything."""
+
+    @staticmethod
+    def _st_register() -> pd.DataFrame:
+        return pd.DataFrame([{
+            "symbol": "000004.SZ", "effective_start": pd.Timestamp("2022-05-06"),
+            "effective_end": pd.Timestamp("2023-06-28"),
+        }, {
+            # A stray row for an uncovered exchange must not become evidence.
+            "symbol": "600000.SH", "effective_start": pd.Timestamp("2022-05-06"),
+            "effective_end": pd.Timestamp("2022-06-30"),
+        }])
+
+    def _masked(self, coverage):
+        symbols = ("000004.SZ", "000001.SZ", "600000.SH", "920001.BJ")
+        return gold_bridge.build_masks(
+            _panel(symbols=symbols, days=10, start="2022-05-30"),
+            master=_master(symbols), st=self._st_register(), st_available=coverage,
+        )
+
+    @staticmethod
+    def _at(masked, symbol, day):
+        row = masked[(masked["symbol"] == symbol) & (masked["trade_date"] == day)]
+        assert len(row) == 1
+        return row["mask_is_st"].iloc[0]
+
+    def test_sz_register_marks_a_known_st_name_true(self):
+        masked = self._masked({"SZ"})
+        assert self._at(masked, "000004.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+        assert self._at(masked, "000001.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_FALSE
+
+    def test_uncovered_exchanges_stay_unknown(self):
+        masked = self._masked({"SZ"})
+        assert self._at(masked, "600000.SH", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_UNKNOWN
+        assert (masked.loc[masked["symbol"] == "920001.BJ", "mask_is_st"]
+                == gold_bridge.MASK_UNKNOWN).all()
+
+    def test_exchange_names_are_accepted(self):
+        masked = self._masked(["SZSE"])
+        assert self._at(masked, "000004.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+
+    def test_boolean_coverage_is_backward_compatible(self):
+        assert (self._masked(False)["mask_is_st"] == gold_bridge.MASK_UNKNOWN).all()
+        everywhere = self._masked(True)
+        assert self._at(everywhere, "600000.SH", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+        assert self._at(everywhere, "920001.BJ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_FALSE
+
+    def test_unknown_exchange_is_refused(self):
+        with pytest.raises(gold_bridge.GoldBridgeError, match="unknown exchange"):
+            gold_bridge.normalise_coverage({"HK"})
+
+    def test_st_row_on_covered_exchange_is_dropped_as_infeasible(self):
+        masked = self._masked({"SZ"})
+        _, dropped = gold_bridge.build_labels(
+            masked, horizons=[1])
+        assert dropped["st_at_t"] == 10
+
+    def test_rows_are_counted_per_exchange(self):
+        counts = gold_bridge.mask_rows_by_exchange(self._masked({"SZ"}), ["mask_is_st"])
+        assert counts["mask_is_st"]["SZ"] == {"TRUE": 10, "FALSE": 10, "UNKNOWN": 0}
+        assert counts["mask_is_st"]["SH"] == {"TRUE": 0, "FALSE": 0, "UNKNOWN": 10}
+
+    def test_coverage_is_derived_from_the_u0_pit_evidence(self):
+        certificate = {"pit_field_availability": {"st_intervals": (
+            "BLOCKED_BY_DATA — PARTIAL: 906 dated episodes over 651 securities from "
+            "SZSE; no dated register for BSE, SSE; current state known for 333 names")}}
+        manifest = {"exchanges_with_dated_history": ["SZSE"],
+                    "exchanges_without_dated_history": ["BSE", "SSE"]}
+        covered, basis = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, manifest, self._st_register())
+        assert covered == frozenset({"SZ"})
+        assert basis["uncovered"] == ["BJ", "SH"]
+        # Without the manifest the certificate text still names the exchange.
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, None, self._st_register())
+        assert covered == frozenset({"SZ"})
+        # A declared exchange with no rows in the register measures nothing.
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, manifest, pd.DataFrame({"symbol": ["600000.SH"]}))
+        assert covered == frozenset()
+        available = {"pit_field_availability": {"st_intervals": "AVAILABLE (all)"}}
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(available)
+        assert covered == frozenset(gold_bridge.EXCHANGE_SUFFIXES)
+
+    def test_certificate_names_the_unmeasured_exchanges(self):
+        symbols = ("000004.SZ", "600000.SH")
+        _, manifest = gold_bridge.build_gold_dataset(
+            _panel(symbols=symbols, days=40, start="2022-05-02"), master=_master(symbols),
+            factors=_factors("000004.SZ"), st=self._st_register(), st_available={"SZ"},
+            adjustment_method=contracts.ADJUST_HFQ, horizons=[1],
+        )
+        assert manifest.st_coverage == ["SZ"]
+        assert manifest.mask_rows_by_exchange["mask_is_st"]["SZ"]["UNKNOWN"] == 0
+        assert manifest.mask_rows_by_exchange["mask_is_st"]["SZ"]["TRUE"] > 0
+        certificate = gold_bridge.certify_training_slice(
+            manifest, u0_pit_certificate={"decision": "FULL_UNIVERSE_DATA_READY",
+                                          "training_permitted": True,
+                                          "blocked_pit_fields": []})
+        assert certificate.training_permitted is False
+        assert certificate.evidence["st_measured_rows_by_exchange"]["SZ"] == 40
+        assert certificate.evidence["st_measured_rows_by_exchange"]["SH"] == 0
+        assert any("unmeasured on exchange(s) SH" in b for b in certificate.blockers)
+
+
 class TestAvailability:
     def test_absent_family_is_false_meaning_not_observed(self):
         result = gold_bridge.attach_availability(_panel(), {})
