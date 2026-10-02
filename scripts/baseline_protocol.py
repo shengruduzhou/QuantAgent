@@ -116,6 +116,35 @@ def _target_weights(
     ).sort_index()
 
 
+def _sharpe_uncertainty(nav: pd.Series) -> dict[str, object]:
+    """Point estimates alone overstate certainty: publish PSR, MinTRL and a
+    dependence-preserving bootstrap interval next to the Sharpe ratio."""
+    from quantagent.quant_math.performance import (
+        minimum_track_record_length,
+        probabilistic_sharpe_ratio,
+        sharpe_bootstrap_interval,
+    )
+
+    daily = pd.Series(nav).sort_index().pct_change().dropna()
+    low, high = sharpe_bootstrap_interval(daily)
+    min_trl = minimum_track_record_length(daily)
+    return {
+        "observed_sessions": int(len(daily)),
+        "psr_vs_zero": None if not np.isfinite(psr := probabilistic_sharpe_ratio(daily)) else round(psr, 4),
+        "min_track_record_sessions": (
+            None if not np.isfinite(min_trl) else int(np.ceil(min_trl))
+        ),
+        "min_track_record_status": (
+            "sharpe_not_above_zero" if min_trl == float("inf") else "measured"
+        ),
+        "sharpe_ci95_stationary_bootstrap": [
+            None if not np.isfinite(low) else round(low, 3),
+            None if not np.isfinite(high) else round(high, 3),
+        ],
+        "multiple_testing": "not_deflated: DSR needs the declared trial family (see research gates)",
+    }
+
+
 def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,
                       start: str, end: str | None, top_k: int,
                       trust_class: str | None = None) -> str:
@@ -257,6 +286,7 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         )
         m = res.metrics
         rec = {
+            **_sharpe_uncertainty(res.nav),
             "ann": round(m.annualized_return, 4),
             "excess_ann": round(m.annualized_return - bench_ann, 4),
             "total": round(m.total_return, 4),
