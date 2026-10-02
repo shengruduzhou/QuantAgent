@@ -20,9 +20,14 @@ Adapters implemented (all verified live against the runtime this ships in):
                      and never silently swallowed.
 ``TickFlowSource``   the entitled vendor SDK: daily bars, instruments, quotes.
 
-Vendor unit conventions are normalised at the boundary: Tencent, Eastmoney and
-Sina all report volume in 手 (lots, 100 shares) on the daily endpoints, so the
-adapters multiply by 100 and declare ``volume_unit = shares``.
+Vendor unit conventions are normalised at the boundary and canonical volume is
+shares. The scale is NOT a per-vendor constant: Tencent's daily volume is 手
+(lots) on the main boards / ChiNext but native SHARES on STAR (akshare PR #7328;
+measured on sh688981, ratio to Sina 1.000000 on 58/58 sessions). Where a
+response carries CNY turnover the scale is proven per response by
+``quantagent.data.ashare.units.infer_volume_scale``; where it does not (Tencent's
+``fqkline`` daily payload) the board prior is applied and the rows are
+``UNIT_AMBIGUOUS``, never ``OK``.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from quantagent.data.ashare.http import (
     utc_now,
 )
 from quantagent.data.ashare.symbols import SecurityIdentity, identify
+from quantagent.data.ashare.units import infer_volume_scale, tencent_native_volume_prior
 
 LOTS_TO_SHARES = 100.0
 
@@ -172,16 +178,21 @@ class TencentSource:
                           "no bars in vendor response")
         rows = []
         for item in collected:
-            # [date, open, close, high, low, volume(lots)] — no turnover column
+            # fqkline: [date, open, close, high, low, volume, ({ex-rights dict})]
+            # with NO turnover. The newfqkline layout appends turnover% at [7]
+            # and amount in 万元 at [8]; that amount is only trusted after the
+            # implied-VWAP check below proves it.
             if len(item) < 6:
                 continue
+            amount = (float(item[8]) * 1e4
+                      if len(item) > 8 and _is_number(item[8]) else float("nan"))
             rows.append({
                 "symbol": ident.symbol,
                 "trade_date": pd.Timestamp(item[0]),
                 "open": float(item[1]), "close": float(item[2]),
                 "high": float(item[3]), "low": float(item[4]),
-                "volume": float(item[5]) * LOTS_TO_SHARES,
-                "amount": float(item[6]) if len(item) > 6 and _is_number(item[6]) else float("nan"),
+                "volume": float(item[5]),          # vendor-native unit, scaled below
+                "amount": amount,
             })
         frame = pd.DataFrame(rows)
         if frame.empty:
@@ -191,12 +202,35 @@ class TencentSource:
         frame = frame[(frame["trade_date"] >= start_ts) & (frame["trade_date"] <= end_ts)]
         if frame.empty:
             return _empty(self.name, last_outcome, cols, RETRY_EMPTY, "no bars inside range")
+        frame = frame.reset_index(drop=True)
+        # Unit truth per response: prove the scale from amount/volume vs
+        # [low, high] when turnover exists; otherwise apply the measured board
+        # prior (STAR native shares, else lots) and refuse to certify the rows.
+        prior_scale, prior_reason = tencent_native_volume_prior(ident.symbol)
+        if adjust != contracts.ADJUST_NONE:
+            verdict_status, scale = "unverifiable", prior_scale
+            basis = (f"unverifiable:vendor_adjusted_prices({adjust}):"
+                     f"board_prior={prior_reason}")
+        else:
+            verdict = infer_volume_scale(frame["volume"], frame["amount"], frame["low"],
+                                         frame["high"], fallback_scale=prior_scale,
+                                         fallback_reason=prior_reason)
+            verdict_status, scale, basis = verdict.status, verdict.scale, verdict.basis
+        frame["volume"] = frame["volume"] * scale if scale is not None else float("nan")
+        quality = (contracts.QUALITY_OK if verdict_status == "verified"
+                   else contracts.QUALITY_UNIT_AMBIGUOUS)
+        if adjust != contracts.ADJUST_NONE:
+            quality = contracts.QUALITY_DERIVED
         frame = _stamp(frame, self.name, self.KLINE_URL, last_outcome.retrieved_at,
-                       frame["trade_date"].dt.strftime("%Y-%m-%d") + " 15:00:00")
+                       frame["trade_date"].dt.strftime("%Y-%m-%d") + " 15:00:00",
+                       quality=quality)
         return SourceResult(frame[cols], self.name, self.KLINE_URL, RETRY_OK,
                             last_outcome.retrieved_at, len(frame),
                             metadata={"adjustment": adjust, "requests": requests_made,
-                                      "amount_available": self.PROVIDES_AMOUNT})
+                                      "amount_available": bool(frame["amount"].notna().any()),
+                                      "volume_unit_status": verdict_status,
+                                      "volume_scale_applied": scale,
+                                      "volume_unit_basis": basis})
 
     # -- minute bars --------------------------------------------------------
     def minute_bars(self, symbol: str, frequency: int = 5, count: int = 320) -> SourceResult:
