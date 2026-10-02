@@ -321,10 +321,6 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         bench_basis = "signal_dates_close_to_close"
     bench_ann = float((1 + bench).prod() ** (ANN / max(1, len(bench))) - 1)
 
-    if panel_path:
-        # The simulator only reads rows of names it may hold; restricting to the
-        # predicted names keeps it fast. Gap rows keep every session present.
-        panel = panel[panel["symbol"].isin(set(preds["symbol"]))]
     panel_noflags = panel.drop(columns=["is_suspended", "is_st", "is_limit_up", "is_limit_down"])
 
     # All targets stay on their signal dates. The strict simulator is the sole
@@ -363,6 +359,10 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             eligible_only=v["eligible"],
         )
         use_panel = panel if v["flags"] else panel_noflags
+        if panel_path:
+            # The simulator only reads rows of names it may hold, and every held
+            # name was a target; gap rows keep each of their sessions present.
+            use_panel = use_panel[use_panel["symbol"].isin(set(tw.columns))]
         res = run_strict_backtest_v8(
             tw, use_panel, sector_map=sector,
             config=AShareExecutionSimulationConfig(initial_cash=1_000_000.0, slippage_bps=slippage_bps),
