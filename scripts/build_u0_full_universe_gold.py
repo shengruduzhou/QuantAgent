@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from quantagent.data import label_contract  # noqa: E402
 from quantagent.data.ashare import contracts, execution_panel, gold_bridge  # noqa: E402
 from quantagent.data.v7_quality_gates import evaluate_survivorship  # noqa: E402
 
@@ -530,8 +531,12 @@ def main() -> int:
     dataset[[c for c in eligibility_columns if c in dataset.columns]].to_parquet(
         target / "eligibility.parquet", index=False)
 
-    dataset[["symbol", "trade_date", "entry_close_t1", *label_columns]].to_parquet(
-        target / "labels.parquet", index=False)
+    # Stamped with its convention and content-hashed in the manifest: the
+    # certified labels were once silently replaced by a same-close v7 file
+    # (R3-F11), and only a hash + declared convention can show that.
+    labels_sha = label_contract.write_labels_parquet(
+        dataset[["symbol", "trade_date", "entry_close_t1", *label_columns]],
+        target / "labels.parquet", convention=label_contract.GOLD_DELAY1)
 
     masks = dataset[["symbol", "trade_date"]].copy()
     for column in feature_columns:
@@ -640,6 +645,10 @@ def main() -> int:
         "schema_hash": schema_hash,
         "feature_hash": feature_hash,
         "label_hash": label_hash,
+        "label_hash_note": "label_hash hashes the label column names; labels_file_sha256 is the content",
+        "label_convention": gold_bridge.LABEL_CONVENTION,
+        "label_convention_id": label_contract.GOLD_DELAY1,
+        "labels_file_sha256": labels_sha,
         "fold_hash": fold_hash,
         "st_pit_complete": st_available,
         "price_limit_mask_stats_incl_lookback": price_limit_stats,

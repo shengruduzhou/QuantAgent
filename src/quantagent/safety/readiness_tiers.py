@@ -191,14 +191,26 @@ class ReadinessEvaluator:
             _req("missingness_masks_present",
                  (self.runtime / "data/gold/full_universe/missingness_masks.parquet").exists(),
                  "explicit missingness masks emitted"),
-            _req("labels_present",
-                 (self.runtime / "data/gold/full_universe/labels.parquet").exists(),
-                 "executable labels emitted"),
+            self._labels_requirement(manifest),
             _req("lineage_present",
                  (self.runtime / "data/gold/full_universe/lineage.json").exists(),
                  "lineage recorded"),
         ]
         return self._assemble(FULL_UNIVERSE_GOLD_READY, requirements, lower)
+
+    def _labels_requirement(self, manifest: Mapping[str, Any] | None) -> Requirement:
+        """The labels next to the dataset are the certified ones, by content.
+
+        Existence was the old check, and it passed after the certified delay-1
+        labels were overwritten with a same-close file (R3-F11).
+        """
+        from quantagent.data.label_contract import verify_labels_against_manifest
+
+        ok, evidence = verify_labels_against_manifest(
+            self.runtime / "data/gold/full_universe/labels.parquet", manifest)
+        return _req("labels_match_certified_convention", ok,
+                    "labels file matches the manifest's declared convention and content hash",
+                    evidence)
 
     def full_universe_research(self, lower: Mapping[str, bool]) -> TierCertificate:
         pit = self._u0_pit()
