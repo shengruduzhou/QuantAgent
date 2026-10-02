@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +27,15 @@ class BacktestAdapter:
         self.settings = settings
         self.indexer = indexer
         self._runs: dict[str, Path] = {}
+        self._runs_lock = threading.Lock()
         self._name_map: dict[str, str] | None = None
 
     def list(self) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
-        self._runs = {}
+        # Built privately and published in one assignment: concurrent requests
+        # used to read the index while another request had just emptied it,
+        # returning spurious 404s that the UI rendered as "no backtests".
+        runs: dict[str, Path] = {}
         seen_directories: set[Path] = set()
         metric_artifacts = [
             item for item in self.indexer.filter(kind="backtest")
@@ -44,7 +49,7 @@ class BacktestAdapter:
             seen_directories.add(directory.resolve())
             relative = require_relative_path(self.settings, directory)
             backtest_id = stable_id("backtest", relative)
-            self._runs[backtest_id] = directory
+            runs[backtest_id] = directory
             metrics = read_json(metrics_path, {}) or {}
             run_config = self._nearby_json(directory, "run_config.json")
             initial_cash = self._metric(run_config, "initial_cash")
@@ -85,7 +90,9 @@ class BacktestAdapter:
                 "manifestPath": artifact.get("manifestPath"),
                 "capabilities": capabilities,
             })
-        summaries.extend(self._discover_summary_backtests(seen_directories))
+        summaries.extend(self._discover_summary_backtests(seen_directories, runs))
+        with self._runs_lock:
+            self._runs = runs
         summaries.sort(key=lambda row: row.get("endDate") or "", reverse=True)
         return summaries
 
@@ -93,7 +100,9 @@ class BacktestAdapter:
         summary = next((item for item in self.list() if item["id"] == backtest_id), None)
         if summary is None:
             return None
-        directory = self._runs[backtest_id]
+        directory = self._runs.get(backtest_id)
+        if directory is None:
+            return None
         return {
             **summary,
             "files": sorted(require_relative_path(self.settings, item) for item in directory.iterdir() if item.is_file()),
@@ -433,9 +442,10 @@ class BacktestAdapter:
         }
 
     def _resolve(self, backtest_id: str) -> Path:
-        if backtest_id not in self._runs:
-            self.list()
         path = self._runs.get(backtest_id)
+        if path is None:
+            self.list()
+            path = self._runs.get(backtest_id)
         if path is None:
             raise KeyError(backtest_id)
         return path
@@ -484,7 +494,9 @@ class BacktestAdapter:
                 result[(row_symbol, str(row.get("sell_date") or "")[:10])].append(value)
         return result
 
-    def _discover_summary_backtests(self, seen_directories: set[Path]) -> list[dict[str, Any]]:
+    def _discover_summary_backtests(
+        self, seen_directories: set[Path], runs: dict[str, Path]
+    ) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
         summary_artifacts = [
             item for item in self.indexer.scan()
@@ -504,7 +516,7 @@ class BacktestAdapter:
             metrics = _best_metrics_payload(payload)
             relative = require_relative_path(self.settings, directory)
             backtest_id = stable_id("backtest", relative)
-            self._runs[backtest_id] = directory
+            runs[backtest_id] = directory
             start_date, end_date = _window_dates(payload.get("window"))
             config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
             capabilities = self._capabilities(directory)
