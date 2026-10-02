@@ -216,8 +216,11 @@ def build_execution_panel(
     if delisting_dates is not None and len(bars):
         dated = pd.to_datetime(pd.Series(delisting_dates), errors="coerce").dropna()
         dated.index = dated.index.astype(str)
-        calendar = pd.DatetimeIndex(sorted(set(bars["trade_date"]) | set(gap_rows.get(
-            "trade_date", pd.Series(dtype="datetime64[ns]")))))
+        calendar = pd.DatetimeIndex(np.unique(np.concatenate([
+            bars["trade_date"].to_numpy(dtype="datetime64[ns]"),
+            gap_rows["trade_date"].to_numpy(dtype="datetime64[ns]")
+            if len(gap_rows) else np.array([], dtype="datetime64[ns]"),
+        ])))
         present = set(bars["symbol"].astype(str))
         records = []
         for symbol, when in dated.items():
