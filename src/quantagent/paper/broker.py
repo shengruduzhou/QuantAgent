@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 from typing import Any, Iterable, Mapping, Sequence
 
 from quantagent.backtest import ashare_rules as rules
@@ -60,6 +61,43 @@ from quantagent.paper.portfolio import (
 )
 
 
+class InvalidMarketSnapshot(ValueError):
+    """A snapshot whose price or volume is not a measurement.
+
+    A NaN session volume used to disable the participation cap, the pre-trade
+    participation check and market impact all at once: ``min(remaining, nan)``
+    is ``remaining`` and ``nan > 0`` is False, so an unmeasured bar filled the
+    whole order at zero impact. An unmeasured value is refused, never defaulted.
+    """
+
+
+def snapshot_invalid_reason(
+    *,
+    last_price: Any,
+    previous_close: Any,
+    session_volume: Any,
+    high: Any = None,
+    low: Any = None,
+) -> str | None:
+    """Why these snapshot values cannot be priced against, or None."""
+    def finite(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    problems: list[str] = []
+    for name, value in (("last_price", last_price), ("previous_close", previous_close)):
+        if not finite(value) or float(value) <= 0:
+            problems.append(f"{name}={value!r} is not a finite positive price")
+    if not finite(session_volume) or float(session_volume) < 0:
+        problems.append(f"session_volume={session_volume!r} is not a finite non-negative volume")
+    for name, value in (("high", high), ("low", low)):
+        if value is not None and (not finite(value) or float(value) <= 0):
+            problems.append(f"{name}={value!r} is not a finite positive price")
+    return "; ".join(problems) or None
+
+
 @dataclass
 class MarketSnapshot:
     """What the broker knows about one symbol at one point in time."""
@@ -76,6 +114,20 @@ class MarketSnapshot:
     sessions_since_listing: int | None = None
     high: float | None = None
     low: float | None = None
+
+    def __post_init__(self) -> None:
+        reason = self.invalid_reason()
+        if reason is not None:
+            raise InvalidMarketSnapshot(
+                f"market_data_invalid for {self.symbol} on {self.trade_date}: {reason}"
+            )
+
+    def invalid_reason(self) -> str | None:
+        """Re-checkable: the dataclass is mutable, so the venue checks again."""
+        return snapshot_invalid_reason(
+            last_price=self.last_price, previous_close=self.previous_close,
+            session_volume=self.session_volume, high=self.high, low=self.low,
+        )
 
     def limits(self) -> rules.PriceLimits:
         return rules.price_limits(
@@ -298,6 +350,10 @@ class PaperBroker:
         """Return a rejection reason, or None when the order may proceed."""
         if self.killed:
             return f"kill switch active: {self.kill_reason}"
+
+        invalid = market.invalid_reason()
+        if invalid is not None:
+            return f"market_data_invalid: {invalid}"
 
         if market.phase not in mc.CONTINUOUS_PHASES and market.phase not in mc.AUCTION_PHASES:
             return f"outside a tradable session phase ({market.phase})"

@@ -17,6 +17,7 @@ from quantagent.execution.broker_base import (
     OrderState,
     OrderStatus,
     OrderType,
+    VenueRefusal,
 )
 from quantagent.execution.constraints import (
     ExecutionConstraintEvaluator,
@@ -30,6 +31,7 @@ from quantagent.domain.orders import (
     OrderBook,
     OrderEventType as CanonicalEventType,
     OrderIntent as CanonicalIntent,
+    OrderStatus as CanonicalOrderStatus,
     RiskDecision as CanonicalRiskDecision,
     Side as CanonicalSide,
     Signal,
@@ -480,21 +482,28 @@ class OrderManager:
                 self._risk_intents_today.append(risk_intent)
             if self._venue_is_canonical:
                 self.broker.attach_canonical(order.client_order_id, canonical_order.order_id)
-            state = self.broker.submit(order)
+            venue_refusal: str | None = None
+            try:
+                state = self.broker.submit(order)
+            except VenueRefusal as exc:
+                # The venue declined before acknowledging anything. Without a
+                # terminal event the canonical order would stay SUBMITTED with
+                # its full leaves quantity: a working order no venue holds.
+                venue_refusal = exc.reason
+                state = self._record_venue_refusal(order, canonical_order, exc)
             self._update(order, state)
-            if not self._venue_is_canonical:
+            if not self._venue_is_canonical and venue_refusal is None:
                 self._record_canonical_state(canonical_order, state)
             if not self.forensic_replay:
-                self.claims.resolve(
-                    key,
-                    outcome=order.client_order_id,
-                    payload={
-                        "clientOrderId": order.client_order_id,
-                        "orderId": canonical_order.order_id,
-                        "fingerprint": fingerprint,
-                        "riskApproved": True,
-                    },
-                )
+                resolution = {
+                    "clientOrderId": order.client_order_id,
+                    "orderId": canonical_order.order_id,
+                    "fingerprint": fingerprint,
+                    "riskApproved": True,
+                }
+                if venue_refusal is not None:
+                    resolution["venueRefused"] = venue_refusal
+                self.claims.resolve(key, outcome=order.client_order_id, payload=resolution)
             self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
             yield state
 
@@ -800,6 +809,28 @@ class OrderManager:
         self.book.apply(canonical_order.order_id, CanonicalEventType.SUBMITTED)
         self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
         return self.book.state_of(canonical_order.order_id)
+
+    def _record_venue_refusal(self, order: Order, canonical, exc: VenueRefusal) -> OrderState:
+        """Terminate a SUBMITTED canonical order the venue declined.
+
+        Only an order the venue never acknowledged is terminated here. If the
+        venue had already appended its own events the refusal cannot be a clean
+        "nothing happened", so the state is left for explicit reconciliation.
+        """
+        current = self.book.state_of(canonical.order_id)
+        if current.status is CanonicalOrderStatus.SUBMITTED:
+            self.book.apply(canonical.order_id, CanonicalEventType.REJECTED, reason=exc.reason)
+            self.canonical.append(
+                self.book.history_of(canonical.order_id)[-1], trade_date=canonical.trade_date
+            )
+        return OrderState(
+            client_order_id=order.client_order_id,
+            broker_order_id=None,
+            status=OrderStatus.REJECTED,
+            filled_quantity=0,
+            avg_price=0.0,
+            last_message=exc.reason,
+        )
 
     def _record_canonical_state(self, canonical, state: OrderState) -> None:
         session = str(getattr(state, "timestamp", "") or "")[:10] or None

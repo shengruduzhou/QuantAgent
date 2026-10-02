@@ -56,6 +56,7 @@ from quantagent.execution.broker_base import (
     Order as WireOrder,
     OrderSide,
     OrderType,
+    VenueRefusal,
 )
 from quantagent.execution.order_manager import (
     IdempotencyConflict,
@@ -65,7 +66,12 @@ from quantagent.execution.order_manager import (
 )
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
 from quantagent.paper import ledger as paper_ledger
-from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
+from quantagent.paper.broker import (
+    BrokerConfig,
+    InvalidMarketSnapshot,
+    MarketSnapshot,
+    PaperBroker,
+)
 from quantagent.paper.risk import RiskEngine, RiskLimits
 from quantagent.paper.portfolio import Portfolio
 from quantagent.safety.operating_mode import (
@@ -85,6 +91,7 @@ INTERRUPTED = "interrupted"
 MISSING_IDEMPOTENCY_KEY = "missing_idempotency_key"
 MISSING_LINEAGE = "missing_lineage"
 MARKET_DATA_UNAVAILABLE = "market_data_unavailable"
+MARKET_DATA_INVALID = "market_data_invalid"
 
 MarketSource = Callable[[str, str], MarketSnapshot | None]
 
@@ -121,6 +128,15 @@ class SubmissionRejected(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class MarketDataRefused(SubmissionRejected, VenueRefusal):
+    """No usable market snapshot for the order's session.
+
+    A `SubmissionRejected` for the HTTP layer and a `VenueRefusal` for the order
+    manager: if the lookup fails inside the venue rather than before it, the OMS
+    terminates the canonical order instead of leaving it SUBMITTED.
+    """
 
 
 class WriterLockUnavailable(RuntimeError):
@@ -447,9 +463,16 @@ class PaperOrderService:
 
     # -- market data --------------------------------------------------------
     def _market_for(self, symbol: str, trade_date: str) -> MarketSnapshot:
-        snapshot = self.market_source(symbol, trade_date) if self.market_source else None
+        try:
+            snapshot = self.market_source(symbol, trade_date) if self.market_source else None
+        except InvalidMarketSnapshot as exc:
+            # A NaN volume used to fill the whole order uncapped at zero impact.
+            raise MarketDataRefused(
+                MARKET_DATA_INVALID,
+                f"market data for {symbol} on {trade_date} is not a measurement: {exc}",
+            ) from exc
         if snapshot is None:
-            raise SubmissionRejected(
+            raise MarketDataRefused(
                 MARKET_DATA_UNAVAILABLE,
                 f"no market data for {symbol} on {trade_date}. This path fills at a "
                 "real observed price or not at all; inventing one would make the fill "
@@ -599,6 +622,12 @@ class PaperOrderService:
         )
 
         try:
+            # Resolve the session's market data before the order manager opens a
+            # canonical order. Risk approval without the snapshot the venue will
+            # price against approves nothing, and a refusal discovered inside the
+            # venue used to leave CREATED + RISK_APPROVED + SUBMITTED behind with
+            # no working order anywhere.
+            self._market_for(request.symbol, request.trade_date)
             states = self.manager.submit_orders([wire])
         except SubmissionRejected as exc:
             # No market data: nothing economic happened, and saying so is more
@@ -803,7 +832,9 @@ class PaperOrderService:
 __all__ = [
     "EXECUTED",
     "INTERRUPTED",
+    "MARKET_DATA_INVALID",
     "MARKET_DATA_UNAVAILABLE",
+    "MarketDataRefused",
     "MISSING_IDEMPOTENCY_KEY",
     "MISSING_LINEAGE",
     "PaperOrderRequest",
