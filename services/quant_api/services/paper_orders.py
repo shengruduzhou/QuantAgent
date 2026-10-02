@@ -72,7 +72,7 @@ from quantagent.paper.broker import (
     MarketSnapshot,
     PaperBroker,
 )
-from quantagent.paper.risk import RiskEngine, RiskLimits
+from quantagent.paper.risk import RiskEngine, RiskLimits, load_industry_map
 from quantagent.paper.portfolio import Portfolio
 from quantagent.safety.operating_mode import (
     OperatingModeState,
@@ -271,8 +271,20 @@ class PaperOrderService:
         risk_limits: RiskLimits | None = None,
         acquire_writer_lock: bool = True,
         industry_map: Mapping[str, str] | None = None,
+        sector_map_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self.root = Path(root)
+        # Where the venue's industry map came from, or why there is none. An
+        # unreadable map must not take the API down; it leaves the map absent,
+        # so BUYs are refused `industry_unmeasured`, and says so.
+        self.industry_map_source: str | None = "injected" if industry_map else None
+        self.industry_map_error: str | None = None
+        if industry_map is None and sector_map_path is not None:
+            try:
+                industry_map = load_industry_map(sector_map_path)
+                self.industry_map_source = str(sector_map_path)
+            except (OSError, ValueError, ImportError) as exc:
+                self.industry_map_error = f"sector map {sector_map_path} unreadable: {exc}"
         self.root.mkdir(parents=True, exist_ok=True)
         self.broker_config = broker_config or BrokerConfig()
         self.mode = OperatingModeState(mode=PAPER)

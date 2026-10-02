@@ -111,7 +111,10 @@ class ServiceContainer:
             # API processes against one paper account would each size orders from
             # their own in-memory portfolio, so the second is refused at startup
             # rather than allowed to over-commit the same cash.
-            paper_orders=PaperOrderService(resolved.runtime_root / "paper_orders"),
+            paper_orders=PaperOrderService(
+                resolved.runtime_root / "paper_orders",
+                sector_map_path=resolved.paper_sector_map,
+            ),
         )
 
     def start(self) -> None:

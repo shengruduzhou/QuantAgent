@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha1
+import os
 from pathlib import Path
 
 from quantagent.config.paths import quant_paths
@@ -19,6 +20,10 @@ class ApiSettings:
     index_ttl_seconds: int = 900
     max_table_rows: int = 1_000
     max_chart_points: int = 10_000
+    #: Optional symbol/industry table for the paper venue's industry limit
+    #: (env ``QUANTAGENT_PAPER_SECTOR_MAP``). Without it a paper BUY is refused
+    #: ``industry_unmeasured`` rather than waved through.
+    paper_sector_map: Path | None = None
 
     def ensure(self) -> "ApiSettings":
         for path in (self.runtime_root, self.cache_root, self.jobs_root):
@@ -32,11 +37,13 @@ def default_settings() -> ApiSettings:
     # that research/training jobs write instead of silently falling back to a
     # repository-local directory.
     paths = quant_paths()
+    sector_map = os.environ.get("QUANTAGENT_PAPER_SECTOR_MAP", "").strip()
     return ApiSettings(
         project_root=PROJECT_ROOT,
         runtime_root=paths.home,
         cache_root=paths.cache / "quant_ui",
         jobs_root=paths.home / "jobs" / "quant_ui",
+        paper_sector_map=Path(sector_map).expanduser() if sector_map else None,
     ).ensure()
 
 
