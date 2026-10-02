@@ -16,6 +16,11 @@ from quantagent.data.ashare.units import (
     infer_volume_scale,
     tencent_native_volume_prior,
 )
+from quantagent.data.providers.akshare_version import (
+    AkShareVersionMismatch,
+    pinned_akshare_version,
+    require_pinned_akshare,
+)
 from quantagent.data.providers.base import ProviderRequest, ProviderResult, ProviderUnavailable
 from quantagent.data.trading_calendar import TradingCalendar
 
@@ -142,11 +147,20 @@ class AkShareLiveProvider:
             import akshare as ak  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
             return {"status": "unavailable", "reason": f"akshare_unavailable:{type(exc).__name__}"}
+        try:
+            version_provenance = require_pinned_akshare(ak)
+        except AkShareVersionMismatch as exc:
+            return {
+                "status": "version_mismatch",
+                "reason": str(exc),
+                "akshare_version": _akshare_version(ak),
+                "akshare_pinned_version": pinned_akshare_version(),
+            }
         if request is None:
             return {
                 "status": "passed",
                 "adjust": self.adjust,
-                "akshare_version": _akshare_version(ak),
+                **version_provenance,
                 "canonical_volume_unit": _CANONICAL_VOLUME_UNIT,
                 "canonical_amount_unit": _CANONICAL_AMOUNT_UNIT,
                 "volume_unit_rule": "per_response_implied_vwap_in_low_high",
@@ -201,6 +215,7 @@ class AkShareLiveProvider:
             raise ProviderUnavailable("akshare is not available; install quantagent[data]") from exc
         if not request.symbols:
             raise ProviderUnavailable("AkShare live daily_ohlcv requires explicit symbols")
+        version_provenance = require_pinned_akshare(ak)
         adjust = self._validated_adjust()
         unknown_sources = sorted(set(self.source_order).difference(_SOURCE_FUNCTIONS))
         if unknown_sources:
@@ -370,6 +385,7 @@ class AkShareLiveProvider:
                     self.trading_calendar is not None and not self.trading_calendar.empty
                 ),
                 "calendar_production_certified": False,
+                **version_provenance,
                 "akshare_version": version,
                 "production_integrity_certified": False,
             },
