@@ -204,6 +204,13 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         px = panel.pivot(index="trade_date", columns="symbol", values="close").sort_index()
         gap_index = _prepare_session_gaps(session_gaps)
         gap_sessions = pd.DatetimeIndex([date for date, _ in gap_index])
+        # Only gaps inside the panel's own span extend the clock: the U0 gap
+        # register covers 1990-2026, and a panel truncated for quarantine must
+        # trim its last signals rather than fail on gaps it never spans.
+        if len(px.index):
+            gap_sessions = gap_sessions[
+                (gap_sessions >= px.index.min()) & (gap_sessions <= px.index.max())
+            ]
         sessions = pd.DatetimeIndex(px.index).union(gap_sessions).sort_values().unique()
         # Keep known empty sessions in both the reward and feature clocks.
         # Reindexing does not fabricate bars: _proven_close still requires

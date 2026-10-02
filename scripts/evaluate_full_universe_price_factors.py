@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from quantagent.backtest.quarantine import clean_label_mask
 
 GOLD = Path("runtime/data/gold/full_universe")
 LABEL = "forward_return_5d"
@@ -67,6 +70,15 @@ def main() -> int:
     )
     if args.start:
         base = base[base["trade_date"] >= pd.Timestamp(args.start)]
+    # A screen that ranks factors is a selection step: no label window may
+    # touch a quarantined holdout (configs/quarantined_windows.json).
+    horizon = re.fullmatch(r"forward_return_(\d+)d", args.label)
+    if horizon is None:
+        print(f"cannot infer the label horizon from {args.label!r}", file=sys.stderr)
+        return 2
+    clean = clean_label_mask(base["trade_date"], horizon_sessions=int(horizon.group(1)))
+    quarantine_rows_dropped = int((~clean).sum())
+    base = base[clean]
     tradable = base["entry_feasible"].astype(bool)
     print(
         f"[domain] rows={len(base):,} tradable={int(tradable.sum()):,} "
@@ -104,6 +116,7 @@ def main() -> int:
         "label": args.label,
         "domain": "entry_feasible only",
         "start": args.start,
+        "quarantine_rows_dropped": quarantine_rows_dropped,
         "factors_scored": int(frame["rank_ic"].notna().sum()),
         "factors_all_nan": int(frame["rank_ic"].isna().sum()),
         "median_abs_ic": round(float(frame["abs_ic"].median(skipna=True)), 6),

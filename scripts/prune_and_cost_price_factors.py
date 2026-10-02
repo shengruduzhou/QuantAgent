@@ -32,13 +32,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from quantagent.backtest.quarantine import clean_label_mask
+
 GOLD = Path("runtime/data/gold/full_universe")
+
+
+def _label_horizon(label: str) -> int:
+    match = re.fullmatch(r"forward_return_(\d+)d", label)
+    if match is None:
+        raise SystemExit(f"cannot infer the label horizon from {label!r}")
+    return int(match.group(1))
 
 
 def _load(family: str, columns: list[str] | None = None) -> pd.DataFrame:
@@ -66,7 +76,17 @@ def main() -> int:
     )
     base = base[base["entry_feasible"].astype(bool)]
     base = base[base[args.label].notna()].reset_index(drop=True)
-    print(f"[domain] tradable labelled rows={len(base):,}", flush=True)
+    horizon = _label_horizon(args.label)
+    # Factor selection must not read a quarantined holdout: drop every row
+    # whose label window touches one (configs/quarantined_windows.json).
+    clean = clean_label_mask(base["trade_date"], horizon_sessions=horizon)
+    quarantine_rows_dropped = int((~clean).sum())
+    base = base[clean].reset_index(drop=True)
+    print(
+        f"[domain] tradable labelled rows={len(base):,} "
+        f"(quarantined label windows dropped: {quarantine_rows_dropped:,})",
+        flush=True,
+    )
 
     import pyarrow.parquet as pq
 
@@ -106,10 +126,17 @@ def main() -> int:
     grouped = merged.groupby("trade_date", sort=True)
     date_index = {d: i for i, d in enumerate(sorted(merged["trade_date"].unique()))}
 
+    # One rebalance per label horizon: the spread is an h-day return, so both
+    # the spread and the churn it pays must be measured on non-overlapping
+    # h-day periods. Session-to-session churn understates the cost of an
+    # h-day book roughly by a factor of two at h=5.
+    rebalance_dates = set(sorted(grouped.indices)[::horizon])
     for n, factor in enumerate(factors, 1):
         values = merged[factor].to_numpy(dtype=float)
         top_ret, bot_ret, prev_top, prev_bot, turn = [], [], None, None, []
-        for _, idx in grouped.indices.items():
+        for trade_date, idx in grouped.indices.items():
+            if trade_date not in rebalance_dates:
+                continue
             v = values[idx]
             ok = np.isfinite(v)
             if ok.sum() < 50:
@@ -131,23 +158,26 @@ def main() -> int:
                 turn.append((churn_t + churn_b) / 2.0)
             prev_top, prev_bot = top, bot
 
-        if len(top_ret) < 100:
+        if len(top_ret) < max(30, 500 // horizon):
             continue
         gross = float(np.mean(top_ret) - np.mean(bot_ret))
         churn = float(np.mean(turn)) if turn else float("nan")
         # Both legs trade, so the round-trip cost per rebalance is 2 x churn.
         cost = 2.0 * churn * args.cost_bps / 10_000.0
+        # A negative spread is traded the other way round; cost is paid either
+        # way, so the net is |gross| - cost (gross - cost made a costlier
+        # negative factor look *stronger*).
+        direction = 1.0 if gross >= 0 else -1.0
         results.append(
-            {"factor": factor, "gross_spread": gross, "decile_churn": churn,
-             "cost_per_period": cost, "net_spread": gross - cost,
-             "periods": len(top_ret)}
+            {"factor": factor, "direction": direction, "gross_spread": gross,
+             "decile_churn": churn, "cost_per_period": cost,
+             "net_spread": abs(gross) - cost, "periods": len(top_ret)}
         )
         if n % 20 == 0 or n == len(factors):
             print(f"[spread] {n}/{len(factors)}", flush=True)
 
     spread = pd.DataFrame(results)
-    spread["abs_net"] = spread["net_spread"].abs()
-    spread = spread.sort_values("abs_net", ascending=False).reset_index(drop=True)
+    spread = spread.sort_values("net_spread", ascending=False).reset_index(drop=True)
 
     # ---- cross-sectional correlation clustering ---------------------------
     all_dates = sorted(merged["trade_date"].unique())
@@ -180,8 +210,11 @@ def main() -> int:
 
     payload = {
         "label": args.label,
+        "horizon_sessions": horizon,
         "cost_bps": args.cost_bps,
         "domain": "entry_feasible only",
+        "net_spread_convention": "sign_aware_abs_gross_minus_cost_per_horizon_rebalance",
+        "quarantine_rows_dropped": quarantine_rows_dropped,
         "rows": int(len(merged)),
         "factors_evaluated": int(len(spread)),
         "correlation_dates_used": int(used),

@@ -84,3 +84,16 @@ def test_sparse_book_cannot_bridge_a_known_gap_session():
     book = pd.DataFrame({"A": [0.5] * 4, "B": [0.5] * 4}, index=dates[[0, 1, 2, 4]])
     with pytest.raises(ValueError, match="consecutive execution sessions"):
         PITPortfolioEnv(book, predictions, panel, PITPortfolioEnvConfig(max_book=2), session_gaps=gaps)
+
+
+def test_gap_register_beyond_the_panel_span_does_not_extend_the_clock():
+    dates, book, predictions, panel, gaps = _inputs(classification="SUSPENDED")
+    outside = pd.DataFrame([
+        dict(trade_date=pd.Timestamp("2030-01-02"), symbol=symbol, classification="MISSING_UNEXPLAINED")
+        for symbol in ("A", "B")
+    ])
+    env = PITPortfolioEnv(
+        book, predictions, panel, PITPortfolioEnvConfig(max_book=2),
+        session_gaps=pd.concat([gaps, outside], ignore_index=True),
+    )
+    assert env.execution_dates == list(dates[1:4])

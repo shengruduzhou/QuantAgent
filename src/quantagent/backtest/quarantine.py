@@ -33,7 +33,13 @@ _BUILTIN_WINDOWS = [
         "end": "2026-05-18",
         "reason": "burned final holdout (builtin fallback; config file unavailable)",
         "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md",
-    }
+    },
+    {
+        "start": "2026-05-19",
+        "end": "2027-12-31",
+        "reason": "frozen fresh holdout (builtin fallback; config file unavailable)",
+        "evidence": "FRESH_HOLDOUT_FREEZE_MANIFEST.md",
+    },
 ]
 _BUILTIN_LOG_PATH = "runtime/state/holdout_access_log.jsonl"
 
@@ -132,6 +138,42 @@ def clamp_panel_window(
     return ps, pe
 
 
+def clean_label_mask(
+    trade_dates: pd.Series,
+    *,
+    horizon_sessions: int,
+    sessions: pd.DatetimeIndex | None = None,
+    entry_delay_sessions: int = 1,
+    windows: list[QuarantineWindow] | None = None,
+) -> pd.Series:
+    """True where a row's label window avoids every quarantined window.
+
+    A label for ``trade_date`` t spans t .. the session ``entry_delay_sessions
+    + horizon_sessions`` later (delay-1 entry at close(t+1), exit at
+    close(t+1+h)). Restricting the *signal* date is not enough: a 20-day label
+    on a clean date can still read prices inside a holdout. Rows whose exit
+    session lies beyond the known calendar are treated as unclean.
+    """
+    if windows is None:
+        windows, _ = load_windows()
+    dates = pd.to_datetime(trade_dates, errors="coerce")
+    calendar = (
+        pd.DatetimeIndex(sorted(pd.unique(dates.dropna())))
+        if sessions is None
+        else pd.DatetimeIndex(sessions).sort_values()
+    )
+    offset = int(entry_delay_sessions) + int(horizon_sessions)
+    position = calendar.searchsorted(dates.to_numpy())
+    exit_position = position + offset
+    exits = pd.Series(pd.NaT, index=dates.index, dtype="datetime64[ns]")
+    inside = (exit_position < len(calendar)) & dates.notna().to_numpy()
+    exits.loc[inside] = calendar[exit_position[inside]]
+    clean = exits.notna() & dates.notna()
+    for w in windows:
+        clean &= ~((dates <= w.end) & (exits >= w.start))
+    return clean
+
+
 def _git_hash() -> str:
     try:
         return subprocess.run(
@@ -175,5 +217,6 @@ __all__ = [
     "check_window",
     "violation_message",
     "clamp_panel_window",
+    "clean_label_mask",
     "log_access",
 ]

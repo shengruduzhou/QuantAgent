@@ -397,3 +397,29 @@ class TestArmsCannotImpersonateTheBaseline:
         report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config())
         failed = {a.name for a in report.arms if a.status == "failed"}
         assert report.champion not in failed
+
+
+def test_folds_never_reach_a_quarantined_label_window():
+    """Round-29 R3-F03: folds are anchored at the panel end, so an unclamped
+    panel put every fold inside the burned / frozen-fresh holdouts."""
+    rng = np.random.default_rng(11)
+    dates = pd.bdate_range("2023-06-01", "2026-03-31")
+    symbols = [f"S{i:03d}" for i in range(60)]
+    rows = []
+    for date in dates:
+        x1, x2 = rng.normal(size=60), rng.normal(size=60)
+        label = 0.01 * x1 + rng.normal(0, 0.02, 60)
+        rows.append(pd.DataFrame({"trade_date": date, "symbol": symbols,
+                                  "f1": x1, "f2": x2, "forward_return_5d": label}))
+    panel = pd.concat(rows, ignore_index=True)
+    report = run_model_comparison(panel, ["f1", "f2"], config=ComparisonConfig(n_folds=3, holdout_folds=1))
+    assert report.quarantine_rows_dropped > 0
+    import re
+
+    stamps = [
+        pd.Timestamp(day)
+        for window in report.fold_windows
+        for value in window.values()
+        for day in re.findall(r"\d{4}-\d{2}-\d{2}", str(value))
+    ]
+    assert stamps and max(stamps) <= pd.Timestamp("2025-08-29")

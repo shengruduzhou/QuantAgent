@@ -61,7 +61,7 @@ selection is not a holdout.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -70,6 +70,7 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.backtest.quarantine import clean_label_mask
 from quantagent.models.interactions import (
     InteractionPair,
     ModelClass,
@@ -233,10 +234,13 @@ class ComparisonReport:
     dsr_probability: float
     fold_windows: list[dict[str, str]]
     generated_at: str
+    #: Rows removed because their label window touches a quarantined holdout.
+    quarantine_rows_dropped: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "generatedAt": self.generated_at,
+            "quarantineRowsDropped": int(self.quarantine_rows_dropped),
             "verdict": self.verdict,
             "verdictReasons": list(self.verdict_reasons),
             "champion": self.champion,
@@ -570,6 +574,12 @@ def run_model_comparison(
         )
 
     work = _prepare_comparison_panel(panel, usable_factors, cfg)
+    # Folds are anchored at the end of whatever panel arrives, so an unclamped
+    # panel puts every fold - holdout folds included - inside the burned and
+    # frozen-fresh windows. Evaluate only rows whose label window is clean.
+    clean = clean_label_mask(work["trade_date"], horizon_sessions=cfg.horizon_days)
+    quarantine_rows_dropped = int((~clean).sum())
+    work = work[clean].reset_index(drop=True)
     if work.empty or not bool(work[cfg.label_column].notna().any()):
         return _invalid_report(
             cfg,
@@ -717,9 +727,10 @@ def run_model_comparison(
             )
         )
 
-    return _decide(
+    report = _decide(
         results, cfg, n_trials, fold_windows, generated_at, invalid_models=invalid_models
     )
+    return replace(report, quarantine_rows_dropped=quarantine_rows_dropped)
 
 
 def _build_feature_blocks(

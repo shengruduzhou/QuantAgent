@@ -93,6 +93,30 @@ def equal_weight_book_from_predictions(
     return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0).sort_index()
 
 
+def _quarantine_clamped_env_config(
+    env_config: PITPortfolioEnvConfig, market_panel: pd.DataFrame
+) -> PITPortfolioEnvConfig:
+    """Censor every transition whose reward reads a quarantined holdout.
+
+    The callers pass the whole predictions file and market panel, so without
+    this the policy trains on burned and frozen-fresh holdout returns.
+    """
+    from dataclasses import replace
+
+    from quantagent.backtest.quarantine import load_windows
+
+    windows, _ = load_windows()
+    first = pd.to_datetime(market_panel["trade_date"], errors="coerce").min()
+    starts = [w.start for w in windows if pd.isna(first) or w.end >= first]
+    if not starts:
+        return env_config
+    cutoff = (min(starts) - pd.Timedelta(days=1)).normalize()
+    requested = env_config.reward_end_date_limit
+    if requested is not None and pd.Timestamp(requested).normalize() <= cutoff:
+        return env_config
+    return replace(env_config, reward_end_date_limit=cutoff.date().isoformat())
+
+
 def train_ppo_policy(
     predictions: pd.DataFrame,
     market_panel: pd.DataFrame,
@@ -121,13 +145,14 @@ def train_ppo_policy(
             "RL GPU training was required, but torch.cuda.is_available() is false. "
             + format_cuda_diagnostic(cuda_runtime_probe(torch))
         )
+    env_config = _quarantine_clamped_env_config(cfg.env, market_panel)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     Path(cfg.tensorboard_log).mkdir(parents=True, exist_ok=True)
 
     def make_env(rank: int):
         def _factory():
-            env = PITPortfolioEnv(book_weights, predictions, market_panel, cfg.env)
+            env = PITPortfolioEnv(book_weights, predictions, market_panel, env_config)
             env.reset(seed=cfg.seed + rank)
             return env
 
@@ -142,7 +167,10 @@ def train_ppo_policy(
     policy_path = output_dir / "policy.zip"
     model.save(policy_path)
     summary = {
-        "status": "passed",
+        # Training finishing says nothing about usefulness; only a
+        # pre-registered evaluation verdict can (round 24 / round 29: DO NOT ENABLE).
+        "status": "trained_unevaluated",
+        "reward_end_date_limit": env_config.reward_end_date_limit,
         "policy_path": str(policy_path),
         "timesteps": int(cfg.timesteps),
         "device": cfg.device,
