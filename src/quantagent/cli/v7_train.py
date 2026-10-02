@@ -2253,14 +2253,23 @@ def _build_full_pipeline_acceptance_metrics(
     metrics = dict(training_metrics)
     metrics.update(
         {
-            "turnover_adjusted_net_return": paper_summary.get("turnover_adjusted_net_return", paper_summary.get("net_return_after_estimated_costs", 0.0)),
-            "max_drawdown": paper_summary.get("max_drawdown", 0.0),
-            "sharpe": paper_summary.get("sharpe", training_metrics.get("sharpe", 0.0)),
+            # No defaults here: a missing paper measurement must reach the gate as
+            # unmeasured. `max_drawdown: 0.0` used to turn "no drawdown was ever
+            # computed" into a measured pass of the drawdown gate (DEF-023 undone
+            # on the producer side, the DEF-025 shape).
+            "turnover_adjusted_net_return": paper_summary.get("turnover_adjusted_net_return", paper_summary.get("net_return_after_estimated_costs")),
+            "max_drawdown": paper_summary.get("max_drawdown"),
+            "sharpe": paper_summary.get("sharpe", training_metrics.get("sharpe")),
             "benchmark_symbol": benchmark_symbol,
             "benchmark_return": paper_summary.get("benchmark_return"),
             "excess_return": paper_summary.get("excess_return"),
-            "excess_return_after_costs": paper_summary.get("excess_return_after_costs", paper_summary.get("excess_return", 0.0)),
+            "excess_return_after_costs": paper_summary.get("excess_return_after_costs", paper_summary.get("excess_return")),
             "benchmark_excess_return": paper_summary.get("excess_return"),
+            # Benchmark coverage (DEF-022) so an incomplete benchmark is reported as
+            # incomplete, not as "no benchmark configured".
+            "benchmark_status": paper_summary.get("benchmark_status"),
+            "benchmark_sessions_covered": paper_summary.get("benchmark_sessions_covered"),
+            "benchmark_sessions_missing": paper_summary.get("benchmark_sessions_missing"),
             "selection_pressure_min": weight_diagnostics.get("selection_pressure_min", 0.0),
             "selection_pressure_mean": weight_diagnostics.get("selection_pressure_mean", 0.0),
             "prediction_symbol_count": int(predictions["symbol"].nunique()) if "symbol" in predictions.columns else 0,
