@@ -508,6 +508,7 @@ class StrategyService:
                 "runtime/data/v7/gold/training_dataset/training_dataset.parquet",
             ),
             "sectorMapPath": (
+                "runtime/data/v7/silver/sector_map/sector_map.parquet",
                 "runtime/data/v7/silver/sector_map.parquet",
                 "runtime/data/u0/pit/sector_map.parquet",
             ),
@@ -559,6 +560,16 @@ class StrategyService:
             found.sort(reverse=True, key=lambda item: (item[0], item[1]))
             selected[field] = found[0][2] if found else None
             options[field] = field_options
+        # Panel and labels must come from ONE build: picking each by newest file
+        # paired the 15.3M-row v7 silver panel with the 10.9M-row gold labels of
+        # another build, and validation still passed (round-29 R6).
+        panel_family = _input_family(selected.get("marketPanelPath"))
+        if panel_family and _input_family(selected.get("labelsPath")) != panel_family:
+            same_family = [
+                option["path"] for option in options.get("labelsPath", [])
+                if option["exists"] and _input_family(option["path"]) == panel_family
+            ]
+            selected["labelsPath"] = same_family[0] if same_family else None
         return {
             "selected": selected,
             "options": options,
@@ -612,6 +623,21 @@ class StrategyService:
             "minutePanelPath": draft.minute_panel_path,
             "universeSymbolsFile": draft.universe_symbols_file,
         }
+        panel_family = _input_family(draft.market_panel_path)
+        labels_family = _input_family(draft.labels_path)
+        if panel_family and labels_family and panel_family != labels_family:
+            add_issue(
+                "input_lineage_mismatch",
+                "blocking",
+                "行情面板与标签来自不同构建",
+                (
+                    f"market panel family '{panel_family}' vs labels family '{labels_family}': "
+                    "labels must be built from the same panel (row sets, adjustment and "
+                    "calendars differ between builds)"
+                ),
+                field="labelsPath",
+                evidence={"marketPanelFamily": panel_family, "labelsFamily": labels_family},
+            )
         resolved_inputs: dict[str, str] = {}
         resolved_paths: dict[str, Path] = {}
         required_paths = {"marketPanelPath", "labelsPath"}
@@ -1265,3 +1291,23 @@ class StrategyService:
     def _slug(value: str) -> str:
         slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-").lower()
         return (slug or "strategy")[:48]
+
+
+def _input_family(path: str | None) -> str | None:
+    """Which data build an input path belongs to (e.g. 'gold/full_universe', 'v7').
+
+    Used only to refuse mixing a market panel and labels from different builds.
+    """
+    if not path:
+        return None
+    parts = Path(str(path)).as_posix().split("/")
+    try:
+        index = parts.index("data")
+    except ValueError:
+        return None
+    rest = parts[index + 1:]
+    if not rest:
+        return None
+    if rest[0] == "gold" and len(rest) > 1:
+        return f"gold/{rest[1]}"
+    return rest[0]

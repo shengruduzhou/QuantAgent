@@ -111,3 +111,12 @@ def test_missing_risk_events_artifact_is_unmeasured_not_zero(tmp_path: Path) -> 
     assert overview["eventCounts"] is None
     assert overview["eventCountsExact"] is False
     assert overview["eventCountsBasis"] == "risk_events_artifact_missing"
+
+
+def test_panel_and_labels_from_different_builds_are_a_blocking_mismatch() -> None:
+    """Round-29 R6: defaults paired the v7 silver panel with gold labels and passed."""
+    from services.quant_api.services.strategies import _input_family
+
+    assert _input_family("runtime/data/v7/silver/market_panel/market_panel.parquet") == "v7"
+    assert _input_family("runtime/data/gold/full_universe/labels.parquet") == "gold/full_universe"
+    assert _input_family("runtime/data/gold/full_universe_r29/dataset.parquet") == "gold/full_universe_r29"
