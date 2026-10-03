@@ -57,15 +57,22 @@ def main() -> int:
     ap.add_argument("--label", default=LABEL)
     ap.add_argument("--start", default=None, help="restrict to trade_date >= this")
     ap.add_argument("--output", type=Path, default=None)
+    ap.add_argument("--dataset", type=Path, default=None,
+                    help="labelled dataset (default: <gold>/dataset.parquet)")
+    ap.add_argument("--factors-dir", type=Path, default=None,
+                    help="directory holding factors_<family>.parquet (default: gold)")
+    ap.add_argument("--summary-csv", type=Path, default=None,
+                    help="also write a factor_summary.csv the Factor Lab adapter indexes")
     args = ap.parse_args()
 
-    artifact = GOLD / f"factors_{args.family}.parquet"
+    dataset_path = args.dataset or (GOLD / "dataset.parquet")
+    artifact = (args.factors_dir or GOLD) / f"factors_{args.family}.parquet"
     if not artifact.exists():
         print(f"BLOCKED_BY_DATA: {artifact} not built", file=sys.stderr)
         return 2
 
     base = pd.read_parquet(
-        GOLD / "dataset.parquet",
+        dataset_path,
         columns=["symbol", "trade_date", args.label, "entry_feasible"],
     )
     if args.start:
@@ -126,7 +133,22 @@ def main() -> int:
         "count_abs_icir_above_0.30": int((frame["icir"].abs() > 0.30).sum()),
         "top": frame.head(15).round(6).to_dict(orient="records"),
     }
+    payload["dataset"] = str(dataset_path)
+    payload["factors"] = frame.round(6).to_dict(orient="records")
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    if args.summary_csv is not None:
+        args.summary_csv.parent.mkdir(parents=True, exist_ok=True)
+        summary = pd.DataFrame({
+            "factor_name": frame["factor"],
+            "rank_ic": frame["rank_ic"],
+            "rank_icir": frame["icir"],
+            "ic_std": frame["ic_std"],
+            "n_dates": frame["n_dates"],
+            "label": args.label,
+            "domain": "entry_feasible, quarantine-clean label windows",
+            "dataset": str(dataset_path),
+        })
+        summary.to_csv(args.summary_csv, index=False)
     print(json.dumps({k: v for k, v in payload.items() if k != "top"}, ensure_ascii=False))
     print(f"[done] {out}")
     return 0
