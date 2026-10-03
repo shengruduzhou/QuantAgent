@@ -117,12 +117,19 @@ _HOLD_WHEN_REJECTED: frozenset[str] = frozenset(
 )
 
 
+#: A holding with no market row is pinned only while the gap is plausibly a
+#: suspension; past this many sessions (or with no row ever) it is released.
+MAX_SESSIONS_HELD_WITHOUT_MARKET_ROW = 60
+
+
 def _hold_untradeable_positions(
     weights: pd.Series,
     previous_weights: pd.Series | None,
     rejected: list[dict[str, object]],
     date: object,
     diagnostics: dict[str, object],
+    *,
+    release: set[str] | frozenset[str] = frozenset(),
 ) -> pd.Series:
     """Keep a held name at its previous weight when it cannot trade today.
 
@@ -138,7 +145,14 @@ def _hold_untradeable_positions(
     blocked = {
         str(item["symbol"]) for item in rejected
         if str(item.get("reason")) in _HOLD_WHEN_REJECTED and str(item["symbol"]) in held.index
+        and not (str(item.get("reason")) == "no_market_row" and str(item["symbol"]) in release)
     }
+    released = sorted(set(release) & set(held.index.astype(str)))
+    if released:
+        diagnostics.setdefault("held_untradeable_released", []).append(
+            {"trade_date": str(date), "symbols": released,
+             "reason": f"no market row for > {MAX_SESSIONS_HELD_WITHOUT_MARKET_ROW} sessions"}
+        )
     if not blocked:
         return weights
     out = weights.reindex(weights.index.union(held.index)).fillna(0.0)
@@ -367,7 +381,10 @@ def build_v7_target_weights(
         base_top_k=int(config.top_k),
     )
 
-    for date, day in preds.groupby("trade_date", sort=True):
+    #: Session index of each symbol's latest market row, so a holding with no
+    #: market row is pinned only while its absence is plausibly a suspension.
+    last_market_session: dict[str, int] = {}
+    for session_index, (date, day) in enumerate(preds.groupby("trade_date", sort=True)):
         day_expected_horizons: dict[str, int | None] = {}
         if age_tracker is not None and theme_frame is not None:
             today_theme = theme_frame[theme_frame["trade_date"] == date]
@@ -380,6 +397,8 @@ def build_v7_target_weights(
             age_tracker.update_expected_horizons(day_expected_horizons)
 
         day_market = market[market["trade_date"] == date].assign(_market_row=True)
+        for symbol in day_market["symbol"].astype(str):
+            last_market_session[symbol] = session_index
         merged = day.merge(day_market, on=["symbol", "trade_date"], how="left", suffixes=("", "_mkt"))
         rejected: list[dict[str, object]] = []
         # A name with no market row on the date has no measured tradability: its
@@ -408,7 +427,7 @@ def build_v7_target_weights(
             if not requested:
                 continue
             enforced_tradability.add(config_attr)
-            blocked = merged[column].fillna(False).astype(bool)
+            blocked = merged[column].eq(True)
             for symbol in merged.loc[blocked, "symbol"]:
                 rejected.append({"trade_date": str(date), "symbol": str(symbol), "reason": reason})
             keep_mask = keep_mask & ~blocked
@@ -650,6 +669,19 @@ def build_v7_target_weights(
             sign = np.sign(weights.replace(0.0, 1.0))
             weights = weights + redistribute * sign
 
+        # Untradeable holdings are pinned BEFORE the turnover cap and the
+        # long-only projection: the projection reserves current holdings and
+        # trims only increases, so every other name is then fitted inside the
+        # sector/name caps. Pinning after it breached the sector cap while the
+        # cap was still reported enforced (round-29 R10-F02).
+        stale = {
+            symbol for symbol in (previous_weights.index.astype(str) if previous_weights is not None else [])
+            if session_index - last_market_session.get(symbol, -10**9) > MAX_SESSIONS_HELD_WITHOUT_MARKET_ROW
+        }
+        weights = _hold_untradeable_positions(
+            weights, previous_weights, rejected, date, diagnostics, release=stale
+        )
+
         # Holding-period lock (Phase 3.4): apply to the union of desired and
         # actually held names. A selected-only loop would allow a locked
         # recovered holding to disappear simply because it fell out of Top-K.
@@ -696,7 +728,6 @@ def build_v7_target_weights(
                 sector_lookup=sector_lookup,
                 config=config,
             )
-        weights = _hold_untradeable_positions(weights, previous_weights, rejected, date, diagnostics)
         previous_weights = weights[weights.abs() > 1e-12].copy()
 
         if age_tracker is not None:
