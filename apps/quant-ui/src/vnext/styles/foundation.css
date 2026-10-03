@@ -373,3 +373,104 @@
   overflow-x: auto;
   max-width: 100%;
 }
+
+/* ------------------------------------------------- error boundary (R8-F18) */
+
+.vnext-shell .error-boundary-workspace {
+  padding: var(--vnx-space-5);
+}
+
+.vnext-shell.error-boundary-root {
+  display: block;
+  overflow: auto;
+  padding: var(--vnx-space-6);
+}
+
+.vnext-shell .error-boundary-panel {
+  max-width: 920px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--vnx-space-3);
+  padding: var(--vnx-space-4) var(--vnx-space-5);
+}
+
+.vnext-shell .error-boundary-panel > header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--vnx-space-3);
+}
+
+.vnext-shell .error-boundary-panel > header > svg {
+  color: var(--vnx-danger);
+  flex: none;
+}
+
+.vnext-shell .error-boundary-panel h2 {
+  margin: 2px 0 4px;
+  color: var(--vnx-text-bright);
+  font-size: var(--vnx-text-title);
+}
+
+.vnext-shell .error-boundary-panel p {
+  margin: 0;
+  max-width: 78ch;
+  color: var(--vnx-text-soft);
+  line-height: 1.55;
+}
+
+.vnext-shell .error-boundary-facts {
+  display: grid;
+  gap: var(--vnx-space-2);
+  margin: 0;
+}
+
+.vnext-shell .error-boundary-facts > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: var(--vnx-space-3);
+}
+
+.vnext-shell .error-boundary-facts dt {
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-micro);
+  font-weight: 600;
+  letter-spacing: var(--vnx-tracking-micro);
+  text-transform: uppercase;
+}
+
+.vnext-shell .error-boundary-facts dd {
+  margin: 0;
+  color: var(--vnx-text);
+  overflow-wrap: anywhere;
+}
+
+.vnext-shell .error-boundary-stack summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--vnx-muted);
+  cursor: pointer;
+  font-size: var(--vnx-text-small);
+}
+
+.vnext-shell .error-boundary-stack pre {
+  margin: var(--vnx-space-2) 0 0;
+  padding: var(--vnx-space-3);
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--vnx-line-soft);
+  border-radius: var(--vnx-radius-sm);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
+  font: var(--vnx-text-small)/1.5 var(--vnx-font-mono);
+  white-space: pre-wrap;
+}
+
+.vnext-shell .error-boundary-hint {
+  color: var(--vnx-muted);
+  font-size: var(--vnx-text-small);
+}
+
+@media (max-width: 760px) {
+  .vnext-shell .error-boundary-facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}

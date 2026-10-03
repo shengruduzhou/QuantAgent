@@ -582,7 +582,9 @@ def run_model_comparison(
     # Folds are anchored at the end of whatever panel arrives, so an unclamped
     # panel puts every fold - holdout folds included - inside the burned and
     # frozen-fresh windows. Evaluate only rows whose label window is clean.
-    clean = clean_label_mask(work["trade_date"], horizon_sessions=cfg.horizon_days)
+    clean = clean_label_mask(
+        work["trade_date"], horizon_sessions=cfg.horizon_days, symbols=work["symbol"]
+    )
     quarantine_rows_dropped = int((~clean).sum())
     work = work[clean].reset_index(drop=True)
     if work.empty or not bool(work[cfg.label_column].notna().any()):

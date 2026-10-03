@@ -1451,8 +1451,6 @@ def _final_hybrid_stock_pool(
     out["research_amount_hint"] = out["research_weight_hint"] * float(capital) if capital > 0 else 0.0
     out["no_orders_generated"] = True
     return out
-    typer.echo(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
-    return output_dataset_path
 
 
 @app.command("build-capital-flow-thesis-v8")

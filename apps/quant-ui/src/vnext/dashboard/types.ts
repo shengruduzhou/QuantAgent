@@ -10,13 +10,3 @@ export interface ActionQueueItem {
   action: string;
   path: string;
 }
-
-export interface RiskRuleView {
-  id: string;
-  name: string;
-  description?: string;
-  current: number | null;
-  threshold: number | string | null;
-  enabled: boolean;
-  state: "normal" | "warning" | "unavailable";
-}

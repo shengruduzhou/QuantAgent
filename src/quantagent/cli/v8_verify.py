@@ -111,7 +111,7 @@ def _try_akshare(sample_symbols: list[str]) -> dict[str, Any]:
         t0 = time.time()
         df = ak.stock_zh_a_hist(
             symbol=ak_sym, period="daily",
-            start_date=start, end_date=end, adjust="qfq",
+            start_date=start, end_date=end, adjust="",
         )
         probes["stock_zh_a_hist_daily"] = {
             "status": "ok" if df is not None and not df.empty else "empty",
@@ -128,7 +128,7 @@ def _try_akshare(sample_symbols: list[str]) -> dict[str, Any]:
             symbol=ak_sym, period="60",
             start_date=(datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d 09:30:00"),
             end_date=datetime.now().strftime("%Y-%m-%d 15:00:00"),
-            adjust="qfq",
+            adjust="",
         )
         probes["stock_zh_a_hist_min_60"] = {
             "status": "ok" if df is not None and not df.empty else "empty",

@@ -1,7 +1,7 @@
 .terminal-frame {
   grid-template-columns: 216px minmax(0, 1fr);
   grid-template-rows: 42px 31px minmax(0, 1fr) 27px;
-  background: #050c13;
+  background: var(--vnx-input);
 }
 
 .terminal-frame.activity-open {
@@ -10,7 +10,7 @@
 
 .terminal-launcher {
   grid-row: 1 / -1;
-  background: #07111a;
+  background: var(--vnx-surface-1);
 }
 
 .terminal-launcher .brand {
@@ -49,7 +49,7 @@
 
 .module-group-label {
   padding: 3px 8px;
-  color: #465f74;
+  color: var(--vnx-muted);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 7px;
   letter-spacing: .16em;
@@ -101,14 +101,14 @@
   height: auto;
   gap: 14px;
   padding: 0 9px;
-  background: #08131d;
+  background: var(--vnx-surface-1);
 }
 
 .terminal-menu {
   display: flex;
   align-items: center;
   gap: 13px;
-  color: #7890a3;
+  color: var(--vnx-muted);
   font-size: 9px;
   white-space: nowrap;
 }
@@ -120,7 +120,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: #b6c8d7;
+  color: var(--vnx-primary-strong);
   font-size: inherit;
 }
 
@@ -128,7 +128,7 @@
   width: min(490px, 42vw);
   height: 27px;
   border-radius: 2px;
-  background: #050e16;
+  background: var(--vnx-input);
 }
 
 .workspace-tabs {
@@ -139,7 +139,7 @@
   min-width: 0;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
-  background: #07111a;
+  background: var(--vnx-surface-1);
 }
 
 .workspace-tabs > div {
@@ -149,13 +149,13 @@
   max-width: 220px;
   border-right: 1px solid var(--border-soft);
   border-top: 1px solid transparent;
-  color: #71889b;
+  color: var(--vnx-muted);
 }
 
 .workspace-tabs > div.active {
   border-top-color: var(--blue);
-  background: #0b1925;
-  color: #c8d8e4;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text);
 }
 
 .workspace-tabs button {
@@ -184,7 +184,7 @@
   width: 22px;
   justify-content: center;
   padding: 0;
-  color: #52697b;
+  color: var(--vnx-muted);
 }
 
 .workspace-tabs .tab-close:hover {
@@ -206,21 +206,21 @@
   gap: 16px;
   margin: -2px 0 6px;
   padding: 0 7px;
-  border: 1px solid #14283a;
+  border: 1px solid var(--vnx-line);
   background: rgba(7, 17, 26, .94);
-  color: #5f778a;
+  color: var(--vnx-muted);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 8px;
   white-space: nowrap;
 }
 
 .workspace-context strong {
-  color: #9cb1c2;
+  color: var(--vnx-text-soft);
 }
 
 .workspace-context .context-trust {
   margin-left: auto;
-  color: #bd8840;
+  color: var(--vnx-warning);
 }
 
 .activity-drawer {
@@ -228,8 +228,8 @@
   grid-row: 4;
   min-width: 0;
   min-height: 0;
-  border-top: 1px solid #2a4b63;
-  background: #06111a;
+  border-top: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-surface-1);
   overflow: hidden;
 }
 
@@ -240,7 +240,7 @@
   gap: 10px;
   padding: 0 9px;
   border-bottom: 1px solid var(--border-soft);
-  color: #a9bdcd;
+  color: var(--vnx-text-soft);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 8px;
 }
@@ -252,17 +252,17 @@
 }
 
 .activity-drawer > header small {
-  color: #526b80;
+  color: var(--vnx-muted);
 }
 
 .activity-drawer > header .activity-stream-status.live {
-  color: #4fc49a;
+  color: var(--vnx-success);
 }
 
 .activity-drawer > header .activity-stream-status.reconnecting,
 .activity-drawer > header .activity-stream-status.stale,
 .activity-drawer > header .activity-stream-status.unavailable {
-  color: #d9a85f;
+  color: var(--vnx-warning);
 }
 
 .activity-drawer > header button {
@@ -309,8 +309,8 @@
 }
 
 .terminal-statusbar button.active {
-  background: #0d2130;
-  color: #8fbcff;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-primary-strong);
 }
 
 .health-dot.offline {
@@ -330,7 +330,7 @@
   margin-bottom: 6px;
   padding: 4px 7px;
   border: 1px solid var(--border);
-  background: #08141e;
+  background: var(--vnx-surface-1);
 }
 
 .runtime-commandbar h2 {
@@ -352,7 +352,7 @@
   display: flex;
   align-items: center;
   border: 1px solid var(--border);
-  background: #050e16;
+  background: var(--vnx-input);
 }
 
 .terminal-segments button {
@@ -365,7 +365,7 @@
   border-right: 1px solid var(--border-soft);
   border-radius: 0;
   background: transparent;
-  color: #758da0;
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 
@@ -374,8 +374,8 @@
 }
 
 .terminal-segments button.active {
-  background: #133456;
-  color: #a8ccff;
+  background: var(--vnx-primary-surface);
+  color: var(--vnx-primary-strong);
 }
 
 .runtime-stat-strip {
@@ -383,7 +383,7 @@
   grid-template-columns: repeat(6, minmax(92px, 1fr)) minmax(190px, 1.45fr);
   margin-bottom: 6px;
   border: 1px solid var(--border);
-  background: #06111a;
+  background: var(--vnx-surface-1);
 }
 
 .runtime-stat {
@@ -407,7 +407,7 @@
 }
 
 .runtime-stat span {
-  color: #6e8699;
+  color: var(--vnx-muted);
   font-size: 7px;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -415,13 +415,13 @@
 
 .runtime-stat strong {
   margin: 4px 0 2px;
-  color: #d4e1eb;
+  color: var(--vnx-text-bright);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 13px;
 }
 
 .runtime-stat small {
-  color: #4f677a;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -445,7 +445,7 @@
   margin-bottom: 6px;
   padding: 6px;
   border: 1px solid var(--border);
-  background: #08141e;
+  background: var(--vnx-surface-1);
 }
 
 .runtime-filterbar label {
@@ -455,7 +455,7 @@
 .runtime-filterbar label > span {
   display: block;
   margin-bottom: 3px;
-  color: #60778a;
+  color: var(--vnx-muted);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 7px;
   text-transform: uppercase;
@@ -468,8 +468,8 @@
   height: 27px;
   border: 1px solid var(--border);
   border-radius: 1px;
-  background: #050e16;
-  color: #b8cbd9;
+  background: var(--vnx-input);
+  color: var(--vnx-primary-strong);
   font-size: 8px;
 }
 
@@ -494,8 +494,8 @@
 .runtime-filterbar .sort-direction {
   height: 27px;
   border: 1px solid var(--border);
-  background: #0c1b28;
-  color: #8da4b6;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 7px;
 }
@@ -538,7 +538,7 @@
 .runtime-catalog-table td > span,
 .runtime-runs-panel td > span {
   margin-top: 2px;
-  color: #596f81;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -566,7 +566,7 @@
 
 .artifact-inspector-head code {
   margin-top: 4px;
-  color: #60778a;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -590,7 +590,7 @@
 }
 
 .artifact-metadata-grid dt {
-  color: #5c7386;
+  color: var(--vnx-muted);
   font-size: 7px;
   text-transform: uppercase;
 }
@@ -598,7 +598,7 @@
 .artifact-metadata-grid dd {
   margin: 3px 0 0;
   overflow-wrap: anywhere;
-  color: #adbfcd;
+  color: var(--vnx-text);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 7px;
 }
@@ -613,9 +613,9 @@
 
 .capability-list span {
   padding: 2px 4px;
-  border: 1px solid #21435b;
-  background: #0b2030;
-  color: #78a4c4;
+  border: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-primary);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 6px;
 }
@@ -634,8 +634,8 @@
   gap: 4px;
   padding: 0 7px;
   border: 1px solid var(--border);
-  background: #0b1b28;
-  color: #9bb0c0;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
   font-size: 7px;
 }
 
@@ -661,7 +661,7 @@
 .lineage-workbench {
   min-height: 430px;
   border: 1px solid var(--border);
-  background: #07121b;
+  background: var(--vnx-surface-1);
 }
 
 .lineage-status {
@@ -671,12 +671,12 @@
   gap: 8px;
   padding: 0 10px;
   border-bottom: 1px solid var(--border);
-  color: #7890a3;
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 
 .lineage-status strong {
-  color: #9bc0ff;
+  color: var(--vnx-primary-strong);
   font-family: "JetBrains Mono Variable", monospace;
 }
 
@@ -690,14 +690,14 @@
 
 .lineage-column,
 .lineage-focus {
-  border: 1px solid #234157;
-  background: #0a1722;
+  border: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-surface-2);
 }
 
 .lineage-column header {
   padding: 6px 8px;
   border-bottom: 1px solid var(--border-soft);
-  color: #5e778b;
+  color: var(--vnx-muted);
   font-family: "JetBrains Mono Variable", monospace;
   font-size: 7px;
   letter-spacing: .12em;
@@ -713,12 +713,12 @@
   border: 0;
   border-bottom: 1px solid var(--border-soft);
   background: transparent;
-  color: #b4c4d0;
+  color: var(--vnx-text);
   text-align: left;
 }
 
 .lineage-column button:hover {
-  background: #0e2434;
+  background: var(--vnx-surface-selected);
 }
 
 .lineage-column button strong,
@@ -734,7 +734,7 @@
 .lineage-column button code,
 .lineage-unresolved code {
   grid-column: 2;
-  color: #5d7486;
+  color: var(--vnx-muted);
 }
 
 .lineage-unresolved {
@@ -744,7 +744,7 @@
 .lineage-none,
 .lineage-empty-action {
   padding: 14px;
-  color: #536b7d;
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 
@@ -754,17 +754,17 @@
   align-items: center;
   gap: 7px;
   padding: 18px 12px;
-  border-color: #346fa2;
+  border-color: var(--vnx-primary);
   box-shadow: 0 0 24px rgba(63, 140, 255, .09);
   text-align: center;
 }
 
 .lineage-focus > svg {
-  color: #65a2f4;
+  color: var(--vnx-primary);
 }
 
 .lineage-focus > span {
-  color: #60809a;
+  color: var(--vnx-muted);
   font-size: 7px;
   text-transform: uppercase;
 }
@@ -775,7 +775,7 @@
 
 .lineage-focus code {
   overflow-wrap: anywhere;
-  color: #6b8192;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 

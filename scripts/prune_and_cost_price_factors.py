@@ -79,7 +79,7 @@ def main() -> int:
     horizon = _label_horizon(args.label)
     # Factor selection must not read a quarantined holdout: drop every row
     # whose label window touches one (configs/quarantined_windows.json).
-    clean = clean_label_mask(base["trade_date"], horizon_sessions=horizon)
+    clean = clean_label_mask(base["trade_date"], horizon_sessions=horizon, symbols=base["symbol"])
     quarantine_rows_dropped = int((~clean).sum())
     base = base[clean].reset_index(drop=True)
     print(

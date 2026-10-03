@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 
@@ -80,10 +82,14 @@ def test_future_label_missing_does_not_backfill_a_lower_ranked_name() -> None:
                 }
             )
 
+    # Horizon 1: each day's book replaces the previous day's, so the carried
+    # day-1 target is exactly the book day 2 trades against. (At horizon H the
+    # day-2 tranche would be built from cash and replace nothing.)
+    config = replace(_config(), horizon_days=1)
     net, turnover, _ = _topk_daily_returns(
         pd.DataFrame(rows),
         "forward_executable_return_5d",
-        _config(),
+        config,
     )
 
     # Day 1 has no economic observation because one selected name has no future
@@ -91,4 +97,4 @@ def test_future_label_missing_does_not_backfill_a_lower_ranked_name() -> None:
     assert list(net.index) == [dates[1]]
     assert list(turnover.index) == [dates[1]]
     assert turnover.iloc[0] == 0.5
-    assert net.iloc[0] == (0.03 + 0.04) / 2.0 / 5.0
+    assert net.iloc[0] == (0.03 + 0.04) / 2.0

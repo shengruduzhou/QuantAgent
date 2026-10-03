@@ -46,6 +46,10 @@ SESSION_1 = "2026-08-04"
 SESSION_2 = "2026-08-05"
 INITIAL = 1_000_000.0
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+#: The venue now refuses a BUY whose industry it cannot measure (R2 F03); these
+#: tests are about idempotency, so they declare the industries they trade
+#: rather than relying on the old silent skip of the industry limit.
+INDUSTRY_MAP = {SYMBOL: "bank", "000002.SZ": "property"}
 
 
 def _now_iso() -> str:
@@ -87,7 +91,8 @@ def order_payload(key: str, **overrides) -> dict:
 @pytest.fixture
 def service(tmp_path) -> PaperOrderService:
     svc = PaperOrderService(
-        tmp_path / "paper_orders", market_source=market_source, initial_cash=INITIAL
+        tmp_path / "paper_orders", market_source=market_source, initial_cash=INITIAL,
+        industry_map=INDUSTRY_MAP,
     )
     yield svc
     svc.close()
@@ -104,6 +109,7 @@ def client(tmp_path):
     ).ensure()
     app = create_app(settings)
     app.state.services.paper_orders.market_source = market_source
+    app.state.services.paper_orders.broker.industry_map = dict(INDUSTRY_MAP)
     app.state.services.paper_orders.initial_cash = INITIAL
     app.state.services.paper_orders.broker.portfolio.cash = INITIAL
     app.state.services.paper_orders.broker.portfolio.initial_cash = INITIAL
@@ -394,7 +400,8 @@ def market(symbol, trade_date):
     return MarketSnapshot(symbol=symbol, trade_date=trade_date, last_price=10.00,
                           previous_close=10.00, session_volume=1e8, board="SH_Main")
 
-svc = PaperOrderService({root_dir!r}, market_source=market, initial_cash={cash!r})
+svc = PaperOrderService({root_dir!r}, market_source=market, initial_cash={cash!r},
+                        industry_map={{{symbol!r}: "bank"}})
 try:
     print(json.dumps({{"writable": svc.writable, "drained": svc.drain() if svc.writable else []}}))
 finally:
@@ -615,7 +622,9 @@ def test_crash_after_execution_is_recovered_as_executed(service, tmp_path):
     root = service.root
     service.close()
 
-    restarted = PaperOrderService(root, market_source=market_source, initial_cash=INITIAL)
+    restarted = PaperOrderService(
+        root, market_source=market_source, initial_cash=INITIAL, industry_map=INDUSTRY_MAP
+    )
     try:
         assert restarted.pending() == []
         assert restarted.status("k1", "run_api")["state"] == EXECUTED
@@ -768,7 +777,8 @@ def test_cancelling_a_working_order_keeps_its_executed_quantity(tmp_path):
         )
 
     service = PaperOrderService(
-        tmp_path / "paper", market_source=thin_market, initial_cash=INITIAL
+        tmp_path / "paper", market_source=thin_market, initial_cash=INITIAL,
+        industry_map=INDUSTRY_MAP,
     )
     try:
         service.submit(

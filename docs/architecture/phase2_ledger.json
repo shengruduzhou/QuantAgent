@@ -749,7 +749,7 @@
       "claimedState": "in_progress",
       "codePaths": [
         "src/quantagent/paper/risk.py",
-        "src/quantagent/execution/risk_kill_switch.py"
+        "src/quantagent/paper/broker.py"
       ],
       "evidencePaths": [],
       "id": "M5-07",

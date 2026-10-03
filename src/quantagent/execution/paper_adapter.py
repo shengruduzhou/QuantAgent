@@ -30,9 +30,14 @@ from quantagent.execution.broker_base import (
     OrderState,
     OrderStatus,
     Position,
+    VenueRefusal,
 )
 from quantagent.paper import orders as po
-from quantagent.paper.broker import MarketSnapshot, PaperBroker
+from quantagent.paper.broker import InvalidMarketSnapshot, MarketSnapshot, PaperBroker
+
+#: Venue refusal reasons. The order never reached the paper book.
+MARKET_DATA_UNAVAILABLE = "market_data_unavailable"
+MARKET_DATA_INVALID = "market_data_invalid"
 
 #: Paper's state vocabulary in the OMS wire vocabulary. Paper's NEW means
 #: "at the venue, unacknowledged", which the wire calls SUBMITTED.
@@ -76,7 +81,16 @@ class PaperBrokerAdapter(BrokerBase):
     # -- BrokerBase ----------------------------------------------------------
     def submit(self, order: Order) -> OrderState:
         trade_date = str(order.timestamp)[:10]
-        market = self.market_source(order.symbol, trade_date)
+        try:
+            market = self.market_source(order.symbol, trade_date)
+        except InvalidMarketSnapshot as exc:
+            raise VenueRefusal(MARKET_DATA_INVALID, str(exc)) from exc
+        if market is None:
+            raise VenueRefusal(
+                MARKET_DATA_UNAVAILABLE,
+                f"no market data for {order.symbol} on {trade_date}; the venue fills "
+                "at an observed price or not at all",
+            )
         self._last_prices[order.symbol] = market.last_price
         paper_order = po.Order(
             symbol=order.symbol,
@@ -155,4 +169,4 @@ class PaperBrokerAdapter(BrokerBase):
         )
 
 
-__all__ = ["PaperBrokerAdapter"]
+__all__ = ["MARKET_DATA_INVALID", "MARKET_DATA_UNAVAILABLE", "PaperBrokerAdapter"]

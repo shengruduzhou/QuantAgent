@@ -8,7 +8,7 @@ audited for point-in-time validity:
 ``source_endpoint``   the concrete endpoint or vendor method that answered
 ``retrieved_at``      UTC timestamp of the retrieval
 ``available_at``      the earliest wall-clock time a decision maker could have used the row
-``quality_status``    OK / SUSPECT / DERIVED — never silently upgraded
+``quality_status``    OK / SUSPECT / DERIVED / UNIT_AMBIGUOUS — never silently upgraded
 
 Unit and scale semantics are declared explicitly per family rather than being
 implied by a column name, because A-share vendors disagree: some report volume
@@ -33,6 +33,9 @@ PROVENANCE_COLUMNS: tuple[str, ...] = (
 QUALITY_OK = "OK"
 QUALITY_SUSPECT = "SUSPECT"
 QUALITY_DERIVED = "DERIVED"
+#: The response could not prove its own volume unit (shares vs 手) from
+#: amount / volume against [low, high]; see ``quantagent.data.ashare.units``.
+QUALITY_UNIT_AMBIGUOUS = "UNIT_AMBIGUOUS"
 
 # --- unit vocabulary --------------------------------------------------------
 VOLUME_SHARES = "shares"

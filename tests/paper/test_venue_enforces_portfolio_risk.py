@@ -30,6 +30,9 @@ def _broker(tmp_path, *, risk_engine=None, cash: float = 1_000_000.0) -> PaperBr
         config=BrokerConfig(participation_cap=0.10),
         canonical_ledger_path=str(tmp_path / "canonical.jsonl"),
         risk_engine=risk_engine,
+        # The venue refuses a BUY whose industry it cannot measure (R2 F03),
+        # so the traded name's industry is declared here.
+        industry_map={"600000.SH": "bank"},
     )
 
 
@@ -91,8 +94,12 @@ def test_a_compliant_order_still_passes(tmp_path) -> None:
 
 def test_declared_limits_are_honoured_over_the_defaults(tmp_path) -> None:
     """A run that wants a concentrated book must declare it, and then gets it."""
+    # A 50% single-name book is also a 50% single-industry book, so the run
+    # declares both concentrations; the industry limit used to be skipped at
+    # the venue, which is why this test once needed only the single-name one.
     engine = RiskEngine(
-        limits=RiskLimits(max_single_name_weight=1.0, max_order_notional=1e9),
+        limits=RiskLimits(max_single_name_weight=1.0, max_industry_weight=1.0,
+                          max_order_notional=1e9),
         run_id="test",
     )
     broker = _broker(tmp_path, risk_engine=engine)

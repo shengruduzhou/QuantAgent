@@ -356,8 +356,14 @@ export function AlphaFoundryPage(): JSX.Element {
           },
           {
             label: "基准口径",
-            value: (summary.benchmarkMode ?? "—").startsWith("index") ? "指数" : "宇宙等权",
-            detail: summary.benchmarkMode ?? "运行后写入产物",
+            // An unrecorded mode is unknown, not "宇宙等权"; universe_equal_weight
+            // must carry its caveat (AGENTS.md Alpha Foundry).
+            value: !summary.benchmarkMode ? "未记录" : summary.benchmarkMode.startsWith("index") ? "指数" : summary.benchmarkMode.startsWith("universe_equal_weight") ? "宇宙等权" : summary.benchmarkMode,
+            detail: !summary.benchmarkMode
+              ? "产物未记录基准口径；超额不可解读"
+              : summary.benchmarkMode.startsWith("universe_equal_weight")
+                ? "含不可交易标的，超额被高估"
+                : summary.benchmarkMode,
             tone: (summary.benchmarkMode ?? "").startsWith("index") ? "info" : "warning",
             icon: CheckCircle,
           },

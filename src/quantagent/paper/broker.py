@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 from typing import Any, Iterable, Mapping, Sequence
 
 from quantagent.backtest import ashare_rules as rules
@@ -58,6 +59,44 @@ from quantagent.paper.portfolio import (
     InsufficientSellable,
     Portfolio,
 )
+from quantagent.paper.risk import SCOPE_GLOBAL, KillSwitch, RiskDecision, RiskEngine
+
+
+class InvalidMarketSnapshot(ValueError):
+    """A snapshot whose price or volume is not a measurement.
+
+    A NaN session volume used to disable the participation cap, the pre-trade
+    participation check and market impact all at once: ``min(remaining, nan)``
+    is ``remaining`` and ``nan > 0`` is False, so an unmeasured bar filled the
+    whole order at zero impact. An unmeasured value is refused, never defaulted.
+    """
+
+
+def snapshot_invalid_reason(
+    *,
+    last_price: Any,
+    previous_close: Any,
+    session_volume: Any,
+    high: Any = None,
+    low: Any = None,
+) -> str | None:
+    """Why these snapshot values cannot be priced against, or None."""
+    def finite(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    problems: list[str] = []
+    for name, value in (("last_price", last_price), ("previous_close", previous_close)):
+        if not finite(value) or float(value) <= 0:
+            problems.append(f"{name}={value!r} is not a finite positive price")
+    if not finite(session_volume) or float(session_volume) < 0:
+        problems.append(f"session_volume={session_volume!r} is not a finite non-negative volume")
+    for name, value in (("high", high), ("low", low)):
+        if value is not None and (not finite(value) or float(value) <= 0):
+            problems.append(f"{name}={value!r} is not a finite positive price")
+    return "; ".join(problems) or None
 
 
 @dataclass
@@ -76,6 +115,20 @@ class MarketSnapshot:
     sessions_since_listing: int | None = None
     high: float | None = None
     low: float | None = None
+
+    def __post_init__(self) -> None:
+        reason = self.invalid_reason()
+        if reason is not None:
+            raise InvalidMarketSnapshot(
+                f"market_data_invalid for {self.symbol} on {self.trade_date}: {reason}"
+            )
+
+    def invalid_reason(self) -> str | None:
+        """Re-checkable: the dataclass is mutable, so the venue checks again."""
+        return snapshot_invalid_reason(
+            last_price=self.last_price, previous_close=self.previous_close,
+            session_volume=self.session_volume, high=self.high, low=self.low,
+        )
 
     def limits(self) -> rules.PriceLimits:
         return rules.price_limits(
@@ -97,6 +150,18 @@ class MarketSnapshot:
     @property
     def phase(self) -> str:
         return mc.session_phase(self.clock[:5], board=self.board)
+
+    @property
+    def observed_at(self) -> datetime | None:
+        """Exchange-local (Asia/Shanghai, naive) time of this quote, or None."""
+        try:
+            return datetime.fromisoformat(f"{str(self.trade_date)[:10]}T{str(self.clock)[:8]}")
+        except ValueError:
+            return None
+
+
+#: Industry bucket for held names missing from the venue's industry map.
+UNKNOWN_INDUSTRY = "__unknown__"
 
 
 @dataclass
@@ -128,6 +193,7 @@ class PaperBroker:
         canonical_ledger: CanonicalLedger | None = None,
         book: OrderBook | None = None,
         risk_engine: "RiskEngine | None" = None,
+        industry_map: Mapping[str, str] | None = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = event_ledger
@@ -147,6 +213,17 @@ class PaperBroker:
         # in, so "no portfolio risk was applied" is readable from the run rather
         # than assumed from the absence of rejections.
         self.risk_engine = risk_engine
+        # symbol -> industry, used to measure industry concentration. Absent or
+        # incomplete while the industry limit is below 1.0 means a BUY of an
+        # unmapped name is refused as `industry_unmeasured`, never waved through.
+        self.industry_map: dict[str, str] = dict(industry_map or {})
+        # Last mark per symbol from every snapshot this venue has seen, and the
+        # venue's simulated clock (the newest quote time observed). The risk
+        # engine values the *whole* book against these; valuing it with only the
+        # order's own price raised UnpriceablePosition on the second name held.
+        self.marks: dict[str, float] = {}
+        self._mark_times: dict[str, datetime] = {}
+        self.clock: datetime | None = None
         self.orders: dict[str, Order] = {}
         self.fills: list[Fill] = []
         #: Execution ids already booked. A set rather than a scan over `fills`
@@ -188,8 +265,23 @@ class PaperBroker:
         )
         self.lineage = lineage or Lineage(run_id=run_id)
         self._canonical_ids: dict[str, str] = {}
-        self.killed: bool = False
-        self.kill_reason: str | None = None
+        self.last_order_decision = None
+        #: Exchange session the venue is in (newest quote date observed).
+        self.session: str | None = None
+        # One kill switch for the venue: the risk engine's when attached, so a
+        # switch latched by a portfolio breach and one pulled by an operator are
+        # the same object. Both are journalled to this venue's operational
+        # ledger and rebuilt from it here — a restart used to clear them.
+        if self.risk_engine is not None:
+            self.risk_engine.bind_state_ledger(
+                self.ledger, portfolio_id=self.portfolio.portfolio_id
+            )
+            self.risk_engine.observe_inception_equity(self.portfolio.initial_cash)
+            self.kill_switch = self.risk_engine.kill_switch
+        else:
+            self.kill_switch = KillSwitch()
+            self.kill_switch.restore(self.ledger.read())
+            self.kill_switch.journal = self._emit
 
     # -- ledger helper -----------------------------------------------------
     def _emit(self, event_type: str, payload: Mapping[str, Any], *,
@@ -277,9 +369,23 @@ class PaperBroker:
         self._emit(lg.KILL_SWITCH_ARMED, {"scope": scope, "reason": reason})
 
     def trigger_kill_switch(self, reason: str, *, scope: str = "GLOBAL") -> None:
-        self.killed = True
-        self.kill_reason = reason
-        self._emit(lg.KILL_SWITCH_TRIGGERED, {"scope": scope, "reason": reason})
+        """Latch a switch; persisted as `lg.KILL_SWITCH_TRIGGERED` by the journal."""
+        self.kill_switch.trigger(scope, reason)
+
+    def clear_kill_switch(self, scope: str = "GLOBAL", *, key: str | None = None,
+                          human_confirmation: bool = False) -> bool:
+        """Clear a latched switch. Refuses without explicit human confirmation."""
+        return self.kill_switch.clear(scope, key, human_confirmation=human_confirmation)
+
+    @property
+    def killed(self) -> bool:
+        """Whether a GLOBAL switch halts this venue entirely."""
+        return any(r["scope"] == SCOPE_GLOBAL for r in self.kill_switch.active())
+
+    @property
+    def kill_reason(self) -> str | None:
+        active = self.kill_switch.active()
+        return active[0]["reason"] if active else None
 
     # -- validation --------------------------------------------------------
     def _reject(self, order: Order, reason: str, market: MarketSnapshot | None) -> Order:
@@ -296,8 +402,14 @@ class PaperBroker:
 
     def _validate(self, order: Order, market: MarketSnapshot) -> str | None:
         """Return a rejection reason, or None when the order may proceed."""
-        if self.killed:
-            return f"kill switch active: {self.kill_reason}"
+        blocking = self.kill_switch.blocking(order.side, order.strategy_id)
+        if blocking:
+            # PORTFOLIO scope is reduce-only: a SELL passes, a BUY does not.
+            return f"kill switch active: {blocking[0]['reason']}"
+
+        invalid = market.invalid_reason()
+        if invalid is not None:
+            return f"market_data_invalid: {invalid}"
 
         if market.phase not in mc.CONTINUOUS_PHASES and market.phase not in mc.AUCTION_PHASES:
             return f"outside a tradable session phase ({market.phase})"
@@ -348,16 +460,126 @@ class PaperBroker:
         # join. A rejection here is final -- `RiskDecision` deliberately carries
         # no override path.
         if self.risk_engine is not None:
+            prices = dict(self.marks)
+            prices.setdefault(order.symbol, market.last_price)
             decision = self.risk_engine.check_order(
                 order,
                 self.portfolio,
                 reference_price=market.last_price,
                 session_volume=market.session_volume,
+                prices=prices,
+                quote_age_seconds=self.quote_age_seconds(market),
+                industry=self.industry_map.get(order.symbol),
+                industry_weights=self.industry_weights(prices),
             )
+            self.last_order_decision = decision
             if not decision.approved:
                 return "portfolio risk rejected: " + ",".join(decision.failed)
 
         return None
+
+    # -- marks and sessions ------------------------------------------------
+    def observe(self, market: MarketSnapshot) -> None:
+        """Record a snapshot's price as the symbol's mark if it is the newest.
+
+        The first quote of a later exchange session starts that session: the
+        risk engine re-keys turnover and daily loss to it and the portfolio
+        limits (drawdown, daily loss, gross, concentration) are evaluated.
+        """
+        stamp = market.observed_at
+        if stamp is None or market.invalid_reason() is not None:
+            return
+        session = str(market.trade_date)[:10]
+        opening = self._opening_equity(session)
+        self._record_mark(market.symbol, float(market.last_price), stamp)
+        self._enter_session(session, opening)
+
+    def observe_marks(self, prices: Mapping[str, float], *, trade_date: str,
+                      clock: str) -> None:
+        """Record a full mark map observed at one exchange time.
+
+        The continuous loop knows every held and target symbol's price for the
+        session; handing the venue the whole map is what lets the risk engine
+        value the entire book rather than only the order's own symbol.
+        """
+        session = str(trade_date)[:10]
+        stamp = datetime.fromisoformat(f"{session}T{str(clock)[:8]}")
+        opening = self._opening_equity(session)
+        for symbol, price in prices.items():
+            value = float(price)
+            if math.isfinite(value) and value > 0:
+                self._record_mark(str(symbol), value, stamp)
+        self._enter_session(session, opening)
+
+    def _opening_equity(self, session: str) -> float | None:
+        """Book value at the marks known before ``session``'s first quote."""
+        if self.session is not None and session <= self.session:
+            return None
+        if self.portfolio.unpriceable(self.marks):
+            return None
+        return self.portfolio.equity(self.marks)
+
+    def _enter_session(self, session: str, opening_equity: float | None) -> None:
+        if self.session is not None and session <= self.session:
+            return
+        self.session = session
+        if self.risk_engine is not None:
+            self.risk_engine.begin_session(session, opening_equity=opening_equity)
+            self.check_portfolio()
+
+    def check_portfolio(self) -> RiskDecision | None:
+        """Evaluate portfolio limits on the book at the venue's marks.
+
+        Runs at the start of every session and after every fill. A drawdown or
+        daily-loss breach latches the PORTFOLIO kill switch, which refuses
+        risk-increasing orders and still lets the book be reduced. Before this
+        was wired nothing called `check_portfolio`, and a book down 24% kept
+        buying.
+        """
+        if self.risk_engine is None:
+            return None
+        return self.risk_engine.check_portfolio(
+            self.portfolio, dict(self.marks), industry_map=self.industry_map or None
+        )
+
+    def _record_mark(self, symbol: str, price: float, stamp: datetime) -> None:
+        previous = self._mark_times.get(symbol)
+        if previous is None or stamp >= previous:
+            self.marks[symbol] = price
+            self._mark_times[symbol] = stamp
+        if self.clock is None or stamp > self.clock:
+            self.clock = stamp
+
+    def quote_age_seconds(self, market: MarketSnapshot) -> float:
+        """Age of this quote against the venue clock (newest quote observed).
+
+        A quote older than something the venue has already seen is measured as
+        that much older; a quote whose time cannot be read is infinitely old.
+        """
+        stamp = market.observed_at
+        if stamp is None:
+            return math.inf
+        if self.clock is None or stamp >= self.clock:
+            return 0.0
+        return (self.clock - stamp).total_seconds()
+
+    def unpriceable_symbols(self) -> tuple[str, ...]:
+        return self.portfolio.unpriceable(self.marks)
+
+    def industry_weights(self, prices: Mapping[str, float]) -> dict[str, float] | None:
+        """Held weight per industry, or None when the book cannot be valued."""
+        if self.portfolio.unpriceable(prices):
+            return None
+        equity = max(self.portfolio.equity(prices), 1e-9)
+        weights: dict[str, float] = {}
+        for symbol, position in self.portfolio.positions.items():
+            if position.is_flat:
+                continue
+            industry = self.industry_map.get(symbol, UNKNOWN_INDUSTRY)
+            weights[industry] = weights.get(industry, 0.0) + abs(
+                position.market_value(prices[symbol])
+            ) / equity
+        return weights
 
     # -- pricing -----------------------------------------------------------
     def _execution_price(self, order: Order, market: MarketSnapshot,
@@ -395,6 +617,7 @@ class PaperBroker:
     def submit(self, order: Order, market: MarketSnapshot) -> Order:
         """Validate, accept and attempt to fill a single order."""
         self.orders[order.order_id] = order
+        self.observe(market)
         if order.order_id not in self._canonical_ids:
             self._canonical_open(order, trade_date=getattr(market, 'trade_date', None))
 
@@ -472,6 +695,7 @@ class PaperBroker:
             order.transition(FILLED)
         else:
             order.transition(PARTIALLY_FILLED)
+        self.check_portfolio()
         return True
 
     def submit_parent(

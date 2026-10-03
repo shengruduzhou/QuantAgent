@@ -145,6 +145,7 @@ def clean_label_mask(
     sessions: pd.DatetimeIndex | None = None,
     entry_delay_sessions: int = 1,
     windows: list[QuarantineWindow] | None = None,
+    symbols: pd.Series | None = None,
 ) -> pd.Series:
     """True where a row's label window avoids every quarantined window.
 
@@ -153,6 +154,12 @@ def clean_label_mask(
     close(t+1+h)). Restricting the *signal* date is not enough: a 20-day label
     on a clean date can still read prices inside a holdout. Rows whose exit
     session lies beyond the known calendar are treated as unclean.
+
+    Gold labels exit on the symbol's own (h+1)-th next ROW, which falls later
+    than the calendar exit when the symbol has a gap (suspension) in between.
+    Pass ``symbols`` (aligned with ``trade_dates``) to use the later of the
+    two exits; without it a gap near a window start can admit a label that
+    reads holdout prices.
     """
     if windows is None:
         windows, _ = load_windows()
@@ -168,6 +175,19 @@ def clean_label_mask(
     exits = pd.Series(pd.NaT, index=dates.index, dtype="datetime64[ns]")
     inside = (exit_position < len(calendar)) & dates.notna().to_numpy()
     exits.loc[inside] = calendar[exit_position[inside]]
+    if symbols is not None:
+        frame = pd.DataFrame({"symbol": pd.Series(symbols).to_numpy(), "date": dates.to_numpy()},
+                             index=dates.index)
+        row_exit = (
+            frame.sort_values(["symbol", "date"])
+            .groupby("symbol", sort=False)["date"]
+            .shift(-offset)
+            .reindex(frame.index)
+        )
+        # Later of the two; a missing own-row exit means the label cannot be
+        # proven clean.
+        exits = exits.where(row_exit.isna() | (exits >= row_exit), row_exit)
+        exits = exits.where(row_exit.notna())
     clean = exits.notna() & dates.notna()
     for w in windows:
         clean &= ~((dates <= w.end) & (exits >= w.start))

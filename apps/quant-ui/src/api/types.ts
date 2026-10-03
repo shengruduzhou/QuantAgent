@@ -671,7 +671,15 @@ export interface BacktestSummary {
   fillCount?: number | null;
   tTradeCount?: number | null;
   tContribution?: number | null;
+  /** Total trading cost in CNY; null = not recorded (never "zero cost"). */
   totalCost?: number | null;
+  /**
+   * "all_fills_explicit_fees_plus_impact_plus_slippage" (round-29 fix) or
+   * "matched_round_trip_fees_only_pre_fix" (excludes slippage; understated).
+   */
+  totalCostBasis?: string | null;
+  slippageCost?: number | null;
+  benchmark?: BacktestBenchmark | null;
   status: DataStatus;
   path: string;
   tags: string[];
@@ -679,6 +687,20 @@ export interface BacktestSummary {
   validationStatus?: ArtifactValidationStatus;
   manifestPath?: string | null;
   capabilities?: Record<string, boolean | string | null>;
+  /** Clock stamp the run declared; "unstamped_pre_timing_fix" when absent. */
+  timingSemantics?: string;
+  timingCanonical?: boolean;
+  /** Quarantined holdout windows the evaluation window overlaps. */
+  quarantineOverlap?: string[];
+}
+
+export interface BacktestBenchmark {
+  /** e.g. "universe_equal_weight", "unlabelled", or an index code. */
+  mode: string | null;
+  source: string | null;
+  annualizedReturn?: number | null;
+  gapSessions?: number | null;
+  caveat?: string | null;
 }
 
 export interface EquityPoint {
@@ -915,6 +937,10 @@ export interface RiskOverview {
   suspensionRisk?: number | null;
   doTFailureRisk?: number | null;
   eventCounts: Record<string, number>;
+  /** False when the counts cover only the first page of persisted events. */
+  eventCountsExact?: boolean;
+  eventCountsBasis?: string;
+  backtestName?: string | null;
   rules: Array<Record<string, unknown>>;
 }
 

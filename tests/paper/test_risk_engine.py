@@ -30,6 +30,12 @@ def order(qty=10_000, price=9.00, side=BUY, **kw):
                  order_type=MARKETABLE_LIMIT, limit_price=price, **kw)
 
 
+#: A BUY must now say which industry it joins: an unmeasured industry is
+#: refused (`industry_unmeasured`) instead of the old silent skip, so tests that
+#: expect an approval supply the measurement explicitly.
+MEASURED_INDUSTRY = {"industry": "银行", "industry_weights": {}}
+
+
 class TestRejectionIsFinal:
     def test_enforce_raises_and_offers_no_override(self, engine, portfolio):
         decision = engine.check_order(order(qty=1_000_000), portfolio,
@@ -105,8 +111,10 @@ class TestPreTradeRisk:
 
     def test_duplicate_order_id_rejected(self, engine, portfolio):
         first = order(qty=100)
-        assert engine.check_order(first, portfolio, reference_price=9.00).approved
-        again = engine.check_order(first, portfolio, reference_price=9.00)
+        assert engine.check_order(first, portfolio, reference_price=9.00,
+                                  **MEASURED_INDUSTRY).approved
+        again = engine.check_order(first, portfolio, reference_price=9.00,
+                                   **MEASURED_INDUSTRY)
         assert "duplicate_order" in again.failed
 
     def test_unapproved_model_rejected(self, engine, portfolio):
@@ -129,18 +137,39 @@ class TestPreTradeRisk:
 
     def test_clean_order_approved(self, engine, portfolio):
         decision = engine.check_order(order(qty=1_000), portfolio,
-                                      reference_price=9.00, session_volume=10_000_000)
+                                      reference_price=9.00, session_volume=10_000_000,
+                                      **MEASURED_INDUSTRY)
         assert decision.approved, decision.failed
 
 
 class TestPortfolioRisk:
-    def test_daily_loss_triggers_kill_switch(self, portfolio):
+    def test_daily_loss_halts_buys_for_the_session_without_latching(self, portfolio):
+        """A daily-loss breach stops new buys for that session only; it is not
+        the reduce-only latch a drawdown breach is (round-29 R7 breaker sim)."""
         engine = rk.RiskEngine(rk.RiskLimits(max_daily_loss=1_000.0))
+        engine.begin_session("2025-06-03", opening_equity=portfolio.equity({}))
         engine.check_portfolio(portfolio, {})
         portfolio.cash -= 50_000.0
         decision = engine.check_portfolio(portfolio, {})
         assert "daily_loss" in decision.failed
-        assert engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+        assert not engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+        buy = engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                                 session_volume=10_000_000, **MEASURED_INDUSTRY)
+        assert "daily_loss_halt" in buy.failed
+        engine.begin_session("2025-06-04", opening_equity=portfolio.equity({}))
+        next_day = engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                                      session_volume=10_000_000, **MEASURED_INDUSTRY)
+        assert "daily_loss_halt" not in next_day.failed
+
+    def test_default_daily_loss_breaker_is_a_fraction_of_opening_equity(self, portfolio):
+        engine = rk.RiskEngine(rk.RiskLimits())
+        engine.check_portfolio(portfolio, {})
+        opening = engine.session_start_equity
+        portfolio.cash -= 0.03 * opening  # an ordinary bad day
+        assert "daily_loss" not in engine.check_portfolio(portfolio, {}).failed
+        portfolio.cash -= 0.03 * opening  # now 6% down on the session
+        assert "daily_loss" in engine.check_portfolio(portfolio, {}).failed
+        assert engine.loss_halted_session == engine.session_date
 
     def test_drawdown_triggers_kill_switch(self, portfolio):
         engine = rk.RiskEngine(rk.RiskLimits(max_drawdown=0.05,
@@ -248,7 +277,8 @@ class TestKillSwitch:
     def test_decisions_are_written_to_the_ledger(self, tmp_path, portfolio):
         ledger = lg.EventLedger(tmp_path / "l.jsonl")
         engine = rk.RiskEngine(rk.RiskLimits(), event_ledger=ledger, run_id="R")
-        engine.check_order(order(qty=1_000), portfolio, reference_price=9.00)
+        engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                           **MEASURED_INDUSTRY)
         engine.check_order(order(qty=999_999), portfolio, reference_price=9.00)
         kinds = [e.event_type for e in ledger.read()]
         assert lg.RISK_APPROVED in kinds

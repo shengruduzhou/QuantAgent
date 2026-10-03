@@ -60,6 +60,9 @@ REPORT_PATH = PROJECT_ROOT / "docs" / "architecture" / "module1_fault_injection.
 SYMBOL = "600000.SH"
 SESSION = "2026-08-04"
 INITIAL_CASH = 1_000_000.0
+#: The venue refuses a BUY whose industry it cannot measure, so the fault
+#: harness declares the one symbol it trades.
+INDUSTRY_MAP = {SYMBOL: "bank"}
 
 #: Boundaries a child process can be killed at, in the order they occur.
 KILL_POINTS: tuple[str, ...] = (
@@ -105,7 +108,10 @@ def run_child(root: Path, kill_at: str) -> dict[str, Any]:
     """Submit and drain one order, dying at `kill_at`. Runs in its own process."""
     from services.quant_api.services.paper_orders import PaperOrderService
 
-    service = PaperOrderService(root, market_source=market_source, initial_cash=INITIAL_CASH)
+    service = PaperOrderService(
+        root, market_source=market_source, initial_cash=INITIAL_CASH,
+        industry_map=INDUSTRY_MAP,
+    )
     appends = {"n": 0}
     real_append = CanonicalLedger.append
 
@@ -236,7 +242,8 @@ def measure(root: Path, *, recover: bool = True) -> Measurement:
 
     if recover:
         service = PaperOrderService(
-            root, market_source=market_source, initial_cash=INITIAL_CASH
+            root, market_source=market_source, initial_cash=INITIAL_CASH,
+            industry_map=INDUSTRY_MAP,
         )
         try:
             if service.writable:
@@ -397,7 +404,10 @@ def _filesystem_experiment(
 def _service(root: Path):
     from services.quant_api.services.paper_orders import PaperOrderService
 
-    return PaperOrderService(root, market_source=market_source, initial_cash=INITIAL_CASH)
+    return PaperOrderService(
+        root, market_source=market_source, initial_cash=INITIAL_CASH,
+        industry_map=INDUSTRY_MAP,
+    )
 
 
 def _fsync_only_for(target_name: str, real_fsync):

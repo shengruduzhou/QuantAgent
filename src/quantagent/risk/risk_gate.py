@@ -1,3 +1,14 @@
+"""Target-weight and order-intent risk gate for the *live* arming boundary.
+
+Wiring, stated so nobody credits it to the wrong path: ``RiskGate`` (configured by
+``risk_limits.V6RiskLimits``) is the required ``risk_gate`` of
+``execution.live_session.LiveTradingSession``, which stays dormant while the
+operating mode is LIVE_DISABLED. The paper venue does **not** read it: paper
+orders are checked by ``paper.risk.RiskEngine`` / ``paper.risk.RiskLimits``.
+Round 29 kept this module deliberately (AGENTS.md: QMT submit must pass the risk
+gate) rather than deleting it as unreferenced by order paths.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

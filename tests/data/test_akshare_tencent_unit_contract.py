@@ -17,6 +17,13 @@ is the *failover* and therefore engages precisely when EastMoney is rate-limited
 
 These tests use synthetic frames shaped exactly like the live payloads so they
 run offline; the live shape itself is pinned by the first test.
+
+Round 29 update: this lots-shaped payload carries no CNY turnover, so its unit
+cannot be PROVEN from the response (amount / volume vs [low, high]). The volume
+is still scaled by the measured board prior, but the rows are
+``UNIT_AMBIGUOUS`` / ``shares_unverified`` and are never accepted by the
+provider. Recorded-fixture coverage lives in
+``test_akshare_unit_truth_per_response.py``.
 """
 
 from __future__ import annotations
@@ -24,11 +31,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quantagent.data.ashare.contracts import QUALITY_UNIT_AMBIGUOUS
 from quantagent.data.providers.akshare_live_provider import (
     _CANONICAL_AMOUNT_UNIT,
     _CANONICAL_VOLUME_UNIT,
-    _RAW_VOLUME_UNIT_BY_SOURCE,
+    _DOCUMENTED_VOLUME_SCALE_BY_SOURCE,
     _UNIT_UNAVAILABLE,
+    _UNIT_UNVERIFIED,
     _normalize_akshare_daily,
 )
 
@@ -75,12 +84,15 @@ class TestTencentVolumeRecovery:
 
         Tencent has shipped two shapes, so a fixed table entry is guaranteed to
         be wrong for one of them. The lots shape must report lots even though
-        the table's default (the legacy shape) says shares.
+        the documented default (akshare's "volume 统一为股") says shares -- and,
+        having no turnover to prove it, must say the lots are UNVERIFIED.
         """
-        assert _RAW_VOLUME_UNIT_BY_SOURCE["tencent"] == "shares"  # legacy default
+        assert _DOCUMENTED_VOLUME_SCALE_BY_SOURCE["tencent"] == 1.0  # documented claim
         out = _tencent()
-        assert out["raw_volume_unit"].iloc[0] == "lots_100_shares"
-        assert out["volume_unit"].iloc[0] == _CANONICAL_VOLUME_UNIT
+        assert out["raw_volume_unit"].iloc[0] == "lots_100_shares_unverified"
+        assert out["volume_unit"].iloc[0] == _UNIT_UNVERIFIED
+        assert out["volume_unit"].iloc[0] != _CANONICAL_VOLUME_UNIT
+        assert set(out["quality_status"]) == {QUALITY_UNIT_AMBIGUOUS}
 
     def test_legacy_shape_with_real_volume_and_turnover_is_left_alone(self):
         """Regression on my own over-reach: do not null a genuine CNY amount."""
@@ -100,6 +112,7 @@ class TestTencentVolumeRecovery:
         assert out["amount"].iloc[0] == pytest.approx(1_295_000.0)
         assert out["raw_volume_unit"].iloc[0] == "shares"
         assert out["amount_unit"].iloc[0] == _CANONICAL_AMOUNT_UNIT
+        assert out["volume_unit"].iloc[0] == _CANONICAL_VOLUME_UNIT  # proven by VWAP
 
 
 class TestTencentAmountIsNotFabricated:

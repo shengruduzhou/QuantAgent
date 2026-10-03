@@ -2253,14 +2253,23 @@ def _build_full_pipeline_acceptance_metrics(
     metrics = dict(training_metrics)
     metrics.update(
         {
-            "turnover_adjusted_net_return": paper_summary.get("turnover_adjusted_net_return", paper_summary.get("net_return_after_estimated_costs", 0.0)),
-            "max_drawdown": paper_summary.get("max_drawdown", 0.0),
-            "sharpe": paper_summary.get("sharpe", training_metrics.get("sharpe", 0.0)),
+            # No defaults here: a missing paper measurement must reach the gate as
+            # unmeasured. `max_drawdown: 0.0` used to turn "no drawdown was ever
+            # computed" into a measured pass of the drawdown gate (DEF-023 undone
+            # on the producer side, the DEF-025 shape).
+            "turnover_adjusted_net_return": paper_summary.get("turnover_adjusted_net_return", paper_summary.get("net_return_after_estimated_costs")),
+            "max_drawdown": paper_summary.get("max_drawdown"),
+            "sharpe": paper_summary.get("sharpe", training_metrics.get("sharpe")),
             "benchmark_symbol": benchmark_symbol,
             "benchmark_return": paper_summary.get("benchmark_return"),
             "excess_return": paper_summary.get("excess_return"),
-            "excess_return_after_costs": paper_summary.get("excess_return_after_costs", paper_summary.get("excess_return", 0.0)),
+            "excess_return_after_costs": paper_summary.get("excess_return_after_costs", paper_summary.get("excess_return")),
             "benchmark_excess_return": paper_summary.get("excess_return"),
+            # Benchmark coverage (DEF-022) so an incomplete benchmark is reported as
+            # incomplete, not as "no benchmark configured".
+            "benchmark_status": paper_summary.get("benchmark_status"),
+            "benchmark_sessions_covered": paper_summary.get("benchmark_sessions_covered"),
+            "benchmark_sessions_missing": paper_summary.get("benchmark_sessions_missing"),
             "selection_pressure_min": weight_diagnostics.get("selection_pressure_min", 0.0),
             "selection_pressure_mean": weight_diagnostics.get("selection_pressure_mean", 0.0),
             "prediction_symbol_count": int(predictions["symbol"].nunique()) if "symbol" in predictions.columns else 0,
@@ -3063,19 +3072,23 @@ def _load_env_config(path: Path | None) -> dict[str, object]:
     env = payload.get("rl_env", payload.get("env", payload))
     if not isinstance(env, dict):
         raise typer.BadParameter("env config must contain an object")
-    allowed = set(PITPortfolioEnvConfig.__dataclass_fields__) if "PITPortfolioEnvConfig" in globals() else {
-        "top_n",
-        "max_delta",
-        "max_weight_per_name",
-        "max_gross",
-        "max_turnover",
-        "cost_bps",
-        "drawdown_lambda",
-        "drawdown_limit",
-        "kill_switch_drawdown",
-        "initial_nav",
-    }
-    return {str(k): v for k, v in env.items() if str(k) in allowed}
+    # The allow-list used to be `__dataclass_fields__ if "PITPortfolioEnvConfig"
+    # in globals() else {legacy PortfolioEnv keys}`. The class is imported only
+    # inside `train_rl_agent`, so the legacy set always won: real fields such as
+    # max_book, volatility_lambda and reward_end_date_limit were silently dropped
+    # and stale ones such as max_turnover reached the constructor as a TypeError.
+    from dataclasses import fields
+
+    from quantagent.rl.pit_portfolio_env import PITPortfolioEnvConfig
+
+    allowed = {item.name for item in fields(PITPortfolioEnvConfig)}
+    unknown = sorted(str(key) for key in env if str(key) not in allowed)
+    if unknown:
+        raise typer.BadParameter(
+            f"env config keys {unknown} are not PITPortfolioEnvConfig fields; "
+            f"allowed: {sorted(allowed)}"
+        )
+    return {str(k): v for k, v in env.items()}
 
 
 def _write_autopilot_report(path: Path, payload: dict[str, object]) -> None:

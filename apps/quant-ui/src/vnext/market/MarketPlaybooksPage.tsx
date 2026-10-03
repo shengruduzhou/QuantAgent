@@ -87,18 +87,21 @@ export function MarketPlaybooksPage(): JSX.Element {
     return null;
   }, [payload, selected, palette]) as EChartsOption | null;
 
-  if (catalog.isLoading) return <StateView state="loading" detail="正在加载 Fuyao 16 个研究模板契约。" />;
-  if (!selected) return <StateView state="empty" detail="没有可用研究模板。" />;
-  const metrics = (payload?.metrics && typeof payload.metrics === "object") ? payload.metrics as Record<string, unknown> : {};
-
+  // Every hook runs before any early return: a hook after a conditional
+  // return changes the hook order between renders (React error #310), which
+  // unmounted the whole application, not just this page.
   const navGapDate = useMemo(() => {
-    if (!payload || !["13", "14", "15"].includes(selected.id)) return null;
+    if (!payload || !selected || !["13", "14", "15"].includes(selected.id)) return null;
     const rows = rowsOf(payload);
     const series = compoundNav(rows);
     const index = series.indexOf(null);
     if (index < 0) return null;
     return String(rows[index]?.date ?? `第 ${index + 1} 行`);
-  }, [payload, selected.id]);
+  }, [payload, selected]);
+
+  if (catalog.isLoading) return <StateView state="loading" detail="正在加载 Fuyao 16 个研究模板契约。" />;
+  if (!selected) return <StateView state="empty" detail="没有可用研究模板。" />;
+  const metrics = (payload?.metrics && typeof payload.metrics === "object") ? payload.metrics as Record<string, unknown> : {};
 
   return <div className="page institutional-workbench playbooks-page">
     <section className="playbook-hero panel"><div><span className="playbook-kicker"><Flask size={17}/> Fuyao × QuantAgent Research Playbooks</span><h2>16 个数据看板、研究与回测工作台</h2><p>功能与证据链对齐官方示例，视觉与治理保持 QuantAgent。真实数据只由服务端读取 API Key；PIT、T+1、成本、基准与缺失状态显式展示。</p></div><StatusBadge status="ready" label={`${items.length}/16 registered`} /></section>
