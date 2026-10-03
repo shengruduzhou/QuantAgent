@@ -268,6 +268,8 @@ class RiskEngine:
         #: All-time peak equity; drawdown is measured against it.
         self.peak_equity: float | None = None
         self.last_portfolio_decision: RiskDecision | None = None
+        #: Exchange session on which a daily-loss breach halted new buys.
+        self.loss_halted_session: str | None = None
         self._seen_orders: set[str] = set()
         self._turnover_by_session: dict[str, float] = {}
         self._start_equity_by_session: dict[str, float] = {}
@@ -312,6 +314,8 @@ class RiskEngine:
             payload = event.payload
             if event.event_type == lg.RISK_STATE_UPDATED:
                 session = payload.get("session")
+                if payload.get("daily_loss_halt"):
+                    self.loss_halted_session = session
                 if session and _finite(payload.get("session_turnover")):
                     self._turnover_by_session[session] = float(payload["session_turnover"])
                 if session and _finite(payload.get("session_start_equity")):
@@ -417,6 +421,14 @@ class RiskEngine:
                 {"scope": r["scope"], "key": r.get("key"), "reason": r["reason"]}
                 for r in blocking
             ] or None))
+        if order.side == BUY:
+            halted = self.loss_halted_session is not None and (
+                self.loss_halted_session == self.session_date
+            )
+            checks.append(RiskCheck(
+                "daily_loss_halt", not halted,
+                "no daily-loss halt on this session (buys resume next session)",
+                measured=self.loss_halted_session if halted else None))
 
         checks.append(RiskCheck(
             "duplicate_order", order.order_id not in self._seen_orders,
@@ -628,9 +640,16 @@ class RiskEngine:
             if check.passed:
                 continue
             if check.name == "daily_loss":
-                self.kill_switch.trigger(SCOPE_PORTFOLIO,
-                                         f"daily loss {check.measured:.2f} exceeds "
-                                         f"{check.limit:.2f}")
+                # A session-scoped halt, not a latch: new buys stop for the rest
+                # of this exchange session and the halt lapses at the next one.
+                # Latching reduce-only on a -5% day held a real top-50 book at
+                # ~12% exposure from 2018-02 onward (round-29 R7 breaker sim).
+                if self.loss_halted_session != self.session_date:
+                    self.loss_halted_session = self.session_date
+                    self._journal(lg.RISK_STATE_UPDATED, {
+                        "session": self.session_date, "daily_loss_halt": True,
+                        "daily_loss": check.measured, "daily_loss_limit": check.limit,
+                    })
             elif check.name == "drawdown":
                 self.kill_switch.trigger(SCOPE_PORTFOLIO,
                                          f"drawdown {check.measured:.2%} exceeds "

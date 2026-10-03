@@ -143,13 +143,23 @@ class TestPreTradeRisk:
 
 
 class TestPortfolioRisk:
-    def test_daily_loss_triggers_kill_switch(self, portfolio):
+    def test_daily_loss_halts_buys_for_the_session_without_latching(self, portfolio):
+        """A daily-loss breach stops new buys for that session only; it is not
+        the reduce-only latch a drawdown breach is (round-29 R7 breaker sim)."""
         engine = rk.RiskEngine(rk.RiskLimits(max_daily_loss=1_000.0))
+        engine.begin_session("2025-06-03", opening_equity=portfolio.equity({}))
         engine.check_portfolio(portfolio, {})
         portfolio.cash -= 50_000.0
         decision = engine.check_portfolio(portfolio, {})
         assert "daily_loss" in decision.failed
-        assert engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+        assert not engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+        buy = engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                                 session_volume=10_000_000, **MEASURED_INDUSTRY)
+        assert "daily_loss_halt" in buy.failed
+        engine.begin_session("2025-06-04", opening_equity=portfolio.equity({}))
+        next_day = engine.check_order(order(qty=1_000), portfolio, reference_price=9.00,
+                                      session_volume=10_000_000, **MEASURED_INDUSTRY)
+        assert "daily_loss_halt" not in next_day.failed
 
     def test_default_daily_loss_breaker_is_a_fraction_of_opening_equity(self, portfolio):
         engine = rk.RiskEngine(rk.RiskLimits())
@@ -159,7 +169,7 @@ class TestPortfolioRisk:
         assert "daily_loss" not in engine.check_portfolio(portfolio, {}).failed
         portfolio.cash -= 0.03 * opening  # now 6% down on the session
         assert "daily_loss" in engine.check_portfolio(portfolio, {}).failed
-        assert engine.kill_switch.is_triggered(rk.SCOPE_PORTFOLIO)
+        assert engine.loss_halted_session == engine.session_date
 
     def test_drawdown_triggers_kill_switch(self, portfolio):
         engine = rk.RiskEngine(rk.RiskLimits(max_drawdown=0.05,
