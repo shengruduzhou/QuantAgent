@@ -57,10 +57,57 @@ PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
 SECTOR = "runtime/data/v7/silver/sector_map/sector_map.parquet"
 ANN = 244
 
+#: How the legacy default panel is described in every output that used it. It is
+#: kept as the default only for backward compatibility: qfq price levels with raw
+#: volume/amount, vendor-stitched without SourceBoundary, no rows for suspended
+#: sessions after 2020 (R1-F01/F02). Pass ``--panel`` with a certified raw
+#: execution panel for a canonical number.
+LEGACY_PANEL_NOTE = (
+    "legacy v7 silver panel: not verified (qfq price levels with raw volume, "
+    "vendor-stitched, suspended sessions absent); not a certified execution panel"
+)
+
 
 def _bench_daily(panel: pd.DataFrame, dates) -> pd.Series:
     px = panel[panel["trade_date"].isin(dates)].pivot_table(index="trade_date", columns="symbol", values="close")
     return px.pct_change(fill_method=None).mean(axis=1).dropna()
+
+
+def _bench_sessions_total_return(panel: pd.DataFrame, start, end) -> pd.Series:
+    """Equal-weight all-A total return on every valuation session.
+
+    For a raw execution panel the price is ``close x adjust_factor`` (hfq), so
+    ex-rights dates are not read as losses, and the benchmark is computed on the
+    sessions the NAV is valued on -- not on signal dates, which for a weekly
+    prediction file would compound weekly returns as if they were daily.
+    """
+    frame = panel[(panel["trade_date"] >= pd.Timestamp(start))
+                  & ((panel["trade_date"] <= pd.Timestamp(end)) if end else True)]
+    price = frame["close"] * frame.get("adjust_factor", 1.0)
+    px = frame.assign(_px=price).pivot_table(index="trade_date", columns="symbol", values="_px")
+    return px.pct_change(fill_method=None).mean(axis=1).dropna()
+
+
+def _load_verified_panel(panel_path: str, p_start, p_end) -> tuple[pd.DataFrame, dict]:
+    """Read a certified raw execution panel and refuse anything else."""
+    from quantagent.data.ashare.execution_panel import verify_execution_panel
+
+    path = Path(panel_path)
+    filters = [("trade_date", ">=", pd.Timestamp(p_start))]
+    if p_end is not None:
+        filters.append(("trade_date", "<=", pd.Timestamp(p_end)))
+    panel = pd.read_parquet(path, filters=filters)
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+    boundaries_path = path.parent / "source_boundaries.parquet"
+    boundaries = pd.read_parquet(boundaries_path) if boundaries_path.exists() else None
+    verification = verify_execution_panel(panel, source_boundaries=boundaries)
+    meta: dict = {"path": str(path), "verified": True, **verification}
+    manifest_path = path.parent / "execution_panel_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        meta["schema"] = manifest.get("schema")
+        meta["content_hash"] = manifest.get("content_hash")
+    return panel, meta
 
 
 def _regime_label(bench_daily: pd.Series) -> pd.Series:
@@ -202,7 +249,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
              slippage_bps: float, variants: list[str], score_column: str = "alpha_score",
              save_backtest_dir: str | None = None,
              save_variant: str = "C_flags_eligible_delay1",
-             allow_quarantined: str | None = None) -> dict:
+             allow_quarantined: str | None = None,
+             panel_path: str | None = None) -> dict:
     # ---- quarantine guard (fail closed, BEFORE any data is read) ----------
     q_windows, q_log_path = load_windows()
     q_hit = check_window(start, end, q_windows)
@@ -226,23 +274,51 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
 
     panel_cols = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
                   "available_at", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]
-    panel = pd.read_parquet(PANEL, columns=panel_cols)
-    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     p_start = pd.Timestamp(start) - pd.Timedelta(days=10)
     p_end = pd.Timestamp(end) + pd.Timedelta(days=10) if end else None
     if q_record is None:
         # Keep the +/-10d execution buffers out of quarantine too: the strict
         # simulator consumes the next global session after each signal date.
         p_start, p_end = clamp_panel_window(p_start, p_end, q_windows)
-    panel = panel[panel["trade_date"] >= p_start]
-    if p_end is not None:
-        panel = panel[panel["trade_date"] <= p_end]
-    sector = pd.read_parquet(SECTOR)
+    universe_note: dict = {}
+    if panel_path:
+        # Certified raw execution panel: verified at entry (adjustment 'none',
+        # one provider per symbol or a declared SourceBoundary, corporate-action
+        # credits present) -- refused otherwise.
+        panel, panel_meta = _load_verified_panel(panel_path, p_start, p_end)
+        # A prediction with no execution row is not a signal anyone could act on.
+        keyed = preds.merge(panel[["symbol", "trade_date"]], on=["symbol", "trade_date"])
+        universe_note["predictions_without_execution_row"] = int(len(preds) - len(keyed))
+        preds = keyed
+        # The strict simulator refuses NaN amount; the vendor lacks it for whole
+        # symbols, so those names cannot be executed and are excluded up front
+        # (disclosed, not filled with an estimate).
+        unmeasured = set(panel.loc[~panel["amount_measured"].astype(bool), "symbol"])
+        universe_note["excluded_symbols_amount_unmeasured"] = len(unmeasured)
+        universe_note["excluded_prediction_rows_amount_unmeasured"] = int(
+            preds["symbol"].isin(unmeasured).sum())
+        preds = preds[~preds["symbol"].isin(unmeasured)]
+        panel = panel[~panel["symbol"].isin(unmeasured)]
+    else:
+        panel = pd.read_parquet(PANEL, columns=panel_cols)
+        panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+        panel = panel[panel["trade_date"] >= p_start]
+        if p_end is not None:
+            panel = panel[panel["trade_date"] <= p_end]
+        panel_meta = {"path": PANEL, "verified": False, "note": LEGACY_PANEL_NOTE}
+        print(f"[panel] WARNING {LEGACY_PANEL_NOTE}", file=sys.stderr, flush=True)
+    sector = pd.read_parquet(SECTOR) if Path(SECTOR).exists() else pd.DataFrame()
 
     flags = panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
     preds = preds.merge(flags, on=["symbol", "trade_date"], how="left")
 
-    bench = _bench_daily(panel, sorted(preds["trade_date"].unique()))
+    if panel_path:
+        last = pd.Timestamp(end) if end else preds["trade_date"].max()
+        bench = _bench_sessions_total_return(panel, preds["trade_date"].min(), last)
+        bench_basis = "valuation_sessions_total_return_hfq"
+    else:
+        bench = _bench_daily(panel, sorted(preds["trade_date"].unique()))
+        bench_basis = "signal_dates_close_to_close"
     bench_ann = float((1 + bench).prod() ** (ANN / max(1, len(bench))) - 1)
 
     panel_noflags = panel.drop(columns=["is_suspended", "is_st", "is_limit_up", "is_limit_down"])
@@ -266,6 +342,9 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
         "target_index_semantics": "signal_date_not_pre_shifted",
         "legacy_variant_aliases": {"C_flags_eligible_delay1": "B_flags_eligible"},
+        "panel": panel_meta,
+        "universe_restrictions": universe_note,
+        "benchmark_basis": bench_basis,
         "variants": {},
     }
     if q_record is not None:
@@ -280,11 +359,27 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             eligible_only=v["eligible"],
         )
         use_panel = panel if v["flags"] else panel_noflags
+        if panel_path:
+            # The simulator only reads rows of names it may hold, and every held
+            # name was a target; gap rows keep each of their sessions present.
+            use_panel = use_panel[use_panel["symbol"].isin(set(tw.columns))]
         res = run_strict_backtest_v8(
             tw, use_panel, sector_map=sector,
             config=AShareExecutionSimulationConfig(initial_cash=1_000_000.0, slippage_bps=slippage_bps),
         )
         m = res.metrics
+        ca_audit = getattr(res, "corporate_action_audit", None)
+        corporate_actions = (
+            {"credits": int((ca_audit["basis"] != "delisting_writeoff").sum()),
+             "cash_credit_cny": round(float(ca_audit["cash_credit"].sum()), 2),
+             "bonus_shares": int(ca_audit.loc[ca_audit["basis"] != "delisting_writeoff",
+                                              "bonus_shares"].sum()),
+             "delisting_writeoffs": int((ca_audit["basis"] == "delisting_writeoff").sum()),
+             "delisting_writeoff_value_cny": round(float(
+                 ca_audit.get("written_off_value", pd.Series(dtype=float)).fillna(0.0).sum()), 2)}
+            if isinstance(ca_audit, pd.DataFrame) and not ca_audit.empty
+            else {"credits": 0}
+        )
         rec = {
             **_sharpe_uncertainty(res.nav),
             "ann": round(m.annualized_return, 4),
@@ -294,6 +389,7 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "maxDD": round(m.max_drawdown, 4),
             "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
             "regime": _regime_excess(res.nav, bench),
+            "corporate_action_credits_applied": corporate_actions,
         }
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:
@@ -327,6 +423,11 @@ def main() -> int:
                     help="Forensic override for quarantined windows (configs/quarantined_windows.json). "
                          "Requires a non-empty justification; access is logged and outputs are "
                          "stamped trust_class=contaminated_holdout_forensics.")
+    ap.add_argument("--panel", default=None,
+                    help=("Certified raw execution panel (e.g. runtime/data/gold/full_universe_r29/"
+                          "execution_panel.parquet). Verified at entry: adjustment_method 'none', one "
+                          "provider per symbol or a declared SourceBoundary, corporate-action credits. "
+                          "Default: the legacy v7 silver panel, reported as unverified."))
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     try:
@@ -336,7 +437,8 @@ def main() -> int:
                        save_backtest_dir=args.save_backtest_dir,
                        save_variant=args.save_variant,
                        variants=[v.strip() for v in args.variants.split(",") if v.strip()],
-                       allow_quarantined=args.allow_quarantined)
+                       allow_quarantined=args.allow_quarantined,
+                       panel_path=args.panel)
     except QuarantineViolation as exc:
         print(str(exc), file=sys.stderr)
         return 3

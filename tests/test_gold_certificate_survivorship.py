@@ -176,3 +176,45 @@ def test_bars_printed_after_a_delisting_still_fail(build_module):
     quality = build_module.run_quality_checks(frame, master)
     assert _verdict(quality, "no_post_delisting_rows") == "FAIL"
     assert quality["structurally_valid"] is False
+
+
+def _st_dataset(master: pd.DataFrame, coverage) -> pd.DataFrame:
+    from quantagent.data.ashare.gold_bridge import build_masks
+
+    dates = pd.bdate_range("2026-01-05", periods=10)
+    rows = [{"symbol": s, "trade_date": d} for s in master["symbol"] for d in dates
+            if not (s == "000003.SZ" and d >= pd.Timestamp("2026-01-20"))]
+    frame = build_masks(pd.DataFrame(rows), master=master, st_available=coverage,
+                        suspension=pd.DataFrame(), st=pd.DataFrame(
+                            columns=["symbol", "effective_start", "effective_end"]))
+    frame["adjustment_method"] = "hfq"
+    frame["volume"] = 1_000_000.0
+    frame["close"] = 10.0
+    frame["entry_feasible"] = True
+    frame["forward_return_1d"] = 0.01
+    return frame
+
+
+def test_st_mask_check_counts_measured_rows_per_exchange(build_module):
+    """R1-F05: `masks_present` passed on column existence while the SZSE register
+    measured nothing. The per-exchange check passes only when each covered exchange
+    is actually measured and uncovered exchanges stay UNKNOWN."""
+    master = _master()
+    honest = build_module.run_quality_checks(
+        _st_dataset(master, {"SZ"}), master, st_coverage={"SZ"})
+    assert _verdict(honest, "st_mask_measured_per_exchange") == "PASS"
+    evidence = next(c["evidence"] for c in honest["checks"]
+                    if c["check"] == "st_mask_measured_per_exchange")
+    assert evidence["rows_by_exchange"]["SZ"]["FALSE"] == 10
+    assert evidence["rows_by_exchange"]["SH"]["UNKNOWN"] == 20
+
+    # The shipped shape: register declared for SZ, mask built with one boolean.
+    blanked = build_module.run_quality_checks(
+        _st_dataset(master, False), master, st_coverage={"SZ"})
+    assert _verdict(blanked, "st_mask_measured_per_exchange") == "FAIL"
+    assert blanked["structurally_valid"] is False
+
+    # A confident FALSE on an exchange with no register is fabricated.
+    fabricated = build_module.run_quality_checks(
+        _st_dataset(master, True), master, st_coverage={"SZ"})
+    assert _verdict(fabricated, "st_mask_measured_per_exchange") == "FAIL"

@@ -153,6 +153,110 @@ class TestMasks:
         assert masked["eligible_for_training"].sum() == 25
 
 
+class TestPerExchangeStCoverage:
+    """R1-F05: a SZSE-only register must measure SZ rows, not blank everything."""
+
+    @staticmethod
+    def _st_register() -> pd.DataFrame:
+        return pd.DataFrame([{
+            "symbol": "000004.SZ", "effective_start": pd.Timestamp("2022-05-06"),
+            "effective_end": pd.Timestamp("2023-06-28"),
+        }, {
+            # A stray row for an uncovered exchange must not become evidence.
+            "symbol": "600000.SH", "effective_start": pd.Timestamp("2022-05-06"),
+            "effective_end": pd.Timestamp("2022-06-30"),
+        }])
+
+    def _masked(self, coverage):
+        symbols = ("000004.SZ", "000001.SZ", "600000.SH", "920001.BJ")
+        return gold_bridge.build_masks(
+            _panel(symbols=symbols, days=10, start="2022-05-30"),
+            master=_master(symbols), st=self._st_register(), st_available=coverage,
+        )
+
+    @staticmethod
+    def _at(masked, symbol, day):
+        row = masked[(masked["symbol"] == symbol) & (masked["trade_date"] == day)]
+        assert len(row) == 1
+        return row["mask_is_st"].iloc[0]
+
+    def test_sz_register_marks_a_known_st_name_true(self):
+        masked = self._masked({"SZ"})
+        assert self._at(masked, "000004.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+        assert self._at(masked, "000001.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_FALSE
+
+    def test_uncovered_exchanges_stay_unknown(self):
+        masked = self._masked({"SZ"})
+        assert self._at(masked, "600000.SH", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_UNKNOWN
+        assert (masked.loc[masked["symbol"] == "920001.BJ", "mask_is_st"]
+                == gold_bridge.MASK_UNKNOWN).all()
+
+    def test_exchange_names_are_accepted(self):
+        masked = self._masked(["SZSE"])
+        assert self._at(masked, "000004.SZ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+
+    def test_boolean_coverage_is_backward_compatible(self):
+        assert (self._masked(False)["mask_is_st"] == gold_bridge.MASK_UNKNOWN).all()
+        everywhere = self._masked(True)
+        assert self._at(everywhere, "600000.SH", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_TRUE
+        assert self._at(everywhere, "920001.BJ", pd.Timestamp("2022-06-01")) == gold_bridge.MASK_FALSE
+
+    def test_unknown_exchange_is_refused(self):
+        with pytest.raises(gold_bridge.GoldBridgeError, match="unknown exchange"):
+            gold_bridge.normalise_coverage({"HK"})
+
+    def test_st_row_on_covered_exchange_is_dropped_as_infeasible(self):
+        masked = self._masked({"SZ"})
+        _, dropped = gold_bridge.build_labels(masked, horizons=[1])
+        assert dropped["st_at_t"] == 10
+
+    def test_rows_are_counted_per_exchange(self):
+        counts = gold_bridge.mask_rows_by_exchange(self._masked({"SZ"}), ["mask_is_st"])
+        assert counts["mask_is_st"]["SZ"] == {"TRUE": 10, "FALSE": 10, "UNKNOWN": 0}
+        assert counts["mask_is_st"]["SH"] == {"TRUE": 0, "FALSE": 0, "UNKNOWN": 10}
+
+    def test_coverage_is_derived_from_the_u0_pit_evidence(self):
+        certificate = {"pit_field_availability": {"st_intervals": (
+            "BLOCKED_BY_DATA — PARTIAL: 906 dated episodes over 651 securities from "
+            "SZSE; no dated register for BSE, SSE; current state known for 333 names")}}
+        manifest = {"exchanges_with_dated_history": ["SZSE"],
+                    "exchanges_without_dated_history": ["BSE", "SSE"]}
+        covered, basis = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, manifest, self._st_register())
+        assert covered == frozenset({"SZ"})
+        assert basis["uncovered"] == ["BJ", "SH"]
+        # Without the manifest the certificate text still names the exchange.
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, None, self._st_register())
+        assert covered == frozenset({"SZ"})
+        # A declared exchange with no rows in the register measures nothing.
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(
+            certificate, manifest, pd.DataFrame({"symbol": ["600000.SH"]}))
+        assert covered == frozenset()
+        available = {"pit_field_availability": {"st_intervals": "AVAILABLE (all)"}}
+        covered, _ = gold_bridge.st_coverage_from_pit_evidence(available)
+        assert covered == frozenset(gold_bridge.EXCHANGE_SUFFIXES)
+
+    def test_certificate_names_the_unmeasured_exchanges(self):
+        symbols = ("000004.SZ", "600000.SH")
+        _, manifest = gold_bridge.build_gold_dataset(
+            _panel(symbols=symbols, days=40, start="2022-05-02"), master=_master(symbols),
+            factors=_factors("000004.SZ"), st=self._st_register(), st_available={"SZ"},
+            adjustment_method=contracts.ADJUST_HFQ, horizons=[1],
+        )
+        assert manifest.st_coverage == ["SZ"]
+        assert manifest.mask_rows_by_exchange["mask_is_st"]["SZ"]["UNKNOWN"] == 0
+        assert manifest.mask_rows_by_exchange["mask_is_st"]["SZ"]["TRUE"] > 0
+        certificate = gold_bridge.certify_training_slice(
+            manifest, u0_pit_certificate={"decision": "FULL_UNIVERSE_DATA_READY",
+                                          "training_permitted": True,
+                                          "blocked_pit_fields": []})
+        assert certificate.training_permitted is False
+        assert certificate.evidence["st_measured_rows_by_exchange"]["SZ"] == 40
+        assert certificate.evidence["st_measured_rows_by_exchange"]["SH"] == 0
+        assert any("unmeasured on exchange(s) SH" in b for b in certificate.blockers)
+
+
 class TestAvailability:
     def test_absent_family_is_false_meaning_not_observed(self):
         result = gold_bridge.attach_availability(_panel(), {})
@@ -179,7 +283,8 @@ class TestAvailability:
 class TestLabels:
     def test_labels_are_delay_one_not_same_day(self):
         panel = _panel(days=10)
-        labelled, _ = gold_bridge.build_labels(panel, horizons=[1])
+        labelled, _ = gold_bridge.build_labels(
+            panel, horizons=[1], allow_unmeasured_limit_up=True)
         row = labelled.iloc[0]
         closes = panel.sort_values("trade_date")["close"].tolist()
         expected = closes[2] / closes[1] - 1.0
@@ -187,7 +292,8 @@ class TestLabels:
 
     def test_entry_price_is_the_next_close_not_todays(self):
         panel = _panel(days=5)
-        labelled, _ = gold_bridge.build_labels(panel, horizons=[1])
+        labelled, _ = gold_bridge.build_labels(
+            panel, horizons=[1], allow_unmeasured_limit_up=True)
         closes = panel.sort_values("trade_date")["close"].tolist()
         assert labelled.iloc[0]["entry_close_t1"] == pytest.approx(closes[1])
 
@@ -214,8 +320,167 @@ class TestLabels:
 
     def test_tail_rows_without_an_entry_price_are_dropped(self):
         panel = _panel(days=5)
-        labelled, dropped = gold_bridge.build_labels(panel, horizons=[1])
+        labelled, dropped = gold_bridge.build_labels(
+            panel, horizons=[1], allow_unmeasured_limit_up=True)
         assert dropped["entry_price_missing"] == 1
+        assert dropped["limit_up_unmeasured_rows"] == 5
+
+
+def _limit_panel(closes, *, symbol="000004.SZ", start="2022-06-01", factors=None):
+    dates = pd.bdate_range(start, periods=len(closes))
+    frame = pd.DataFrame({
+        "symbol": symbol, "trade_date": dates, "open": closes, "high": closes,
+        "low": closes, "close": closes, "volume": 1e6, "amount": 1e7,
+    })
+    return frame
+
+
+def _limit_master(symbol="000004.SZ", board="SZ_Main", listing="2010-01-04"):
+    return pd.DataFrame([{"symbol": symbol, "board": board,
+                          "listing_date": pd.Timestamp(listing), "delisting_date": pd.NaT}])
+
+
+def _with_sessions(panel, offset=1000):
+    """Old names: the full-history session count is far past any IPO window."""
+    panel = panel.copy()
+    panel["sessions_since_listing"] = offset + np.arange(len(panel))
+    return panel
+
+
+class TestPriceLimitMasks:
+    """R3-F01: the limit-up branch of build_labels had no producer."""
+
+    def _masks(self, closes, **kw):
+        master = kw.pop("master", _limit_master())
+        mask_kw = {k: kw.pop(k) for k in ("st", "st_available") if k in kw}
+        panel = _with_sessions(_limit_panel(closes, **kw))
+        return gold_bridge.build_masks(panel, master=master, **mask_kw)
+
+    def test_close_at_ten_percent_is_limit_up_on_main_board(self):
+        masked = self._masks([10.00, 11.00, 11.50, 10.35])
+        assert masked["mask_limit_up"].tolist() == ["UNKNOWN", "TRUE", "FALSE", "FALSE"]
+        assert masked["mask_limit_down"].tolist() == ["UNKNOWN", "FALSE", "FALSE", "TRUE"]
+
+    def test_limit_is_rounded_half_up_to_the_cent(self):
+        # 10.05 x 1.1 = 11.055 -> 11.06 (half-up); 10.05 x 0.9 = 9.045 -> 9.05.
+        masked = self._masks([10.05, 11.06])
+        assert masked["mask_limit_up"].iloc[1] == "TRUE"
+        masked = self._masks([10.05, 11.05])
+        assert masked["mask_limit_up"].iloc[1] == "FALSE"
+        masked = self._masks([10.05, 9.05])
+        assert masked["mask_limit_down"].iloc[1] == "TRUE"
+
+    def test_limits_use_raw_prices_and_the_ex_rights_reference(self):
+        """hfq factor 1.0 -> 1.1 on day 2: raw prev 11.00 re-bases to 10.00."""
+        raw = _limit_panel([11.00, 11.00])
+        factors = pd.DataFrame([
+            {"symbol": "000004.SZ", "effective_date": pd.Timestamp("2010-01-04"), "hfq_factor": 1.0},
+            {"symbol": "000004.SZ", "effective_date": pd.Timestamp("2022-06-02"), "hfq_factor": 1.1},
+        ])
+        adjusted = gold_bridge.apply_adjustment(
+            _with_sessions(raw), factors, method=contracts.ADJUST_HFQ)
+        masked = gold_bridge.build_masks(adjusted, master=_limit_master())
+        # Raw 11.00 on the ex-date against a 10.00 reference is +10%: sealed.
+        assert masked["mask_limit_up"].iloc[1] == "TRUE"
+        assert masked["close"].iloc[1] == pytest.approx(12.1)  # adjusted scale untouched
+
+    def test_chinext_band_is_dated(self):
+        before = self._masks([10.00, 11.00], symbol="300001.SZ", start="2019-06-03",
+                             master=_limit_master("300001.SZ", "ChiNext"))
+        after = self._masks([10.00, 11.00, 12.00], symbol="300001.SZ", start="2021-06-01",
+                            master=_limit_master("300001.SZ", "ChiNext"))
+        assert before["mask_limit_up"].iloc[1] == "TRUE"   # 10% before 2020-08-24
+        assert after["mask_limit_up"].iloc[1] == "FALSE"   # 20% after
+        assert after["mask_limit_up"].iloc[2] == "FALSE"
+
+    def test_st_band_applies_where_st_is_measured(self):
+        st = pd.DataFrame([{"symbol": "000004.SZ", "effective_start": pd.Timestamp("2022-05-06"),
+                            "effective_end": pd.Timestamp("2023-06-28")}])
+        masked = self._masks([10.00, 10.50], st=st, st_available={"SZ"})
+        assert masked["mask_is_st"].iloc[1] == "TRUE"
+        assert masked["mask_limit_up"].iloc[1] == "TRUE"   # 5% band
+
+    def test_st_unknown_between_the_bands_is_unknown(self):
+        sh = dict(symbol="600000.SH", master=_limit_master("600000.SH", "SH_Main"))
+        masked = self._masks([10.00, 10.50, 11.55, 11.80], **sh)
+        assert masked["mask_is_st"].iloc[1] == "UNKNOWN"
+        assert masked["mask_limit_up"].iloc[1] == "UNKNOWN"  # sealed iff ST
+        assert masked["mask_limit_up"].iloc[2] == "TRUE"     # ordinary limit: not ST either way
+        assert masked["mask_limit_up"].iloc[3] == "FALSE"    # +2.2%: below both bands
+
+    def test_close_beyond_every_band_is_unknown_not_a_guess(self):
+        masked = self._masks([10.00, 12.00])
+        assert masked["mask_limit_up"].iloc[1] == "UNKNOWN"
+        assert masked.attrs["price_limit_stats"]["close_beyond_every_band"] == 1
+
+    def test_registration_ipo_window_has_no_limit(self):
+        master = _limit_master("301001.SZ", "ChiNext", listing="2021-06-01")
+        panel = _limit_panel([30.0, 60.0, 90.0, 99.0, 100.0, 120.0, 130.0],
+                             symbol="301001.SZ", start="2021-06-01")
+        masked = gold_bridge.build_masks(panel, master=master)
+        assert masked["mask_limit_up"].iloc[:5].tolist() == ["FALSE"] * 5
+        assert masked["mask_limit_up"].iloc[5] == "TRUE"     # session 6: 20% band
+
+    def test_ipo_window_that_cannot_be_ruled_out_is_unknown(self):
+        # Listed long ago but the panel starts later and carries no session count.
+        masked = gold_bridge.build_masks(
+            _limit_panel([10.0, 11.0]), master=_limit_master())
+        assert masked["mask_limit_up"].iloc[1] == "UNKNOWN"
+
+    def test_full_history_session_count_survives_a_start_date_cut(self):
+        master = _limit_master(listing="2022-06-01")
+        full = _limit_panel([10.0 + 0.01 * i for i in range(30)])
+        full["sessions_since_listing"] = gold_bridge.sessions_since_listing(full, master)
+        cut = full.iloc[25:]
+        masked = gold_bridge.build_masks(cut, master=master, seasoning_days=20)
+        assert (masked["mask_seasoning"] == "FALSE").all()
+        assert full["sessions_since_listing"].tolist() == list(range(30))
+
+    def test_usd_b_shares_with_a_sub_cent_tick_are_not_claimed(self):
+        masked = self._masks([0.500, 0.550], symbol="900901.SH",
+                             master=_limit_master("900901.SH", "SH_Main"))
+        assert masked["mask_limit_up"].iloc[1] == "UNKNOWN"
+        assert masked.attrs["price_limit_stats"]["sub_cent_tick_rows"] == 2
+
+    def test_adjusted_prices_without_a_factor_are_refused(self):
+        panel = _with_sessions(_limit_panel([10.0, 11.0]))
+        panel["adjustment_method"] = contracts.ADJUST_HFQ
+        with pytest.raises(gold_bridge.GoldBridgeError, match="raw prices"):
+            gold_bridge.build_masks(panel, master=_limit_master())
+
+
+class TestLimitUpLabelGate:
+    def test_build_labels_refuses_without_the_limit_mask(self):
+        with pytest.raises(gold_bridge.GoldBridgeError, match="mask_limit_up"):
+            gold_bridge.build_labels(_panel(days=5), horizons=[1])
+
+    def test_builder_level_sealed_limit_up_entry_is_dropped(self):
+        """No hand-injected column: build_masks -> build_labels on a sealed bar."""
+        closes = [10.00, 10.10, 11.11, 11.50, 11.60, 11.70]
+        panel = _with_sessions(_limit_panel(closes))
+        masked = gold_bridge.build_masks(panel, master=_limit_master(), st_available={"SZ"},
+                                         st=pd.DataFrame(columns=["symbol", "effective_start",
+                                                                  "effective_end"]))
+        assert masked["mask_limit_up"].iloc[2] == "TRUE"
+        labelled, dropped = gold_bridge.build_labels(masked, horizons=[1])
+        assert dropped["limit_up_at_t1"] == 1
+        sealed_entry_signal = pd.Timestamp(masked["trade_date"].iloc[1])
+        assert sealed_entry_signal not in set(labelled["trade_date"])
+        assert "limit_up_at_t1" in dropped and dropped["rows_dropped_total"] >= 1
+
+    def test_gold_dataset_records_limit_up_drops(self):
+        closes = [10.0 + 0.01 * i for i in range(30)]
+        closes[10] = round(closes[9] * 1.1 + 1e-9, 2)
+        closes[11:] = [closes[10]] * 19
+        panel = _with_sessions(_limit_panel(closes))
+        _, manifest = gold_bridge.build_gold_dataset(
+            panel, master=_limit_master(), factors=pd.DataFrame([
+                {"symbol": "000004.SZ", "effective_date": pd.Timestamp("2010-01-04"),
+                 "hfq_factor": 1.0}]),
+            adjustment_method=contracts.ADJUST_HFQ, horizons=[1],
+        )
+        assert manifest.rows_dropped["limit_up_at_t1"] == 1
+        assert "mask_limit_up" in manifest.mask_columns
 
 
 class TestBuildAndCertify:

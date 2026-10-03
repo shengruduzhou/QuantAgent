@@ -48,7 +48,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from quantagent.data.ashare import contracts, gold_bridge  # noqa: E402
+from quantagent.data import label_contract  # noqa: E402
+from quantagent.data.ashare import contracts, execution_panel, gold_bridge  # noqa: E402
 from quantagent.data.v7_quality_gates import evaluate_survivorship  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -58,6 +59,9 @@ U0 = REPO / "runtime" / "data" / "u0"
 IPO_SEASONING_TRADING_DAYS = 60
 #: Label horizons in trading days.
 HORIZONS = (1, 5, 20)
+#: Calendar days of history kept before --start-date so the first in-window
+#: session has a previous close for its price-limit reference.
+LIMIT_LOOKBACK_DAYS = 45
 #: Embargo must be at least the longest label horizon, or a fold's training data
 #: overlaps the very returns the next fold is scored on.
 EMBARGO_DAYS = max(HORIZONS)
@@ -80,6 +84,14 @@ def _frame_hash(frame: pd.DataFrame) -> str:
     ordered = frame.reindex(sorted(frame.columns), axis=1)
     payload = pd.util.hash_pandas_object(ordered, index=False).values.tobytes()
     return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()[:16]
 
 
 def _schema_hash(frame: pd.DataFrame) -> str:
@@ -200,8 +212,22 @@ def build_folds(dates: pd.Series, *, n_folds: int, embargo: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 # structural checks
 # ---------------------------------------------------------------------------
-def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
-    """Structural checks that gate FULL_UNIVERSE_GOLD_READY."""
+def run_quality_checks(
+    dataset: pd.DataFrame,
+    master: pd.DataFrame,
+    *,
+    st_coverage=None,
+    mask_rows_by_exchange: dict | None = None,
+) -> dict:
+    """Structural checks that gate FULL_UNIVERSE_GOLD_READY.
+
+    ``st_coverage`` (the exchanges the ST register answers for) turns the mask
+    check from "the column exists" into "the register measured the rows it
+    claims to": every row on a covered exchange must be TRUE/FALSE and no row on
+    an uncovered exchange may carry a fabricated FALSE. ``mask_rows_by_exchange``
+    are the counts *before* label filtering (ST rows are dropped as infeasible
+    entries, so the dataset alone under-reports what was measured).
+    """
     checks: list[dict] = []
 
     def add(name: str, ok: bool, detail: str, evidence=None) -> None:
@@ -278,6 +304,35 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
     add("masks_present", bool(mask_columns), "explicit eligibility masks emitted",
         {"masks": mask_columns})
 
+    if st_coverage is not None:
+        covered = gold_bridge.normalise_coverage(st_coverage)
+        counts = (mask_rows_by_exchange or gold_bridge.mask_rows_by_exchange(
+            dataset, ["mask_is_st"])).get("mask_is_st", {})
+        unmeasured_on_covered = {
+            ex: c.get(gold_bridge.MASK_UNKNOWN, 0) for ex, c in counts.items()
+            if ex in covered and c.get(gold_bridge.MASK_UNKNOWN, 0)
+        }
+        fabricated_on_uncovered = {
+            ex: c.get(gold_bridge.MASK_TRUE, 0) + c.get(gold_bridge.MASK_FALSE, 0)
+            for ex, c in counts.items()
+            if ex not in covered
+            and c.get(gold_bridge.MASK_TRUE, 0) + c.get(gold_bridge.MASK_FALSE, 0)
+        }
+        covered_without_rows = sorted(
+            ex for ex in covered
+            if ex in counts and not (counts[ex].get(gold_bridge.MASK_TRUE, 0)
+                                     + counts[ex].get(gold_bridge.MASK_FALSE, 0))
+        )
+        add("st_mask_measured_per_exchange",
+            not unmeasured_on_covered and not fabricated_on_uncovered
+            and not covered_without_rows and "mask_is_st" in dataset.columns,
+            "mask_is_st is TRUE/FALSE on every row of a covered exchange and "
+            "UNKNOWN elsewhere (counted per exchange, not inferred from column presence)",
+            {"covered": sorted(covered), "rows_by_exchange": counts,
+             "unmeasured_on_covered": unmeasured_on_covered,
+             "fabricated_on_uncovered": fabricated_on_uncovered,
+             "covered_without_measured_rows": covered_without_rows})
+
     infeasible_kept = (
         int((~dataset["entry_feasible"]).sum()) if "entry_feasible" in dataset else 0
     )
@@ -316,6 +371,56 @@ def run_quality_checks(dataset: pd.DataFrame, master: pd.DataFrame) -> dict:
     }
 
 
+def _write_execution_panel(masked: pd.DataFrame, *, raw_columns: list[str], u0: Path,
+                           target: Path, factors: pd.DataFrame, st: pd.DataFrame,
+                           st_coverage, start, end, master: pd.DataFrame) -> None:
+    """Raw execution panel next to the dataset (masks shared with the dataset)."""
+    print("      building the certified raw execution panel ...", flush=True)
+    traded = masked[["symbol", "trade_date", *raw_columns, "volume", "amount",
+                     "serving_provider", "mask_is_suspended", "mask_is_st",
+                     "mask_limit_up", "mask_limit_down"]].rename(
+        columns={f"raw_{c}": c for c in gold_bridge.PRICE_COLUMNS})
+    traded["available_at"] = pd.to_datetime(traded["trade_date"]) + pd.Timedelta(hours=15)
+    execution, execution_stats = execution_panel.build_execution_panel(
+        traded,
+        session_gaps=_read(u0 / "panel/session_gaps.parquet"),
+        factors=factors,
+        corporate_actions=_read(u0 / "pit/corporate_actions.parquet"),
+        st=st, st_coverage=st_coverage,
+        start=start, end=end, copy=False,
+        delisting_dates=(master.dropna(subset=["delisting_date"])
+                         .drop_duplicates("symbol").set_index("symbol")["delisting_date"]
+                         if "delisting_date" in master.columns else None),
+    )
+    del traded
+    execution_panel.verify_execution_panel(execution)
+    execution.to_parquet(target / "execution_panel.parquet", index=False)
+    execution_hash = _frame_hash(execution)
+    (target / "execution_panel_manifest.json").write_text(json.dumps({
+        "generated": _now(),
+        "source_commit": _source_commit(),
+        "schema": execution_panel.EXECUTION_PANEL_SCHEMA,
+        "content_hash": execution_hash,
+        "file_sha256_16": _file_sha256(target / "execution_panel.parquet"),
+        "adjustment_method": contracts.ADJUST_NONE,
+        "columns": list(execution.columns),
+        "inputs": {
+            "panel": "runtime/data/u0/panel/daily_bars_raw.parquet",
+            "session_gaps": "runtime/data/u0/panel/session_gaps.parquet",
+            "adjust_factors": "runtime/data/u0/pit/adjust_factors.parquet",
+            "corporate_actions": "runtime/data/u0/pit/corporate_actions.parquet",
+            "st_intervals": "runtime/data/u0/pit/st_intervals.parquet",
+            "suspension_intervals": "runtime/data/u0/pit/suspension_intervals.parquet",
+            "security_master": "runtime/data/u0/security_master.parquet",
+        },
+        "st_coverage_exchanges": sorted(st_coverage),
+        "available_at_rule": "trade_date 15:00 Asia/Shanghai (close of the session)",
+        **execution_stats,
+    }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    print(f"      {execution_panel.execution_panel_summary(execution_stats)}", flush=True)
+    del execution
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -329,7 +434,14 @@ def main() -> int:
     parser.add_argument("--adjustment", default=contracts.ADJUST_HFQ,
                         choices=list(gold_bridge.ADJUSTMENT_METHODS))
     parser.add_argument("--folds", type=int, default=6)
+    parser.add_argument("--u0-root", default=str(U0),
+                        help="U0 data root (read-only inputs); defaults to the repo runtime")
+    parser.add_argument("--phase", default="all", choices=["all", "dataset", "execution"],
+                        help=("'execution' writes only the raw execution panel, 'dataset' only "
+                              "the training artifacts; run them as two processes to bound "
+                              "peak memory on the full universe (same masks either way)"))
     args = parser.parse_args()
+    u0 = Path(args.u0_root)
 
     target = Path(args.output)
     target.mkdir(parents=True, exist_ok=True)
@@ -337,25 +449,44 @@ def main() -> int:
 
     print("[1/8] loading U0 inputs ...", flush=True)
     panel = pd.read_parquet(
-        U0 / "panel/daily_bars_raw.parquet",
+        u0 / "panel/daily_bars_raw.parquet",
         columns=["symbol", "trade_date", "open", "high", "low", "close",
                  "volume", "amount", "serving_provider"])
-    if args.start_date:
-        panel = panel[panel["trade_date"] >= args.start_date]
     if args.end_date:
         panel = panel[panel["trade_date"] <= args.end_date]
 
-    master = _read(U0 / "security_master.parquet")
-    factors = _read(U0 / "pit/adjust_factors.parquet")
-    suspension = _read(U0 / "pit/suspension_intervals.parquet")
-    st = _read(U0 / "pit/st_intervals.parquet")
+    master = _read(u0 / "security_master.parquet")
+    # Session counts since listing come from the FULL history, before any date
+    # cut: the IPO no-limit window and the seasoning rule are anchored on the
+    # listing session, not on whichever row the build happens to start at.
+    panel["sessions_since_listing"] = gold_bridge.sessions_since_listing(panel, master)
+    in_window_symbols = (
+        panel.loc[panel["trade_date"] >= args.start_date, "symbol"].unique()
+        if args.start_date else panel["symbol"].unique()
+    )
+    if args.start_date:
+        # Keep a short look-back so the first in-window session still has a
+        # previous close to anchor its price limit; trimmed again after masking.
+        lookback = pd.Timestamp(args.start_date) - pd.Timedelta(days=LIMIT_LOOKBACK_DAYS)
+        panel = panel[(panel["trade_date"] >= lookback)
+                      & panel["symbol"].isin(in_window_symbols)]
+    factors = _read(u0 / "pit/adjust_factors.parquet")
+    suspension = _read(u0 / "pit/suspension_intervals.parquet")
+    st = _read(u0 / "pit/st_intervals.parquet")
 
-    pit_certificate = json.loads((U0 / "u0_strict_pit_certificate.json").read_text("utf-8"))
-    st_field = pit_certificate.get("pit_field_availability", {}).get("st_intervals", "")
-    st_available = st_field.startswith("AVAILABLE")
+    pit_certificate = json.loads((u0 / "u0_strict_pit_certificate.json").read_text("utf-8"))
+    st_manifest_path = u0 / "pit/st_manifest.json"
+    st_manifest = (json.loads(st_manifest_path.read_text("utf-8"))
+                   if st_manifest_path.exists() else None)
+    # Coverage is per exchange. One boolean ("is the register complete?") made the
+    # SZSE-only register measure nothing at all, so known SZ ST names were
+    # trainable (R1-F05). The certificate/register decide which exchanges answer.
+    st_coverage, st_coverage_basis = gold_bridge.st_coverage_from_pit_evidence(
+        pit_certificate, st_manifest, st)
+    st_available = set(st_coverage) >= set(gold_bridge.EXCHANGE_SUFFIXES)
 
     if args.max_symbols:
-        merged = master.merge(panel[["symbol"]].drop_duplicates(), on="symbol")
+        merged = master.merge(pd.DataFrame({"symbol": in_window_symbols}), on="symbol")
         per_board = max(1, args.max_symbols // max(1, merged["board"].nunique()))
         picks: list[str] = []
         for _, group in merged.groupby("board"):
@@ -365,10 +496,38 @@ def main() -> int:
     print(f"      panel rows={len(panel):,} symbols={panel.symbol.nunique():,}", flush=True)
 
     print("[2/8] applying adjustment and eligibility masks ...", flush=True)
+    # The raw traded prices travel beside the adjusted ones so the execution
+    # panel takes them verbatim (no adjusted/factor round trip, which would
+    # corrupt 3-decimal B-share ticks).
+    want_execution = args.phase in ("all", "execution")
+    want_dataset = args.phase in ("all", "dataset")
+    if want_execution:
+        for column in gold_bridge.PRICE_COLUMNS:
+            panel[f"raw_{column}"] = panel[column]
     adjusted = gold_bridge.apply_adjustment(panel, factors, method=args.adjustment)
+    del panel
     masked = gold_bridge.build_masks(
         adjusted, master=master, suspension=suspension, st=st,
-        st_available=st_available, seasoning_days=IPO_SEASONING_TRADING_DAYS)
+        st_available=st_coverage, seasoning_days=IPO_SEASONING_TRADING_DAYS)
+    del adjusted
+    price_limit_stats = dict(masked.attrs.get("price_limit_stats", {}))
+
+    raw_columns = [f"raw_{c}" for c in gold_bridge.PRICE_COLUMNS]
+    if want_execution:
+        _write_execution_panel(masked, raw_columns=raw_columns, u0=u0, target=target,
+                               factors=factors, st=st, st_coverage=st_coverage,
+                               start=args.start_date or None, end=args.end_date or None,
+                               master=master)
+        masked = masked.drop(columns=raw_columns)
+    if not want_dataset:
+        print("[8/8] done (execution phase only)", flush=True)
+        return 0
+
+    if args.start_date:
+        masked = masked[masked["trade_date"] >= args.start_date]
+    masked = masked.drop(columns=["sessions_since_listing"])
+    mask_rows_by_exchange = gold_bridge.mask_rows_by_exchange(
+        masked, [c for c in masked.columns if c.startswith("mask_")])
 
     print("[3/8] computing features ...", flush=True)
     featured = build_features(masked)
@@ -398,8 +557,12 @@ def main() -> int:
     dataset[[c for c in eligibility_columns if c in dataset.columns]].to_parquet(
         target / "eligibility.parquet", index=False)
 
-    dataset[["symbol", "trade_date", "entry_close_t1", *label_columns]].to_parquet(
-        target / "labels.parquet", index=False)
+    # Stamped with its convention and content-hashed in the manifest: the
+    # certified labels were once silently replaced by a same-close v7 file
+    # (R3-F11), and only a hash + declared convention can show that.
+    labels_sha = label_contract.write_labels_parquet(
+        dataset[["symbol", "trade_date", "entry_close_t1", *label_columns]],
+        target / "labels.parquet", convention=label_contract.GOLD_DELAY1)
 
     masks = dataset[["symbol", "trade_date"]].copy()
     for column in feature_columns:
@@ -428,7 +591,8 @@ def main() -> int:
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("[7/8] running structural quality checks ...", flush=True)
-    quality = run_quality_checks(dataset, master)
+    quality = run_quality_checks(dataset, master, st_coverage=st_coverage,
+                                 mask_rows_by_exchange=mask_rows_by_exchange)
 
     dataset_hash = _frame_hash(dataset)
     schema_hash = _schema_hash(dataset)
@@ -441,9 +605,12 @@ def main() -> int:
 
     warnings: list[str] = []
     if not st_available:
+        st_rows = mask_rows_by_exchange.get("mask_is_st", {})
         warnings.append(
-            "ST intervals are not a complete dated register (SZSE only); mask_is_st "
-            "is UNKNOWN for exchanges without one. This dataset is therefore NOT "
+            f"ST intervals are a dated register only for {sorted(st_coverage) or 'no exchange'}; "
+            f"mask_is_st is measured (TRUE/FALSE) there and UNKNOWN for "
+            f"{st_coverage_basis.get('uncovered', [])} "
+            f"(rows by exchange: {st_rows}). This dataset is therefore NOT "
             "point-in-time complete for ST, and FULL_UNIVERSE_RESEARCH_READY must "
             "stay withheld.")
 
@@ -493,6 +660,10 @@ def main() -> int:
         "label_columns": label_columns,
         "mask_columns": mask_columns,
         "rows_dropped": dropped,
+        "mask_distribution": {
+            column: {str(k): int(v) for k, v in dataset[column].value_counts().items()}
+            for column in mask_columns
+        },
         "dataset_hash": dataset_hash,
         # Alias consumed by ReadinessEvaluator, which names this field
         # content_hash. Emitting both keeps one source of truth for the value.
@@ -500,8 +671,22 @@ def main() -> int:
         "schema_hash": schema_hash,
         "feature_hash": feature_hash,
         "label_hash": label_hash,
+        "label_hash_note": "label_hash hashes the label column names; labels_file_sha256 is the content",
+        "label_convention": gold_bridge.LABEL_CONVENTION,
+        "label_convention_id": label_contract.GOLD_DELAY1,
+        "labels_file_sha256": labels_sha,
         "fold_hash": fold_hash,
         "st_pit_complete": st_available,
+        "price_limit_mask_stats_incl_lookback": price_limit_stats,
+        "price_limit_convention": (
+            "mask_limit_up/down = raw close (adjusted / adjust_factor) at the half-up "
+            "0.01-rounded limit of the ex-rights reference (adjusted prev close / today's "
+            "factor) x (1 +/- dated board band; ST band where mask_is_st is TRUE); "
+            "UNKNOWN when no previous close, undetermined IPO window, ST unknown between "
+            "the bands, close beyond every band, or a one-tick miss on an ex-rights day"),
+        "st_coverage_exchanges": sorted(st_coverage),
+        "st_coverage_basis": st_coverage_basis,
+        "mask_rows_by_exchange_before_label_drop": mask_rows_by_exchange,
         "warnings": warnings,
     }
     (target / "manifest.json").write_text(
