@@ -24,6 +24,8 @@ from quantagent.config.paths import quant_paths
 from quantagent.domain.lineage import Lineage
 from quantagent.execution.fill_simulator import FillSimulator
 from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
+from quantagent.backtest.dividend_tax import POLICY as DIVIDEND_TAX_POLICY, DividendTaxLots
+from quantagent.execution.broker_base import OrderSide
 from quantagent.execution.virtual_broker import VirtualBroker
 
 
@@ -168,6 +170,31 @@ def simulate_ashare_target_weights(
     risk_events: list[dict[str, object]] = []
     trace_rows: list[dict[str, object]] = []
     ca_rows: list[dict[str, object]] = []
+    # Raw execution panels (corporate-action columns present) pay dividends
+    # gross; the A-share holding-period dividend tax is settled at sale.
+    tax_lots = (
+        DividendTaxLots()
+        if {"ca_cash_per_share", "ca_share_ratio"} & set(market.columns)
+        else None
+    )
+    session_clock: dict[str, pd.Timestamp | None] = {"date": None}
+    if tax_lots is not None:
+        def _on_fill(trade) -> None:
+            when = session_clock["date"]
+            if trade.side == OrderSide.BUY:
+                tax_lots.buy(str(trade.symbol), when, float(trade.fill_quantity))
+                return
+            tax = tax_lots.sell(str(trade.symbol), when, float(trade.fill_quantity))
+            if tax > 0:
+                broker.ledger.cash -= tax
+                ca_rows.append({
+                    "trade_date": when, "symbol": str(trade.symbol),
+                    "shares_before": float(trade.fill_quantity), "cash_per_share": 0.0,
+                    "share_ratio": 0.0, "bonus_shares": 0, "cash_credit": -tax,
+                    "close": float(trade.fill_price), "basis": "dividend_tax",
+                })
+
+        broker.on_trade(_on_fill)
 
     schedule: dict[pd.Timestamp, tuple[pd.Timestamp, pd.Series]] = {}
     for signal_date, weights in target.iterrows():
@@ -292,8 +319,10 @@ def simulate_ashare_target_weights(
             manager.reset_daily_counters()
         # Raw-price panels carry dated corporate-action credits; without them an
         # ex-rights date would be booked as a loss on every held name.
+        session_clock["date"] = execution_date
         _apply_corporate_actions(
             broker, day_market, execution_date=execution_date, audit_rows=ca_rows,
+            tax_lots=tax_lots,
         )
         broker.set_market_state(day_market.to_dict("records"))
         prices = close_by_symbol.dropna()
@@ -444,6 +473,16 @@ def simulate_ashare_target_weights(
     metadata["valuation_frequency"] = "each_observed_market_session"
     metadata["valuation_window"] = "first_to_last_mapped_execution"
     metadata["calendar_source"] = "observed_market_panel"
+    if tax_lots is not None:
+        last_session = nav_rows[-1][0] if nav_rows else None
+        metadata["dividend_tax"] = {
+            "policy": DIVIDEND_TAX_POLICY,
+            "dividends_gross_cny": round(tax_lots.dividends_gross, 2),
+            "tax_paid_at_sale_cny": round(tax_lots.tax_paid, 2),
+            "latent_tax_on_open_lots_cny": (
+                round(tax_lots.latent_tax(last_session), 2) if last_session is not None else 0.0
+            ),
+        }
     return AShareExecutionSimulationResult(
         nav=pd.Series(dict(nav_rows), name="nav").sort_index(),
         order_audit=order_audit,
@@ -519,6 +558,7 @@ def _apply_corporate_actions(
     *,
     execution_date: pd.Timestamp,
     audit_rows: list[dict[str, object]],
+    tax_lots: DividendTaxLots | None = None,
 ) -> None:
     """Credit held positions with the session's dividend cash and bonus shares.
 
@@ -527,7 +567,8 @@ def _apply_corporate_actions(
     neither column and are unaffected. Bonus/transfer shares settle as frozen
     (tradeable next session, as 红股 list the day after the ex-date); the
     fractional remainder is paid as cash in lieu at the session close.
-    Dividends are credited gross of the holding-period dividend tax. A
+    Dividends are credited gross; with ``tax_lots`` the holding-period
+    dividend tax (财税〔2015〕101号) is charged when the lot is sold. A
     ``delisting_writeoff`` row removes a still-held position at zero proceeds.
     """
     if not {"ca_cash_per_share", "ca_share_ratio", "delisting_writeoff"} & set(day_market.columns):
@@ -547,6 +588,8 @@ def _apply_corporate_actions(
             shares = int(position.available_shares) + int(position.frozen_shares)
             close = float(row.get("close") or 0.0)
             broker.ledger.positions.pop(symbol, None)
+            if tax_lots is not None:
+                tax_lots.write_off(symbol)
             audit_rows.append({
                 "trade_date": execution_date, "symbol": symbol, "shares_before": shares,
                 "cash_per_share": 0.0, "share_ratio": -1.0, "bonus_shares": -shares,
@@ -568,6 +611,9 @@ def _apply_corporate_actions(
         close = float(row.get("close") or 0.0)
         credit = shares * cash_per_share + (exact_new - new_shares) * close
         broker.ledger.cash += credit
+        if tax_lots is not None:
+            tax_lots.dividend(symbol, cash_per_share)
+            tax_lots.bonus(symbol, share_ratio)
         total = shares + new_shares
         avg_cost = (
             (float(position.avg_cost) * shares - credit) / total if total else 0.0
