@@ -311,6 +311,13 @@ def _gbm_fit_predict(
 ) -> np.ndarray:
     import lightgbm as lgb  # type: ignore
 
+    # A fixed seed is not enough for a reproducible verdict. Left on auto,
+    # LightGBM *times* col-wise against row-wise histogram building before every
+    # fit and keeps the faster one, so the summation order - and with it split
+    # choices - depends on machine load. Two identical round-29 CLI runs on the
+    # same panel and commit then disagreed (gbm fold IC 0.059346 vs 0.059345,
+    # ensemble_stack net return 0.1515 vs 0.1525, PBO 0.1430 vs 0.1442).
+    # Pinning the histogram mode plus ``deterministic`` removes that.
     model = lgb.LGBMRegressor(
         n_estimators=config.gbm_estimators,
         num_leaves=config.gbm_leaves,
@@ -321,6 +328,8 @@ def _gbm_fit_predict(
         colsample_bytree=0.8,
         random_state=config.random_state,
         n_jobs=config.gbm_n_jobs,
+        deterministic=True,
+        force_col_wise=True,
         verbose=-1,
     )
     model.fit(train_x, train_y)
