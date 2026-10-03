@@ -109,6 +109,53 @@ _SUPPORTED_OBJECTIVES: tuple[str, ...] = (
 
 
 
+#: Rejection reasons that make trading a HELD name impossible today. A buy block
+#: (limit-up) must not force a sale of the holding, and a sell block (limit-down,
+#: suspension, no market row) makes a lower target unexecutable.
+_HOLD_WHEN_REJECTED: frozenset[str] = frozenset(
+    {"limit_up_buy_block", "limit_down_sell_block", "suspended", "no_market_row"}
+)
+
+
+def _hold_untradeable_positions(
+    weights: pd.Series,
+    previous_weights: pd.Series | None,
+    rejected: list[dict[str, object]],
+    date: object,
+    diagnostics: dict[str, object],
+) -> pd.Series:
+    """Keep a held name at its previous weight when it cannot trade today.
+
+    Before this, rejection removed the name from the eligible set, its target
+    became 0, and the order layer received a sell: a top-ranked limit-up
+    holding was force-sold by what is meant to be a buy block, and a
+    limit-down or suspended holding got a sell no venue can fill (round-29
+    R4-F04). The other names are scaled so gross exposure does not grow.
+    """
+    if previous_weights is None or previous_weights.empty:
+        return weights
+    held = previous_weights[previous_weights.abs() > 1e-12]
+    blocked = {
+        str(item["symbol"]) for item in rejected
+        if str(item.get("reason")) in _HOLD_WHEN_REJECTED and str(item["symbol"]) in held.index
+    }
+    if not blocked:
+        return weights
+    out = weights.reindex(weights.index.union(held.index)).fillna(0.0)
+    frozen = pd.Index(sorted(blocked))
+    out.loc[frozen] = held.reindex(frozen).to_numpy()
+    others = out.index.difference(frozen)
+    target_gross = float(weights.abs().sum())
+    room = max(0.0, target_gross - float(out.loc[frozen].abs().sum()))
+    other_gross = float(out.loc[others].abs().sum())
+    if other_gross > room and other_gross > 0:
+        out.loc[others] = out.loc[others] * (room / other_gross)
+    diagnostics.setdefault("held_untradeable", []).append(
+        {"trade_date": str(date), "symbols": list(frozen)}
+    )
+    return out
+
+
 def normalise_sector_map(frame: pd.DataFrame) -> pd.DataFrame:
     """Return ``symbol`` + ``industry`` from either sector-map convention.
 
@@ -332,10 +379,18 @@ def build_v7_target_weights(
                         day_expected_horizons[str(sym)] = eh
             age_tracker.update_expected_horizons(day_expected_horizons)
 
-        day_market = market[market["trade_date"] == date]
+        day_market = market[market["trade_date"] == date].assign(_market_row=True)
         merged = day.merge(day_market, on=["symbol", "trade_date"], how="left", suffixes=("", "_mkt"))
         rejected: list[dict[str, object]] = []
-        keep_mask = pd.Series(True, index=merged.index)
+        # A name with no market row on the date has no measured tradability: its
+        # flags would otherwise be NaN -> False -> "tradable" and a suspended
+        # name (U0 writes no row for a suspended session) could take the full
+        # name cap (round-29 R4-F03 / R9-F05).
+        no_market_row = merged["_market_row"].isna()
+        for symbol in merged.loc[no_market_row, "symbol"]:
+            rejected.append({"trade_date": str(date), "symbol": str(symbol), "reason": "no_market_row"})
+        merged = merged.drop(columns=["_market_row"])
+        keep_mask = ~no_market_row
         for column, config_attr, reason in _TRADABILITY_CONSTRAINTS:
             requested = bool(getattr(config, config_attr, False))
             if column not in merged.columns:
@@ -454,11 +509,16 @@ def build_v7_target_weights(
             effective_top_k = selected_count
             scaled = _selection_weights(longs["prediction"].to_numpy(dtype=float), config.weighting, config.alpha_temperature)
             weights = pd.Series(scaled, index=pd.Index(longs["symbol"].to_numpy(), name="symbol"))
+            confidence_measured = "confidence" in eligible.columns
             diagnostics.setdefault("optimizer_backend", []).append({
                 "trade_date": str(date),
                 "backend": "ai_threshold",
                 "alpha_threshold": float(config.alpha_threshold),
-                "confidence_floor": float(config.confidence_floor),
+                # Reported as applied only when a confidence column existed;
+                # blended rank predictions carry none (round-29 R4-F02).
+                "confidence_floor": float(config.confidence_floor) if confidence_measured else None,
+                "confidence_floor_status": "applied" if confidence_measured else "unmeasured_no_confidence_column",
+                "top_k_status": "not_used_in_ai_threshold_mode",
                 "selected_count": selected_count,
                 "eligible_count": int(len(eligible)),
                 "fallback_to_min": fallback_to_min,
@@ -636,6 +696,7 @@ def build_v7_target_weights(
                 sector_lookup=sector_lookup,
                 config=config,
             )
+        weights = _hold_untradeable_positions(weights, previous_weights, rejected, date, diagnostics)
         previous_weights = weights[weights.abs() > 1e-12].copy()
 
         if age_tracker is not None:
