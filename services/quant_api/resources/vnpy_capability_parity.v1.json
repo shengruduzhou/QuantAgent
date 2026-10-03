@@ -1074,7 +1074,7 @@
         "modules": [
           "EChart semantic adapter",
           "EquityChart",
-          "CandlestickChart"
+          "MarketCandlestickChart"
         ],
         "api": [
           "stock replay endpoints"
@@ -1092,7 +1092,7 @@
       "adoption": "Continue ECharts behind one Chart Adapter unless benchmarks prove inadequate.",
       "tests": [
         "kline helper tests",
-        "CandlestickChart interaction tests",
+        "MarketCandlestickChart interaction tests (the component /stock-replay renders)",
         "browser wheel, drag, keyboard and range-control verification"
       ],
       "evidence": [

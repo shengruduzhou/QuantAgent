@@ -7,8 +7,11 @@ import { StateView } from "../../components/StateView";
 import { formatDate } from "../../utils/format";
 import { ActionQueue } from "./ActionQueue";
 import { DecisionStateStrip } from "./DecisionStateStrip";
+import { PaperAccountRiskCard } from "../paper/PaperAccountRiskCard";
 import { PrimaryDecisionCanvas } from "./PrimaryDecisionCanvas";
-import type { ActionQueueItem, DecisionView, RiskRuleView } from "./types";
+import type { ActionQueueItem, DecisionView } from "./types";
+import { usePaperAccount } from "../../hooks/usePaperAccount";
+import { buildVenueRuleRows } from "../paper/venueRules";
 
 export function VNextDashboard(): JSX.Element {
   const [view, setView] = useState<DecisionView>("portfolio");
@@ -26,29 +29,13 @@ export function VNextDashboard(): JSX.Element {
   const latestPoint = equity.data?.data.at(-1);
   const riskEventCount = Object.values(riskData?.eventCounts ?? {}).reduce((sum, count) => sum + count, 0);
 
-  const riskRules = useMemo<RiskRuleView[]>(() => {
-    if (!riskData) return [];
-    return (riskData.rules ?? []).map((rule) => {
-    const id = String(rule.id ?? rule.name ?? "rule");
-    // These rules govern the paper account's venue. A backtest's drawdown or
-    // daily return is a different subject (and daily loss a different unit,
-    // CNY), so no backtest figure is compared against them here; the paper
-    // account's own risk state supplies the current value when available.
-    const currentMap: Record<string, number | null | undefined> = {};
-    const current = currentMap[id] ?? null;
-    const threshold = typeof rule.threshold === "number" || typeof rule.threshold === "string" ? rule.threshold : null;
-    const warning = current !== null && typeof threshold === "number" && Math.abs(current) >= Math.abs(threshold) * 0.8;
-    return {
-      id,
-      name: String(rule.name ?? id),
-      description: String(rule.description ?? ""),
-      current,
-      threshold,
-      enabled: rule.enabled !== false,
-      state: current === null ? "unavailable" : warning ? "warning" : "normal",
-    };
-    });
-  }, [latestBacktest?.turnover, riskData]);
+  // Venue limits with the paper account's like-for-like readings; no
+  // backtest figure is ever compared against them.
+  const paperAccount = usePaperAccount();
+  const riskRules = useMemo(
+    () => buildVenueRuleRows(riskData?.rules, paperAccount.data?.data?.riskState ? paperAccount.data.data : undefined),
+    [paperAccount.data, riskData?.rules],
+  );
 
   const queueItems = useMemo<ActionQueueItem[]>(() => {
     if (!data) return [];
@@ -90,6 +77,9 @@ export function VNextDashboard(): JSX.Element {
         <div><span>INSTITUTIONAL DECISION DASHBOARD</span><h1>今日决策总览</h1><p>发现异常、判断可信状态并进入对应工作站；复杂操作不在 Dashboard 内展开。</p></div>
         <div><strong>{formatDate(data.runtime.indexedAt)}</strong><span>Runtime decision as-of</span></div>
       </header>
+      {/* The paper venue's own account leads: it is the only state here that
+          is an account rather than a research artifact. */}
+      <PaperAccountRiskCard variant="overview" />
       <DecisionStateStrip overview={data} latestPoint={latestPoint} jobs={jobItems} />
       <section className="vnext-dashboard-main">
         <PrimaryDecisionCanvas

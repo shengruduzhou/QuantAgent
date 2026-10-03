@@ -1,6 +1,6 @@
 .kline-workstation {
   min-width: 0;
-  background: #06111a;
+  background: var(--vnx-surface-1);
 }
 
 .kline-controlbar {
@@ -11,7 +11,7 @@
   gap: 10px;
   padding: 4px 7px;
   border-bottom: 1px solid var(--border-soft);
-  background: #08141e;
+  background: var(--vnx-surface-1);
   overflow-x: hidden;
 }
 
@@ -24,7 +24,7 @@
 
 .kline-control-group > span {
   margin: 0 3px 0 1px;
-  color: #5f778a;
+  color: var(--vnx-muted);
   font: 8px "JetBrains Mono Variable", monospace;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -36,24 +36,24 @@
   align-items: center;
   gap: 5px;
   padding: 0 7px;
-  border: 1px solid #1a3347;
+  border: 1px solid var(--vnx-line);
   border-radius: 2px;
-  background: #07121b;
-  color: #71899c;
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
   font-size: 8px;
   white-space: nowrap;
 }
 
 .kline-control-group button:hover {
-  border-color: #315978;
-  color: #bbccd8;
-  background: #0b1b28;
+  border-color: var(--vnx-primary);
+  color: var(--vnx-text);
+  background: var(--vnx-surface-2);
 }
 
 .kline-control-group button.active {
-  border-color: #35699a;
-  background: #102d48;
-  color: #9ec6ff;
+  border-color: var(--vnx-primary);
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-primary-strong);
 }
 
 .kline-layer-group button i {
@@ -78,24 +78,24 @@
 .kline-current-state > span,
 .kline-current-state time,
 .kline-current-state em {
-  color: #5f778a;
+  color: var(--vnx-muted);
   font-style: normal;
 }
 
 .kline-current-state strong {
-  color: #d8e5ef;
+  color: var(--vnx-text-bright);
   font-size: 9px;
 }
 
 .kline-current-state b {
-  color: #83b6ff;
+  color: var(--vnx-primary-strong);
   font-weight: 600;
 }
 
 .kline-current-state em {
   padding: 2px 5px;
-  border: 1px solid #254159;
-  background: #0a1a27;
+  border: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-surface-2);
 }
 
 .kline-gesture-hint {
@@ -104,8 +104,8 @@
   align-items: center;
   justify-content: flex-end;
   padding: 0 9px;
-  border-bottom: 1px solid #102536;
-  color: #4e677a;
+  border-bottom: 1px solid var(--vnx-line);
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 
@@ -119,7 +119,7 @@
   height: 100vh;
   border: 0;
   border-radius: 0;
-  background: #06111a;
+  background: var(--vnx-surface-1);
 }
 
 .kline-panel:fullscreen .panel-body,
@@ -133,7 +133,7 @@
 
 .qa-tooltip-title {
   margin-bottom: 7px;
-  color: #eef6fb;
+  color: var(--vnx-text-bright);
   font: 600 10px "JetBrains Mono Variable", monospace;
 }
 
@@ -146,11 +146,11 @@
 }
 
 .qa-tooltip-grid span {
-  color: #6f8799;
+  color: var(--vnx-muted);
 }
 
 .qa-tooltip-grid b {
-  color: #d5e1ea;
+  color: var(--vnx-text-bright);
   text-align: right;
   font-weight: 500;
 }
@@ -166,7 +166,7 @@
 .qa-tooltip-events {
   margin-top: 8px;
   padding-top: 7px;
-  border-top: 1px solid #20394d;
+  border-top: 1px solid var(--vnx-line-strong);
 }
 
 .qa-tooltip-trade {
@@ -180,20 +180,20 @@
 
 .qa-tooltip-trade b {
   overflow: hidden;
-  color: #9fb2c1;
+  color: var(--vnx-text-soft);
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .qa-tooltip-trade em {
-  color: #d8e5ef;
+  color: var(--vnx-text-bright);
   font-style: normal;
   text-align: right;
 }
 
 .qa-tooltip-muted {
-  color: #526b80;
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 

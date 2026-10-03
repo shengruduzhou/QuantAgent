@@ -19,11 +19,11 @@
   margin-bottom: 6px;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  background: #08141e;
+  background: var(--vnx-surface-1);
 }
 
 .parity-commandbar > div:first-child > span {
-  color: #5f7a8f;
+  color: var(--vnx-muted);
   font-size: 8px;
   letter-spacing: .14em;
 }
@@ -85,7 +85,7 @@
   margin-bottom: 6px;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  background: #07121b;
+  background: var(--vnx-surface-1);
 }
 
 .parity-filterbar label > span {
@@ -101,7 +101,7 @@
   height: 28px;
   border: 1px solid var(--border);
   border-radius: 3px;
-  background: #071722;
+  background: var(--vnx-surface-1);
   color: var(--text);
   font-size: 9px;
 }
@@ -139,7 +139,7 @@
   grid-template-columns: repeat(4, minmax(105px, .65fr)) minmax(300px, 2fr);
   margin-bottom: 6px;
   border: 1px solid var(--border);
-  background: #06111a;
+  background: var(--vnx-surface-1);
 }
 
 .parity-stat-strip > div {
@@ -182,7 +182,7 @@
 }
 
 .parity-status-counts b {
-  color: #9bb0c0;
+  color: var(--vnx-text-soft);
   font: 8px "JetBrains Mono Variable", monospace;
 }
 
@@ -219,7 +219,7 @@
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #0a1824;
+  background: var(--vnx-surface-2);
 }
 
 .parity-table td {
@@ -233,7 +233,7 @@
 
 .parity-table tbody tr:hover,
 .parity-table tbody tr.selected {
-  background: #0c2233;
+  background: var(--vnx-surface-selected);
 }
 
 .parity-table tbody tr.selected {
@@ -246,7 +246,7 @@
 }
 
 .parity-table td strong {
-  color: #c4d4df;
+  color: var(--vnx-text);
   font-size: 9px;
 }
 
@@ -261,44 +261,44 @@
   align-items: center;
   min-height: 19px;
   padding: 0 6px;
-  border: 1px solid #2a465b;
+  border: 1px solid var(--vnx-line-strong);
   border-radius: 2px;
-  color: #a8bdcc;
-  background: #0d1d29;
+  color: var(--vnx-text-soft);
+  background: var(--vnx-surface-2);
   font: 8px "JetBrains Mono Variable", monospace;
   white-space: nowrap;
 }
 
 .parity-status-verified {
-  border-color: #23624f;
+  border-color: var(--vnx-success);
   background: rgba(42, 200, 159, .1);
-  color: #65d5b5;
+  color: var(--vnx-success);
 }
 
 .parity-status-implemented {
-  border-color: #315e8d;
+  border-color: var(--vnx-primary);
   background: rgba(63, 140, 255, .1);
-  color: #86b7ff;
+  color: var(--vnx-primary-strong);
 }
 
 .parity-status-partial,
 .parity-status-in-progress {
-  border-color: #6d5428;
+  border-color: var(--vnx-warning);
   background: rgba(231, 165, 58, .1);
-  color: #e4b660;
+  color: var(--vnx-warning);
 }
 
 .parity-status-missing,
 .parity-status-blocked {
-  border-color: #71353b;
+  border-color: var(--vnx-danger);
   background: rgba(239, 92, 99, .1);
-  color: #f07d83;
+  color: var(--vnx-danger);
 }
 
 .parity-status-not-audited,
 .parity-status-planned,
 .parity-status-not-applicable {
-  color: #8197a8;
+  color: var(--vnx-muted);
 }
 
 .parity-inspector {
@@ -306,7 +306,7 @@
   max-height: calc(100vh - 252px);
   overflow: auto;
   border: 1px solid var(--border);
-  background: #08141e;
+  background: var(--vnx-surface-1);
 }
 
 .parity-inspector-content > section,
@@ -320,7 +320,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  background: #0a1925;
+  background: var(--vnx-surface-2);
 }
 
 .parity-inspector-title > div {
@@ -342,14 +342,14 @@
 
 .parity-inspector h3 {
   margin: 0 0 8px;
-  color: #6f879a;
+  color: var(--vnx-muted);
   font-size: 8px;
   letter-spacing: .1em;
 }
 
 .parity-inspector p {
   margin: 7px 0 0;
-  color: #9db1c0;
+  color: var(--vnx-text-soft);
   font-size: 9px;
   line-height: 1.55;
 }
@@ -363,7 +363,7 @@
   grid-template-columns: 76px minmax(0, 1fr);
   gap: 7px;
   padding: 5px 0;
-  border-bottom: 1px solid #102536;
+  border-bottom: 1px solid var(--vnx-line);
 }
 
 .parity-inspector dl > div:last-child {
@@ -379,13 +379,13 @@
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
-  color: #aebfcb;
+  color: var(--vnx-text-soft);
   font-size: 8px;
   line-height: 1.45;
 }
 
 .parity-inspector a {
-  color: #7daeff;
+  color: var(--vnx-primary-strong);
 }
 
 .parity-inspector-gap {
@@ -415,7 +415,7 @@
 .parity-governance-grid li {
   break-inside: avoid;
   margin-bottom: 5px;
-  color: #92a8b8;
+  color: var(--vnx-text-soft);
   font-size: 8px;
   line-height: 1.45;
 }
