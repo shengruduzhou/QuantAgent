@@ -54,6 +54,8 @@ from quantagent.backtest.quarantine import (
 from quantagent.backtest.strict_v8 import run_strict_backtest_v8
 
 PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
+#: Certified raw execution panel (round 29). The default whenever it exists.
+CERTIFIED_PANEL = "runtime/data/gold/full_universe_r29/execution_panel.parquet"
 SECTOR = "runtime/data/v7/silver/sector_map/sector_map.parquet"
 ANN = 244
 
@@ -64,8 +66,13 @@ ANN = 244
 #: execution panel for a canonical number.
 LEGACY_PANEL_NOTE = (
     "legacy v7 silver panel: not verified (qfq price levels with raw volume, "
-    "vendor-stitched, suspended sessions absent); not a certified execution panel"
+    "vendor-stitched, suspended sessions absent, is_st = the 2026-05-31 ST list "
+    "broadcast to every historical date); not a certified execution panel"
 )
+#: Trust class stamped on any number produced from the legacy panel. Its ST flag
+#: is today's list applied to the past, which excludes names that became ST
+#: LATER - future losers - so historical results carry look-ahead (round-29 R4-F01).
+LEGACY_PANEL_TRUST_CLASS = "unverified_legacy_panel_lookahead_st"
 
 
 def _bench_daily(panel: pd.DataFrame, dates) -> pd.Series:
@@ -250,7 +257,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
              save_backtest_dir: str | None = None,
              save_variant: str = "C_flags_eligible_delay1",
              allow_quarantined: str | None = None,
-             panel_path: str | None = None) -> dict:
+             panel_path: str | None = None,
+             allow_unverified_panel: str | None = None) -> dict:
     # ---- quarantine guard (fail closed, BEFORE any data is read) ----------
     q_windows, q_log_path = load_windows()
     q_hit = check_window(start, end, q_windows)
@@ -281,6 +289,16 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         # simulator consumes the next global session after each signal date.
         p_start, p_end = clamp_panel_window(p_start, p_end, q_windows)
     universe_note: dict = {}
+    if panel_path is None and Path(CERTIFIED_PANEL).exists():
+        panel_path = CERTIFIED_PANEL
+    if panel_path is None and not (allow_unverified_panel and allow_unverified_panel.strip()):
+        raise ValueError(
+            "no certified execution panel found at "
+            f"{CERTIFIED_PANEL}; the legacy v7 panel broadcasts today's ST list to "
+            "every historical date (look-ahead). Pass --panel <certified panel>, or "
+            "--allow-unverified-panel '<reason>' to stamp the output "
+            f"trust_class={LEGACY_PANEL_TRUST_CLASS}."
+        )
     if panel_path:
         # Certified raw execution panel: verified at entry (adjustment 'none',
         # one provider per symbol or a declared SourceBoundary, corporate-action
@@ -305,7 +323,11 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         panel = panel[panel["trade_date"] >= p_start]
         if p_end is not None:
             panel = panel[panel["trade_date"] <= p_end]
-        panel_meta = {"path": PANEL, "verified": False, "note": LEGACY_PANEL_NOTE}
+        panel_meta = {
+            "path": PANEL, "verified": False, "note": LEGACY_PANEL_NOTE,
+            "trust_class": LEGACY_PANEL_TRUST_CLASS,
+            "unverified_reason": allow_unverified_panel.strip(),
+        }
         print(f"[panel] WARNING {LEGACY_PANEL_NOTE}", file=sys.stderr, flush=True)
     sector = pd.read_parquet(SECTOR) if Path(SECTOR).exists() else pd.DataFrame()
 
@@ -350,6 +372,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
     if q_record is not None:
         out["trust_class"] = FORENSICS_TRUST_CLASS
         out["quarantine_override"] = q_record
+    elif panel_meta.get("trust_class"):
+        out["trust_class"] = panel_meta["trust_class"]
     for name in variants:
         v = spec[name]
         tw = _target_weights(
@@ -394,7 +418,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:
             saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k,
-                                      trust_class=(FORENSICS_TRUST_CLASS if q_record is not None else None))
+                                      trust_class=(FORENSICS_TRUST_CLASS if q_record is not None
+                                                   else panel_meta.get("trust_class")))
             out["ui_backtest_dir"] = saved
         print(f"{name:28} ann {m.annualized_return:+8.2%} | excess {m.annualized_return - bench_ann:+8.2%} | "
               f"sharpe {m.sharpe:5.2f} | maxDD {m.max_drawdown:6.2%}")
@@ -427,7 +452,11 @@ def main() -> int:
                     help=("Certified raw execution panel (e.g. runtime/data/gold/full_universe_r29/"
                           "execution_panel.parquet). Verified at entry: adjustment_method 'none', one "
                           "provider per symbol or a declared SourceBoundary, corporate-action credits. "
-                          "Default: the legacy v7 silver panel, reported as unverified."))
+                          f"Default: {CERTIFIED_PANEL} when present."))
+    ap.add_argument("--allow-unverified-panel", default=None, metavar="REASON",
+                    help=("Use the legacy v7 silver panel (today's ST list broadcast to history: "
+                          "look-ahead). Requires a justification; outputs are stamped "
+                          f"trust_class={LEGACY_PANEL_TRUST_CLASS}."))
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     try:
@@ -438,7 +467,8 @@ def main() -> int:
                        save_variant=args.save_variant,
                        variants=[v.strip() for v in args.variants.split(",") if v.strip()],
                        allow_quarantined=args.allow_quarantined,
-                       panel_path=args.panel)
+                       panel_path=args.panel,
+                       allow_unverified_panel=args.allow_unverified_panel)
     except QuarantineViolation as exc:
         print(str(exc), file=sys.stderr)
         return 3
