@@ -335,15 +335,26 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         keyed = preds.merge(panel[["symbol", "trade_date"]], on=["symbol", "trade_date"])
         universe_note["predictions_without_execution_row"] = int(len(preds) - len(keyed))
         preds = keyed
-        # The strict simulator refuses NaN amount; the vendor lacks it for whole
-        # symbols, so those names cannot be executed and are excluded up front
-        # (disclosed, not filled with an estimate).
-        unmeasured = set(panel.loc[~panel["amount_measured"].astype(bool), "symbol"])
-        universe_note["excluded_symbols_amount_unmeasured"] = len(unmeasured)
-        universe_note["excluded_prediction_rows_amount_unmeasured"] = int(
-            preds["symbol"].isin(unmeasured).sum())
-        preds = preds[~preds["symbol"].isin(unmeasured)]
-        panel = panel[~panel["symbol"].isin(unmeasured)]
+        # The strict simulator refuses NaN amount, and the vendor lacks it for
+        # whole symbols. Dropping those symbols removed a survivorship-biased
+        # set - 57 of 65 were delisted, median lifetime return -92.7% - i.e. a
+        # model's worst picks (round-29 R10-F11). Their traded value is instead
+        # estimated from measured volume x typical price, flagged and
+        # disclosed; only rows without a measured volume stay unexecutable.
+        unmeasured = ~panel["amount_measured"].astype(bool)
+        volume = pd.to_numeric(panel["volume"], errors="coerce")
+        typical = (pd.to_numeric(panel["high"], errors="coerce")
+                   + pd.to_numeric(panel["low"], errors="coerce")
+                   + pd.to_numeric(panel["close"], errors="coerce")) / 3.0
+        estimable = unmeasured & volume.notna() & typical.notna()
+        panel = panel.copy()
+        panel["amount_estimated"] = estimable
+        panel.loc[estimable, "amount"] = volume[estimable] * typical[estimable]
+        unexecutable = unmeasured & ~estimable
+        universe_note["amount_estimated_rows"] = int(estimable.sum())
+        universe_note["amount_estimated_symbols"] = int(panel.loc[estimable, "symbol"].nunique())
+        universe_note["excluded_rows_amount_and_volume_unmeasured"] = int(unexecutable.sum())
+        panel = panel[~unexecutable]
         if "st_status" in panel.columns:
             unknown_rows = float(panel["st_status"].astype(str).eq("UNKNOWN").mean())
             panel_meta["st_unknown_row_share"] = round(unknown_rows, 4)
