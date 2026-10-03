@@ -35,6 +35,12 @@ export function EquityChart({
   const palette = useVNextChartPalette();
   const option = useMemo<EChartsOption>(() => {
     const hasBenchmark = points.some((point) => point.benchmarkNav !== null && point.benchmarkNav !== undefined);
+    // Benchmark NAV arrives as an index (~1.0) while the portfolio NAV is CNY:
+    // plotted raw it sat flat at 0 on the CNY axis and hid a benchmark that
+    // beat the strategy (round-29 R6). Rebase it to the portfolio's first NAV.
+    const anchor = points.find((point) => point.benchmarkNav != null && point.benchmarkNav !== 0
+      && Number.isFinite(point.benchmarkNav) && Number.isFinite(point.nav));
+    const benchmarkScale = anchor ? anchor.nav / (anchor.benchmarkNav as number) : null;
     const xAxisIndexes = showDrawdown ? [0, 1] : [0];
     return ({
     animation: false,
@@ -106,11 +112,11 @@ export function EquityChart({
         areaStyle: { color: palette.primary, opacity: 0.06 },
         tooltip: { valueFormatter: (value: unknown) => formatTooltipValue(value, "nav") },
       },
-      ...(hasBenchmark
+      ...(hasBenchmark && benchmarkScale !== null
         ? [{
-            name: "Benchmark NAV",
+            name: "Benchmark (rebased to initial NAV)",
             type: "line" as const,
-            data: points.map((point) => point.benchmarkNav ?? null),
+            data: points.map((point) => (point.benchmarkNav == null ? null : point.benchmarkNav * benchmarkScale)),
             showSymbol: false,
             lineStyle: { color: palette.muted, width: 1.2, type: "dashed" as const },
             tooltip: { valueFormatter: (value: unknown) => formatTooltipValue(value, "nav") },
