@@ -57,6 +57,64 @@ def _evaluation_caveats(metrics: dict[str, Any], start: object, end: object) -> 
     }
 
 
+#: ``total_cost`` written by the strict engine after round-29 R1-F14 covers every
+#: fill (explicit fees + impact + slippage). Before it, the same key summed fees
+#: on FIFO-matched round trips only and left slippage out (a 43% understatement
+#: on the certified daily book), so an unlabelled ``total_cost`` is read as that.
+COST_BASIS_ALL_FILLS = "all_fills_explicit_fees_plus_impact_plus_slippage"
+COST_BASIS_PRE_FIX = "matched_round_trip_fees_only_pre_fix"
+
+
+def _cost_and_benchmark(metrics: dict[str, Any], *, has_benchmark_nav: bool) -> dict[str, Any]:
+    """Cost basis and benchmark identity a reader needs before comparing runs.
+
+    Absent fields stay ``None``: a run that recorded no cost is "not recorded",
+    never a zero-cost run, and a run with no benchmark has no excess.
+    """
+    total = metrics.get("total_cost")
+    if total is None:
+        total = metrics.get("total_cost_cny")
+    basis = metrics.get("total_cost_basis")
+    if total is None:
+        basis = None
+    elif basis is None:
+        # baseline_protocol's post-fix export publishes the breakdown instead of
+        # the basis string; the strict engine's pre-fix metrics have neither.
+        basis = COST_BASIS_ALL_FILLS if "slippage_cost_cny" in metrics or "slippage_cost" in metrics else COST_BASIS_PRE_FIX
+    slippage = metrics.get("slippage_cost")
+    if slippage is None:
+        slippage = metrics.get("slippage_cost_cny")
+
+    mode = metrics.get("benchmark_mode") or metrics.get("benchmark")
+    source = "metrics.benchmark_mode" if mode else None
+    if not mode and "benchmark_annualized_return" in metrics:
+        # scripts/baseline_protocol.py is the only producer of this key, and
+        # its benchmark is the frictionless equal-weight all-A mean.
+        mode, source = "universe_equal_weight", "baseline_protocol_export"
+    if not mode and has_benchmark_nav:
+        mode, source = "unlabelled", "nav.csv benchmark_nav column"
+    caveat = None
+    if mode and str(mode).startswith("universe_equal_weight"):
+        caveat = (
+            "universe_equal_weight includes untradeable names (limit-up, suspended, ST) "
+            "and pays no costs; excess against it is overstated"
+        )
+    elif mode == "unlabelled":
+        caveat = "benchmark column present but its identity was not recorded"
+    return {
+        "totalCost": clean_value(total) if total is not None else None,
+        "totalCostBasis": basis,
+        "slippageCost": clean_value(slippage) if slippage is not None else None,
+        "benchmark": {
+            "mode": str(mode) if mode else None,
+            "source": source,
+            "annualizedReturn": clean_value(metrics.get("benchmark_annualized_return")),
+            "gapSessions": clean_value(metrics.get("benchmark_nav_gap_sessions")),
+            "caveat": caveat,
+        } if mode else None,
+    }
+
+
 class BacktestAdapter:
     def __init__(self, settings: ApiSettings, indexer: RuntimeIndexer) -> None:
         self.settings = settings
@@ -118,7 +176,7 @@ class BacktestAdapter:
                 "fillCount": self._int_metric(metrics, "n_fills"),
                 "tTradeCount": self._int_metric(metrics, "t_trade_count", "do_t_trades"),
                 "tContribution": self._metric(metrics, "t_contribution", "overlay_total_return_delta"),
-                "totalCost": self._metric(metrics, "total_cost"),
+                **_cost_and_benchmark(metrics, has_benchmark_nav=_has_benchmark_nav(directory)),
                 "status": "ready",
                 "path": relative,
                 "tags": [item for item in (horizon, "strict-v8" if "risk_events.json" in {p.name for p in directory.iterdir()} else None) if item],
@@ -587,7 +645,7 @@ class BacktestAdapter:
                 "fillCount": _int(_first_metric(metrics, "n_fills")),
                 "tTradeCount": _int(_first_metric(metrics, "do_t_trades", "executed_legs", "completed_round_trips")),
                 "tContribution": _first_metric(metrics, "annualized_uplift", "overlay_total_return_delta"),
-                "totalCost": _first_metric(metrics, "total_cost"),
+                **_cost_and_benchmark(metrics or {}, has_benchmark_nav=_has_benchmark_nav(directory)),
                 "status": "ready",
                 "path": relative,
                 "tags": ["summary-backed", "paper" if "paper" in relative else "research"],
@@ -674,6 +732,18 @@ def _best_metrics_payload(payload: dict[str, Any]) -> dict[str, Any]:
             merged.update(value)
             return merged
     return payload
+
+
+def _has_benchmark_nav(directory: Path) -> bool:
+    path = directory / "nav.csv"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            header = handle.readline()
+    except OSError:
+        return False
+    return "benchmark_nav" in [column.strip() for column in header.split(",")]
 
 
 def _first_metric(payload: dict[str, Any], *keys: str) -> Any:
