@@ -513,7 +513,10 @@ def build_v7_target_weights(
             if "confidence" in pool.columns and float(config.confidence_floor) > 0:
                 pool = pool[pool["confidence"].astype(float) >= float(config.confidence_floor)]
             min_n = max(1, int(config.selection_top_k_min))
-            max_n = max(min_n, int(config.selection_top_k_max))
+            # The configured top_k is the book's name budget in every mode; the
+            # threshold mode used to ignore it and hold up to selection_top_k_max
+            # (100 of 400 with top_k=30, round-29 R4-F02).
+            max_n = max(min_n, min(int(config.selection_top_k_max), int(config.top_k)))
             fallback_to_min = False
             capped_at_max = False
             if len(pool) < min_n:
@@ -537,7 +540,7 @@ def build_v7_target_weights(
                 # blended rank predictions carry none (round-29 R4-F02).
                 "confidence_floor": float(config.confidence_floor) if confidence_measured else None,
                 "confidence_floor_status": "applied" if confidence_measured else "unmeasured_no_confidence_column",
-                "top_k_status": "not_used_in_ai_threshold_mode",
+                "top_k_status": "upper_bound_in_ai_threshold_mode",
                 "selected_count": selected_count,
                 "eligible_count": int(len(eligible)),
                 "fallback_to_min": fallback_to_min,

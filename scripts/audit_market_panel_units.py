@@ -145,8 +145,12 @@ def main(argv=None) -> int:
     md_path.write_text(_markdown(report, args.panel, elapsed), encoding="utf-8")
     print(md_path.read_text(encoding="utf-8"))
     print(f"wrote {json_path}")
-    # Exit 3 when the panel's own PIT claim is refuted, so the audit can gate.
-    return 3 if report["point_in_time_claim"]["verdict"] == "REFUTED" else 0
+    # Exit 3 when the panel's own PIT claim is refuted, 4 when it cannot be
+    # verified (e.g. no U0 reference found), so the audit can gate either way.
+    verdict = report["point_in_time_claim"]["verdict"]
+    if verdict == "REFUTED":
+        return 3
+    return 0 if verdict == "NOT_REFUTED" else 4
 
 
 if __name__ == "__main__":
