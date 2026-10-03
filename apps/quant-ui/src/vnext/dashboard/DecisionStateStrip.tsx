@@ -45,7 +45,7 @@ export function DecisionStateStrip({ overview, latestPoint, jobs }: DecisionStat
 
       <article className={`vnext-decision-state state-risk ${riskEventCount ? "attention" : ""}`}>
         <header><span><ShieldWarning size={17} /> Risk State</span><em>{riskEventCount ? "ATTENTION" : "NO EVENTS"}</em></header>
-        <div className="vnext-state-primary"><strong>{overview.risk.eventCountsExact === false ? `≥${riskEventCount}` : riskEventCount}</strong><span>persisted backtest risk events{overview.risk.backtestName ? ` · ${overview.risk.backtestName}` : ""}</span></div>
+        <div className="vnext-state-primary"><strong>{overview.risk.eventCounts === null ? "未测量" : overview.risk.eventCountsExact === false ? `≥${riskEventCount}` : riskEventCount}</strong><span>persisted backtest risk events{overview.risk.backtestName ? ` · ${overview.risk.backtestName}` : ""}</span></div>
         <dl><div><dt>最大回撤</dt><dd>{formatPercent(overview.risk.maxDrawdown)}</dd></div><div><dt>流动性风险</dt><dd>{formatPercent(overview.risk.liquidityRisk)}</dd></div><div><dt>Stale data</dt><dd>{staleArtifacts}</dd></div></dl>
         <p>{riskEventCount ? "存在持久化风险事件，需要检查具体规则与拦截原因。" : "没有已记录违规；缺失指标仍保持 unavailable。"}</p>
         <Link to="/risk">打开 Risk Manager <ArrowRight size={14} /></Link>

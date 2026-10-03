@@ -20,7 +20,8 @@ class RiskAdapter:
         consecutive = _max_consecutive_losses(daily_returns) if daily_returns else None
         page = self.backtests.risk_events(run["id"], page=1, page_size=1_000)
         events = page["items"]
-        counts: dict[str, int] = {}
+        missing_artifact = bool(page.get("artifactMissing"))
+        counts: dict[str, int] | None = None if missing_artifact else {}
         for event in events:
             counts[event["type"]] = counts.get(event["type"], 0) + 1
         return {
@@ -29,7 +30,9 @@ class RiskAdapter:
             # Persisted events of this backtest (e.g. skipped orders), counted
             # over the first page only when the page was full.
             "eventCountsExact": bool(page.get("totalIsExact", not page.get("hasNext", False))),
-            "eventCountsBasis": "persisted_backtest_events",
+            "eventCountsBasis": (
+                "risk_events_artifact_missing" if missing_artifact else "persisted_backtest_events"
+            ),
             "maxDrawdown": run.get("maxDrawdown"),
             "maxSingleStockLoss": self._max_stock_loss(run["id"]),
             "maxDailyLoss": min(daily_returns) if daily_returns else None,

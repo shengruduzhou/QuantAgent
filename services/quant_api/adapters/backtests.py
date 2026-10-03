@@ -450,7 +450,12 @@ class BacktestAdapter:
         directory = self._resolve(backtest_id)
         path = directory / "risk_events.json"
         if not path.exists():
-            return page_slice([], page, page_size)
+            # No artifact is not "zero events": the count is unmeasured.
+            return {
+                "items": [], "total": None, "totalIsExact": False, "loadedCount": 0,
+                "page": page, "pageSize": page_size, "hasNext": False,
+                "artifactMissing": True,
+            }
         start = (max(1, page) - 1) * page_size
         rows = list(iter_json_array(path, start=start, limit=page_size))
         events = []

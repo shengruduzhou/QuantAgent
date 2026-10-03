@@ -97,3 +97,17 @@ def test_factor_ic_with_no_measurement_is_not_ready(tmp_path: Path) -> None:
     statistics = [data.get(k) for k in ("ic", "rankIc", "icir", "rankIcir")]
     if all(v is None for v in statistics) and not data.get("icSeries"):
         assert body["status"] != "ready"
+
+
+class _NoRiskArtifact(_NoEquityBacktests):
+    def risk_events(self, backtest_id, page=1, page_size=100):
+        return {"items": [], "total": None, "totalIsExact": False, "loadedCount": 0,
+                "page": page, "pageSize": page_size, "hasNext": False, "artifactMissing": True}
+
+
+def test_missing_risk_events_artifact_is_unmeasured_not_zero(tmp_path: Path) -> None:
+    """Round-29 R6: a backtest without risk_events.json read as an exact 'no events'."""
+    overview = RiskAdapter(_NoRiskArtifact(tmp_path)).overview("bt_no_equity")
+    assert overview["eventCounts"] is None
+    assert overview["eventCountsExact"] is False
+    assert overview["eventCountsBasis"] == "risk_events_artifact_missing"

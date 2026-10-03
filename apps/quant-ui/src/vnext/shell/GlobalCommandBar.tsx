@@ -105,7 +105,7 @@ export function GlobalCommandBar({
           {/* No overview yet means risk is unmeasured, not clear. */}
           {/* Persisted events of one research backtest (e.g. skipped orders), not
               the paper account's risk - labelled so it is never read as a live alarm. */}
-          BT EVENTS {!overview ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NONE"}
+          BT EVENTS {!overview || overview.risk.eventCounts === null ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NONE"}
         </button>
         <LiveChip account={paperAccount} state={paperAccountState} />
         <KillSwitchChip account={paperAccount} state={paperAccountState} onOpen={() => openPath("/t-plus-one")} />

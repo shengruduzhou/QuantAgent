@@ -936,7 +936,8 @@ export interface RiskOverview {
   limitDownRisk?: number | null;
   suspensionRisk?: number | null;
   doTFailureRisk?: number | null;
-  eventCounts: Record<string, number>;
+  /** null when the backtest wrote no risk_events artifact: unmeasured, not zero. */
+  eventCounts: Record<string, number> | null;
   /** False when the counts cover only the first page of persisted events. */
   eventCountsExact?: boolean;
   eventCountsBasis?: string;
