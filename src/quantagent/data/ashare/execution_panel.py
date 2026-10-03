@@ -71,6 +71,9 @@ GAP_CLASSES: tuple[str, ...] = (
     "SUSPENDED", "MISSING_UNEXPLAINED", "PROVIDER_HISTORY_TRUNCATED",
 )
 GAP_DELISTED = "DELISTED"
+#: A vendor bar with zero volume (or zero amount): the stock printed but did not
+#: trade. Treated exactly like a gap row -- carried close, untradeable.
+GAP_NO_TRADE = "NO_TRADE_ZERO_VOLUME"
 CA_BASIS_NONE = ""
 CA_BASIS_CORPORATE_ACTION = "corporate_action"
 CA_BASIS_FACTOR_VALUE = "factor_value_equivalent"
@@ -165,11 +168,15 @@ def build_execution_panel(
     stats: dict[str, Any] = {}
     bars = traded.copy() if copy else traded
     bars["trade_date"] = pd.to_datetime(bars["trade_date"]).dt.normalize()
-    bars["gap_classification"] = GAP_TRADED
+    volume = pd.to_numeric(bars["volume"], errors="coerce")
+    amount = pd.to_numeric(bars["amount"], errors="coerce")
+    no_trade = ((volume <= 0) | (amount.notna() & (amount <= 0))).to_numpy()
+    bars["gap_classification"] = np.where(no_trade, GAP_NO_TRADE, GAP_TRADED)
     bars["suspension_status"] = bars["mask_is_suspended"].astype(str)
     bars["st_status"] = bars["mask_is_st"].astype(str)
-    bars["limit_up_status"] = bars["mask_limit_up"].astype(str)
-    bars["limit_down_status"] = bars["mask_limit_down"].astype(str)
+    bars["limit_up_status"] = np.where(no_trade, "NOT_TRADED", bars["mask_limit_up"].astype(str))
+    bars["limit_down_status"] = np.where(no_trade, "NOT_TRADED",
+                                         bars["mask_limit_down"].astype(str))
     if "available_at" not in bars.columns:
         bars["available_at"] = bars["trade_date"] + pd.Timedelta(hours=15)
     if "serving_provider" not in bars.columns:
@@ -269,9 +276,11 @@ def build_execution_panel(
     symbols = panel["symbol"].to_numpy()
     starts = np.r_[True, symbols[1:] != symbols[:-1]]
     group = np.cumsum(starts) - 1
-    adjusted_close = panel["close"].to_numpy(dtype=float) * factor
-    adjusted_filled = pd.Series(adjusted_close).groupby(group).ffill().to_numpy()
     is_gap = panel["gap_classification"].to_numpy() != GAP_TRADED
+    # Only traded closes anchor the carry: a zero-volume print is stale (its
+    # pre-ex level times a new factor is a jump nobody traded, R10-F01).
+    adjusted_close = np.where(is_gap, np.nan, panel["close"].to_numpy(dtype=float) * factor)
+    adjusted_filled = pd.Series(adjusted_close).groupby(group).ffill().to_numpy()
     carried = adjusted_filled / factor
     no_prior = is_gap & ~np.isfinite(carried)
     stats["gap_rows_without_prior_close_excluded"] = {
@@ -389,6 +398,7 @@ def build_execution_panel(
             "is_limit_up/is_limit_down": "TRUE or UNKNOWN status blocks that side (fail-closed)",
             "is_st": "TRUE only where the dated register says so; UNKNOWN kept in st_status",
             "gap rows": "valued at the carried raw close; volume=amount=0; never tradeable",
+            "NO_TRADE_ZERO_VOLUME": "vendor zero-volume print: carried close, never tradeable",
             "DELISTED row": "held position written off at zero proceeds (conservative)",
         },
     })
@@ -418,6 +428,13 @@ def verify_execution_panel(
         raise ExecutionPanelError(
             f"execution panel must be raw traded prices (adjustment_method 'none'); "
             f"found {methods}")
+    if "gap_classification" in panel.columns and "volume" in panel.columns:
+        traded = panel["gap_classification"].astype(str) == GAP_TRADED
+        stale = traded & (pd.to_numeric(panel["volume"], errors="coerce") <= 0)
+        if bool(stale.any()):
+            raise ExecutionPanelError(
+                f"{int(stale.sum())} row(s) classified TRADED have zero volume; a "
+                "zero-volume vendor bar is a no-trade session, not a fill price")
     if require_corporate_actions:
         missing = [c for c in CORPORATE_ACTION_COLUMNS if c not in panel.columns]
         if missing:
@@ -464,6 +481,6 @@ def execution_panel_summary(stats: Mapping[str, Any]) -> str:
 __all__ = [
     "CA_BASIS_CORPORATE_ACTION", "CA_BASIS_FACTOR_VALUE", "CORPORATE_ACTION_COLUMNS",
     "EXECUTION_PANEL_COLUMNS", "EXECUTION_PANEL_SCHEMA", "ExecutionPanelError",
-    "GAP_CLASSES", "GAP_DELISTED", "GAP_TRADED", "build_execution_panel", "execution_panel_summary",
+    "GAP_CLASSES", "GAP_DELISTED", "GAP_NO_TRADE", "GAP_TRADED", "build_execution_panel", "execution_panel_summary",
     "verify_execution_panel",
 ]

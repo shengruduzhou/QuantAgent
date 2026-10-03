@@ -333,6 +333,11 @@ def run_quality_checks(
              "fabricated_on_uncovered": fabricated_on_uncovered,
              "covered_without_measured_rows": covered_without_rows})
 
+    zero_volume = int((pd.to_numeric(dataset["volume"], errors="coerce") <= 0).sum())
+    add("no_zero_volume_rows", zero_volume == 0,
+        "no retained row is a zero-volume vendor print (a no-trade session, R10-F01)",
+        {"rows": zero_volume})
+
     infeasible_kept = (
         int((~dataset["entry_feasible"]).sum()) if "entry_feasible" in dataset else 0
     )
