@@ -170,6 +170,33 @@ def _target_weights(
     ).sort_index()
 
 
+#: Stamped when the certified panel's ST status is UNKNOWN for names the book can
+#: buy (no dated SSE/BSE register exists): those names are treated as non-ST, so
+#: an ST name may be held. Round-29 R7-F1.
+ST_INCOMPLETE_TRUST_CLASS = "research_certified_panel_st_incomplete"
+
+
+def _st_unknown_buy_share(trades: pd.DataFrame | None, panel: pd.DataFrame) -> float | None:
+    """Share of filled buy notional in names whose ST status was UNKNOWN that day."""
+    if trades is None or trades.empty or "st_status" not in panel.columns:
+        return None
+    fills = trades[(trades["side"].astype(str).str.lower() == "buy")
+                   & (pd.to_numeric(trades["filled_quantity"], errors="coerce") > 0)].copy()
+    if fills.empty:
+        return None
+    fills["trade_date"] = pd.to_datetime(fills["trade_date"]).dt.normalize()
+    status = panel[["symbol", "trade_date", "st_status"]].copy()
+    status["trade_date"] = pd.to_datetime(status["trade_date"]).dt.normalize()
+    fills = fills.merge(status, on=["symbol", "trade_date"], how="left")
+    notional = pd.to_numeric(fills["filled_quantity"], errors="coerce") * pd.to_numeric(
+        fills["avg_price"], errors="coerce")
+    total = float(notional.sum())
+    if total <= 0:
+        return None
+    unknown = ~fills["st_status"].astype(str).isin(["FALSE", "TRUE"])
+    return round(float(notional[unknown].sum()) / total, 4)
+
+
 def _sharpe_uncertainty(nav: pd.Series) -> dict[str, object]:
     """Point estimates alone overstate certainty: publish PSR, MinTRL and a
     dependence-preserving bootstrap interval next to the Sharpe ratio."""
@@ -317,6 +344,14 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             preds["symbol"].isin(unmeasured).sum())
         preds = preds[~preds["symbol"].isin(unmeasured)]
         panel = panel[~panel["symbol"].isin(unmeasured)]
+        if "st_status" in panel.columns:
+            unknown_rows = float(panel["st_status"].astype(str).eq("UNKNOWN").mean())
+            panel_meta["st_unknown_row_share"] = round(unknown_rows, 4)
+            if unknown_rows > 0:
+                panel_meta["trust_class"] = ST_INCOMPLETE_TRUST_CLASS
+                print(f"[panel] ST status UNKNOWN on {unknown_rows:.1%} of rows (no dated "
+                      "SSE/BSE register): treated as non-ST; output stamped "
+                      f"trust_class={ST_INCOMPLETE_TRUST_CLASS}", file=sys.stderr, flush=True)
     else:
         panel = pd.read_parquet(PANEL, columns=panel_cols)
         panel["trade_date"] = pd.to_datetime(panel["trade_date"])
@@ -414,6 +449,15 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
             "regime": _regime_excess(res.nav, bench),
             "corporate_action_credits_applied": corporate_actions,
+            # Point estimates of risk and cost belong next to the return
+            # (round-29 R7-F3: these were dropped from out.json).
+            "volatility": round(float(m.volatility), 4),
+            "turnover": round(float(m.turnover), 4),
+            "total_cost_cny": round(float(m.total_cost), 2),
+            "explicit_fees_cny": round(float(m.explicit_fees), 2),
+            "impact_cost_cny": round(float(m.impact_cost), 2),
+            "slippage_cost_cny": round(float(m.slippage_cost), 2),
+            "st_unknown_buy_value_share": _st_unknown_buy_share(res.trades, panel),
         }
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:

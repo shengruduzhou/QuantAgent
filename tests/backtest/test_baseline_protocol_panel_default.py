@@ -33,3 +33,15 @@ def test_without_a_certified_panel_the_legacy_panel_needs_a_stated_reason(tmp_pa
 def test_the_legacy_trust_class_names_the_lookahead():
     assert "lookahead" in baseline_protocol.LEGACY_PANEL_TRUST_CLASS
     assert "ST list" in baseline_protocol.LEGACY_PANEL_NOTE
+
+
+def test_st_unknown_buy_share_counts_only_unmeasured_names():
+    trades = pd.DataFrame({
+        "symbol": ["600000.SH", "000001.SZ"], "trade_date": ["2024-01-03", "2024-01-03"],
+        "side": ["buy", "buy"], "filled_quantity": [100, 300], "avg_price": [10.0, 10.0],
+    })
+    panel = pd.DataFrame({
+        "symbol": ["600000.SH", "000001.SZ"], "trade_date": pd.to_datetime(["2024-01-03"] * 2),
+        "st_status": ["UNKNOWN", "FALSE"],
+    })
+    assert baseline_protocol._st_unknown_buy_share(trades, panel) == 0.25
