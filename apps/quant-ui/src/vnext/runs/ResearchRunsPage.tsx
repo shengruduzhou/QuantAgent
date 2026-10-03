@@ -711,7 +711,7 @@ export function ResearchRunsPage(): JSX.Element {
                             {Object.entries(finding.evidence ?? {}).slice(0, 5).map(([key, value]) => (
                               <div key={key}>
                                 <dt>{key}</dt>
-                                <dd>{value === null || value === undefined ? "—" : String(value)}</dd>
+                                <dd>{formatEvidenceValue(value)}</dd>
                               </div>
                             ))}
                           </dl>
@@ -872,4 +872,16 @@ export function ResearchRunsPage(): JSX.Element {
       </section>
     </div>
   );
+}
+
+
+/** Evidence values can be objects/arrays (e.g. liveOrProductionClaims); String()
+ *  rendered them as "[object Object]". */
+function formatEvidenceValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") {
+    const text = JSON.stringify(value);
+    return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+  }
+  return String(value);
 }

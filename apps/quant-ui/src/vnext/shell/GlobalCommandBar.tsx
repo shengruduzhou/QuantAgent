@@ -100,10 +100,12 @@ export function GlobalCommandBar({
         <button type="button" className="vnext-status-button vnext-collapsible-chip" onClick={() => openPath("/settings?view=jobs")} title="打开任务中心">
           <HardDrives size={14} /> {activeJobs} JOBS
         </button>
-        <button type="button" className={`vnext-status-button ${riskEvents ? "warning" : "safe"}`} onClick={() => openPath("/risk")} title="打开风险管理">
+        <button type="button" className={`vnext-status-button ${riskEvents ? "warning" : "safe"}`} onClick={() => openPath("/risk")} title={`回测风险事件（非纸面账户）：${overview?.risk.backtestName ?? overview?.risk.backtestId ?? "unknown backtest"}`}>
           {riskEvents ? <WarningCircle size={14} /> : <ShieldCheck size={14} />}
           {/* No overview yet means risk is unmeasured, not clear. */}
-          RISK {!overview ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NO EVENTS"}
+          {/* Persisted events of one research backtest (e.g. skipped orders), not
+              the paper account's risk - labelled so it is never read as a live alarm. */}
+          BT EVENTS {!overview ? "UNKNOWN" : riskEvents ? (overview.risk.eventCountsExact === false ? `≥${riskEvents}` : riskEvents) : "NONE"}
         </button>
         <LiveChip account={paperAccount} state={paperAccountState} />
         <KillSwitchChip account={paperAccount} state={paperAccountState} onOpen={() => openPath("/t-plus-one")} />
@@ -138,7 +140,10 @@ function KillSwitchChip({ account, state, onOpen }: { account?: PaperAccount; st
   let label: string;
   let tone: "ready" | "warning" | "error";
   let title: string;
-  if (state !== "ready" || !risk) {
+  // Only an explicit boolean is a measurement: a payload without
+  // killSwitch.active (or riskEngineAttached) is unknown, never "armed".
+  if (state !== "ready" || !risk || typeof risk.killSwitch?.active !== "boolean"
+      || typeof risk.riskEngineAttached !== "boolean") {
     label = "KILL UNKNOWN";
     tone = "warning";
     title = "Paper account unavailable: kill-switch state unknown";
