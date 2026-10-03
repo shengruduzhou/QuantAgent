@@ -1,6 +1,8 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type { EChartsOption } from "echarts";
+import type { EChartsType } from "echarts/core";
 import type { KlineBar, Trade } from "../../api/types";
+import { resolveKlineWindow, type KlineWindow } from "../../charting/kline";
 import { EChart } from "../../components/EChart";
 import { useVNextChartPalette } from "../theme";
 
@@ -14,6 +16,36 @@ interface MarketCandlestickChartProps {
 
 type RangeKey = "60D" | "120D" | "1Y" | "ALL";
 const RANGE_SESSIONS: Record<RangeKey, number | null> = { "60D": 60, "120D": 120, "1Y": 250, ALL: null };
+/** Keyboard pan steps, in bars: human-scale, not one bar per press. */
+const PAN_STEP = 5;
+const PAGE_STEP = 20;
+const MIN_WINDOW = 20;
+
+/**
+ * The window the user dragged, wheeled or keyed to, as bar indices. It is
+ * React state (not just ECharts' internal state) because `EChart` re-applies
+ * the option with `notMerge` on every option change — a theme switch, a trade
+ * marker click or a refetch — and a window that lived only inside ECharts was
+ * reset to the preset range each time (AGENTS.md K 线人类操作契约).
+ */
+export function windowFromZoom(
+  zoom: { start?: number; end?: number; startValue?: string | number; endValue?: string | number } | undefined,
+  dates: string[],
+): KlineWindow | null {
+  if (!zoom || !dates.length) return null;
+  const toIndex = (value: string | number | undefined, percent: number | undefined, fallback: number): number => {
+    if (typeof value === "string") {
+      const found = dates.indexOf(value);
+      if (found >= 0) return found;
+    }
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value < dates.length) return value;
+    if (typeof percent === "number") return Math.round((percent / 100) * Math.max(0, dates.length - 1));
+    return fallback;
+  };
+  const startIndex = toIndex(zoom.startValue, zoom.start, 0);
+  const endIndex = toIndex(zoom.endValue, zoom.end, dates.length - 1);
+  return { startIndex: Math.min(startIndex, endIndex), endIndex: Math.max(startIndex, endIndex) };
+}
 
 function movingAverage(bars: KlineBar[], period: number): Array<number | null> {
   const result: Array<number | null> = Array(bars.length).fill(null);
@@ -39,13 +71,23 @@ export function MarketCandlestickChart({
 }: MarketCandlestickChartProps): JSX.Element {
   const palette = useVNextChartPalette();
   const [range, setRange] = useState<RangeKey>("1Y");
+  const [manualWindow, setManualWindow] = useState<KlineWindow | null>(null);
   const dates = useMemo(() => bars.map((bar) => bar.datetime.slice(0, 10)), [bars]);
-  const startValue = useMemo(() => {
-    const sessions = RANGE_SESSIONS[range];
-    if (!dates.length || sessions === null || dates.length <= sessions) return dates[0];
-    return dates[dates.length - sessions];
-  }, [dates, range]);
-  const endValue = dates.at(-1);
+  const seriesIdentity = `${symbol ?? bars[0]?.symbol ?? ""}|${dates[0] ?? ""}`;
+  // A different instrument (or history) invalidates the manual window; a
+  // refetch of the same series, a theme change or a marker click does not.
+  useEffect(() => {
+    setManualWindow(null);
+  }, [seriesIdentity]);
+  const viewWindow = useMemo<KlineWindow>(() => {
+    const preset = resolveKlineWindow(dates.length, range);
+    if (!manualWindow || !dates.length) return preset;
+    const endIndex = Math.min(dates.length - 1, manualWindow.endIndex);
+    const startIndex = Math.min(endIndex, Math.max(0, manualWindow.startIndex));
+    return { startIndex, endIndex };
+  }, [dates.length, manualWindow, range]);
+  const startValue = dates[viewWindow.startIndex];
+  const endValue = dates[viewWindow.endIndex];
 
   const option = useMemo<EChartsOption>(() => {
     const ma20 = movingAverage(bars, 20);
@@ -138,18 +180,68 @@ export function MarketCandlestickChart({
     if (payload.componentType === "markPoint" && tradeId) onTradeSelect?.(tradeId);
   };
 
+  const handleDataZoom = useCallback((_params: unknown, chart: EChartsType): void => {
+    const current = chart.getOption() as { dataZoom?: Array<{ start?: number; end?: number; startValue?: string | number; endValue?: string | number }> };
+    const next = windowFromZoom(current.dataZoom?.[0], dates);
+    if (!next) return;
+    setManualWindow((previous) => (previous?.startIndex === next.startIndex && previous.endIndex === next.endIndex ? previous : next));
+  }, [dates]);
+
+  const pan = (delta: number): void => {
+    if (!dates.length) return;
+    const width = viewWindow.endIndex - viewWindow.startIndex;
+    const startIndex = Math.min(Math.max(0, dates.length - 1 - width), Math.max(0, viewWindow.startIndex + delta));
+    setManualWindow({ startIndex, endIndex: Math.min(dates.length - 1, startIndex + width) });
+  };
+
+  const zoom = (direction: -1 | 1): void => {
+    if (!dates.length) return;
+    const size = viewWindow.endIndex - viewWindow.startIndex + 1;
+    const nextSize = Math.min(dates.length, Math.max(Math.min(MIN_WINDOW, dates.length), Math.round(size * (direction < 0 ? 0.78 : 1.28))));
+    const center = (viewWindow.startIndex + viewWindow.endIndex) / 2;
+    let startIndex = Math.max(0, Math.round(center - nextSize / 2));
+    const endIndex = Math.min(dates.length - 1, startIndex + nextSize - 1);
+    startIndex = Math.max(0, endIndex - nextSize + 1);
+    setManualWindow({ startIndex, endIndex });
+  };
+
+  const selectRange = (key: RangeKey): void => {
+    setRange(key);
+    setManualWindow(null);
+  };
+
   const handleKeyboard = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === "Home") setRange("ALL");
-    if (event.key === "End") setRange("60D");
+    if (!dates.length) return;
+    const width = viewWindow.endIndex - viewWindow.startIndex;
+    const actions: Record<string, () => void> = {
+      ArrowLeft: () => pan(-PAN_STEP),
+      ArrowRight: () => pan(PAN_STEP),
+      PageUp: () => pan(-PAGE_STEP),
+      PageDown: () => pan(PAGE_STEP),
+      "+": () => zoom(-1),
+      "=": () => zoom(-1),
+      ArrowUp: () => zoom(-1),
+      "-": () => zoom(1),
+      _: () => zoom(1),
+      ArrowDown: () => zoom(1),
+      // Latest keeps the current width and moves it to the newest bar.
+      End: () => setManualWindow({ startIndex: Math.max(0, dates.length - 1 - width), endIndex: dates.length - 1 }),
+      Home: () => selectRange("ALL"),
+    };
+    const action = actions[event.key];
+    if (!action) return;
+    event.preventDefault();
+    action();
   };
 
   return (
     <div className="market-kline-workstation">
       <div className="market-chart-range" aria-label="K线区间">
         {(Object.keys(RANGE_SESSIONS) as RangeKey[]).map((key) => (
-          <button key={key} type="button" className={range === key ? "active" : ""} onClick={() => setRange(key)}>{key}</button>
+          <button key={key} type="button" className={!manualWindow && range === key ? "active" : ""} aria-pressed={!manualWindow && range === key} onClick={() => selectRange(key)}>{key}</button>
         ))}
-        <span>滚轮缩放 · 拖拽平移 · Home 全历史 · End 60D</span>
+        {manualWindow ? <em className="market-chart-window" aria-live="polite">手动窗口 {startValue} → {endValue} · {viewWindow.endIndex - viewWindow.startIndex + 1} 根</em> : null}
+        <span>滚轮只缩放 · 左键拖拽只平移 · ←/→ 5 根 · PgUp/PgDn 20 根 · +/− 缩放 · End 最新 · Home 全部</span>
       </div>
       <EChart
         option={option}
@@ -157,6 +249,7 @@ export function MarketCandlestickChart({
         ariaLabel={`${symbol ?? bars[0]?.symbol ?? "股票"} K 线、成交量与 MA20/60/120`}
         interactive
         onClick={handleChartClick}
+        onDataZoom={handleDataZoom}
         onKeyDown={handleKeyboard}
       />
     </div>
