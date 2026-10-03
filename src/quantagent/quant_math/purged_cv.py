@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import combinations
 from typing import Iterator
 
 import numpy as np
@@ -51,36 +50,6 @@ def purged_kfold_split(
         train_mask[test_end:embargo_end] = False
         train_idx = indices[train_mask]
         yield train_idx, test_idx
-
-
-def combinatorial_purged_split(
-    times: pd.Series,
-    label_end_times: pd.Series,
-    n_splits: int = 6,
-    n_test_groups: int = 2,
-    embargo_pct: float = 0.01,
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """AFML section 12 CPCV: choose n_test_groups out of n_splits as test."""
-    n = len(times)
-    boundaries = np.linspace(0, n, n_splits + 1, dtype=int)
-    groups = [np.arange(boundaries[i], boundaries[i + 1]) for i in range(n_splits)]
-    embargo = _embargo_size(n, embargo_pct)
-    t0 = times.values
-    t1 = label_end_times.values
-    for combo in combinations(range(n_splits), n_test_groups):
-        test_idx = np.concatenate([groups[g] for g in combo])
-        test_idx.sort()
-        test_t0_min = t0[test_idx].min()
-        test_t1_max = t1[test_idx].max()
-        train_mask = np.ones(n, dtype=bool)
-        train_mask[test_idx] = False
-        purge_mask = (t1 >= test_t0_min) & (t0 <= test_t1_max)
-        train_mask &= ~purge_mask
-        for g in combo:
-            end = groups[g][-1] + 1
-            embargo_end = min(end + embargo, n)
-            train_mask[end:embargo_end] = False
-        yield np.where(train_mask)[0], test_idx
 
 
 def probability_of_backtest_overfitting(

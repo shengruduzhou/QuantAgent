@@ -891,7 +891,7 @@ REQUIREMENTS: tuple[Requirement, ...] = (
                 note="Cash, inventory, T+1, price band and lot size enforced in paper; stale-data and abnormal-price checks absent."),
     Requirement("M5-06", "risk", "Intraday/post-trade risk layer", NOT_STARTED),
     Requirement("M5-07", "risk", "Operational controls (kill switch/cancel all/flatten/approval)", IN_PROGRESS,
-                code_paths=("src/quantagent/paper/risk.py", "src/quantagent/execution/risk_kill_switch.py"),
+                code_paths=("src/quantagent/paper/risk.py", "src/quantagent/paper/broker.py"),
                 note="Kill switch and cancel-all exist for paper; flatten, per-symbol disable and manual approval are not wired to the UI."),
     Requirement("M5-08", "risk", "Risk decisions stored as first-class evidence", IN_PROGRESS,
                 code_paths=("src/quantagent/paper/risk.py",),

@@ -160,9 +160,9 @@ runtime/logs/
 ### 3.5 Risk and position lifecycle
 
 - `src/quantagent/risk/risk_gate.py`
-  - target-weight 与 order-intent gates。
-- `src/quantagent/execution/risk_kill_switch.py`
-  - daily loss、drawdown、exposure、reject rate、stale data、manual lock。
+  - target-weight 与 order-intent gates；只接在 `execution/live_session.LiveTradingSession`（LIVE_DISABLED 下休眠的实盘 arming 边界），paper 下单路径不读它。
+- `src/quantagent/paper/risk.py`
+  - paper venue 真正执行的 `RiskEngine` / `RiskLimits` 与分级 latching `KillSwitch`（order / strategy / portfolio / global，只有人工可清除）。
 - `src/quantagent/portfolio/position_state.py`
   - hard stop、soft stop、trailing stop、breakeven、time/event/liquidity exit。
 - `src/quantagent/portfolio/state_machine/machine.py`
