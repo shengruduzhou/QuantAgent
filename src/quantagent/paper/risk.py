@@ -223,7 +223,8 @@ class KillSwitch:
         return found
 
     def clear(self, scope: str, key: str | None = None, *,
-              human_confirmation: bool = False) -> bool:
+              human_confirmation: bool = False,
+              author: str | None = None, reason: str | None = None) -> bool:
         """Clear a switch. Refuses without explicit human confirmation."""
         if not human_confirmation:
             raise RiskRejection(
@@ -235,6 +236,7 @@ class KillSwitch:
         if cleared and self.journal is not None:
             self.journal(lg.KILL_SWITCH_CLEARED, {
                 "scope": scope, "key": key, "human_confirmation": True,
+                "author": author, "reason": reason,
                 "cleared_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             })
         return cleared

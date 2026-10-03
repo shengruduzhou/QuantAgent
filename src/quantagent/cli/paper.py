@@ -260,3 +260,53 @@ def paper_reflect_and_retrain(
 
 
 app.add_typer(paper_app, name="paper")
+
+@app.command("paper-clear-kill-switch")
+def paper_clear_kill_switch(
+    ledger: Path = typer.Option(..., "--ledger", exists=True, dir_okay=False,
+                                help="The account's operational/risk-state ledger (JSONL)."),
+    scope: str = typer.Option("PORTFOLIO", "--scope"),
+    key: str | None = typer.Option(None, "--key"),
+    author: str = typer.Option(..., "--author"),
+    reason: str = typer.Option(..., "--reason"),
+    confirm: bool = typer.Option(False, "--confirm", help="Required: a human clears a latch."),
+) -> None:
+    """Clear a latched kill switch after human review (drawdown breaches latch).
+
+    The clear is appended to the same durable ledger the risk engine replays, so
+    every venue sees it on its next start. Refused while another process holds
+    the ledger directory's writer lock - stop the API / paper loop first, or the
+    two writers would fork the ledger's hash chain.
+    """
+    import fcntl
+
+    from quantagent.paper import ledger as paper_ledger
+    from quantagent.paper.risk import RiskEngine
+
+    if not confirm:
+        raise typer.BadParameter("pass --confirm: clearing a kill switch is a human decision")
+    if not author.strip() or len(reason.strip()) < 8:
+        raise typer.BadParameter("--author is required and --reason must be at least 8 characters")
+    lock_path = ledger.parent / "writer.lock"
+    with lock_path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise typer.BadParameter(
+                f"{lock_path} is held by a running writer; stop it before clearing"
+            ) from exc
+        engine = RiskEngine(state_ledger=paper_ledger.EventLedger(ledger))
+        active_before = engine.kill_switch.active()
+        cleared = engine.kill_switch.clear(
+            scope.upper(), key, human_confirmation=True,
+            author=author.strip(), reason=reason.strip(),
+        )
+    typer.echo(json_dump({
+        "cleared": cleared,
+        "scope": scope.upper(),
+        "key": key,
+        "activeBefore": active_before,
+        "activeAfter": engine.kill_switch.active(),
+    }))
+    if not cleared:
+        raise typer.Exit(code=1)
