@@ -26,6 +26,47 @@ def expression_leakage_reasons(expression: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
+#: Column names that hold information from AFTER the decision close: label
+#: windows, next-session entry/exit prices, eligibility masks built from them.
+_POST_DECISION_COLUMN = re.compile(
+    r"(?:^|_)(?:forward|future|label|target|entry|exit)(?:_|$)|_t\+?1(?:_|$)|^mask_|eligible|feasible",
+    re.IGNORECASE,
+)
+
+
+def expression_column_names(expr: object) -> tuple[str, ...]:
+    """Every column a DSL expression reads (Column / OptionalColumn leaves)."""
+    import dataclasses
+
+    names: list[str] = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if type(node).__name__ in ("Column", "OptionalColumn") and hasattr(node, "name"):
+            names.append(str(node.name))
+        if dataclasses.is_dataclass(node):
+            stack.extend(getattr(node, field.name) for field in dataclasses.fields(node))
+    return tuple(dict.fromkeys(names))
+
+
+def post_decision_column_reasons(
+    expr: object, *, label_column: str | None = None
+) -> tuple[str, ...]:
+    """Reasons a factor expression reads data unknown at the decision close.
+
+    The DSL's operators are causal, but a Column leaf can still name a
+    label-side field present in the merged panel (``entry_close_t1`` is the
+    next session's close) - round-29 R10-F07.
+    """
+    reasons = [
+        f"post_decision_column:{name}"
+        for name in expression_column_names(expr)
+        if _POST_DECISION_COLUMN.search(name) or (label_column and name == label_column)
+    ]
+    reasons.extend(expression_leakage_reasons(repr(expr)))
+    return tuple(dict.fromkeys(reasons))
+
+
 def validate_feature_expression(expression: str) -> str:
     reasons = expression_leakage_reasons(expression)
     if reasons:
@@ -40,4 +81,10 @@ def validate_feature_expressions(expressions: list[str] | tuple[str, ...]) -> tu
     return tuple(validate_feature_expression(item) for item in expressions)
 
 
-__all__ = ["expression_leakage_reasons", "validate_feature_expression", "validate_feature_expressions"]
+__all__ = [
+    "expression_column_names",
+    "expression_leakage_reasons",
+    "post_decision_column_reasons",
+    "validate_feature_expression",
+    "validate_feature_expressions",
+]
