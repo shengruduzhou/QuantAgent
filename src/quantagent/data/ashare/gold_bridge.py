@@ -622,6 +622,59 @@ def price_limit_masks(
     return _CODE_TO_MASK[up[inverse]], _CODE_TO_MASK[down[inverse]], stats
 
 
+def no_trade_mask(frame: pd.DataFrame) -> np.ndarray:
+    """Tri-state "the vendor bar records no trade" (zero volume, or zero amount).
+
+    TickFlow prints a flat bar at the last close on sessions a stock did not
+    trade. Those are not traded sessions: they cannot be entered or exited, and
+    their "close" is a stale print, not a price anyone paid (R10-F01).
+    UNKNOWN where volume is not measured.
+    """
+    if "volume" not in frame.columns:
+        return np.full(len(frame), MASK_UNKNOWN, dtype=object)
+    volume = pd.to_numeric(frame["volume"], errors="coerce").to_numpy(dtype=float)
+    amount = (pd.to_numeric(frame["amount"], errors="coerce").to_numpy(dtype=float)
+              if "amount" in frame.columns else np.full(len(frame), np.nan))
+    no_trade = (volume <= 0) | (np.isfinite(amount) & (amount <= 0))
+    out = np.where(no_trade, MASK_TRUE, np.where(np.isfinite(volume), MASK_FALSE, MASK_UNKNOWN))
+    return out.astype(object)
+
+
+def carry_no_trade_prices(frame: pd.DataFrame, no_trade: np.ndarray) -> pd.DataFrame:
+    """Value no-trade bars at the last traded close, on the frame's price scale.
+
+    On an adjusted (hfq) panel this keeps the series flat through a halt and
+    re-bases across an ex-rights date inside it: the vendor's stale pre-ex
+    print times the new factor is a jump that never traded (000836.SZ 10转20
+    read as x3.0). A no-trade bar before any traded bar keeps its print.
+    """
+    if "close" not in frame.columns:
+        return frame
+    hit = np.asarray(no_trade) == MASK_TRUE
+    if not hit.any():
+        return frame
+    result = frame
+    order = np.lexsort((pd.to_datetime(result["trade_date"]).to_numpy(),
+                        result["symbol"].astype(str).to_numpy()))
+    close = pd.to_numeric(result["close"], errors="coerce").to_numpy(dtype=float)[order]
+    hit_o = hit[order]
+    symbols = result["symbol"].astype(str).to_numpy()[order]
+    group = np.cumsum(np.r_[True, symbols[1:] != symbols[:-1]])
+    traded_close = np.where(hit_o, np.nan, close)
+    carried = pd.Series(traded_close).groupby(group).ffill().to_numpy()
+    use = hit_o & np.isfinite(carried)
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(len(order))
+    carried_by_row = carried[inverse]
+    use_by_row = use[inverse]
+    for column in PRICE_COLUMNS:
+        if column in result.columns:
+            values = pd.to_numeric(result[column], errors="coerce").to_numpy(dtype=float).copy()
+            values[use_by_row] = carried_by_row[use_by_row]
+            result[column] = values
+    return result
+
+
 def build_masks(
     panel: pd.DataFrame,
     *,
@@ -643,6 +696,11 @@ def build_masks(
     """
     result = panel.copy()
     dates = pd.to_datetime(result["trade_date"])
+
+    # Zero-volume vendor bars are no-trade sessions; their stale print is
+    # replaced by the last traded close before anything reads a price.
+    result["mask_no_trade"] = no_trade_mask(result)
+    result = carry_no_trade_prices(result, result["mask_no_trade"].to_numpy())
 
     result["mask_is_suspended"] = _interval_mask(
         result, suspension if suspension is not None else pd.DataFrame(),
@@ -919,6 +977,14 @@ def build_labels(
         reasons["suspended_at_t"] = int(suspended_now.sum())
         reasons["suspended_at_t1"] = int(suspended_next.sum())
         infeasible |= suspended_now | suspended_next
+    if "mask_no_trade" in result.columns:
+        # A zero-volume bar is not a session anyone traded: no signal on it and
+        # no entry into it (R10-F01: 20,851 kept rows had a zero-volume t+1).
+        no_trade_now = result["mask_no_trade"] == MASK_TRUE
+        no_trade_next = grouped["mask_no_trade"].shift(-1) == MASK_TRUE
+        reasons["no_trade_at_t"] = int(no_trade_now.sum())
+        reasons["entry_zero_volume"] = int(no_trade_next.sum())
+        infeasible |= no_trade_now | no_trade_next
     if "mask_is_st" in result.columns:
         is_st = result["mask_is_st"] == MASK_TRUE
         reasons["st_at_t"] = int(is_st.sum())
