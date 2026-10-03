@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors import expr as E
+from quantagent.factors.expression_safety import post_decision_column_reasons
 from quantagent.factors.factor_loop_memory import (
     RAG_EASY,
     RAG_HIGH_IC,
@@ -1338,6 +1339,22 @@ def synthesize_factors_rd_agent(
                 round_feedback.append(f"{task.factor_name}: duplicate expression")
                 continue
             seen_exprs.add(expr_key)
+            leak_reasons = post_decision_column_reasons(candidate.expr, label_column=cfg.label_column)
+            if leak_reasons:
+                task = RDAgentFactorTask(
+                    factor_name=task.factor_name,
+                    factor_description=task.factor_description,
+                    factor_formulation=task.factor_formulation,
+                    variables=task.variables,
+                    factor_implementation=False,
+                )
+                feedback = (
+                    "Rejected before implementation: the expression reads data unknown at the "
+                    f"decision close ({', '.join(leak_reasons)})."
+                )
+                task_feedback_rows.append(_rd_agent_feedback_row(hypothesis, task, False, feedback))
+                round_feedback.append(f"{task.factor_name}: post-decision data")
+                continue
 
             value_ok, value_feedback, _, finite_ratio = _rd_agent_value_feedback(
                 candidate.expr,

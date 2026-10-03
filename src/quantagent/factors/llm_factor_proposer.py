@@ -35,6 +35,7 @@ from quantagent.factors.factor_loop_memory import (
     FALLBACK_MODELS,
     classify_structure,
 )
+from quantagent.factors.expression_safety import post_decision_column_reasons
 from quantagent.factors.factor_synthesis import (
     LLMProposalResult,
     ProposedFactor,
@@ -260,6 +261,8 @@ class LLMFactorProposer:
                 expr = parse_expression(expr_text)
             except Exception:
                 continue  # outside the DSL → silently dropped (loop logs the gap)
+            if post_decision_column_reasons(expr):
+                continue  # reads label-side / next-session data → never a factor
             key = repr(expr)
             if key in seen:
                 continue

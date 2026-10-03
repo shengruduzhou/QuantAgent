@@ -1003,6 +1003,14 @@ class PaperOrderService:
             "nav": nav,
             "sessionTurnover": session_turnover,
             "sessionStartEquity": engine.session_start_equity,
+            # Daily-loss breach: buys halted for this exchange session only.
+            "dailyLossHalt": {
+                "active": engine.loss_halted_session is not None
+                and engine.loss_halted_session == engine.session_date,
+                "session": engine.loss_halted_session,
+                "limitCny": engine.daily_loss_limit_cny()
+                if engine.session_start_equity is not None else None,
+            },
             "unpriceableSymbols": unpriceable,
             "industryLimitEnforced": limit < 1.0,
             "industryLimit": {

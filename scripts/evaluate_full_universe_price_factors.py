@@ -76,7 +76,9 @@ def main() -> int:
     if horizon is None:
         print(f"cannot infer the label horizon from {args.label!r}", file=sys.stderr)
         return 2
-    clean = clean_label_mask(base["trade_date"], horizon_sessions=int(horizon.group(1)))
+    clean = clean_label_mask(
+        base["trade_date"], horizon_sessions=int(horizon.group(1)), symbols=base["symbol"]
+    )
     quarantine_rows_dropped = int((~clean).sum())
     base = base[clean]
     tradable = base["entry_feasible"].astype(bool)

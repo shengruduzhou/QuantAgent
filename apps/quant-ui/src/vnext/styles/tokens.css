@@ -55,7 +55,8 @@
   --vnx-text-bright: #f6fafd;
   --vnx-text-soft: #b3c3d1;
   --vnx-muted: #7f919f;
-  --vnx-muted-2: #61737f;
+  /* 4.5:1 on every night surface incl. the selected row (was #61737f, 3.0-3.8:1). */
+  --vnx-muted-2: #7d909d;
 
   /* ------------------------------------------------------ ui semantics --- */
   --vnx-primary: #5b9dff;              /* interactive: links, selection, focus */
@@ -78,7 +79,7 @@
   --state-unavailable: #71879a;
 
   /* -------------------------------------------------- market semantics --- */
-  --market-up: #f0525f;
+  --market-up: #f2646f;
   --market-down: #22b889;
   --market-flat: #7f919f;
   --market-bid: #f0a7c2;
@@ -206,7 +207,7 @@
   --vnx-text-bright: #f7fbfc;
   --vnx-text-soft: #c6d5db;
   --vnx-muted: #94a7b2;
-  --vnx-muted-2: #8299a4;
+  --vnx-muted-2: #91a7b2;
   --vnx-primary: #63b0ff;
   --vnx-primary-strong: #b2d7ff;
   --vnx-primary-surface: #1e4463;
@@ -214,6 +215,11 @@
   --vnx-agent-surface: #2a2550;
   --vnx-realtime: #4bcfc7;
   --vnx-realtime-surface: #123a40;
+  /* Dawn surfaces are lighter than night's: lift the reds so price cells and
+     danger text keep 4.5:1 on the selected row. */
+  --vnx-danger: #f37580;
+  --state-critical: #f37580;
+  --market-up: #ff7a84;
   --viz-1: #63b0ff;
   --viz-2: #35c295;
   --viz-3: #e6b24a;
@@ -241,7 +247,8 @@
   --vnx-surface-3: #e6edf2;
   --vnx-surface-selected: #dbe9f8;
   --vnx-input: #f5f8fa;
-  --vnx-code: #142430;
+  /* Code/log wells are light in day: day text tokens are dark ink. */
+  --vnx-code: #eef3f6;
   --vnx-elevated: #ffffff;
   --vnx-backdrop: rgba(24, 42, 54, .32);
   --vnx-shadow: rgba(30, 55, 72, .18);
@@ -252,27 +259,28 @@
   --vnx-text: #16262f;
   --vnx-text-bright: #0a1920;
   --vnx-text-soft: #324854;
-  --vnx-muted: #5c7280;
+  /* Day text tokens hold 4.5:1 on canvas, white and the selected row (#dbe9f8). */
+  --vnx-muted: #526876;
   --vnx-muted-2: #4d6572;
   --vnx-primary: #1667c4;
   --vnx-primary-strong: #0f4d94;
   --vnx-primary-surface: #d9e8f8;
   --vnx-agent: #6d45c4;
   --vnx-agent-surface: #e9e1fa;
-  --vnx-realtime: #077e88;
+  --vnx-realtime: #06737c;
   --vnx-realtime-surface: #d5eef0;
-  --vnx-success: #10795e;
-  --vnx-warning: #8f6210;
-  --vnx-danger: #c03846;
+  --vnx-success: #0e6f56;
+  --vnx-warning: #855a0c;
+  --vnx-danger: #b3303e;
   --vnx-info: #1667c4;
-  --state-verified: #10795e;
-  --state-warning: #8f6210;
-  --state-critical: #c03846;
+  --state-verified: #0e6f56;
+  --state-warning: #855a0c;
+  --state-critical: #b3303e;
   --state-stale: #866430;
   --state-unavailable: #63767f;
-  --market-up: #c8323f;
-  --market-down: #0f7a5e;
-  --market-flat: #5c7280;
+  --market-up: #bb2d39;
+  --market-down: #0d7056;
+  --market-flat: #526876;
   --market-bid: #a8455e;
   --market-ask: #2c7a53;
   --trade-t-buy: #2f5fc4;

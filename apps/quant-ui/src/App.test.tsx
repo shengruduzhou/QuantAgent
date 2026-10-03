@@ -76,7 +76,8 @@ test("VNext dashboard separates decision states from the primary canvas", async 
   renderApp("/");
 
   expect(await screen.findByRole("heading", { name: "今日决策总览" }, { timeout: 3_000 })).toBeInTheDocument();
-  expect(screen.getByText("Portfolio State")).toBeInTheDocument();
+  expect(screen.getByText("Latest Backtest · research")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Paper Account & Risk" })).toBeInTheDocument();
   expect(screen.getByText("Model State")).toBeInTheDocument();
   expect(screen.getByText("Risk State")).toBeInTheDocument();
   expect(screen.getByText("Operations State")).toBeInTheDocument();

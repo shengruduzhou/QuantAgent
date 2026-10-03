@@ -12,7 +12,7 @@
   gap: 12px;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  background: #07141e;
+  background: var(--vnx-surface-1);
 }
 
 .data-manager-toolbar > div {
@@ -27,14 +27,14 @@
 }
 
 .data-manager-toolbar strong {
-  color: #b9cfde;
+  color: var(--vnx-primary-strong);
   font: 9px "JetBrains Mono Variable", monospace;
   letter-spacing: .08em;
 }
 
 .data-manager-toolbar small {
   margin-top: 2px;
-  color: #5f788c;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -58,14 +58,14 @@
   border-bottom: 1px solid var(--border-soft);
   border-left: 2px solid transparent;
   background: transparent;
-  color: #9eb2c1;
+  color: var(--vnx-text-soft);
   text-align: left;
 }
 
 .data-provider-list > button:not(:disabled):hover,
 .data-provider-list > button.selected {
   border-left-color: var(--cyan);
-  background: #0d2130;
+  background: var(--vnx-surface-2);
 }
 
 .data-provider-list > button:disabled {
@@ -84,7 +84,7 @@
 
 .data-provider-list small,
 .data-provider-list p {
-  color: #60788b;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -111,14 +111,14 @@
 
 .data-job-form label > span {
   margin-bottom: 4px;
-  color: #718a9d;
+  color: var(--vnx-muted);
   font: 7px "JetBrains Mono Variable", monospace;
   text-transform: uppercase;
 }
 
 .data-job-form label > small {
   margin-top: 4px;
-  color: #526b7e;
+  color: var(--vnx-muted);
   font-size: 7px;
   line-height: 1.45;
 }
@@ -129,8 +129,8 @@
   padding: 0 7px;
   border: 1px solid var(--border);
   border-radius: 1px;
-  background: #050e16;
-  color: #bdd0dc;
+  background: var(--vnx-input);
+  color: var(--vnx-primary-strong);
   font: 8px "JetBrains Mono Variable", monospace;
 }
 
@@ -147,9 +147,9 @@
   gap: 9px;
   margin-top: 9px;
   padding: 8px;
-  border: 1px solid #5d4a25;
+  border: 1px solid var(--vnx-warning);
   background: rgba(231, 165, 58, .045);
-  color: #d1a650;
+  color: var(--vnx-warning);
 }
 
 .network-confirmation strong,
@@ -164,12 +164,12 @@
 .network-confirmation small,
 .local-provider-notice span {
   margin-top: 3px;
-  color: #8a7854;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
 .local-provider-notice {
-  border-color: #21465a;
+  border-color: var(--vnx-line-strong);
   background: rgba(45, 199, 184, .035);
   color: var(--cyan);
 }
@@ -187,7 +187,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #5e788a;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 
@@ -202,7 +202,7 @@
 
 .data-job-queue-panel td > span {
   margin-top: 2px;
-  color: #5f7587;
+  color: var(--vnx-muted);
   font-size: 7px;
 }
 

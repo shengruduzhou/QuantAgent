@@ -54,6 +54,8 @@ from quantagent.backtest.quarantine import (
 from quantagent.backtest.strict_v8 import run_strict_backtest_v8
 
 PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
+#: Certified raw execution panel (round 29). The default whenever it exists.
+CERTIFIED_PANEL = "runtime/data/gold/full_universe_r29/execution_panel.parquet"
 SECTOR = "runtime/data/v7/silver/sector_map/sector_map.parquet"
 ANN = 244
 
@@ -64,8 +66,13 @@ ANN = 244
 #: execution panel for a canonical number.
 LEGACY_PANEL_NOTE = (
     "legacy v7 silver panel: not verified (qfq price levels with raw volume, "
-    "vendor-stitched, suspended sessions absent); not a certified execution panel"
+    "vendor-stitched, suspended sessions absent, is_st = the 2026-05-31 ST list "
+    "broadcast to every historical date); not a certified execution panel"
 )
+#: Trust class stamped on any number produced from the legacy panel. Its ST flag
+#: is today's list applied to the past, which excludes names that became ST
+#: LATER - future losers - so historical results carry look-ahead (round-29 R4-F01).
+LEGACY_PANEL_TRUST_CLASS = "unverified_legacy_panel_lookahead_st"
 
 
 def _bench_daily(panel: pd.DataFrame, dates) -> pd.Series:
@@ -163,6 +170,33 @@ def _target_weights(
     ).sort_index()
 
 
+#: Stamped when the certified panel's ST status is UNKNOWN for names the book can
+#: buy (no dated SSE/BSE register exists): those names are treated as non-ST, so
+#: an ST name may be held. Round-29 R7-F1.
+ST_INCOMPLETE_TRUST_CLASS = "research_certified_panel_st_incomplete"
+
+
+def _st_unknown_buy_share(trades: pd.DataFrame | None, panel: pd.DataFrame) -> float | None:
+    """Share of filled buy notional in names whose ST status was UNKNOWN that day."""
+    if trades is None or trades.empty or "st_status" not in panel.columns:
+        return None
+    fills = trades[(trades["side"].astype(str).str.lower() == "buy")
+                   & (pd.to_numeric(trades["filled_quantity"], errors="coerce") > 0)].copy()
+    if fills.empty:
+        return None
+    fills["trade_date"] = pd.to_datetime(fills["trade_date"]).dt.normalize()
+    status = panel[["symbol", "trade_date", "st_status"]].copy()
+    status["trade_date"] = pd.to_datetime(status["trade_date"]).dt.normalize()
+    fills = fills.merge(status, on=["symbol", "trade_date"], how="left")
+    notional = pd.to_numeric(fills["filled_quantity"], errors="coerce") * pd.to_numeric(
+        fills["avg_price"], errors="coerce")
+    total = float(notional.sum())
+    if total <= 0:
+        return None
+    unknown = ~fills["st_status"].astype(str).isin(["FALSE", "TRUE"])
+    return round(float(notional[unknown].sum()) / total, 4)
+
+
 def _sharpe_uncertainty(nav: pd.Series) -> dict[str, object]:
     """Point estimates alone overstate certainty: publish PSR, MinTRL and a
     dependence-preserving bootstrap interval next to the Sharpe ratio."""
@@ -250,7 +284,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
              save_backtest_dir: str | None = None,
              save_variant: str = "C_flags_eligible_delay1",
              allow_quarantined: str | None = None,
-             panel_path: str | None = None) -> dict:
+             panel_path: str | None = None,
+             allow_unverified_panel: str | None = None) -> dict:
     # ---- quarantine guard (fail closed, BEFORE any data is read) ----------
     q_windows, q_log_path = load_windows()
     q_hit = check_window(start, end, q_windows)
@@ -281,6 +316,16 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         # simulator consumes the next global session after each signal date.
         p_start, p_end = clamp_panel_window(p_start, p_end, q_windows)
     universe_note: dict = {}
+    if panel_path is None and Path(CERTIFIED_PANEL).exists():
+        panel_path = CERTIFIED_PANEL
+    if panel_path is None and not (allow_unverified_panel and allow_unverified_panel.strip()):
+        raise ValueError(
+            "no certified execution panel found at "
+            f"{CERTIFIED_PANEL}; the legacy v7 panel broadcasts today's ST list to "
+            "every historical date (look-ahead). Pass --panel <certified panel>, or "
+            "--allow-unverified-panel '<reason>' to stamp the output "
+            f"trust_class={LEGACY_PANEL_TRUST_CLASS}."
+        )
     if panel_path:
         # Certified raw execution panel: verified at entry (adjustment 'none',
         # one provider per symbol or a declared SourceBoundary, corporate-action
@@ -290,22 +335,45 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         keyed = preds.merge(panel[["symbol", "trade_date"]], on=["symbol", "trade_date"])
         universe_note["predictions_without_execution_row"] = int(len(preds) - len(keyed))
         preds = keyed
-        # The strict simulator refuses NaN amount; the vendor lacks it for whole
-        # symbols, so those names cannot be executed and are excluded up front
-        # (disclosed, not filled with an estimate).
-        unmeasured = set(panel.loc[~panel["amount_measured"].astype(bool), "symbol"])
-        universe_note["excluded_symbols_amount_unmeasured"] = len(unmeasured)
-        universe_note["excluded_prediction_rows_amount_unmeasured"] = int(
-            preds["symbol"].isin(unmeasured).sum())
-        preds = preds[~preds["symbol"].isin(unmeasured)]
-        panel = panel[~panel["symbol"].isin(unmeasured)]
+        # The strict simulator refuses NaN amount, and the vendor lacks it for
+        # whole symbols. Dropping those symbols removed a survivorship-biased
+        # set - 57 of 65 were delisted, median lifetime return -92.7% - i.e. a
+        # model's worst picks (round-29 R10-F11). Their traded value is instead
+        # estimated from measured volume x typical price, flagged and
+        # disclosed; only rows without a measured volume stay unexecutable.
+        unmeasured = ~panel["amount_measured"].astype(bool)
+        volume = pd.to_numeric(panel["volume"], errors="coerce")
+        typical = (pd.to_numeric(panel["high"], errors="coerce")
+                   + pd.to_numeric(panel["low"], errors="coerce")
+                   + pd.to_numeric(panel["close"], errors="coerce")) / 3.0
+        estimable = unmeasured & volume.notna() & typical.notna()
+        panel = panel.copy()
+        panel["amount_estimated"] = estimable
+        panel.loc[estimable, "amount"] = volume[estimable] * typical[estimable]
+        unexecutable = unmeasured & ~estimable
+        universe_note["amount_estimated_rows"] = int(estimable.sum())
+        universe_note["amount_estimated_symbols"] = int(panel.loc[estimable, "symbol"].nunique())
+        universe_note["excluded_rows_amount_and_volume_unmeasured"] = int(unexecutable.sum())
+        panel = panel[~unexecutable]
+        if "st_status" in panel.columns:
+            unknown_rows = float(panel["st_status"].astype(str).eq("UNKNOWN").mean())
+            panel_meta["st_unknown_row_share"] = round(unknown_rows, 4)
+            if unknown_rows > 0:
+                panel_meta["trust_class"] = ST_INCOMPLETE_TRUST_CLASS
+                print(f"[panel] ST status UNKNOWN on {unknown_rows:.1%} of rows (no dated "
+                      "SSE/BSE register): treated as non-ST; output stamped "
+                      f"trust_class={ST_INCOMPLETE_TRUST_CLASS}", file=sys.stderr, flush=True)
     else:
         panel = pd.read_parquet(PANEL, columns=panel_cols)
         panel["trade_date"] = pd.to_datetime(panel["trade_date"])
         panel = panel[panel["trade_date"] >= p_start]
         if p_end is not None:
             panel = panel[panel["trade_date"] <= p_end]
-        panel_meta = {"path": PANEL, "verified": False, "note": LEGACY_PANEL_NOTE}
+        panel_meta = {
+            "path": PANEL, "verified": False, "note": LEGACY_PANEL_NOTE,
+            "trust_class": LEGACY_PANEL_TRUST_CLASS,
+            "unverified_reason": allow_unverified_panel.strip(),
+        }
         print(f"[panel] WARNING {LEGACY_PANEL_NOTE}", file=sys.stderr, flush=True)
     sector = pd.read_parquet(SECTOR) if Path(SECTOR).exists() else pd.DataFrame()
 
@@ -350,6 +418,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
     if q_record is not None:
         out["trust_class"] = FORENSICS_TRUST_CLASS
         out["quarantine_override"] = q_record
+    elif panel_meta.get("trust_class"):
+        out["trust_class"] = panel_meta["trust_class"]
     for name in variants:
         v = spec[name]
         tw = _target_weights(
@@ -390,11 +460,21 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "execution_timing_semantics": EXECUTION_TIMING_SEMANTICS,
             "regime": _regime_excess(res.nav, bench),
             "corporate_action_credits_applied": corporate_actions,
+            # Point estimates of risk and cost belong next to the return
+            # (round-29 R7-F3: these were dropped from out.json).
+            "volatility": round(float(m.volatility), 4),
+            "turnover": round(float(m.turnover), 4),
+            "total_cost_cny": round(float(m.total_cost), 2),
+            "explicit_fees_cny": round(float(m.explicit_fees), 2),
+            "impact_cost_cny": round(float(m.impact_cost), 2),
+            "slippage_cost_cny": round(float(m.slippage_cost), 2),
+            "st_unknown_buy_value_share": _st_unknown_buy_share(res.trades, panel),
         }
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:
             saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k,
-                                      trust_class=(FORENSICS_TRUST_CLASS if q_record is not None else None))
+                                      trust_class=(FORENSICS_TRUST_CLASS if q_record is not None
+                                                   else panel_meta.get("trust_class")))
             out["ui_backtest_dir"] = saved
         print(f"{name:28} ann {m.annualized_return:+8.2%} | excess {m.annualized_return - bench_ann:+8.2%} | "
               f"sharpe {m.sharpe:5.2f} | maxDD {m.max_drawdown:6.2%}")
@@ -427,7 +507,11 @@ def main() -> int:
                     help=("Certified raw execution panel (e.g. runtime/data/gold/full_universe_r29/"
                           "execution_panel.parquet). Verified at entry: adjustment_method 'none', one "
                           "provider per symbol or a declared SourceBoundary, corporate-action credits. "
-                          "Default: the legacy v7 silver panel, reported as unverified."))
+                          f"Default: {CERTIFIED_PANEL} when present."))
+    ap.add_argument("--allow-unverified-panel", default=None, metavar="REASON",
+                    help=("Use the legacy v7 silver panel (today's ST list broadcast to history: "
+                          "look-ahead). Requires a justification; outputs are stamped "
+                          f"trust_class={LEGACY_PANEL_TRUST_CLASS}."))
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     try:
@@ -438,7 +522,8 @@ def main() -> int:
                        save_variant=args.save_variant,
                        variants=[v.strip() for v in args.variants.split(",") if v.strip()],
                        allow_quarantined=args.allow_quarantined,
-                       panel_path=args.panel)
+                       panel_path=args.panel,
+                       allow_unverified_panel=args.allow_unverified_panel)
     except QuarantineViolation as exc:
         print(str(exc), file=sys.stderr)
         return 3

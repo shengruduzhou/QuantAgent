@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { StateView } from "./components/StateView";
 import { InstitutionalShell } from "./vnext/shell/InstitutionalShell";
 
@@ -11,7 +12,11 @@ function WorkstationEntry(): JSX.Element {
     const search = params.toString();
     return <Navigate replace to={`${location.pathname}${search ? `?${search}` : ""}`} />;
   }
-  return <InstitutionalShell />;
+  return (
+    <ErrorBoundary scope="root" location={location.pathname}>
+      <InstitutionalShell />
+    </ErrorBoundary>
+  );
 }
 
 export function App(): JSX.Element {
