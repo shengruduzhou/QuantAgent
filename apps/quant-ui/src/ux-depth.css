@@ -88,9 +88,9 @@
 
 .parity-delivery-cell > span b {
   padding: 1px 4px;
-  border: 1px solid #2b4d63;
+  border: 1px solid var(--vnx-line-strong);
   border-radius: 2px;
-  color: #7f9bad;
+  color: var(--vnx-muted);
   font: 7px "JetBrains Mono Variable", monospace;
   text-align: center;
   text-transform: uppercase;
@@ -118,7 +118,7 @@
   margin-bottom: 6px;
   padding: 5px;
   border: 1px solid var(--border);
-  background: #06131d;
+  background: var(--vnx-surface-1);
 }
 
 .parity-quick-filters button {
@@ -127,10 +127,10 @@
   align-items: center;
   gap: 8px;
   padding: 0 9px;
-  border: 1px solid #1a374a;
+  border: 1px solid var(--vnx-line);
   border-radius: 3px;
-  background: #081823;
-  color: #8fa7b8;
+  background: var(--vnx-surface-1);
+  color: var(--vnx-text-soft);
   font-size: 9px;
 }
 
@@ -138,17 +138,17 @@
   min-width: 20px;
   padding: 1px 5px;
   border-radius: 10px;
-  background: #10283a;
-  color: #b7c8d3;
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-text);
   font: 8px "JetBrains Mono Variable", monospace;
   text-align: center;
 }
 
 .parity-quick-filters button:hover,
 .parity-quick-filters button.active {
-  border-color: #3978a2;
-  background: #0b2638;
-  color: #d9edf5;
+  border-color: var(--vnx-primary);
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-text-bright);
 }
 
 .parity-page-v2 .parity-inspector {
@@ -187,7 +187,7 @@
 .help-hero p {
   max-width: 850px;
   margin: 0;
-  color: #93a9b9;
+  color: var(--vnx-text-soft);
   font-size: 10px;
   line-height: 1.6;
 }
@@ -198,9 +198,9 @@
   gap: 11px;
   min-height: 64px;
   padding: 12px 14px;
-  border: 1px solid #1b5b54;
+  border: 1px solid var(--vnx-realtime);
   background: rgba(42, 200, 159, .055);
-  color: #48d6b1;
+  color: var(--vnx-success);
 }
 
 .help-safety span,
@@ -215,7 +215,7 @@
 
 .help-safety small {
   margin-top: 4px;
-  color: #86a9a4;
+  color: var(--vnx-muted);
   font-size: 9px;
   line-height: 1.45;
 }
@@ -236,14 +236,14 @@
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 5px;
-  background: #081721;
-  color: #8fb0c4;
+  background: var(--vnx-surface-1);
+  color: var(--vnx-primary);
 }
 
 .help-workflow-card:hover {
-  border-color: #356986;
-  background: #0a202f;
-  color: #d7ecf5;
+  border-color: var(--vnx-primary);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-bright);
 }
 
 .help-workflow-card strong,
@@ -252,13 +252,13 @@
 }
 
 .help-workflow-card strong {
-  color: #c8dce7;
+  color: var(--vnx-primary-strong);
   font-size: 11px;
 }
 
 .help-workflow-card small {
   margin-top: 5px;
-  color: #708b9e;
+  color: var(--vnx-muted);
   font-size: 8px;
   line-height: 1.45;
 }
@@ -294,18 +294,18 @@
 .help-shortcuts kbd {
   min-width: 132px;
   padding: 5px 8px;
-  border: 1px solid #31546c;
-  border-bottom-color: #4c7087;
+  border: 1px solid var(--vnx-primary);
+  border-bottom-color: var(--vnx-line-strong);
   border-radius: 3px;
-  background: #0a1b27;
-  color: #a8dce7;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-primary-strong);
   font-size: 9px;
   text-align: center;
 }
 
 .help-shortcuts span,
 .help-guide-list small {
-  color: #91a9b9;
+  color: var(--vnx-text-soft);
   font-size: 9px;
   line-height: 1.5;
 }
@@ -316,7 +316,7 @@
 }
 
 .help-guide-list strong {
-  color: #c3d6e1;
+  color: var(--vnx-text);
   font-size: 10px;
 }
 
@@ -331,15 +331,15 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 10px;
-  border: 1px solid #1f4054;
-  background: #081a26;
-  color: #8cbbea;
+  border: 1px solid var(--vnx-line-strong);
+  background: var(--vnx-surface-2);
+  color: var(--vnx-primary-strong);
   font-size: 9px;
 }
 
 .help-reference-panel p {
   margin: 0 10px 12px;
-  color: #70889a;
+  color: var(--vnx-muted);
   font-size: 8px;
   line-height: 1.55;
 }
@@ -351,10 +351,10 @@
 .backtest-context-note {
   margin: 8px;
   padding: 8px 10px;
-  border: 1px solid #294b61;
+  border: 1px solid var(--vnx-line-strong);
   border-left: 2px solid var(--ux-cyan);
-  background: #071a26;
-  color: #8fa8b9;
+  background: var(--vnx-surface-2);
+  color: var(--vnx-text-soft);
   font-size: 9px;
   line-height: 1.5;
 }
@@ -368,7 +368,7 @@
 
 .single-select-table tr[aria-selected="true"] {
   box-shadow: inset 3px 0 0 var(--ux-cyan);
-  background: #0c2940;
+  background: var(--vnx-surface-selected);
 }
 
 .single-select-table tbody tr {
@@ -405,10 +405,10 @@
   justify-content: space-between;
   gap: 7px;
   padding: 0 8px;
-  border: 1px solid #1b3749;
+  border: 1px solid var(--vnx-line);
   border-radius: 3px;
-  background: #071722;
-  color: #7892a5;
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
   font-size: 8px;
 }
 
@@ -417,15 +417,15 @@
 }
 
 .factor-utility-filters button strong {
-  color: #b6c8d3;
+  color: var(--vnx-text);
   font: 9px "JetBrains Mono Variable", monospace;
 }
 
 .factor-utility-filters button.active,
 .factor-utility-filters button:hover {
-  border-color: #34789a;
-  background: #0a2637;
-  color: #d0e4ed;
+  border-color: var(--vnx-primary);
+  background: var(--vnx-surface-selected);
+  color: var(--vnx-text-bright);
 }
 
 .factor-page-v2 .factor-count {
@@ -449,8 +449,8 @@
 .factor-sidebar-summary {
   padding: 9px 10px;
   border-top: 1px solid var(--border-soft);
-  background: #07141e;
-  color: #6f899b;
+  background: var(--vnx-surface-1);
+  color: var(--vnx-muted);
   font-size: 8px;
   line-height: 1.5;
 }
@@ -464,7 +464,7 @@
   margin-bottom: 7px;
   padding: 7px 9px;
   border: 1px solid var(--border);
-  background: #071721;
+  background: var(--vnx-surface-1);
 }
 
 .factor-commandbar > div {
@@ -479,7 +479,7 @@
 
 .factor-commandbar > div > strong {
   margin-top: 2px;
-  color: #c4d7e2;
+  color: var(--vnx-text);
   font-size: 11px;
 }
 
@@ -487,7 +487,7 @@
   max-width: 900px;
   margin-top: 3px;
   overflow: hidden;
-  color: #738c9e;
+  color: var(--vnx-muted);
   font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -511,8 +511,8 @@
   align-items: center;
   justify-content: flex-end;
   padding: 0 10px;
-  border-bottom: 1px solid #21445c;
-  color: #6f899c;
+  border-bottom: 1px solid var(--vnx-line-strong);
+  color: var(--vnx-muted);
   font-size: 8px;
   letter-spacing: .01em;
 }

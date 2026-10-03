@@ -133,7 +133,7 @@
   padding: 0 3px;
   border-radius: 8px;
   background: var(--vnx-warning);
-  color: #17120a;
+  color: var(--vnx-canvas);
   font: 700 8px var(--vnx-font-mono);
   font-style: normal;
 }
@@ -765,8 +765,8 @@
   gap: 7px;
   padding: 7px 10px;
   border-radius: var(--vnx-radius);
-  background: #34231a;
-  color: #f2c47b;
+  background: color-mix(in srgb, var(--vnx-warning) 18%, var(--vnx-surface-1));
+  color: var(--vnx-warning);
   box-shadow: 0 12px 30px var(--vnx-shadow);
   font-size: 11px;
 }
@@ -838,8 +838,8 @@
 }
 
 .vnext-dock-tabs em.warning {
-  background: #4a3518;
-  color: #f0c06d;
+  background: color-mix(in srgb, var(--vnx-warning) 22%, var(--vnx-surface-1));
+  color: var(--vnx-warning);
 }
 
 .vnext-dock-summary {
@@ -1045,7 +1045,7 @@
   overflow: auto;
   padding: 10px 12px;
   background: var(--vnx-code);
-  color: #aebfc8;
+  color: var(--vnx-text-soft);
   font: 10px/1.6 var(--vnx-font-mono);
   white-space: pre-wrap;
 }

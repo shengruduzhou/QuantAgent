@@ -12,7 +12,7 @@
   gap: 6px;
   padding: 3px 6px;
   border-bottom: 1px solid var(--border-soft);
-  background: #07131d;
+  background: var(--vnx-surface-1);
   color: var(--muted);
   font: 8px "JetBrains Mono Variable", monospace;
 }
@@ -41,7 +41,7 @@
   border: 1px solid transparent;
   border-radius: 2px;
   background: transparent;
-  color: #8ca2b5;
+  color: var(--vnx-text-soft);
   font-size: 8px;
 }
 
@@ -68,7 +68,7 @@
   top: 0;
   z-index: 2;
   padding: 0;
-  background: #091722;
+  background: var(--vnx-surface-1);
 }
 
 .monitor-table th,
@@ -102,7 +102,7 @@
   padding: 0 7px;
   border: 0;
   background: transparent;
-  color: #7f95a7;
+  color: var(--vnx-muted);
   font: 8px "JetBrains Mono Variable", monospace;
   text-align: inherit;
 }

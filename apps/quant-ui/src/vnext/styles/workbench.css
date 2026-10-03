@@ -1,14 +1,10 @@
 .vnext-shell {
-  --iw-ai: #a78bfa;
+  --iw-ai: var(--vnx-agent);
   --iw-ai-surface: color-mix(in srgb, var(--iw-ai) 12%, var(--vnx-surface-1));
-  --iw-cyan: #53cbd6;
+  --iw-cyan: var(--vnx-realtime);
   --iw-positive: var(--vnx-success);
   --iw-danger: var(--vnx-danger);
   --iw-warning: var(--vnx-warning);
-}
-
-.vnext-shell.theme-day {
-  --iw-ai: #7457c8;
 }
 
 .institutional-workbench {
@@ -389,8 +385,8 @@
 
 .vnext-shell.theme-day .job-json-editor {
   border-color: var(--vnx-line);
-  background: #14232c;
-  color: #d9e9f1;
+  background: var(--vnx-code);
+  color: var(--vnx-text);
 }
 
 .selection-empty-grid {
