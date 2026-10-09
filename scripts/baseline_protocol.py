@@ -197,6 +197,23 @@ def _st_unknown_buy_share(trades: pd.DataFrame | None, panel: pd.DataFrame) -> f
     return round(float(notional[unknown].sum()) / total, 4)
 
 
+_B_SHARE = r"^(200|900)\d{3}\."
+
+
+def _exclude_b_shares(panel: pd.DataFrame, preds: pd.DataFrame, note: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop B shares (SZ 200xxx in HKD, SH 900xxx in USD) and count them.
+
+    They are not A-share instruments: their prices are not CNY and a CNY A-share
+    account cannot buy them. The old amount filter dropped them only by
+    accident (round-29 R10 delta re-audit).
+    """
+    in_panel = panel["symbol"].astype(str).str.match(_B_SHARE)
+    in_preds = preds["symbol"].astype(str).str.match(_B_SHARE)
+    note["excluded_b_share_symbols"] = int(panel.loc[in_panel, "symbol"].nunique())
+    note["excluded_b_share_prediction_rows"] = int(in_preds.sum())
+    return panel[~in_panel], preds[~in_preds]
+
+
 def _sharpe_uncertainty(nav: pd.Series) -> dict[str, object]:
     """Point estimates alone overstate certainty: publish PSR, MinTRL and a
     dependence-preserving bootstrap interval next to the Sharpe ratio."""
@@ -331,6 +348,7 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         # one provider per symbol or a declared SourceBoundary, corporate-action
         # credits present) -- refused otherwise.
         panel, panel_meta = _load_verified_panel(panel_path, p_start, p_end)
+        panel, preds = _exclude_b_shares(panel, preds, universe_note)
         # A prediction with no execution row is not a signal anyone could act on.
         keyed = preds.merge(panel[["symbol", "trade_date"]], on=["symbol", "trade_date"])
         universe_note["predictions_without_execution_row"] = int(len(preds) - len(keyed))

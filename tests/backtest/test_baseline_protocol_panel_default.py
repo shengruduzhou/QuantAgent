@@ -45,3 +45,14 @@ def test_st_unknown_buy_share_counts_only_unmeasured_names():
         "st_status": ["UNKNOWN", "FALSE"],
     })
     assert baseline_protocol._st_unknown_buy_share(trades, panel) == 0.25
+
+
+def test_b_shares_are_excluded_and_counted():
+    """Round-29 R10: HKD/USD-quoted B shares were bought with prices read as CNY."""
+    panel = pd.DataFrame({"symbol": ["200054.SZ", "900901.SH", "000001.SZ"], "trade_date": pd.to_datetime(["2024-01-03"] * 3)})
+    preds = pd.DataFrame({"symbol": ["200054.SZ", "000001.SZ"], "trade_date": pd.to_datetime(["2024-01-02"] * 2)})
+    note: dict = {}
+    kept_panel, kept_preds = baseline_protocol._exclude_b_shares(panel, preds, note)
+    assert list(kept_panel["symbol"]) == ["000001.SZ"]
+    assert list(kept_preds["symbol"]) == ["000001.SZ"]
+    assert note == {"excluded_b_share_symbols": 2, "excluded_b_share_prediction_rows": 1}
