@@ -130,5 +130,12 @@ v7 银层面板本身未重建（已由单位审计脚本标记为 REFUTED），
 - **因子有效性**：r29 认证数据、隔离窗干净的 Alpha101 rank-IC 筛选：82 个可计算、|IC|>0.02 共 28 个、
   最佳 alpha040 0.067（ICIR 0.69）；已在 Factor Lab 展示（`runtime/reports/factor_evaluation/round29_r29_quarantine_clean/`）。
 
+**R10 增量复审（c042afd → fdec3c4）：** 阻断项 F01/F02/F03/F05/F06/F07/F09/F11 全部 CLOSED（F03 在真实数据上
+触及 holdout 的标签从 13/41/164 降到 0/0/0；F02 行业 C 0.36 → 0.30），F08 CLOSED（P2 注意：连续纸面循环
+用另一把锁）。F11 修复引入的新 P1——B 股（200xxx 港币、900xxx 美元）被当作人民币买入——已在合并前修复
+（1d4d82f）。全量测试 3930 passed / 47 skipped / 0 failed；前端 tsc、vitest 143、vite build 通过。
+残留（不阻断，已登记）：同一行业的冻结持仓本身已超行业上限时目标构建拒绝产出（失败即关闭，P2）；
+F07 黑名单未覆盖 `fwd_*`/`next_*`（P3）；R10-F04 回合统计未计送转（P2）。
+
 **合并：** 见下方合并记录（由主岗在复审确认与全量测试通过后合并到 `main` 并推送；PR #156 的 head
 提交随之进入 `main`）。仍维持 **RESEARCH / NOT LIVE READY；RL NOT ENABLED**。
