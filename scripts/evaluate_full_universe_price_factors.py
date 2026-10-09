@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from quantagent.backtest.quarantine import clean_label_mask
 
 GOLD = Path("runtime/data/gold/full_universe")
 LABEL = "forward_return_5d"
@@ -54,19 +57,37 @@ def main() -> int:
     ap.add_argument("--label", default=LABEL)
     ap.add_argument("--start", default=None, help="restrict to trade_date >= this")
     ap.add_argument("--output", type=Path, default=None)
+    ap.add_argument("--dataset", type=Path, default=None,
+                    help="labelled dataset (default: <gold>/dataset.parquet)")
+    ap.add_argument("--factors-dir", type=Path, default=None,
+                    help="directory holding factors_<family>.parquet (default: gold)")
+    ap.add_argument("--summary-csv", type=Path, default=None,
+                    help="also write a factor_summary.csv the Factor Lab adapter indexes")
     args = ap.parse_args()
 
-    artifact = GOLD / f"factors_{args.family}.parquet"
+    dataset_path = args.dataset or (GOLD / "dataset.parquet")
+    artifact = (args.factors_dir or GOLD) / f"factors_{args.family}.parquet"
     if not artifact.exists():
         print(f"BLOCKED_BY_DATA: {artifact} not built", file=sys.stderr)
         return 2
 
     base = pd.read_parquet(
-        GOLD / "dataset.parquet",
+        dataset_path,
         columns=["symbol", "trade_date", args.label, "entry_feasible"],
     )
     if args.start:
         base = base[base["trade_date"] >= pd.Timestamp(args.start)]
+    # A screen that ranks factors is a selection step: no label window may
+    # touch a quarantined holdout (configs/quarantined_windows.json).
+    horizon = re.fullmatch(r"forward_return_(\d+)d", args.label)
+    if horizon is None:
+        print(f"cannot infer the label horizon from {args.label!r}", file=sys.stderr)
+        return 2
+    clean = clean_label_mask(
+        base["trade_date"], horizon_sessions=int(horizon.group(1)), symbols=base["symbol"]
+    )
+    quarantine_rows_dropped = int((~clean).sum())
+    base = base[clean]
     tradable = base["entry_feasible"].astype(bool)
     print(
         f"[domain] rows={len(base):,} tradable={int(tradable.sum()):,} "
@@ -104,6 +125,7 @@ def main() -> int:
         "label": args.label,
         "domain": "entry_feasible only",
         "start": args.start,
+        "quarantine_rows_dropped": quarantine_rows_dropped,
         "factors_scored": int(frame["rank_ic"].notna().sum()),
         "factors_all_nan": int(frame["rank_ic"].isna().sum()),
         "median_abs_ic": round(float(frame["abs_ic"].median(skipna=True)), 6),
@@ -111,7 +133,22 @@ def main() -> int:
         "count_abs_icir_above_0.30": int((frame["icir"].abs() > 0.30).sum()),
         "top": frame.head(15).round(6).to_dict(orient="records"),
     }
+    payload["dataset"] = str(dataset_path)
+    payload["factors"] = frame.round(6).to_dict(orient="records")
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    if args.summary_csv is not None:
+        args.summary_csv.parent.mkdir(parents=True, exist_ok=True)
+        summary = pd.DataFrame({
+            "factor_name": frame["factor"],
+            "rank_ic": frame["rank_ic"],
+            "rank_icir": frame["icir"],
+            "ic_std": frame["ic_std"],
+            "n_dates": frame["n_dates"],
+            "label": args.label,
+            "domain": "entry_feasible, quarantine-clean label windows",
+            "dataset": str(dataset_path),
+        })
+        summary.to_csv(args.summary_csv, index=False)
     print(json.dumps({k: v for k, v in payload.items() if k != "top"}, ensure_ascii=False))
     print(f"[done] {out}")
     return 0

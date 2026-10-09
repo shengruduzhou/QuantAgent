@@ -294,6 +294,15 @@
   color: var(--vnx-primary-strong);
 }
 
+.market-chart-range > .market-chart-window {
+  padding: 2px 6px;
+  border: 1px dashed var(--vnx-primary);
+  border-radius: var(--vnx-radius-sm);
+  color: var(--vnx-primary-strong);
+  font: 600 var(--vnx-text-micro) var(--vnx-font-mono);
+  font-style: normal;
+}
+
 .market-chart-range > span {
   margin-left: auto;
   color: var(--vnx-muted-2);

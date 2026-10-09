@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
+import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { StateView } from "../../components/StateView";
 
 const VNextDashboard = lazy(() => import("../dashboard/VNextDashboard").then((module) => ({ default: module.VNextDashboard })));
@@ -28,6 +29,7 @@ const Help = lazy(() => import("../../pages/HelpCenterPage").then((module) => ({
 
 export function WorkspaceRoutes({ location }: { location: string }): JSX.Element {
   return (
+    <ErrorBoundary scope="workspace" resetKey={location} location={location}>
     <Suspense fallback={<StateView state="loading" detail="正在恢复工作区上下文。" />}>
       <Routes location={location}>
         <Route path="/" element={<VNextDashboard />} />
@@ -56,5 +58,6 @@ export function WorkspaceRoutes({ location }: { location: string }): JSX.Element
         <Route path="*" element={<StateView state="unavailable" title="工作站模块不存在" detail="请使用 Global Command Bar 打开已注册模块。" />} />
       </Routes>
     </Suspense>
+    </ErrorBoundary>
   );
 }

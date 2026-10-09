@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+import threading
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import polars as pl
 
 from services.quant_api.adapters.utils import (
@@ -19,6 +21,98 @@ from services.quant_api.adapters.utils import (
 )
 from services.quant_api.config import ApiSettings, safe_project_path, stable_id
 from services.quant_api.runtime_indexer import RuntimeIndexer
+from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
+from quantagent.backtest.quarantine import load_windows
+
+
+def _is_voided(directory: Path) -> bool:
+    """Directories an audit voided (``_VOID_*``) are evidence, not results."""
+    return any(part.startswith("_VOID") for part in directory.parts)
+
+
+def _evaluation_caveats(metrics: dict[str, Any], start: object, end: object) -> dict[str, Any]:
+    """What a reader must know before trusting this backtest's numbers.
+
+    ``timingSemantics`` is the clock stamp the run declared; runs without the
+    canonical stamp predate the next-session execution fix and their headline
+    numbers cannot be cited. ``quarantineOverlap`` names every quarantined
+    holdout the evaluation window touches.
+    """
+    stamp = metrics.get("execution_timing_semantics")
+    overlap: list[str] = []
+    try:
+        windows, _ = load_windows()
+        if start is not None:
+            first = pd.Timestamp(str(start))
+            last = pd.Timestamp(str(end)) if end is not None else None
+            for window in windows:
+                if first <= window.end and (last is None or last >= window.start):
+                    overlap.append(f"{window.start.date()}..{window.end.date()}")
+    except (ValueError, TypeError):
+        overlap.append("unparseable_window")
+    return {
+        "timingSemantics": stamp or "unstamped_pre_timing_fix",
+        "timingCanonical": stamp == EXECUTION_TIMING_SEMANTICS,
+        "quarantineOverlap": overlap,
+    }
+
+
+#: ``total_cost`` written by the strict engine after round-29 R1-F14 covers every
+#: fill (explicit fees + impact + slippage). Before it, the same key summed fees
+#: on FIFO-matched round trips only and left slippage out (a 43% understatement
+#: on the certified daily book), so an unlabelled ``total_cost`` is read as that.
+COST_BASIS_ALL_FILLS = "all_fills_explicit_fees_plus_impact_plus_slippage"
+COST_BASIS_PRE_FIX = "matched_round_trip_fees_only_pre_fix"
+
+
+def _cost_and_benchmark(metrics: dict[str, Any], *, has_benchmark_nav: bool) -> dict[str, Any]:
+    """Cost basis and benchmark identity a reader needs before comparing runs.
+
+    Absent fields stay ``None``: a run that recorded no cost is "not recorded",
+    never a zero-cost run, and a run with no benchmark has no excess.
+    """
+    total = metrics.get("total_cost")
+    if total is None:
+        total = metrics.get("total_cost_cny")
+    basis = metrics.get("total_cost_basis")
+    if total is None:
+        basis = None
+    elif basis is None:
+        # baseline_protocol's post-fix export publishes the breakdown instead of
+        # the basis string; the strict engine's pre-fix metrics have neither.
+        basis = COST_BASIS_ALL_FILLS if "slippage_cost_cny" in metrics or "slippage_cost" in metrics else COST_BASIS_PRE_FIX
+    slippage = metrics.get("slippage_cost")
+    if slippage is None:
+        slippage = metrics.get("slippage_cost_cny")
+
+    mode = metrics.get("benchmark_mode") or metrics.get("benchmark")
+    source = "metrics.benchmark_mode" if mode else None
+    if not mode and "benchmark_annualized_return" in metrics:
+        # scripts/baseline_protocol.py is the only producer of this key, and
+        # its benchmark is the frictionless equal-weight all-A mean.
+        mode, source = "universe_equal_weight", "baseline_protocol_export"
+    if not mode and has_benchmark_nav:
+        mode, source = "unlabelled", "nav.csv benchmark_nav column"
+    caveat = None
+    if mode and str(mode).startswith("universe_equal_weight"):
+        caveat = (
+            "universe_equal_weight includes untradeable names (limit-up, suspended, ST) "
+            "and pays no costs; excess against it is overstated"
+        )
+    elif mode == "unlabelled":
+        caveat = "benchmark column present but its identity was not recorded"
+    return {
+        "totalCost": clean_value(total) if total is not None else None,
+        "totalCostBasis": basis,
+        "slippageCost": clean_value(slippage) if slippage is not None else None,
+        "benchmark": {
+            "mode": str(mode) if mode else None,
+            "source": source,
+            "annualizedReturn": clean_value(metrics.get("benchmark_annualized_return")),
+            "gapSessions": clean_value(metrics.get("benchmark_nav_gap_sessions")),
+            "caveat": caveat,
+        } if mode else None,
+    }
 
 
 class BacktestAdapter:
@@ -26,11 +120,15 @@ class BacktestAdapter:
         self.settings = settings
         self.indexer = indexer
         self._runs: dict[str, Path] = {}
+        self._runs_lock = threading.Lock()
         self._name_map: dict[str, str] | None = None
 
     def list(self) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
-        self._runs = {}
+        # Built privately and published in one assignment: concurrent requests
+        # used to read the index while another request had just emptied it,
+        # returning spurious 404s that the UI rendered as "no backtests".
+        runs: dict[str, Path] = {}
         seen_directories: set[Path] = set()
         metric_artifacts = [
             item for item in self.indexer.filter(kind="backtest")
@@ -39,12 +137,14 @@ class BacktestAdapter:
         for artifact in metric_artifacts:
             metrics_path = safe_project_path(self.settings, artifact["path"])
             directory = metrics_path.parent
+            if _is_voided(directory):
+                continue
             if not ((directory / "nav.csv").exists() or (directory / "trades.csv").exists()):
                 continue
             seen_directories.add(directory.resolve())
             relative = require_relative_path(self.settings, directory)
             backtest_id = stable_id("backtest", relative)
-            self._runs[backtest_id] = directory
+            runs[backtest_id] = directory
             metrics = read_json(metrics_path, {}) or {}
             run_config = self._nearby_json(directory, "run_config.json")
             initial_cash = self._metric(run_config, "initial_cash")
@@ -76,7 +176,7 @@ class BacktestAdapter:
                 "fillCount": self._int_metric(metrics, "n_fills"),
                 "tTradeCount": self._int_metric(metrics, "t_trade_count", "do_t_trades"),
                 "tContribution": self._metric(metrics, "t_contribution", "overlay_total_return_delta"),
-                "totalCost": self._metric(metrics, "total_cost"),
+                **_cost_and_benchmark(metrics, has_benchmark_nav=_has_benchmark_nav(directory)),
                 "status": "ready",
                 "path": relative,
                 "tags": [item for item in (horizon, "strict-v8" if "risk_events.json" in {p.name for p in directory.iterdir()} else None) if item],
@@ -84,8 +184,15 @@ class BacktestAdapter:
                 "validationStatus": artifact.get("validationStatus", "unverified"),
                 "manifestPath": artifact.get("manifestPath"),
                 "capabilities": capabilities,
+                **_evaluation_caveats(
+                    metrics,
+                    self._metric(metrics, "start_date"),
+                    self._metric(metrics, "end_date"),
+                ),
             })
-        summaries.extend(self._discover_summary_backtests(seen_directories))
+        summaries.extend(self._discover_summary_backtests(seen_directories, runs))
+        with self._runs_lock:
+            self._runs = runs
         summaries.sort(key=lambda row: row.get("endDate") or "", reverse=True)
         return summaries
 
@@ -93,7 +200,9 @@ class BacktestAdapter:
         summary = next((item for item in self.list() if item["id"] == backtest_id), None)
         if summary is None:
             return None
-        directory = self._runs[backtest_id]
+        directory = self._runs.get(backtest_id)
+        if directory is None:
+            return None
         return {
             **summary,
             "files": sorted(require_relative_path(self.settings, item) for item in directory.iterdir() if item.is_file()),
@@ -341,7 +450,12 @@ class BacktestAdapter:
         directory = self._resolve(backtest_id)
         path = directory / "risk_events.json"
         if not path.exists():
-            return page_slice([], page, page_size)
+            # No artifact is not "zero events": the count is unmeasured.
+            return {
+                "items": [], "total": None, "totalIsExact": False, "loadedCount": 0,
+                "page": page, "pageSize": page_size, "hasNext": False,
+                "artifactMissing": True,
+            }
         start = (max(1, page) - 1) * page_size
         rows = list(iter_json_array(path, start=start, limit=page_size))
         events = []
@@ -433,9 +547,10 @@ class BacktestAdapter:
         }
 
     def _resolve(self, backtest_id: str) -> Path:
-        if backtest_id not in self._runs:
-            self.list()
         path = self._runs.get(backtest_id)
+        if path is None:
+            self.list()
+            path = self._runs.get(backtest_id)
         if path is None:
             raise KeyError(backtest_id)
         return path
@@ -484,7 +599,9 @@ class BacktestAdapter:
                 result[(row_symbol, str(row.get("sell_date") or "")[:10])].append(value)
         return result
 
-    def _discover_summary_backtests(self, seen_directories: set[Path]) -> list[dict[str, Any]]:
+    def _discover_summary_backtests(
+        self, seen_directories: set[Path], runs: dict[str, Path]
+    ) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
         summary_artifacts = [
             item for item in self.indexer.scan()
@@ -493,7 +610,7 @@ class BacktestAdapter:
         for artifact in summary_artifacts:
             summary_path = safe_project_path(self.settings, artifact["path"])
             directory = summary_path.parent
-            if directory.resolve() in seen_directories:
+            if directory.resolve() in seen_directories or _is_voided(directory):
                 continue
             if not any(
                 (directory / name).exists()
@@ -504,7 +621,7 @@ class BacktestAdapter:
             metrics = _best_metrics_payload(payload)
             relative = require_relative_path(self.settings, directory)
             backtest_id = stable_id("backtest", relative)
-            self._runs[backtest_id] = directory
+            runs[backtest_id] = directory
             start_date, end_date = _window_dates(payload.get("window"))
             config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
             capabilities = self._capabilities(directory)
@@ -533,7 +650,7 @@ class BacktestAdapter:
                 "fillCount": _int(_first_metric(metrics, "n_fills")),
                 "tTradeCount": _int(_first_metric(metrics, "do_t_trades", "executed_legs", "completed_round_trips")),
                 "tContribution": _first_metric(metrics, "annualized_uplift", "overlay_total_return_delta"),
-                "totalCost": _first_metric(metrics, "total_cost"),
+                **_cost_and_benchmark(metrics or {}, has_benchmark_nav=_has_benchmark_nav(directory)),
                 "status": "ready",
                 "path": relative,
                 "tags": ["summary-backed", "paper" if "paper" in relative else "research"],
@@ -541,6 +658,7 @@ class BacktestAdapter:
                 "validationStatus": artifact.get("validationStatus", "unverified"),
                 "manifestPath": artifact.get("manifestPath"),
                 "capabilities": capabilities,
+                **_evaluation_caveats(metrics or {}, start_date, end_date),
             })
         return summaries
 
@@ -619,6 +737,18 @@ def _best_metrics_payload(payload: dict[str, Any]) -> dict[str, Any]:
             merged.update(value)
             return merged
     return payload
+
+
+def _has_benchmark_nav(directory: Path) -> bool:
+    path = directory / "nav.csv"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            header = handle.readline()
+    except OSError:
+        return False
+    return "benchmark_nav" in [column.strip() for column in header.split(",")]
 
 
 def _first_metric(payload: dict[str, Any], *keys: str) -> Any:

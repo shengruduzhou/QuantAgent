@@ -29,7 +29,12 @@ def trusted_simulation_config() -> dict[str, object]:
 
 
 def trusted_cost_model_config() -> dict[str, object]:
-    return asdict(AShareCostModel())
+    payload = asdict(AShareCostModel())
+    if payload.get("stamp_tax_rate") is None:
+        # The certificate must state the rate actually charged, not "None".
+        payload["stamp_tax_rate"] = "statutory_dated"
+        payload["stamp_tax_schedule"] = {"before_2023-08-28": 0.001, "from_2023-08-28": 0.0005}
+    return payload
 
 
 __all__ = [

@@ -46,7 +46,7 @@ from quantagent.paper.account_identity import (
 )
 from quantagent.paper.account_lock import paper_account_lock
 from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
-from quantagent.paper.risk import RiskEngine, RiskLimits
+from quantagent.paper.risk import RiskEngine, RiskLimits, load_industry_map
 from quantagent.paper.canonical_receipt import (
     CanonicalPrefixReceiptError,
     build_canonical_prefix_index,
@@ -97,6 +97,11 @@ class ContinuousPaperExecutionConfig:
     risk_limits: "RiskLimits | None" = None
     execution_clock: str = "14:59:00+08:00"
     strategy_version: str = "v7_continuous_paper_v1"
+    #: ``symbol`` + ``industry`` table measuring industry concentration at the
+    #: venue. The current snapshot is point-in-time for forward paper. Without
+    #: it, and with ``max_industry_weight < 1.0``, every BUY is refused as
+    #: ``industry_unmeasured``; 1.0 is the explicit opt-out.
+    sector_map_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1050,6 +1055,12 @@ def _execute_pending_for_session_locked(
         canonical_ledger_path=config.canonical_ledger_path,
         paper_account_identity_sha256=account_identity.payload_sha256,
     )
+    try:
+        industry_map = (
+            load_industry_map(config.sector_map_path) if config.sector_map_path else None
+        )
+    except (OSError, ValueError) as exc:
+        raise ContinuousPaperExecutionBlocked(f"sector map is unreadable: {exc}") from exc
 
     results: list[ContinuousPaperExecutionResult] = []
     for pending in _pending_signals(store):
@@ -1209,6 +1220,13 @@ def _execute_pending_for_session_locked(
                 limits=config.risk_limits or RiskLimits(max_participation=1.0),
                 run_id=run_id,
             ),
+            industry_map=industry_map,
+        )
+        # Every held and target symbol's session price, so the venue values the
+        # whole book: with only the order's own price the second name raised
+        # UnpriceablePosition mid-batch and left a phantom SUBMITTED order.
+        broker.observe_marks(
+            prices.to_dict(), trade_date=as_of, clock=_snapshot_clock(config.execution_clock)
         )
         market_source = lambda symbol, trade_date: snapshots.get((str(symbol), str(trade_date)))
         adapter = PaperBrokerAdapter(broker=broker, market_source=market_source)

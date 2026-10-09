@@ -35,7 +35,7 @@ def test_stamp_tax_applies_only_on_sell():
 def test_transfer_fee_applies_both_sides():
     m = AShareCostModel(transfer_fee_rate=0.00001)
     buy = m.calculate(OrderSide.BUY, quantity=1000, price=100.0)
-    sell = m.calculate(OrderSide.SELL, quantity=1000, price=100.0)
+    sell = m.calculate(OrderSide.SELL, quantity=1000, price=100.0, trade_date="2024-03-05")
     assert buy["transfer_fee"] == pytest.approx(1.0)
     assert sell["transfer_fee"] == pytest.approx(1.0)
 
@@ -89,3 +89,22 @@ def test_negative_participation_rate_clamped():
         OrderSide.BUY, quantity=1000, price=100.0, participation_rate=-0.10
     )
     assert out["impact_cost"] == 0.0
+
+
+def test_stamp_duty_follows_the_statutory_schedule():
+    m = AShareCostModel()
+    before = m.calculate(OrderSide.SELL, quantity=1000, price=100.0, trade_date="2023-08-25")
+    after = m.calculate(OrderSide.SELL, quantity=1000, price=100.0, trade_date="2023-08-28")
+    assert before["stamp_duty"] == pytest.approx(100.0)  # 0.10%
+    assert after["stamp_duty"] == pytest.approx(50.0)  # 0.05%
+
+
+def test_undated_sell_is_refused_not_charged_todays_rate():
+    with pytest.raises(ValueError, match="trade_date"):
+        AShareCostModel().calculate(OrderSide.SELL, quantity=1000, price=100.0)
+
+
+def test_explicit_flat_stamp_rate_is_a_what_if_override():
+    m = AShareCostModel(stamp_tax_rate=0.0005)
+    out = m.calculate(OrderSide.SELL, quantity=1000, price=100.0)
+    assert out["stamp_duty"] == pytest.approx(50.0)

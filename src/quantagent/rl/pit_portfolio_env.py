@@ -5,6 +5,8 @@ The environment follows the repository's canonical execution semantics:
 * Observation / action time: signal close T.
 * Execution constraints: the next market session T+1.
 * Reward holding interval: close(T+1) -> close(T+2).
+* Known sessions include dates represented only in ``session_gaps``; an
+  entirely missing panel day must not silently shorten the market clock.
 * A training cutoff censors any transition whose *reward end* exceeds the
   cutoff; signal-date truncation alone is not sufficient.
 * Tradability is fail-closed on the execution session. A missing bar is accepted
@@ -200,8 +202,21 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         panel["close"] = pd.to_numeric(panel["close"], errors="coerce")
         panel_index = panel.set_index(["trade_date", "symbol"]).sort_index()
         px = panel.pivot(index="trade_date", columns="symbol", values="close").sort_index()
-        ret5 = px / px.shift(5) - 1.0
         gap_index = _prepare_session_gaps(session_gaps)
+        gap_sessions = pd.DatetimeIndex([date for date, _ in gap_index])
+        # Only gaps inside the panel's own span extend the clock: the U0 gap
+        # register covers 1990-2026, and a panel truncated for quarantine must
+        # trim its last signals rather than fail on gaps it never spans.
+        if len(px.index):
+            gap_sessions = gap_sessions[
+                (gap_sessions >= px.index.min()) & (gap_sessions <= px.index.max())
+            ]
+        sessions = pd.DatetimeIndex(px.index).union(gap_sessions).sort_values().unique()
+        # Keep known empty sessions in both the reward and feature clocks.
+        # Reindexing does not fabricate bars: _proven_close still requires
+        # explicit suspension evidence before carrying a valuation forward.
+        px = px.reindex(sessions)
+        ret5 = px / px.shift(5) - 1.0
 
         preds = predictions.copy()
         if "trade_date" not in preds.columns or "symbol" not in preds.columns:
@@ -230,7 +245,6 @@ class PITPortfolioEnv(gym.Env if gym is not None else object):
         cum = (1 + bench.fillna(0)).cumprod().shift(1)
         trail = cum / cum.shift(60) - 1.0
 
-        sessions = pd.DatetimeIndex(px.index).sort_values().unique()
         session_position = {
             pd.Timestamp(session): index for index, session in enumerate(sessions)
         }

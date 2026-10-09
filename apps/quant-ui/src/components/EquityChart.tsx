@@ -10,6 +10,18 @@ interface EquityChartProps {
   showDrawdown?: boolean;
 }
 
+/** Drawdown is stored as a negative fraction (-0.0609); read it as a percent. */
+export function formatDrawdownAxis(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  return `${(value * 100).toFixed(Math.abs(value) < 0.1 && value !== 0 ? 1 : 0)}%`;
+}
+
+function formatTooltipValue(value: unknown, kind: "nav" | "drawdown"): string {
+  const number = Array.isArray(value) ? value[value.length - 1] : value;
+  if (typeof number !== "number" || !Number.isFinite(number)) return "未测量";
+  return kind === "drawdown" ? `${(number * 100).toFixed(2)}%` : number.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+}
+
 function formatAxisDate(value: string): string {
   const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
   return match?.[1] ?? value;
@@ -23,12 +35,20 @@ export function EquityChart({
   const palette = useVNextChartPalette();
   const option = useMemo<EChartsOption>(() => {
     const hasBenchmark = points.some((point) => point.benchmarkNav !== null && point.benchmarkNav !== undefined);
+    // Benchmark NAV arrives as an index (~1.0) while the portfolio NAV is CNY:
+    // plotted raw it sat flat at 0 on the CNY axis and hid a benchmark that
+    // beat the strategy (round-29 R6). Rebase it to the portfolio's first NAV.
+    const anchor = points.find((point) => point.benchmarkNav != null && point.benchmarkNav !== 0
+      && Number.isFinite(point.benchmarkNav) && Number.isFinite(point.nav));
+    const benchmarkScale = anchor ? anchor.nav / (anchor.benchmarkNav as number) : null;
     const xAxisIndexes = showDrawdown ? [0, 1] : [0];
     return ({
     animation: false,
     backgroundColor: "transparent",
     grid: showDrawdown
-      ? [{ left: 64, right: 18, top: 34, height: "53%" }, { left: 64, right: 18, top: "69%", height: "13%" }]
+      // The drawdown pane used to be 13% tall with 8 stacked tick labels;
+      // it now gets ~22% and two ticks so its labels never overlap.
+      ? [{ left: 64, right: 18, top: 34, height: "46%" }, { left: 64, right: 18, top: "64%", height: "21%" }]
       : { left: 64, right: 18, top: 34, bottom: 46 },
     legend: {
       show: hasBenchmark,
@@ -56,7 +76,7 @@ export function EquityChart({
     yAxis: showDrawdown
       ? [
           { type: "value", scale: true, axisLabel: { color: palette.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { lineStyle: { color: palette.grid } } },
-          { type: "value", gridIndex: 1, axisLabel: { color: palette.muted, fontSize: 10, formatter: "{value}" }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { show: false } },
+          { type: "value", gridIndex: 1, max: 0, splitNumber: 2, name: "回撤", nameLocation: "middle", nameGap: 46, nameTextStyle: { color: palette.muted, fontSize: 10 }, axisLabel: { color: palette.muted, fontSize: 10, hideOverlap: true, formatter: formatDrawdownAxis }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { lineStyle: { color: palette.grid } } },
         ]
       : { type: "value", scale: true, axisLabel: { color: palette.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false }, splitLine: { lineStyle: { color: palette.grid } } },
     dataZoom: [
@@ -75,10 +95,10 @@ export function EquityChart({
         height: 13,
         borderColor: palette.axis,
         backgroundColor: palette.slider,
-        fillerColor: "rgba(76, 141, 255, .18)",
+        fillerColor: palette.sliderSelected,
         dataBackground: { lineStyle: { color: palette.muted }, areaStyle: { color: palette.sliderData } },
-        selectedDataBackground: { lineStyle: { color: "#4c8dff" }, areaStyle: { color: palette.sliderSelected } },
-        handleStyle: { color: "#75a9ff", borderColor: "#75a9ff" },
+        selectedDataBackground: { lineStyle: { color: palette.primary }, areaStyle: { color: palette.sliderSelected } },
+        handleStyle: { color: palette.primary, borderColor: palette.primary },
         textStyle: { color: palette.muted, fontSize: 9 },
       },
     ],
@@ -88,16 +108,18 @@ export function EquityChart({
         type: "line",
         data: points.map((point) => point.nav),
         showSymbol: false,
-        lineStyle: { color: "#2f83ff", width: 1.8 },
-        areaStyle: { color: "rgba(47,131,255,.06)" },
+        lineStyle: { color: palette.primary, width: 1.8 },
+        areaStyle: { color: palette.primary, opacity: 0.06 },
+        tooltip: { valueFormatter: (value: unknown) => formatTooltipValue(value, "nav") },
       },
-      ...(hasBenchmark
+      ...(hasBenchmark && benchmarkScale !== null
         ? [{
-            name: "Benchmark NAV",
+            name: "Benchmark (rebased to initial NAV)",
             type: "line" as const,
-            data: points.map((point) => point.benchmarkNav ?? null),
+            data: points.map((point) => (point.benchmarkNav == null ? null : point.benchmarkNav * benchmarkScale)),
             showSymbol: false,
-            lineStyle: { color: "#6f8798", width: 1.2, type: "dashed" as const },
+            lineStyle: { color: palette.muted, width: 1.2, type: "dashed" as const },
+            tooltip: { valueFormatter: (value: unknown) => formatTooltipValue(value, "nav") },
           }]
         : []),
       ...(showDrawdown
@@ -108,8 +130,10 @@ export function EquityChart({
             yAxisIndex: 1,
             data: points.map((point) => point.drawdown ?? null),
             showSymbol: false,
-            lineStyle: { color: "#f05a5a", width: 1.2 },
-            areaStyle: { color: "rgba(240,90,90,.16)" },
+            // A risk measure, so status danger — not market red, which means "up".
+            lineStyle: { color: palette.danger, width: 1.2 },
+            areaStyle: { color: palette.danger, opacity: 0.16 },
+            tooltip: { valueFormatter: (value: unknown) => formatTooltipValue(value, "drawdown") },
           }]
         : []),
     ],

@@ -56,6 +56,7 @@ from quantagent.execution.broker_base import (
     Order as WireOrder,
     OrderSide,
     OrderType,
+    VenueRefusal,
 )
 from quantagent.execution.order_manager import (
     IdempotencyConflict,
@@ -65,8 +66,18 @@ from quantagent.execution.order_manager import (
 )
 from quantagent.execution.paper_adapter import PaperBrokerAdapter
 from quantagent.paper import ledger as paper_ledger
-from quantagent.paper.broker import BrokerConfig, MarketSnapshot, PaperBroker
-from quantagent.paper.risk import RiskEngine, RiskLimits
+from quantagent.paper.account_identity import (
+    PaperAccountIdentityError,
+    PaperAccountIdentityStore,
+    account_identity_path_for_canonical,
+)
+from quantagent.paper.broker import (
+    BrokerConfig,
+    InvalidMarketSnapshot,
+    MarketSnapshot,
+    PaperBroker,
+)
+from quantagent.paper.risk import RiskEngine, RiskLimits, load_industry_map
 from quantagent.paper.portfolio import Portfolio
 from quantagent.safety.operating_mode import (
     OperatingModeState,
@@ -85,6 +96,7 @@ INTERRUPTED = "interrupted"
 MISSING_IDEMPOTENCY_KEY = "missing_idempotency_key"
 MISSING_LINEAGE = "missing_lineage"
 MARKET_DATA_UNAVAILABLE = "market_data_unavailable"
+MARKET_DATA_INVALID = "market_data_invalid"
 
 MarketSource = Callable[[str, str], MarketSnapshot | None]
 
@@ -121,6 +133,15 @@ class SubmissionRejected(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class MarketDataRefused(SubmissionRejected, VenueRefusal):
+    """No usable market snapshot for the order's session.
+
+    A `SubmissionRejected` for the HTTP layer and a `VenueRefusal` for the order
+    manager: if the lookup fails inside the venue rather than before it, the OMS
+    terminates the canonical order instead of leaving it SUBMITTED.
+    """
 
 
 class WriterLockUnavailable(RuntimeError):
@@ -254,8 +275,21 @@ class PaperOrderService:
         broker_config: BrokerConfig | None = None,
         risk_limits: RiskLimits | None = None,
         acquire_writer_lock: bool = True,
+        industry_map: Mapping[str, str] | None = None,
+        sector_map_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self.root = Path(root)
+        # Where the venue's industry map came from, or why there is none. An
+        # unreadable map must not take the API down; it leaves the map absent,
+        # so BUYs are refused `industry_unmeasured`, and says so.
+        self.industry_map_source: str | None = "injected" if industry_map else None
+        self.industry_map_error: str | None = None
+        if industry_map is None and sector_map_path is not None:
+            try:
+                industry_map = load_industry_map(sector_map_path)
+                self.industry_map_source = str(sector_map_path)
+            except (OSError, ValueError, ImportError) as exc:
+                self.industry_map_error = f"sector map {sector_map_path} unreadable: {exc}"
         self.root.mkdir(parents=True, exist_ok=True)
         self.broker_config = broker_config or BrokerConfig()
         self.mode = OperatingModeState(mode=PAPER)
@@ -310,6 +344,10 @@ class PaperOrderService:
                 ),
                 run_id="paper_api",
             ),
+            # Without a map, a BUY is refused `industry_unmeasured` while the
+            # industry limit is below 1.0: unmeasured concentration is not
+            # "within limit".
+            industry_map=industry_map,
         )
         self.adapter = PaperBrokerAdapter(self.broker, self._market_for)
         self.manager = OrderManager(
@@ -447,15 +485,53 @@ class PaperOrderService:
 
     # -- market data --------------------------------------------------------
     def _market_for(self, symbol: str, trade_date: str) -> MarketSnapshot:
-        snapshot = self.market_source(symbol, trade_date) if self.market_source else None
+        try:
+            snapshot = self.market_source(symbol, trade_date) if self.market_source else None
+        except InvalidMarketSnapshot as exc:
+            # A NaN volume used to fill the whole order uncapped at zero impact.
+            raise MarketDataRefused(
+                MARKET_DATA_INVALID,
+                f"market data for {symbol} on {trade_date} is not a measurement: {exc}",
+            ) from exc
         if snapshot is None:
-            raise SubmissionRejected(
+            raise MarketDataRefused(
                 MARKET_DATA_UNAVAILABLE,
                 f"no market data for {symbol} on {trade_date}. This path fills at a "
                 "real observed price or not at all; inventing one would make the fill "
                 "a property of the server rather than of the market.",
             )
         return snapshot
+
+    def _roll_session(self, trade_date: str) -> None:
+        """Close the venue's previous session before trading a later one.
+
+        Closing settles T+1 purchases. A long-lived API process never closed a
+        session, so shares bought through this endpoint stayed pending forever
+        and became sellable only after a restart rebuilt them from the ledger.
+        """
+        current = self.broker.session
+        if current is not None and str(trade_date)[:10] > current:
+            self.broker.close_session(current)
+
+    def _mark_held_positions(self, trade_date: str) -> None:
+        """Give the venue a mark for every held name on the order's session.
+
+        The risk engine values the whole book. A held name the venue has never
+        seen a quote for (e.g. after a restart) leaves the book unvaluable, and
+        a BUY is then refused `book_priceable` rather than sized against a
+        partial book. A missing quote here is left missing, never invented.
+        """
+        if self.market_source is None:
+            return
+        for symbol, position in list(self.broker.portfolio.positions.items()):
+            if position.is_flat:
+                continue
+            try:
+                snapshot = self.market_source(symbol, trade_date)
+            except InvalidMarketSnapshot:
+                continue
+            if snapshot is not None:
+                self.broker.observe(snapshot)
 
     def _restore_portfolio(self) -> None:
         _, account = self.ledger.replay(initial_cash=self.initial_cash)
@@ -599,6 +675,14 @@ class PaperOrderService:
         )
 
         try:
+            # Resolve the session's market data before the order manager opens a
+            # canonical order. Risk approval without the snapshot the venue will
+            # price against approves nothing, and a refusal discovered inside the
+            # venue used to leave CREATED + RISK_APPROVED + SUBMITTED behind with
+            # no working order anywhere.
+            self._market_for(request.symbol, request.trade_date)
+            self._roll_session(request.trade_date)
+            self._mark_held_positions(request.trade_date)
             states = self.manager.submit_orders([wire])
         except SubmissionRejected as exc:
             # No market data: nothing economic happened, and saying so is more
@@ -797,13 +881,158 @@ class PaperOrderService:
             "mode": self.mode.to_dict(),
             "writable": self.writable,
             "writerLockError": self.writer_lock_error,
+            "accountIdentity": self.account_identity(),
+            "riskState": self.risk_state(),
+        }
+
+    def account_identity(self) -> dict[str, Any]:
+        """Which paper account this is. Absent identity fields are null with a reason."""
+        path = account_identity_path_for_canonical(self.ledger_path)
+        reasons: dict[str, str] = {}
+        identity = None
+        try:
+            identity = PaperAccountIdentityStore(path).read()
+        except PaperAccountIdentityError as exc:
+            reasons["accountInstanceId"] = reasons["identitySha256"] = (
+                f"identity_record_unreadable: {exc}"
+            )
+        if identity is None and not reasons:
+            reasons["accountInstanceId"] = reasons["identitySha256"] = (
+                "no_identity_record: this HTTP paper account has no immutable identity "
+                "file; portfolioId and initialCash are process configuration"
+            )
+        return {
+            "portfolioId": self.broker.portfolio.portfolio_id,
+            "initialCash": self.initial_cash,
+            "accountInstanceId": identity.account_instance_id if identity else None,
+            "identitySha256": identity.payload_sha256 if identity else None,
+            "identityPath": str(path),
+            "reasons": reasons,
+        }
+
+    def risk_state(self) -> dict[str, Any]:
+        """What the venue's risk engine sees, measured from its own last marks.
+
+        Every value the engine has not measured is null with an entry in
+        `reasons` — never 0, which would read as "no drawdown" or "no turnover".
+        """
+        broker = self.broker
+        engine = broker.risk_engine
+        reasons: dict[str, str] = {}
+        portfolio = broker.portfolio
+        marks = dict(broker.marks)
+        unpriceable = list(broker.unpriceable_symbols())
+        nav = None if unpriceable else float(portfolio.equity(marks))
+        if nav is None:
+            reasons["nav"] = "unpriceable_positions: " + ",".join(unpriceable)
+
+        switches = [
+            {"scope": r["scope"], "key": r.get("key"), "reason": r["reason"],
+             "triggeredAt": r.get("triggered_at")}
+            for r in broker.kill_switch.active()
+        ]
+        first = switches[0] if switches else None
+        kill_switch = {
+            "active": bool(switches),
+            "scope": first["scope"] if first else None,
+            "reason": first["reason"] if first else None,
+            "triggeredAt": first["triggeredAt"] if first else None,
+            "reduceOnly": bool(switches) and all(s["scope"] == "PORTFOLIO" for s in switches),
+            "switches": switches,
+        }
+        if not switches:
+            reasons["killSwitch"] = "no_active_kill_switch"
+
+        if engine is None:
+            reasons["riskEngine"] = "no_risk_engine_attached: no portfolio limit is applied"
+            return {
+                "riskEngineAttached": False, "limits": None, "killSwitch": kill_switch,
+                "peakEquity": None, "drawdownFromPeak": None, "nav": nav,
+                "sessionTurnover": None, "sessionStartEquity": None,
+                "unpriceableSymbols": unpriceable, "industryLimitEnforced": False,
+                "industryLimit": None, "lastPortfolioCheck": None,
+                "valuationMarks": {"source": "venue_last_observed", "count": len(marks)},
+                "reasons": reasons,
+            }
+
+        peak = engine.peak_equity
+        if peak is None:
+            reasons["peakEquity"] = "no_equity_observation"
+        drawdown = None
+        if nav is not None and peak:
+            drawdown = max(0.0, 1.0 - nav / peak)
+        else:
+            reasons["drawdownFromPeak"] = (
+                "nav_unavailable" if nav is None else "peak_equity_unavailable"
+            )
+
+        session_turnover = None
+        if engine.session_date is None:
+            reasons["sessionTurnover"] = "no_session_observed_by_this_process"
+        else:
+            session_turnover = {
+                "session": engine.session_date,
+                "notional": float(engine.session_turnover),
+                "fractionOfNav": (float(engine.session_turnover) / nav) if nav else None,
+                "limit": engine.limits.max_daily_turnover,
+            }
+        if engine.session_start_equity is None:
+            reasons["sessionStartEquity"] = "no_session_start_valuation"
+
+        limit = float(engine.limits.max_industry_weight)
+        map_loaded = bool(broker.industry_map)
+        if limit >= 1.0:
+            mode = "opt_out"
+        elif map_loaded:
+            mode = "measured_with_map"
+        else:
+            mode = "refuse_unmeasured"
+            reasons["industryLimit"] = (
+                "no industry map: every BUY is refused industry_unmeasured"
+                + (f" ({self.industry_map_error})" if self.industry_map_error else "")
+            )
+        decision = engine.last_portfolio_decision
+        if decision is None:
+            reasons["lastPortfolioCheck"] = "no_portfolio_check_run_in_this_process"
+        return {
+            "riskEngineAttached": True,
+            "limits": engine.limits.to_dict(),
+            "killSwitch": kill_switch,
+            "peakEquity": peak,
+            "drawdownFromPeak": drawdown,
+            "nav": nav,
+            "sessionTurnover": session_turnover,
+            "sessionStartEquity": engine.session_start_equity,
+            # Daily-loss breach: buys halted for this exchange session only.
+            "dailyLossHalt": {
+                "active": engine.loss_halted_session is not None
+                and engine.loss_halted_session == engine.session_date,
+                "session": engine.loss_halted_session,
+                "limitCny": engine.daily_loss_limit_cny()
+                if engine.session_start_equity is not None else None,
+            },
+            "unpriceableSymbols": unpriceable,
+            "industryLimitEnforced": limit < 1.0,
+            "industryLimit": {
+                "limit": limit,
+                "mode": mode,
+                "mapLoaded": map_loaded,
+                "mapSymbolCount": len(broker.industry_map),
+                "source": self.industry_map_source,
+                "error": self.industry_map_error,
+            },
+            "lastPortfolioCheck": decision.to_dict() if decision is not None else None,
+            "valuationMarks": {"source": "venue_last_observed", "count": len(marks)},
+            "reasons": reasons,
         }
 
 
 __all__ = [
     "EXECUTED",
     "INTERRUPTED",
+    "MARKET_DATA_INVALID",
     "MARKET_DATA_UNAVAILABLE",
+    "MarketDataRefused",
     "MISSING_IDEMPOTENCY_KEY",
     "MISSING_LINEAGE",
     "PaperOrderRequest",

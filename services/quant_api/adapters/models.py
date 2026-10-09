@@ -389,7 +389,9 @@ class ModelAdapter:
                 gpu_name=summary.get("gpu_name"),
                 production_ready=False,
                 status="ready",
-                verdict=str(evaluation.get("verdict") or summary.get("status") or "research"),
+                # A training summary is not an evaluation; an RL policy with no
+                # verdict artifact is "unevaluated", never "passed".
+                verdict=str(evaluation.get("verdict") or "unevaluated"),
                 source_kind="rl_policy",
                 capabilities={
                     "trainingMetrics": bool(summary),

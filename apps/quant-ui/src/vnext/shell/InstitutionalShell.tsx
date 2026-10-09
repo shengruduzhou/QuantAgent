@@ -3,6 +3,7 @@ import { WarningCircle, X } from "@phosphor-icons/react";
 import type { JobSummary, SystemOverview } from "../../api/types";
 import { useApi } from "../../hooks/useApi";
 import { useJobEvents } from "../../hooks/useJobEvents";
+import { usePaperAccount } from "../../hooks/usePaperAccount";
 import { moduleForVNextPath } from "../workspace/modules";
 import { useWorkspaceStore } from "../workspace/useWorkspaceStore";
 import { EntityCommandPalette } from "./EntityCommandPalette";
@@ -18,6 +19,7 @@ export function InstitutionalShell(): JSX.Element {
   const workspace = useWorkspaceStore();
   const overview = useApi<SystemOverview>(["system-overview-shell"], "/system/overview", undefined, { refetchInterval: 15_000, staleTime: 10_000 });
   const jobs = useApi<JobSummary[]>(["global-activity-jobs"], "/jobs", undefined, { refetchInterval: 5_000, staleTime: 2_000 });
+  const paperAccount = usePaperAccount();
   const realtime = useJobEvents(true);
   const data = overview.data?.data;
   const jobItems = jobs.data?.data ?? [];
@@ -61,6 +63,8 @@ export function InstitutionalShell(): JSX.Element {
         activeTab={workspace.activeTab}
         overview={data}
         apiState={overview.isLoading ? "loading" : overview.isError ? "error" : "ready"}
+        paperAccount={paperAccount.data?.data?.riskState ? paperAccount.data.data : undefined}
+        paperAccountState={paperAccount.isLoading ? "loading" : paperAccount.isError ? "error" : "ready"}
         jobs={jobItems}
         realtime={realtime}
         railExpanded={workspace.state.railExpanded}

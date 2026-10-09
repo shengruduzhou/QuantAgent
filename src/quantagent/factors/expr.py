@@ -12,7 +12,8 @@ Key guarantees:
   per ``symbol`` group and respect the ascending ``trade_date`` sort.
 * The DSL has **zero look-ahead**: every operator uses only data
   observed up to and including the current row (``Delay`` shifts
-  values forward in time but never backward).
+  values forward in time but never backward). Constructors enforce it:
+  a lag or window below 1 raises, because ``Delay(x, -1)`` is a lead.
 * ``Rank`` is cross-sectional per ``trade_date`` so it's safe to
   combine ranks across symbols on the same day.
 
@@ -29,6 +30,14 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+
+
+def _require_positive_int(owner: str, name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) < 1:
+        raise ValueError(
+            f"{owner}.{name} must be an integer >= 1 (got {value!r}); a non-positive "
+            "lag or window reads the current or a future row"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +155,9 @@ class Delay(Expr):
     expr: Expr
     periods: int = 1
 
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "periods", self.periods)
+
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         values = self.expr.evaluate(frame)
         sorted_frame = _ensure_sorted(frame)
@@ -160,6 +172,9 @@ class Delta(Expr):
     expr: Expr
     periods: int = 1
 
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "periods", self.periods)
+
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         current = self.expr.evaluate(frame)
         shifted = Delay(self.expr, self.periods).evaluate(frame)
@@ -171,6 +186,9 @@ class _RollingReduction(Expr):
     expr: Expr
     window: int
     op: str
+
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "window", self.window)
 
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         values = self.expr.evaluate(frame)
@@ -219,6 +237,9 @@ class TsRank(Expr):
     expr: Expr
     window: int
 
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "window", self.window)
+
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         values = self.expr.evaluate(frame)
         sorted_frame = _ensure_sorted(frame)
@@ -261,6 +282,9 @@ class Returns(Expr):
     expr: Expr
     periods: int = 1
 
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "periods", self.periods)
+
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         current = self.expr.evaluate(frame)
         delayed = Delay(self.expr, self.periods).evaluate(frame)
@@ -274,6 +298,9 @@ class TsCorr(Expr):
     left: Expr
     right: Expr
     window: int
+
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "window", self.window)
 
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         left_values = self.left.evaluate(frame)
@@ -302,6 +329,9 @@ class TsCov(Expr):
     right: Expr
     window: int
 
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "window", self.window)
+
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         left_values = self.left.evaluate(frame)
         right_values = self.right.evaluate(frame)
@@ -327,6 +357,9 @@ class DecayLinear(Expr):
 
     expr: Expr
     window: int
+
+    def __post_init__(self) -> None:
+        _require_positive_int(type(self).__name__, "window", self.window)
 
     def evaluate(self, frame: pd.DataFrame) -> pd.Series:
         values = self.expr.evaluate(frame)

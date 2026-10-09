@@ -296,17 +296,29 @@ def board_price_limit_vector(
     }
     result = symbols.map(ordinary_by_symbol).astype(float)
 
+    if isinstance(trade_dates, pd.Series):
+        dates = trade_dates.reindex(symbols.index)
+    else:
+        dates = pd.Series(trade_dates, index=symbols.index)
+    # ChiNext's ordinary band is date-versioned (10% before 2020-08-24).
+    boards = symbols.map({s: exchange_rules.exchange_board_for_symbol(s) for s in uniq})
+    chinext = boards.eq(exchange_rules.CHINEXT)
+    if bool(chinext.any()):
+        parsed = pd.to_datetime(dates.loc[chinext], errors="coerce")
+        if bool(parsed.isna().any()):
+            raise ValueError(
+                "ChiNext price limits changed on 2020-08-24 (10% -> 20%); "
+                "trade_dates are required for every ChiNext row"
+            )
+        legacy = parsed < pd.Timestamp(exchange_rules.CHINEXT_REGISTRATION_REFORM)
+        result.loc[legacy.index[legacy.to_numpy()]] = exchange_rules.CHINEXT_LEGACY_LIMIT
+
     if isinstance(is_st, pd.Series):
         st_mask = is_st.reindex(symbols.index).fillna(False).astype(bool)
     else:
         st_mask = pd.Series(bool(is_st), index=symbols.index, dtype=bool)
     if not bool(st_mask.any()):
         return result
-
-    if isinstance(trade_dates, pd.Series):
-        dates = trade_dates.reindex(symbols.index)
-    else:
-        dates = pd.Series(trade_dates, index=symbols.index)
 
     for idx in symbols.index[st_mask]:
         result.loc[idx] = daily_price_limit(

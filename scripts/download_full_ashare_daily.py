@@ -81,7 +81,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", default="20200101")
     parser.add_argument("--end", default=pd.Timestamp.today().strftime("%Y%m%d"))
-    parser.add_argument("--adjust", default="", choices=["", "qfq", "hfq"])
+    parser.add_argument(
+        "--research-only-vendor-adjust", default="", choices=["", "qfq", "hfq"],
+        help="RESEARCH ONLY. Canonical shards are raw (adjust=''): vendor qfq is "
+             "subtractive on EastMoney/Tencent but multiplicative on Sina and is "
+             "rewritten on every ex-date, so it never feeds a panel. Adjusted "
+             "prices come from U0 hfq factors (scripts/u0_pit_intervals.py).",
+    )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=0, help="0 = whole universe")
@@ -91,7 +97,12 @@ def main(argv=None) -> int:
     socket.setdefaulttimeout(SOCKET_TIMEOUT_SECONDS)
     import akshare as ak
 
-    shard_dir = args.out / f"adjust={args.adjust or 'none'}"
+    args.adjust = args.research_only_vendor_adjust
+    # Vendor-adjusted shards are segregated by name so consolidate_ashare_daily
+    # (which globs adjust=none) can never pick them up.
+    shard_dir = args.out / (
+        f"adjust={args.adjust}__RESEARCH_ONLY_vendor_adjusted" if args.adjust else "adjust=none"
+    )
     shard_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"akshare {ak.__version__}  window {args.start}..{args.end}  "

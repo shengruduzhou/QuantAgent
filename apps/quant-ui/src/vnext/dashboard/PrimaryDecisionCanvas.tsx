@@ -4,7 +4,9 @@ import type { BacktestSummary, EquityPoint, JobSummary, ModelSummary, Page, Risk
 import { EquityChart } from "../../components/EquityChart";
 import { StateView } from "../../components/StateView";
 import { formatDate, formatNumber, formatPercent } from "../../utils/format";
-import type { DecisionView, RiskRuleView } from "./types";
+import type { DecisionView } from "./types";
+import type { VenueRuleRow } from "../paper/venueRules";
+import { VenueRuleTable } from "../paper/VenueRuleTable";
 
 const viewLabels: Array<{ id: DecisionView; label: string }> = [
   { id: "portfolio", label: "Portfolio" },
@@ -22,7 +24,7 @@ interface PrimaryDecisionCanvasProps {
   backtest?: BacktestSummary | null;
   model?: ModelSummary | null;
   risk: RiskOverview;
-  riskRules: RiskRuleView[];
+  riskRules: VenueRuleRow[];
   trades?: Page<Trade>;
   jobs: JobSummary[];
 }
@@ -58,7 +60,7 @@ function PortfolioView(props: PrimaryDecisionCanvasProps): JSX.Element {
       </div>
       <aside className="vnext-canvas-context">
         <section><h3>Major trades</h3>{largestTrades.length ? largestTrades.map((trade) => <Link key={trade.id} to={`/stock-replay?symbol=${trade.symbol}&backtestId=${props.backtest?.id ?? ""}`}><span><strong>{trade.symbol}</strong><small>{trade.action} · {formatDate(trade.datetime)}</small></span><em>{formatNumber(trade.amount)}</em></Link>) : <p>暂无 persisted fills。</p>}</section>
-        <section><h3>Active risk</h3><div className="vnext-inline-risk"><span>Drawdown <strong>{formatPercent(props.risk.maxDrawdown)}</strong></span><span>Liquidity <strong>{formatPercent(props.risk.liquidityRisk)}</strong></span><span>Limit-down <strong>{formatPercent(props.risk.limitDownRisk)}</strong></span></div><Link to="/risk">Inspect exact limits <ArrowRight size={13} /></Link></section>
+        <section><h3>Backtest risk{props.risk.backtestName ? ` · ${props.risk.backtestName}` : ""}</h3><div className="vnext-inline-risk"><span>Max drawdown <strong>{formatPercent(props.risk.maxDrawdown)}</strong></span><span>Liquidity events{props.risk.eventCountsExact === false ? " (first 1,000)" : ""} <strong>{formatPercent(props.risk.liquidityRisk)}</strong></span><span>Limit-down events <strong>{formatPercent(props.risk.limitDownRisk)}</strong></span></div><Link to={props.risk.backtestId ? `/risk?backtestId=${props.risk.backtestId}` : "/risk"}>Audit this backtest <ArrowRight size={13} /></Link></section>
       </aside>
     </div>
   );
@@ -76,24 +78,12 @@ function ModelView({ model }: { model?: ModelSummary | null }): JSX.Element {
   );
 }
 
-function RiskView({ rules }: { rules: RiskRuleView[] }): JSX.Element {
+function RiskView({ rules }: { rules: VenueRuleRow[] }): JSX.Element {
   return (
-    <div className="vnext-risk-table" role="table" aria-label="风险规则与阈值">
-      <div role="row" className="vnext-risk-head"><span>Rule</span><span>Current</span><span>Hard threshold</span><span>State</span><span>Action</span></div>
-      {rules.map((rule) => {
-        const current = rule.current;
-        const threshold = typeof rule.threshold === "number" ? rule.threshold : null;
-        const ratio = current !== null && threshold ? Math.min(100, Math.abs(current / threshold) * 100) : 0;
-        return (
-          <div role="row" key={rule.id} className={`state-${rule.state}`}>
-            <span><strong>{rule.name}</strong><small>{rule.description ?? rule.id}</small></span>
-            <span className="mono">{current === null ? "UNAVAILABLE" : formatPercent(current)}</span>
-            <span className="mono">{typeof rule.threshold === "number" ? formatPercent(rule.threshold) : rule.threshold ?? "POLICY"}</span>
-            <span><i><b style={{ width: `${ratio}%` }} /></i><em>{rule.state}</em></span>
-            <Link to="/risk">Inspect <ArrowRight size={12} /></Link>
-          </div>
-        );
-      })}
+    <div className="vnext-venue-risk">
+      <p className="vnext-venue-risk-caption">Paper venue limits · current values are the paper account's own (riskState), never a backtest's.</p>
+      <VenueRuleTable rows={rules} compact />
+      <Link to="/risk">Open Risk Manager <ArrowRight size={12} /></Link>
     </div>
   );
 }

@@ -13,16 +13,26 @@ class RiskAdapter:
         runs = self.backtests.list()
         if not runs:
             return self._empty()
-        run = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        run = _requested_run(runs, backtest_id)
         equity = self.backtests.equity(run["id"])
         daily_returns = [point["dailyReturn"] for point in equity if point.get("dailyReturn") is not None]
-        consecutive = _max_consecutive_losses(daily_returns)
-        events = self.backtests.risk_events(run["id"], page=1, page_size=1_000)["items"]
-        counts: dict[str, int] = {}
+        # No measured daily return means the streak is unknown, not 0 days.
+        consecutive = _max_consecutive_losses(daily_returns) if daily_returns else None
+        page = self.backtests.risk_events(run["id"], page=1, page_size=1_000)
+        events = page["items"]
+        missing_artifact = bool(page.get("artifactMissing"))
+        counts: dict[str, int] | None = None if missing_artifact else {}
         for event in events:
             counts[event["type"]] = counts.get(event["type"], 0) + 1
         return {
             "backtestId": run["id"],
+            "backtestName": run.get("name"),
+            # Persisted events of this backtest (e.g. skipped orders), counted
+            # over the first page only when the page was full.
+            "eventCountsExact": bool(page.get("totalIsExact", not page.get("hasNext", False))),
+            "eventCountsBasis": (
+                "risk_events_artifact_missing" if missing_artifact else "persisted_backtest_events"
+            ),
             "maxDrawdown": run.get("maxDrawdown"),
             "maxSingleStockLoss": self._max_stock_loss(run["id"]),
             "maxDailyLoss": min(daily_returns) if daily_returns else None,
@@ -42,14 +52,14 @@ class RiskAdapter:
         runs = self.backtests.list()
         if not runs:
             return {"items": [], "total": 0, "page": page, "pageSize": page_size, "hasNext": False}
-        selected = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        selected = _requested_run(runs, backtest_id)
         return self.backtests.risk_events(selected["id"], page=page, page_size=page_size)
 
     def stocks(self, backtest_id: str | None = None) -> list[dict[str, Any]]:
         runs = self.backtests.list()
         if not runs:
             return []
-        selected = next((item for item in runs if item["id"] == backtest_id), runs[0])
+        selected = _requested_run(runs, backtest_id)
         directory = self.backtests._resolve(selected["id"])
         from services.quant_api.adapters.utils import read_csv_rows
 
@@ -68,67 +78,108 @@ class RiskAdapter:
 
     @staticmethod
     def rules() -> list[dict[str, Any]]:
-        from quantagent.execution.risk_kill_switch import KillSwitchLimits
-        from quantagent.risk.risk_limits import V6RiskLimits
+        """The limits the paper venue's RiskEngine actually enforces.
 
-        risk_limits = V6RiskLimits()
-        kill_limits = KillSwitchLimits()
+        These used to come from ``V6RiskLimits`` / ``KillSwitchLimits`` - config
+        classes no order path reads - so the UI showed a 5% name cap, a 15%
+        drawdown switch and a 3% daily-loss switch, all "enabled", while the
+        venue enforced 10%, 20% and 20,000 CNY (and, before round 29, never
+        evaluated drawdown or daily loss at all).
+        """
+        from quantagent.paper.risk import RiskLimits
+
+        limits = RiskLimits()
+        venue = "src/quantagent/paper/risk.py"
         return [
             {
-                "id": "max_name_weight",
+                "id": "max_single_name_weight",
                 "name": "Single-name weight cap",
-                "description": "限制单票目标权重。",
-                "threshold": risk_limits.max_name_weight,
+                "description": "买入后单票权重上限（paper venue 逐单检查）。",
+                "threshold": limits.max_single_name_weight,
+                "unit": "fraction_of_equity",
+                "enforcedAt": "pre_trade_order",
                 "enabled": True,
-                "codeLocation": "src/quantagent/risk/risk_gate.py",
+                "codeLocation": venue,
+            },
+            {
+                "id": "max_industry_weight",
+                "name": "Industry weight cap",
+                "description": "买入后行业权重上限；缺少行业映射时拒绝买入（industry_unmeasured）。",
+                "threshold": limits.max_industry_weight,
+                "unit": "fraction_of_equity",
+                "enforcedAt": "pre_trade_order_with_sector_map",
+                "enabled": True,
+                "codeLocation": venue,
             },
             {
                 "id": "max_drawdown",
                 "name": "Drawdown kill switch",
-                "description": "组合回撤超过阈值时触发 kill switch。",
-                "threshold": kill_limits.max_drawdown_pct,
+                "description": "相对历史最高净值的回撤超过阈值后锁定，只允许减仓，需人工解除。",
+                "threshold": limits.max_drawdown,
+                "unit": "fraction_from_all_time_peak",
+                "enforcedAt": "portfolio_after_fill_and_session_open",
                 "enabled": True,
-                "codeLocation": "src/quantagent/execution/risk_kill_switch.py",
-            },
-            {
-                "id": "t_plus_one",
-                "name": "T+1 sellability",
-                "description": "卖出数量不得超过昨日已结算可卖库存。",
-                "threshold": "available_shares",
-                "enabled": True,
-                "codeLocation": "src/quantagent/execution/virtual_broker.py",
-            },
-            {
-                "id": "limit_and_suspension",
-                "name": "Limit/suspension gate",
-                "description": "阻止涨停买入、跌停卖出和停牌交易。",
-                "threshold": None,
-                "enabled": True,
-                "codeLocation": "src/quantagent/risk/risk_gate.py",
+                "codeLocation": venue,
             },
             {
                 "id": "max_daily_loss",
                 "name": "Daily loss kill switch",
-                "description": "单日亏损超过阈值时触发 kill switch。",
-                "threshold": kill_limits.max_daily_loss_pct,
+                "description": "单个交易日亏损超过开盘权益的该比例后锁定，只允许减仓，需人工解除。",
+                "threshold": limits.max_daily_loss_fraction,
+                "unit": "fraction_of_session_opening_equity",
+                "enforcedAt": "portfolio_after_fill_and_session_open",
                 "enabled": True,
-                "codeLocation": "src/quantagent/execution/risk_kill_switch.py",
+                "codeLocation": venue,
             },
             {
-                "id": "max_sector_weight",
-                "name": "Sector weight cap",
-                "description": "限制单一行业组合权重。",
-                "threshold": risk_limits.max_sector_weight,
+                "id": "max_gross_exposure",
+                "name": "Gross exposure cap",
+                "description": "总敞口/净值上限。",
+                "threshold": limits.max_gross_exposure,
+                "unit": "fraction_of_equity",
+                "enforcedAt": "portfolio_after_fill_and_session_open",
                 "enabled": True,
-                "codeLocation": "src/quantagent/risk/risk_gate.py",
+                "codeLocation": venue,
             },
             {
-                "id": "max_turnover",
-                "name": "Turnover cap",
-                "description": "限制目标权重相对当前权重的换手。",
-                "threshold": risk_limits.max_turnover,
+                "id": "max_daily_turnover",
+                "name": "Daily turnover cap",
+                "description": "按交易所交易日累计的成交额/净值上限（重启后恢复）。",
+                "threshold": limits.max_daily_turnover,
+                "unit": "fraction_of_equity_per_session",
+                "enforcedAt": "pre_trade_order",
                 "enabled": True,
-                "codeLocation": "src/quantagent/risk/risk_gate.py",
+                "codeLocation": venue,
+            },
+            {
+                "id": "max_order_notional",
+                "name": "Order notional cap",
+                "description": "单笔委托金额上限。",
+                "threshold": limits.max_order_notional,
+                "unit": "cny",
+                "enforcedAt": "pre_trade_order",
+                "enabled": True,
+                "codeLocation": venue,
+            },
+            {
+                "id": "max_price_deviation",
+                "name": "Fat-finger guard",
+                "description": "限价偏离参考价上限。",
+                "threshold": limits.max_price_deviation,
+                "unit": "fraction_of_reference_price",
+                "enforcedAt": "pre_trade_order",
+                "enabled": True,
+                "codeLocation": venue,
+            },
+            {
+                "id": "t_plus_one_and_price_limits",
+                "name": "T+1 / limit / suspension / ST rules",
+                "description": "T+1 可卖、涨停不买、跌停不卖、停牌不交易、ST 买入受限。",
+                "threshold": None,
+                "unit": None,
+                "enforcedAt": "venue_instrument_rules",
+                "enabled": True,
+                "codeLocation": "src/quantagent/paper/broker.py",
             },
         ]
 
@@ -187,3 +238,17 @@ def _int(value: Any) -> int | None:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _requested_run(runs: list[dict[str, Any]], backtest_id: str | None) -> dict[str, Any]:
+    """The run the caller asked for; KeyError for an unknown id.
+
+    Falling back to ``runs[0]`` for an unknown id returned another backtest's
+    risk numbers under status "ready" - the wrong subject, presented as valid.
+    """
+    if backtest_id is None:
+        return runs[0]
+    for item in runs:
+        if item["id"] == backtest_id:
+            return item
+    raise KeyError(backtest_id)

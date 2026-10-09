@@ -94,6 +94,22 @@ class TradeFill:
     impact_cost: float = 0.0
 
 
+class VenueRefusal(RuntimeError):
+    """The venue declined an order before acknowledging it.
+
+    Raised from ``BrokerBase.submit`` when nothing economic happened at the
+    venue -- no market data for the session, or market data that is not a
+    measurement. It is a declared outcome, not a crash: the order manager turns
+    it into a terminal canonical REJECTED event, so the record of account never
+    shows a working order that no venue holds. Any other exception keeps its
+    crash semantics and leaves the order for explicit recovery.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class BrokerBase(ABC):
     """Minimum contract a broker adapter must satisfy."""
 

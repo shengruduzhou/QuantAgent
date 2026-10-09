@@ -73,7 +73,15 @@ def load_inputs(
     panel["trade_date"] = pd.to_datetime(panel["trade_date"]).dt.normalize()
     panel["symbol"] = panel["symbol"].astype(str)
     for flag in _EXECUTION_FLAGS:
-        panel[flag] = pd.to_numeric(panel[flag], errors="coerce").fillna(0.0) > 0.5
+        values = pd.to_numeric(panel[flag], errors="coerce")
+        if values.isna().any():
+            # An unknown flag is not "tradable": coercing it to False silently
+            # defeated the environment's strict flag check (round-29 R11-F02).
+            raise ValueError(
+                f"market panel {panel_path}: {int(values.isna().sum())} unmeasured "
+                f"{flag} values; execution flags must be measured"
+            )
+        panel[flag] = values > 0.5
 
     predictions = pd.read_parquet(predictions_path)
     if score_column not in predictions.columns:

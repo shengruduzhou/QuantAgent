@@ -135,7 +135,11 @@ def _trade_frame(orders: pd.DataFrame, config: PaperReportConfig) -> pd.DataFram
         fees.append(
             float(audited_total)
             if pd.notna(audited_total) and float(audited_total) >= 0
-            else float(cost_model.calculate(side, quantity, avg_price)["total"])
+            else float(
+                cost_model.calculate(
+                    side, quantity, avg_price, trade_date=row.get("trade_date")
+                )["total"]
+            )
         )
         if side == OrderSide.BUY:
             slippage.append(max(0.0, avg_price - ref_price) * quantity)

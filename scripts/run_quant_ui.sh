@@ -93,6 +93,14 @@ export QUANTAGENT_HOME="$runtime"
 export QUANT_UI_HOST="$host"
 export QUANT_UI_PORT="$port"
 export QUANT_UI_RELOAD="$reload"
+# The HTTP paper venue refuses every BUY whose industry it cannot measure. For a
+# forward paper account the runtime's current sector snapshot is the
+# point-in-time map, so use it unless the operator chose another.
+default_sector_map="${runtime}/data/v7/silver/sector_map/sector_map.parquet"
+if [[ -z "${QUANTAGENT_PAPER_SECTOR_MAP:-}" && -f "$default_sector_map" ]]; then
+  export QUANTAGENT_PAPER_SECTOR_MAP="$default_sector_map"
+fi
+printf '  Paper sector map: %s\n' "${QUANTAGENT_PAPER_SECTOR_MAP:-<none: paper buys refused as industry_unmeasured>}"
 
 api_args=(--runtime "$runtime" --host "$host" --port "$port")
 if [[ "$reload" == "true" ]]; then

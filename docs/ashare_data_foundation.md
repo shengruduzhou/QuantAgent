@@ -81,8 +81,21 @@ capability matrix 中 `l2_depth` 家族的可用供应商为空，不做任何"�
 
 ## 4. 单位与复权口径 / Units and adjustment
 
-- `volume` = **股**（腾讯/东财/新浪的日线以"手"计，adapter 在边界 ×100）。
-- `amount` = **CNY**；腾讯日线**不含**该列，由 provenance 与 `amount_coverage` 如实记录。
+- `volume` = **股**。供应商原始单位**不是**每个供应商一个常数（Round 29 实测）：
+  东财日线 = 手；新浪日线 = 股；腾讯日线主板/创业板 = 手、**科创板 688/689 = 股**
+  （akshare PR #7328）；akshare ≥ 1.18.69 的 `stock_zh_a_hist_tx` 对所有 `sz000*`
+  代码跳过自己的 ×100，所以 000001.SZ 返回的是手。因此 scale（×1 / ×100）由
+  `quantagent.data.ashare.units.infer_volume_scale` **按每次响应**判定：只有一个候选
+  使 `amount / volume` 落在 `[low, high]`（≥95% 行）才算 verified；否则
+  `quality_status = UNIT_AMBIGUOUS`、`volume_unit = shares_unverified`，绝不写成 OK。
+  无成交额的响应（腾讯 `fqkline`、akshare 1.18.60 的腾讯形状）只能套用板块先验，且保持未验证。
+- `amount` = **CNY**；腾讯 `fqkline` 日线**不含**该列，由 provenance 与 `amount_coverage` 如实记录。
+- akshare 只允许 `adjust=""`（raw）。供应商 qfq/hfq 在 canonical 路径上直接拒绝：东财/腾讯
+  的 qfq 是**减法**、新浪是**乘法**，且每个新除权日都会改写历史（取数日依赖）。
+  已有面板用 `scripts/audit_market_panel_units.py` 审计（价格对 U0 raw 的比值是否在
+  除权日跳变 ⇒ qfq-as-of-fetch ⇒ `point_in_time_valid` 被判 REFUTED）。
+- akshare 版本是数据契约的一部分：安装版本 ≠ `pyproject.toml` 的 pin 时日线 provider
+  直接失败（`QUANTAGENT_AKSHARE_VERSION_OVERRIDE=<installed>` 为显式确认）。
 - 面板 `daily_bars_raw.parquet` 为 **raw 未复权**，复权因子单独存放于
   `pit/adjust_factors.parquet`，下游按需应用。
 

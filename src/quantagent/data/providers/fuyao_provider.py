@@ -571,7 +571,13 @@ def _normalise_financial_rows(
     )
     frame["report_period"] = _ms_series_to_shanghai_date(frame["period_end_ms"])
     frame["ann_date"] = _ms_series_to_shanghai_date(frame["report_date_ms"])
-    frame["available_at"] = frame["ann_date"]
+    # The disclosure DATE carries no time of day and most statements are filed
+    # after the close, so the earliest session that can act on one is the next
+    # business day - the same one-session lag the AkShare provider applies. A
+    # same-day stamp would join an evening disclosure onto the session whose
+    # decision was taken at that day's close.
+    frame["available_at"] = frame["ann_date"] + pd.offsets.BDay(1)
+    frame["available_at_rule"] = "next_business_day_after_disclosure_date"
     if frame["available_at"].isna().any():
         raise ProviderUnavailable(
             f"Fuyao {statement_type} contains null disclosure dates; PIT merge blocked"

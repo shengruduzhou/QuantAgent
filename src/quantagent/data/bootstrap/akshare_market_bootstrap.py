@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
+
+from quantagent.data.ashare.contracts import QUALITY_OK, SourceBoundary
 
 from quantagent.config.paths import quant_paths
 from quantagent.data.lake import v7_lake_paths
@@ -32,11 +35,31 @@ class AkShareMarketPanelConfig:
     adjust: str = ""
     provider_uri_for_range: str | None = None
     as_of_date: str | None = None
+    #: A symbol whose stored history came from another source may only be
+    #: extended from a new source when the seam is written down as a
+    #: SourceBoundary. Default: refuse (block) instead of splicing silently.
+    record_source_boundaries: bool = False
 
 
 def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, object]:
     if not config.symbols:
         raise ValueError("AKShare market panel requires at least one symbol")
+    if config.adjust:
+        # Vendor qfq/hfq never enters the canonical silver panel: semantics
+        # differ by source and the series is rewritten on every new ex-date.
+        return {
+            "status": "blocked",
+            "output": None,
+            "manifest": None,
+            "rows": 0,
+            "symbols": list(config.symbols),
+            "warnings": [],
+            "blockers": ["akshare_vendor_adjusted_prices_refused"],
+            "remediation": (
+                "build the panel with adjust='' (raw) and derive adjusted prices from "
+                "U0 hfq factors (scripts/u0_pit_intervals.py)"
+            ),
+        }
     resolved_root = Path(config.output_root) if config.output_root else quant_paths().data_root / "v7"
     lake = v7_lake_paths(resolved_root).ensure()
     heuristic_range = resolve_akshare_market_fetch_range(
@@ -62,12 +85,20 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         symbols=config.symbols,
     )
 
+    established = _established_sources(resolved_output, config.symbols)
+    affinity = {
+        symbol: source.split(":", 1)[1]
+        for symbol, source in established.items()
+        if source.startswith("akshare:")
+    }
     result = AkShareLiveProvider(
         allow_network=config.allow_network,
         adjust=config.adjust,
         trading_calendar=research_calendar,
         calendar_source=str(calendar_meta.get("source") or ""),
+        source_affinity=affinity,
     ).daily_ohlcv(request)
+    boundaries = _source_boundaries(established, result.frame)
     merged_frame, merge_info = _merge_with_existing_panel(result.frame, resolved_output)
     normalised = _normalise_dtypes(merged_frame)
     schema_report = akshare_market_schema_report(normalised)
@@ -91,6 +122,13 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         blockers.append("akshare_adjusted_history_has_no_vintaged_adjustment_evidence")
     if research_calendar.empty:
         blockers.append("akshare_independent_research_calendar_unavailable")
+    if boundaries and not config.record_source_boundaries:
+        blockers.append("akshare_symbol_history_would_mix_sources")
+        warnings.extend(
+            f"source_boundary_required:{b.symbol}:{b.provider_before}->{b.provider_after}"
+            f"@{b.boundary_date}"
+            for b in boundaries
+        )
 
     # Never replace the canonical silver panel with a candidate that failed its
     # own source/PIT/economic-unit contract. In particular, an older panel built
@@ -117,9 +155,11 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
             "rebuild_required": bool(
                 economic_report["status"] != "passed" and merge_info["merged_with_existing"]
             ),
+            "source_boundaries": [asdict(b) for b in boundaries],
         }
 
     written = _write_frame(normalised, resolved_output)
+    boundary_log = _append_source_boundaries(lake.manifests, boundaries)
     panel_start = (
         str(pd.to_datetime(normalised["trade_date"]).min().date())
         if not normalised.empty
@@ -151,6 +191,11 @@ def build_akshare_market_panel(config: AkShareMarketPanelConfig) -> dict[str, ob
         "canonical_volume_unit": result.metadata.get("canonical_volume_unit", "shares"),
         "canonical_amount_unit": result.metadata.get("canonical_amount_unit", "CNY"),
         "raw_volume_unit_by_source": result.metadata.get("raw_volume_unit_by_source", {}),
+        "volume_unit_rule": result.metadata.get("volume_unit_rule"),
+        "volume_unit_basis_by_symbol": result.metadata.get("volume_unit_basis_by_symbol", {}),
+        "unit_rejections": result.metadata.get("unit_rejections", []),
+        "source_boundaries": [asdict(b) for b in boundaries],
+        "source_boundary_log": str(boundary_log) if boundary_log else None,
         "schema_report": schema_report,
         "economic_contract_report": economic_report,
         "availability_rule": "daily_bar_available_next_explicit_trading_session",
@@ -229,6 +274,13 @@ def _market_economic_contract_report(frame: pd.DataFrame) -> dict[str, object]:
         valid = frame["point_in_time_valid"].fillna(False).astype(bool)
         if not bool(valid.all()):
             violations.append(f"non_pit_market_rows:{int((~valid).sum())}")
+    if "quality_status" not in frame.columns:
+        violations.append("missing_economic_provenance:quality_status")
+    else:
+        statuses = frame["quality_status"].astype("string").fillna("<missing>")
+        not_ok = statuses[statuses.ne(QUALITY_OK)]
+        for status, count in not_ok.value_counts().sort_index().items():
+            violations.append(f"non_ok_quality_rows:{status}={int(count)}")
     if "source" not in frame.columns:
         violations.append("missing_economic_provenance:source")
     else:
@@ -447,3 +499,67 @@ def _merge_with_existing_panel(
     combined = combined.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     info["final_rows"] = int(len(combined))
     return combined, info
+
+
+def _established_sources(output_path: Path, symbols: tuple[str, ...]) -> dict[str, str]:
+    """Source of the most recent stored row per requested symbol (if any)."""
+    if not output_path.exists() or not symbols:
+        return {}
+    try:
+        existing = pd.read_parquet(
+            output_path,
+            columns=["symbol", "trade_date", "source"],
+            filters=[("symbol", "in", list(symbols))],
+        )
+    except Exception:
+        return {}
+    if existing.empty:
+        return {}
+    existing = existing.dropna(subset=["source"]).sort_values(["symbol", "trade_date"])
+    latest = existing.groupby("symbol", sort=False)["source"].last()
+    return {str(symbol): str(source) for symbol, source in latest.items()}
+
+
+def _source_boundaries(
+    established: dict[str, str], new_frame: pd.DataFrame
+) -> list[SourceBoundary]:
+    """A seam for every symbol whose new rows come from a different source."""
+    if new_frame is None or new_frame.empty or not established:
+        return []
+    boundaries: list[SourceBoundary] = []
+    for symbol, rows in new_frame.groupby("symbol", sort=True):
+        before = established.get(str(symbol))
+        after_values = rows["source"].dropna().astype(str).unique().tolist()
+        if before is None or not after_values:
+            continue
+        after = after_values[0]
+        if after == before:
+            continue
+        boundaries.append(
+            SourceBoundary(
+                symbol=str(symbol),
+                boundary_date=str(pd.to_datetime(rows["trade_date"]).min().date()),
+                provider_before=before,
+                provider_after=after,
+                reason="akshare_refresh_served_by_different_source",
+                metrics={
+                    "new_rows": int(len(rows)),
+                    "volume_unit_basis": str(rows["volume_unit_basis"].iloc[0])
+                    if "volume_unit_basis" in rows.columns
+                    else None,
+                },
+            )
+        )
+    return boundaries
+
+
+def _append_source_boundaries(manifests_dir: Path, boundaries: list[SourceBoundary]) -> Path | None:
+    if not boundaries:
+        return None
+    path = Path(manifests_dir) / "market_panel_source_boundaries.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    recorded_at = pd.Timestamp.now(tz="UTC").isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        for boundary in boundaries:
+            handle.write(json.dumps({**asdict(boundary), "recorded_at": recorded_at}) + "\n")
+    return path

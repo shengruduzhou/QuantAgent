@@ -165,7 +165,7 @@ jobs:
           set -o pipefail
           npm test -- --run \
             src/App.test.tsx \
-            src/components/CandlestickChart.test.tsx \
+            src/vnext/market/MarketCandlestickChart.test.tsx \
             src/pages/BacktestLabPage.test.tsx \
             src/pages/FactorCenterPage.test.tsx \
             src/pages/HelpCenterPage.test.tsx \

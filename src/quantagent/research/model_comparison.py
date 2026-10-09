@@ -61,7 +61,8 @@ selection is not a holdout.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -70,6 +71,7 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.backtest.quarantine import clean_label_mask
 from quantagent.models.interactions import (
     InteractionPair,
     ModelClass,
@@ -233,10 +235,13 @@ class ComparisonReport:
     dsr_probability: float
     fold_windows: list[dict[str, str]]
     generated_at: str
+    #: Rows removed because their label window touches a quarantined holdout.
+    quarantine_rows_dropped: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "generatedAt": self.generated_at,
+            "quarantineRowsDropped": int(self.quarantine_rows_dropped),
             "verdict": self.verdict,
             "verdictReasons": list(self.verdict_reasons),
             "champion": self.champion,
@@ -306,6 +311,13 @@ def _gbm_fit_predict(
 ) -> np.ndarray:
     import lightgbm as lgb  # type: ignore
 
+    # A fixed seed is not enough for a reproducible verdict. Left on auto,
+    # LightGBM *times* col-wise against row-wise histogram building before every
+    # fit and keeps the faster one, so the summation order - and with it split
+    # choices - depends on machine load. Two identical round-29 CLI runs on the
+    # same panel and commit then disagreed (gbm fold IC 0.059346 vs 0.059345,
+    # ensemble_stack net return 0.1515 vs 0.1525, PBO 0.1430 vs 0.1442).
+    # Pinning the histogram mode plus ``deterministic`` removes that.
     model = lgb.LGBMRegressor(
         n_estimators=config.gbm_estimators,
         num_leaves=config.gbm_leaves,
@@ -316,6 +328,8 @@ def _gbm_fit_predict(
         colsample_bytree=0.8,
         random_state=config.random_state,
         n_jobs=config.gbm_n_jobs,
+        deterministic=True,
+        force_col_wise=True,
         verbose=-1,
     )
     model.fit(train_x, train_y)
@@ -378,7 +392,10 @@ def _topk_daily_returns(
     gross: dict[pd.Timestamp, float] = {}
     turnover: dict[pd.Timestamp, float] = {}
     untradable: dict[pd.Timestamp, float] = {}
-    previous: set[str] = set()
+    # Each day's tranche replaces the tranche formed H selections earlier, so
+    # that - not yesterday's - is the book it trades against. Day-over-day
+    # churn understated the cost of an H-day book roughly by half at H=5.
+    history: deque[set[str]] = deque(maxlen=horizon)
     tradability_columns = [
         column
         for column in ("is_suspended", "is_limit_up", "is_st")
@@ -393,10 +410,11 @@ def _topk_daily_returns(
             continue
 
         names = set(picked["symbol"].astype(str))
+        replaced = history[0] if len(history) == horizon else None
         target_turnover = (
-            1.0 if not previous else len(names - previous) / max(1, len(names))
+            1.0 if replaced is None else len(names - replaced) / max(1, len(names))
         )
-        previous = names
+        history.append(names)
 
         if tradability_columns:
             blocked = np.zeros(len(picked), dtype=bool)
@@ -570,6 +588,14 @@ def run_model_comparison(
         )
 
     work = _prepare_comparison_panel(panel, usable_factors, cfg)
+    # Folds are anchored at the end of whatever panel arrives, so an unclamped
+    # panel puts every fold - holdout folds included - inside the burned and
+    # frozen-fresh windows. Evaluate only rows whose label window is clean.
+    clean = clean_label_mask(
+        work["trade_date"], horizon_sessions=cfg.horizon_days, symbols=work["symbol"]
+    )
+    quarantine_rows_dropped = int((~clean).sum())
+    work = work[clean].reset_index(drop=True)
     if work.empty or not bool(work[cfg.label_column].notna().any()):
         return _invalid_report(
             cfg,
@@ -717,9 +743,10 @@ def run_model_comparison(
             )
         )
 
-    return _decide(
+    report = _decide(
         results, cfg, n_trials, fold_windows, generated_at, invalid_models=invalid_models
     )
+    return replace(report, quarantine_rows_dropped=quarantine_rows_dropped)
 
 
 def _build_feature_blocks(

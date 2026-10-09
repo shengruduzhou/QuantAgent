@@ -255,7 +255,8 @@ def test_canonical_raw_market_row_passes_economic_contract() -> None:
     assert report["economic_scale_violation_rows"] == 0
 
 
-def test_economic_contract_rejects_100x_lot_share_scale_corruption() -> None:
+def test_normaliser_proves_lot_scale_instead_of_trusting_the_label() -> None:
+    """A lots-valued Tencent volume (akshare's sz000 skip) is rescaled by evidence."""
     row = _normalize_akshare_daily(
         _tencent_raw(volume=1234),
         "600000.SH",
@@ -263,6 +264,23 @@ def test_economic_contract_rejects_100x_lot_share_scale_corruption() -> None:
         adjust="",
         trading_calendar=_calendar(),
     )
+    assert row["volume"].tolist() == [123_400.0]
+    assert row["raw_volume_unit"].tolist() == ["lots_100_shares"]
+    assert row["quality_status"].tolist() == ["OK"]
+    report = _market_economic_contract_report(_normalise_dtypes(row))
+    assert report["status"] == "passed"
+
+
+def test_economic_contract_rejects_100x_lot_share_scale_corruption() -> None:
+    """The panel-level contract still catches a pre-fix row stamped 'shares'."""
+    row = _normalize_akshare_daily(
+        _tencent_raw(),
+        "600000.SH",
+        source="tencent",
+        adjust="",
+        trading_calendar=_calendar(),
+    )
+    row["volume"] = 1234.0  # lots left unscaled under a "shares" label
     report = _market_economic_contract_report(_normalise_dtypes(row))
     assert report["status"] == "failed"
     assert report["economic_scale_checked_rows"] == 1

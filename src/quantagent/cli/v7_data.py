@@ -378,15 +378,24 @@ def build_labels_v7(
     symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
 ) -> None:
     """Build future-return labels for training; labels must never be used for inference."""
+    from quantagent.data import label_contract
     from quantagent.data.v7_label_builder import build_forward_return_labels
 
     resolved_output = Path(output_path) if output_path is not None else default_v7_lake_root() / "labels.parquet"
+    # A certified gold directory is immutable: this command once replaced the
+    # certified delay-1 labels with same-close v7 labels in place (R3-F11).
+    label_contract.refuse_certified_overwrite(resolved_output)
     frame = read_frame(market_panel_path)
     symbol_tuple = merge_symbols(symbols, symbols_file)
     if symbol_tuple:
         frame = frame[frame["symbol"].astype(str).isin(set(symbol_tuple))].reset_index(drop=True)
     result = build_forward_return_labels(frame, tuple(int(item) for item in parse_csv_tuple(horizons)))
-    actual = write_frame(result.frame, resolved_output)
+    if resolved_output.suffix == ".parquet":
+        label_contract.write_labels_parquet(
+            result.frame, resolved_output, convention=label_contract.V7_SAME_CLOSE)
+        actual = resolved_output
+    else:
+        actual = write_frame(result.frame, resolved_output)
     typer.echo(json_dump({"status": "passed", "output": str(actual), "rows": len(result.frame), "label_schema": result.label_schema}))
 
 

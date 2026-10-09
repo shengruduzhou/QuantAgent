@@ -45,6 +45,65 @@ def probabilistic_sharpe_ratio(
     return float(_normal_cdf(z))
 
 
+def minimum_track_record_length(
+    returns: pd.Series,
+    sr_benchmark: float = 0.0,
+    confidence: float = 0.95,
+    periods_per_year: int = 252,
+) -> float:
+    """Bailey & Lopez de Prado (2012) MinTRL, in observations.
+
+    The number of observations needed before the observed Sharpe ratio exceeds
+    ``sr_benchmark`` (annualised) with probability ``confidence``, given the
+    sample's skew and kurtosis. ``inf`` when the observed Sharpe does not exceed
+    the benchmark at all - no track record is long enough.
+    """
+    clean = returns.dropna()
+    if len(clean) < 4 or clean.std(ddof=1) <= 1e-12:
+        return float("nan")
+    sr = sharpe_ratio(clean, periods_per_year=periods_per_year) / np.sqrt(periods_per_year)
+    sr_b = sr_benchmark / np.sqrt(periods_per_year)
+    if sr <= sr_b:
+        return float("inf")
+    with np.errstate(invalid="ignore"):
+        skew_raw, kurt_raw = clean.skew(), clean.kurt()
+    skew = 0.0 if not np.isfinite(skew_raw) else float(skew_raw)
+    excess_kurtosis = 0.0 if not np.isfinite(kurt_raw) else float(kurt_raw)
+    dispersion = max(1.0 - skew * sr + (excess_kurtosis + 2.0) / 4.0 * sr ** 2, 1e-12)
+    z = _normal_ppf(confidence)
+    return float(1.0 + dispersion * (z / (sr - sr_b)) ** 2)
+
+
+def sharpe_bootstrap_interval(
+    returns: pd.Series,
+    *,
+    confidence: float = 0.95,
+    n_boot: int = 1000,
+    periods_per_year: int = 252,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Stationary-bootstrap confidence interval for the annualised Sharpe.
+
+    Politis-Romano resampling with the Politis-White block length keeps the
+    serial dependence of daily strategy returns, which an i.i.d. bootstrap
+    would destroy and so understate the interval width.
+    """
+    clean = returns.dropna().to_numpy(dtype=float)
+    n = len(clean)
+    if n < 20:
+        return float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    block = _politis_romano_block_length(clean)
+    stats = np.empty(n_boot)
+    for b in range(n_boot):
+        sample = clean[_stationary_bootstrap_indices(n, block, rng)]
+        std = sample.std(ddof=1)
+        stats[b] = sample.mean() / std * np.sqrt(periods_per_year) if std > 1e-12 else np.nan
+    tail = (1.0 - confidence) / 2.0
+    low, high = np.nanquantile(stats, [tail, 1.0 - tail])
+    return float(low), float(high)
+
+
 def deflated_sharpe_ratio(
     returns: pd.Series,
     candidate_sharpes: np.ndarray,

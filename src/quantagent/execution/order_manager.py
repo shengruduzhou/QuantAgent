@@ -17,6 +17,7 @@ from quantagent.execution.broker_base import (
     OrderState,
     OrderStatus,
     OrderType,
+    VenueRefusal,
 )
 from quantagent.execution.constraints import (
     ExecutionConstraintEvaluator,
@@ -30,6 +31,7 @@ from quantagent.domain.orders import (
     OrderBook,
     OrderEventType as CanonicalEventType,
     OrderIntent as CanonicalIntent,
+    OrderStatus as CanonicalOrderStatus,
     RiskDecision as CanonicalRiskDecision,
     Side as CanonicalSide,
     Signal,
@@ -141,9 +143,15 @@ class OrderManagerConfig:
     lot_size: int = 100
     min_order_value_yuan: float = 100.0
     allow_odd_lot_sell_only_for_full_liquidation: bool = True
+    #: Enforced on every non-forensic submission (`submit_orders` and
+    #: `reconcile`) against the canonical same-session count, so a restart does
+    #: not refund it. It used to be read only inside `reconcile()`, which
+    #: neither production paper path calls.
     max_orders_per_symbol_per_day: int = 5
-    block_buy_limit_up: bool = True
-    block_sell_limit_down: bool = True
+    # `block_buy_limit_up` / `block_sell_limit_down` were declared here and never
+    # read; the venue (paper broker tradability rules) is what refuses a
+    # limit-up buy or a limit-down sell. Removed rather than left advertising a
+    # control this class does not apply.
     # No participation limit lives here on purpose.  ``max_participation_rate``
     # was declared on this dataclass and written by two production callers, but
     # nothing in this module ever read it, so setting it constrained nothing
@@ -219,11 +227,45 @@ class OrderManager:
         self._risk_intents_today: list[OrderIntentRecord] = []
         self._risk_session: str | None = None
         self._risk_recovery_errors: list[str] = []
+        #: Session `counts_today` was last seeded from the canonical book for.
+        self._count_session: str | None = None
 
     def reset_daily_counters(self) -> None:
+        """Declare a new trading day for the in-memory counters.
+
+        Used by the backtest simulator, whose orders carry a wall-clock
+        timestamp, as its explicit day boundary. The live path still re-derives
+        its consumed limits from the canonical chain after a reset.
+        """
         self.counts_today.clear()
         self._risk_intents_today.clear()
         self._risk_session = None
+
+    def _submitted_orders(self, session: str) -> list:
+        """Canonical orders of ``session`` that reached SUBMITTED (terminal included)."""
+        return [
+            order for order in self.book.orders()
+            if order.trade_date == session and any(
+                event.event_type == CanonicalEventType.SUBMITTED
+                for event in self.book.history_of(order.order_id)
+            )
+        ]
+
+    def _symbol_orders_today(self, order: Order) -> int:
+        """Same-session submitted-order count for ``order.symbol``.
+
+        Seeded from the canonical book whenever the session changes, so a
+        restarted process counts the orders its predecessor already sent.
+        """
+        session = _exchange_session(order.timestamp)
+        if self._requires_production_pretrade():
+            self._restore_daily_risk(pd.Timestamp(order.timestamp))
+        elif self._count_session != session:
+            self.counts_today.clear()
+            for submitted in self._submitted_orders(session):
+                self.counts_today[submitted.symbol] = self.counts_today.get(submitted.symbol, 0) + 1
+        self._count_session = session
+        return self.counts_today.get(order.symbol, 0)
 
     def _restore_daily_risk(self, timestamp: pd.Timestamp) -> None:
         """Restore consumed limits from the canonical chain, including terminal orders."""
@@ -234,12 +276,8 @@ class OrderManager:
         self._risk_intents_today.clear()
         self._risk_recovery_errors.clear()
         self.counts_today.clear()
-        for order in self.book.orders():
-            if order.trade_date != session:
-                continue
+        for order in self._submitted_orders(session):
             history = self.book.history_of(order.order_id)
-            if not any(event.event_type == CanonicalEventType.SUBMITTED for event in history):
-                continue
             self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
             decisions = [event.risk_decision for event in history
                          if event.event_type == CanonicalEventType.RISK_APPROVED and event.risk_decision]
@@ -367,6 +405,10 @@ class OrderManager:
                     timestamp=now,
                 )
             )
+        # Sells first: A-share sell proceeds fund same-session buys, so a
+        # rotation must not depend on whether the new name sorts before the
+        # old one. Stable sort keeps the deterministic symbol order per side.
+        intents.sort(key=lambda intent: intent.side != OrderSide.SELL)
         return intents
 
     def _skip(
@@ -476,21 +518,28 @@ class OrderManager:
                 self._risk_intents_today.append(risk_intent)
             if self._venue_is_canonical:
                 self.broker.attach_canonical(order.client_order_id, canonical_order.order_id)
-            state = self.broker.submit(order)
+            venue_refusal: str | None = None
+            try:
+                state = self.broker.submit(order)
+            except VenueRefusal as exc:
+                # The venue declined before acknowledging anything. Without a
+                # terminal event the canonical order would stay SUBMITTED with
+                # its full leaves quantity: a working order no venue holds.
+                venue_refusal = exc.reason
+                state = self._record_venue_refusal(order, canonical_order, exc)
             self._update(order, state)
-            if not self._venue_is_canonical:
+            if not self._venue_is_canonical and venue_refusal is None:
                 self._record_canonical_state(canonical_order, state)
             if not self.forensic_replay:
-                self.claims.resolve(
-                    key,
-                    outcome=order.client_order_id,
-                    payload={
-                        "clientOrderId": order.client_order_id,
-                        "orderId": canonical_order.order_id,
-                        "fingerprint": fingerprint,
-                        "riskApproved": True,
-                    },
-                )
+                resolution = {
+                    "clientOrderId": order.client_order_id,
+                    "orderId": canonical_order.order_id,
+                    "fingerprint": fingerprint,
+                    "riskApproved": True,
+                }
+                if venue_refusal is not None:
+                    resolution["venueRefused"] = venue_refusal
+                self.claims.resolve(key, outcome=order.client_order_id, payload=resolution)
             self.counts_today[order.symbol] = self.counts_today.get(order.symbol, 0) + 1
             yield state
 
@@ -624,6 +673,33 @@ class OrderManager:
                 ),
                 None,
             )
+
+        # A forensic replay reconstructs history and is asserted isolated from
+        # any economic venue, so it keeps its historical behaviour.
+        if not self.forensic_replay:
+            limit = int(self.config.max_orders_per_symbol_per_day)
+            submitted_today = self._symbol_orders_today(order)
+            if submitted_today >= limit:
+                return (
+                    order,
+                    CanonicalRiskDecision.create(
+                        approved=False,
+                        rule="max_orders_per_symbol_per_day",
+                        threshold=limit,
+                        measured={
+                            "symbol": order.symbol,
+                            "session": _exchange_session(order.timestamp),
+                            "submitted_today": submitted_today,
+                        },
+                        reason=(
+                            f"{order.symbol} already has {submitted_today} submitted "
+                            f"orders this session (limit {limit})"
+                        ),
+                        lineage=canonical_order.lineage,
+                        decided_by="order_manager",
+                    ),
+                    None,
+                )
 
         if not self._requires_production_pretrade():
             decision = CanonicalRiskDecision.create(
@@ -796,6 +872,28 @@ class OrderManager:
         self.book.apply(canonical_order.order_id, CanonicalEventType.SUBMITTED)
         self.canonical.append(self.book.history_of(canonical_order.order_id)[-1], trade_date=session)
         return self.book.state_of(canonical_order.order_id)
+
+    def _record_venue_refusal(self, order: Order, canonical, exc: VenueRefusal) -> OrderState:
+        """Terminate a SUBMITTED canonical order the venue declined.
+
+        Only an order the venue never acknowledged is terminated here. If the
+        venue had already appended its own events the refusal cannot be a clean
+        "nothing happened", so the state is left for explicit reconciliation.
+        """
+        current = self.book.state_of(canonical.order_id)
+        if current.status is CanonicalOrderStatus.SUBMITTED:
+            self.book.apply(canonical.order_id, CanonicalEventType.REJECTED, reason=exc.reason)
+            self.canonical.append(
+                self.book.history_of(canonical.order_id)[-1], trade_date=canonical.trade_date
+            )
+        return OrderState(
+            client_order_id=order.client_order_id,
+            broker_order_id=None,
+            status=OrderStatus.REJECTED,
+            filled_quantity=0,
+            avg_price=0.0,
+            last_message=exc.reason,
+        )
 
     def _record_canonical_state(self, canonical, state: OrderState) -> None:
         session = str(getattr(state, "timestamp", "") or "")[:10] or None

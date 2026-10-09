@@ -49,7 +49,6 @@ import numpy as np
 import pandas as pd
 
 from quantagent.risk.kill_switch import KillSwitch
-from quantagent.risk.risk_limits import V6RiskLimits
 from quantagent.market_rules.tradability_flags import ensure_tradability_flags
 
 

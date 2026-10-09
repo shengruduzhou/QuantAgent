@@ -187,8 +187,13 @@ def _candidate(
     edge_pct = sell_price / buy_price - 1.0
     if edge_pct <= 0:
         return None
-    buy_cost = float(cost_model.calculate(OrderSide.BUY, quantity, buy_price)["total"])
-    sell_cost = float(cost_model.calculate(OrderSide.SELL, quantity, sell_price)["total"])
+    trade_date = times[sell_idx]
+    buy_cost = float(
+        cost_model.calculate(OrderSide.BUY, quantity, buy_price, trade_date=trade_date)["total"]
+    )
+    sell_cost = float(
+        cost_model.calculate(OrderSide.SELL, quantity, sell_price, trade_date=trade_date)["total"]
+    )
     gross = float((sell_price - buy_price) * quantity)
     net = gross - buy_cost - sell_cost
     return {
