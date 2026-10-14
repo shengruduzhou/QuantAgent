@@ -40,3 +40,29 @@ def test_clear_is_durable_and_attributed(tmp_path):
     assert not replayed.kill_switch.is_triggered(SCOPE_PORTFOLIO)
     cleared = [e for e in paper_ledger.EventLedger(path).read() if e.event_type == paper_ledger.KILL_SWITCH_CLEARED]
     assert cleared and cleared[-1].payload["author"] == "pm-zhang"
+
+
+def test_clear_is_refused_while_the_paper_loop_holds_the_account(tmp_path):
+    """Round-30: the loop holds the canonical-ledger account lock, not writer.lock."""
+    from quantagent.paper.account_lock import paper_account_lock
+
+    path = _latched_ledger(tmp_path)
+    canonical = tmp_path / "canonical_ledger.jsonl"
+    canonical.write_text("", encoding="utf-8")
+    args = ["paper-clear-kill-switch", "--ledger", str(path), "--confirm",
+            "--author", "pm-zhang", "--reason", "reviewed drawdown, resuming"]
+    with paper_account_lock(canonical):
+        refused = CliRunner().invoke(app, args)
+    assert refused.exit_code != 0
+    assert "in use by a running paper loop" in refused.output
+    assert RiskEngine(state_ledger=paper_ledger.EventLedger(path)).kill_switch.is_triggered(SCOPE_PORTFOLIO)
+
+    explicit = tmp_path / "elsewhere" / "canonical.jsonl"
+    explicit.parent.mkdir()
+    explicit.write_text("", encoding="utf-8")
+    with paper_account_lock(explicit):
+        refused = CliRunner().invoke(app, [*args, "--canonical-ledger", str(explicit)])
+    assert refused.exit_code != 0
+
+    cleared = CliRunner().invoke(app, args)
+    assert cleared.exit_code == 0, cleared.output

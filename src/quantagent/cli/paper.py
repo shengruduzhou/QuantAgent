@@ -270,31 +270,56 @@ def paper_clear_kill_switch(
     author: str = typer.Option(..., "--author"),
     reason: str = typer.Option(..., "--reason"),
     confirm: bool = typer.Option(False, "--confirm", help="Required: a human clears a latch."),
+    canonical_ledger: Path | None = typer.Option(
+        None, "--canonical-ledger", dir_okay=False,
+        help="The account's canonical ledger, when it is not a sibling of --ledger.",
+    ),
 ) -> None:
     """Clear a latched kill switch after human review (drawdown breaches latch).
 
     The clear is appended to the same durable ledger the risk engine replays, so
-    every venue sees it on its next start. Refused while another process holds
-    the ledger directory's writer lock - stop the API / paper loop first, or the
-    two writers would fork the ledger's hash chain.
+    every venue sees it on its next start. Refused while another process could
+    be appending to that ledger - stop the API / paper loop first, or the two
+    writers would fork the ledger's hash chain. The HTTP service holds the
+    directory's ``writer.lock``; the continuous/daily paper loop holds the
+    account lock of its canonical ledger, so both are taken here.
     """
     import fcntl
+    from contextlib import ExitStack
 
     from quantagent.paper import ledger as paper_ledger
+    from quantagent.paper.account_lock import PaperAccountLockTimeout, paper_account_lock
     from quantagent.paper.risk import RiskEngine
 
     if not confirm:
         raise typer.BadParameter("pass --confirm: clearing a kill switch is a human decision")
     if not author.strip() or len(reason.strip()) < 8:
         raise typer.BadParameter("--author is required and --reason must be at least 8 characters")
+    if canonical_ledger is not None:
+        account_ledgers = [canonical_ledger]
+    else:
+        # Both on-disk layouts: the paper loop (runtime_paths) and the HTTP service.
+        account_ledgers = [
+            ledger.parent / name
+            for name in ("canonical_ledger.jsonl", "canonical.jsonl")
+            if (ledger.parent / name).exists()
+        ]
     lock_path = ledger.parent / "writer.lock"
-    with lock_path.open("a+") as handle:
+    with ExitStack() as locks, lock_path.open("a+") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             raise typer.BadParameter(
                 f"{lock_path} is held by a running writer; stop it before clearing"
             ) from exc
+        for account_ledger in account_ledgers:
+            try:
+                locks.enter_context(paper_account_lock(account_ledger, timeout_seconds=1.0))
+            except PaperAccountLockTimeout as exc:
+                raise typer.BadParameter(
+                    f"the paper account of {account_ledger} is in use by a running paper "
+                    "loop; stop it before clearing"
+                ) from exc
         engine = RiskEngine(state_ledger=paper_ledger.EventLedger(ledger))
         active_before = engine.kill_switch.active()
         cleared = engine.kill_switch.clear(
