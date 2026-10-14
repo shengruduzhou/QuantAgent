@@ -35,7 +35,7 @@ from quantagent.factors.factor_loop_memory import (
     FALLBACK_MODELS,
     classify_structure,
 )
-from quantagent.factors.expression_safety import post_decision_column_reasons
+from quantagent.factors.expression_safety import PIT_INPUT_COLUMNS, post_decision_column_reasons
 from quantagent.factors.factor_synthesis import (
     LLMProposalResult,
     ProposedFactor,
@@ -87,6 +87,7 @@ class LLMFactorProposer:
         retry_backoff_seconds: float = 12.0,
         fallback_models: Sequence[str] = FALLBACK_MODELS,
         max_nodes: int = 12,
+        declared_columns: Sequence[str] = (),
     ) -> None:
         base = config or LLMSkillConfig.from_env()
         overrides: dict[str, Any] = {"timeout_seconds": max(base.timeout_seconds, float(timeout_seconds))}
@@ -99,6 +100,7 @@ class LLMFactorProposer:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self.fallback_models = tuple(fallback_models)
         self.max_nodes = int(max_nodes)
+        self.declared_columns = tuple(str(name) for name in declared_columns)
 
     # -- prompt -------------------------------------------------------------- #
 
@@ -154,9 +156,11 @@ class LLMFactorProposer:
                 ],
             },
             "allowed_expression_nodes": list(ALLOWED_NODES),
+            "allowed_columns": sorted(PIT_INPUT_COLUMNS | set(self.declared_columns)),
             "prefer_structures": list(A_SHARE_STRUCTURES),
             "constraints": [
                 "Use only information available at or before trade_date (no future data, no labels).",
+                "Column(...) may only name a column listed in allowed_columns.",
                 f"Windows must be <= 120 trading days; keep each formula parseable and under ~{self.max_nodes} nodes.",
                 "Every formula must have a clear economic meaning; no random operator soup.",
                 "Avoid formulas equivalent to plain size/volatility/turnover ranks already in the library.",
@@ -261,8 +265,8 @@ class LLMFactorProposer:
                 expr = parse_expression(expr_text)
             except Exception:
                 continue  # outside the DSL → silently dropped (loop logs the gap)
-            if post_decision_column_reasons(expr):
-                continue  # reads label-side / next-session data → never a factor
+            if post_decision_column_reasons(expr, declared_columns=self.declared_columns):
+                continue  # label-side, next-session or undeclared column → never a factor
             key = repr(expr)
             if key in seen:
                 continue

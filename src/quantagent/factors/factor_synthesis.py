@@ -185,6 +185,10 @@ class RDAgentFactorLoopConfig:
     seed: int = 1729
     reference_columns: tuple[str, ...] = ()
     max_reference_correlation: float = 0.7
+    # Panel columns beyond OHLCV + the blueprint fundamentals
+    # (expression_safety.PIT_INPUT_COLUMNS) that a candidate may read. Each one
+    # must be known at the decision close; anything undeclared is refused.
+    declared_input_columns: tuple[str, ...] = ()
     # Tradability guard (see SymbolicGAConfig): validation IC / fitness drop
     # names untradable at signal time so the acceptance gate cannot be fooled
     # by phantom edge over limit-up-sealed / limit-down / suspended / ST names.
@@ -1207,6 +1211,7 @@ def synthesize_factors_rd_agent(
                 allow_network=cfg.allow_network,
                 timeout_seconds=cfg.llm_timeout_seconds,
                 max_attempts=cfg.max_llm_attempts,
+                declared_columns=cfg.declared_input_columns,
             )
         except Exception as exc:  # pragma: no cover - import/config guard
             logger.warning("[rd-agent-factor] LLM proposer unavailable (%s); using blueprints only", exc)
@@ -1339,7 +1344,11 @@ def synthesize_factors_rd_agent(
                 round_feedback.append(f"{task.factor_name}: duplicate expression")
                 continue
             seen_exprs.add(expr_key)
-            leak_reasons = post_decision_column_reasons(candidate.expr, label_column=cfg.label_column)
+            leak_reasons = post_decision_column_reasons(
+                candidate.expr,
+                label_column=cfg.label_column,
+                declared_columns=cfg.declared_input_columns,
+            )
             if leak_reasons:
                 task = RDAgentFactorTask(
                     factor_name=task.factor_name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 _FUTURE_NAME = re.compile(r"(?:^|[^a-z0-9])(?:forward[_-]?returns?|future[_-]?returns?|future|lead|label|target)(?:[^a-z0-9]|$)", re.IGNORECASE)
 _Q_LIB_NEGATIVE_REF = re.compile(r"\b(?:Ref|Shift)\s*\([^,]+,\s*-(?:0*[1-9]\d*)\s*\)", re.IGNORECASE)
@@ -29,8 +30,21 @@ def expression_leakage_reasons(expression: str) -> tuple[str, ...]:
 #: Column names that hold information from AFTER the decision close: label
 #: windows, next-session entry/exit prices, eligibility masks built from them.
 _POST_DECISION_COLUMN = re.compile(
-    r"(?:^|_)(?:forward|future|label|target|entry|exit)(?:_|$)|_t\+?1(?:_|$)|^mask_|eligible|feasible",
+    r"(?:^|_)(?:forward|fwd|future|next|lead|label|target|entry|exit)(?:_|$)"
+    r"|_t\+?1(?:_|$)|^mask_|eligible|feasible",
     re.IGNORECASE,
+)
+
+#: Inputs a synthesized factor may read without being declared: daily OHLCV
+#: plus the point-in-time fundamentals the built-in blueprints use. A name
+#: pattern can only reject spellings someone thought of (round 29 missed
+#: ``fwd_*`` / ``next_*``), so leaves are checked against this allowlist and
+#: anything else must be declared by the caller.
+PIT_INPUT_COLUMNS: frozenset[str] = frozenset(
+    {
+        "open", "high", "low", "close", "volume", "amount",
+        "turnover_rate", "pb", "pe_ttm", "revenue", "roe", "operating_cash_flow",
+    }
 )
 
 
@@ -50,19 +64,26 @@ def expression_column_names(expr: object) -> tuple[str, ...]:
 
 
 def post_decision_column_reasons(
-    expr: object, *, label_column: str | None = None
+    expr: object,
+    *,
+    label_column: str | None = None,
+    declared_columns: Iterable[str] = (),
 ) -> tuple[str, ...]:
     """Reasons a factor expression reads data unknown at the decision close.
 
     The DSL's operators are causal, but a Column leaf can still name a
     label-side field present in the merged panel (``entry_close_t1`` is the
-    next session's close) - round-29 R10-F07.
+    next session's close) - round-29 R10-F07. A leaf must be in
+    :data:`PIT_INPUT_COLUMNS` or ``declared_columns``; the name pattern is a
+    second layer that also refuses a label-side name someone declared.
     """
-    reasons = [
-        f"post_decision_column:{name}"
-        for name in expression_column_names(expr)
-        if _POST_DECISION_COLUMN.search(name) or (label_column and name == label_column)
-    ]
+    allowed = PIT_INPUT_COLUMNS | frozenset(str(name) for name in declared_columns)
+    reasons: list[str] = []
+    for name in expression_column_names(expr):
+        if _POST_DECISION_COLUMN.search(name) or (label_column and name == label_column):
+            reasons.append(f"post_decision_column:{name}")
+        elif name not in allowed:
+            reasons.append(f"undeclared_column:{name}")
     reasons.extend(expression_leakage_reasons(repr(expr)))
     return tuple(dict.fromkeys(reasons))
 

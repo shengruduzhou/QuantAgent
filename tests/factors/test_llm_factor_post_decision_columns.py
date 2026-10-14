@@ -49,3 +49,49 @@ def test_label_side_column_is_refused_before_it_is_ever_evaluated():
 
     # A guard would refuse the expression before it is ever evaluated.
     assert row.empty, "label-side column evaluated as a factor"
+
+
+def test_column_leaves_are_allowlisted_not_pattern_matched():
+    """Round-30: the round-29 name pattern missed fwd_* / next_* spellings.
+
+    A leaf must be OHLCV / a blueprint fundamental or explicitly declared;
+    the label-side pattern still applies to declared names.
+    """
+    from quantagent.factors.expression_safety import post_decision_column_reasons
+
+    def reasons(column, **kwargs):
+        expr = parse_expression(f"Rank(expr=Column(name='{column}'), method='average', pct=True)")
+        return post_decision_column_reasons(expr, **kwargs)
+
+    assert reasons("fwd_ret_5") == ("post_decision_column:fwd_ret_5",)
+    assert reasons("next_open") == ("post_decision_column:next_open",)
+    assert "post_decision_column:lead_close" in reasons("lead_close")
+    assert reasons("alpha_secret") == ("undeclared_column:alpha_secret",)
+    assert reasons("alpha_secret", declared_columns=("alpha_secret",)) == ()
+    assert reasons("next_open", declared_columns=("next_open",)) == ("post_decision_column:next_open",)
+    for column in ("close", "volume", "amount", "turnover_rate", "pe_ttm", "roe"):
+        assert reasons(column) == (), column
+
+
+def test_llm_proposer_drops_undeclared_columns_and_lists_allowed_ones():
+    import json
+
+    from quantagent.factors.llm_factor_proposer import LLMFactorProposer
+    from quantagent.factors.factor_synthesis import RDAgentFactorHypothesis
+
+    proposer = LLMFactorProposer(allow_network=False, declared_columns=("northbound_ratio",))
+    items = [
+        {"name": "a", "expression": "Rank(expr=Column(name='fwd_ret_5'), method='average', pct=True)"},
+        {"name": "b", "expression": "Rank(expr=Column(name='mystery'), method='average', pct=True)"},
+        {"name": "c", "expression": "Rank(expr=Column(name='northbound_ratio'), method='average', pct=True)"},
+    ]
+    kept = proposer._parse_factors(items, ())
+    assert [factor.name for factor in kept] == ["llm_c"]
+    _, user_text = proposer._build_prompt(
+        hypothesis=RDAgentFactorHypothesis(hypothesis="h", reason="r"),
+        rag_directive="",
+        memory_digest_payload={},
+        n_candidates=1,
+        seen_expr_reprs=(),
+    )
+    assert "northbound_ratio" in json.loads(user_text)["allowed_columns"]
