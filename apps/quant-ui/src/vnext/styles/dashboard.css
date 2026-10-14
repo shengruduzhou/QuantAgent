@@ -717,3 +717,14 @@
   color: var(--text);
   font-size: 12px;
 }
+
+/* Phone widths: one decision card per row (the 2 x 260px grid overflowed a
+   332px workspace pane at 390px). */
+@media (max-width: 760px) {
+  .vnext-dashboard { padding: 10px 10px 20px; }
+  .vnext-decision-strip,
+  .vnext-action-rows { grid-template-columns: minmax(0, 1fr); }
+  /* The six canvas tabs wrap under the title instead of running off-pane. */
+  .vnext-primary-canvas > header { flex-wrap: wrap; gap: 8px; }
+  .vnext-primary-canvas > header nav { flex-wrap: wrap; max-width: 100%; }
+}

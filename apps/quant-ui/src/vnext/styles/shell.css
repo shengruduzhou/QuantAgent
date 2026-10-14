@@ -1319,9 +1319,39 @@
   .vnext-workspace.split-right .vnext-workspace-pane.secondary { border-top: 1px solid var(--vnx-line-strong); border-left: 0; }
 }
 
+/* Phone widths. The shell used to pin min-width: 680px here, so a 390px
+   phone scrolled sideways through the whole workstation (round-29 R5/R6).
+   The rail stays at its 58px icon width (the <=1240px rule), the command bar
+   wraps onto a second line instead of overflowing, and only convenience
+   controls are dropped - never the API / BT EVENTS / LIVE / KILL chips. */
 @media (max-width: 760px) {
-  .vnext-shell { min-width: 680px; }
+  .vnext-shell,
+  .vnext-shell.rail-collapsed,
+  .vnext-shell.rail-expanded {
+    min-width: 0;
+    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-rows: auto 38px minmax(0, 1fr) var(--vnext-dock-height);
+  }
   .vnext-workspace-name { display: none; }
+  .vnext-commandbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+  .vnext-global-search {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .vnext-global-search span,
+  .vnext-global-search kbd { display: none; }
+  .vnext-system-strip {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+  .vnext-system-strip .vnext-theme-switcher,
+  .vnext-system-strip button[aria-label^="切换为"] { display: none; }
 }
 
 /* ===========================================================================
