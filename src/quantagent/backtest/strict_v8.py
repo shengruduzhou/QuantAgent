@@ -511,6 +511,10 @@ class StrictBacktestArtifactSet:
     # Dividend cash / bonus shares the simulator credited (raw execution panels
     # only). Kept in memory for callers that report on it.
     corporate_action_audit: pd.DataFrame | None = None
+    # Opt-in exposure policy (round 30): its per-signal decision records and
+    # the account history it read. None when no policy was applied.
+    exposure_decisions: pd.DataFrame | None = None
+    account_path: pd.DataFrame | None = None
 
     def write(self, output_dir: str | Path) -> dict[str, Path]:
         out = Path(output_dir)
@@ -555,6 +559,12 @@ class StrictBacktestArtifactSet:
             json.dumps(self.factor_weights, indent=2, default=str),
             encoding="utf-8",
         )
+        if self.exposure_decisions is not None:
+            paths["exposure_decisions"] = out / "exposure_decisions.csv"
+            self.exposure_decisions.to_csv(paths["exposure_decisions"], index=False)
+        if self.account_path is not None:
+            paths["account_path"] = out / "account_path.csv"
+            self.account_path.to_csv(paths["account_path"], index=False)
         return paths
 
 
@@ -569,8 +579,14 @@ def run_strict_backtest_v8(
     sector_map: pd.DataFrame | None = None,
     factor_weights: Mapping[str, float] | None = None,
     config: AShareExecutionSimulationConfig | None = None,
+    exposure_policy=None,
 ) -> StrictBacktestArtifactSet:
-    """Run the existing strict simulator + emit the full v8 report bundle."""
+    """Run the existing strict simulator + emit the full v8 report bundle.
+
+    ``exposure_policy`` is opt-in (round 30, risk.exposure_policy): the gross
+    multiplier decided at each signal close scales that signal's target. With
+    ``None`` the canonical path is unchanged.
+    """
     cfg = config or AShareExecutionSimulationConfig()
     # Non-blocking quarantine check (P-G): warn + stamp, never alter execution.
     trust_stamp = quarantine_trust_stamp(
@@ -585,9 +601,14 @@ def run_strict_backtest_v8(
             f"(see {trust_stamp['quarantine_evidence']}).",
             file=_sys.stderr, flush=True,
         )
-    sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
-        target_weights, market_panel, cfg,
-    )
+    if exposure_policy is None:
+        sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
+            target_weights, market_panel, cfg,
+        )
+    else:
+        sim = simulate_ashare_target_weights(
+            target_weights, market_panel, cfg, exposure_policy=exposure_policy,
+        )
     metrics = _compute_metrics(sim.nav, sim.order_audit, initial_nav=cfg.initial_cash)
     realized_trades = _realized_round_trip_pnl(sim.order_audit)
     by_stock = _profit_by_stock(realized_trades, sim.order_audit)
@@ -640,6 +661,8 @@ def run_strict_backtest_v8(
         config=artifact_config,
         trust_stamp=trust_stamp,
         corporate_action_audit=getattr(sim, "corporate_action_audit", None),
+        exposure_decisions=(sim.exposure_decisions if exposure_policy is not None else None),
+        account_path=(sim.account_path if exposure_policy is not None else None),
     )
 
 
