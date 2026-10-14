@@ -125,3 +125,34 @@ test("separates active, rejected and unevaluated factors", async () => {
 
   expect(screen.getByText(/已剔除因子不会因为页面存在而自动进入训练/)).toBeInTheDocument();
 });
+
+test("a stage only says PASSED when a gate judged it; approval needs IC evidence", async () => {
+  const lone: Factor = { ...factors[2], name: "alpha_code_only", displayName: "Code Only", pitSafe: true, codeLocation: "src/x.py" } as Factor;
+  const noEvidence = { ...metrics, factorName: "alpha_code_only", ic: null, rankIc: null, coverage: null, verdict: "rejected" };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    let data: unknown;
+    if (url.includes("/reviews")) data = [];
+    else if (url.includes("/backtest")) data = noEvidence;
+    else if (url.includes("/jobs")) data = [];
+    else if (url.includes("/factors/alpha_code_only")) data = lone;
+    else data = [lone];
+    return new Response(JSON.stringify({ status: "ready", data, issues: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }));
+
+  render(
+    <MemoryRouter>
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <FactorCenterPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+
+  const approve = await screen.findByRole("button", { name: /研究通过/ });
+  await waitFor(() => expect(screen.getAllByText(/RECORDED · 未判定/).length).toBeGreaterThan(0));
+  expect(screen.queryByText("PASSED")).toBeNull();
+  expect(approve).toBeDisabled();
+});
