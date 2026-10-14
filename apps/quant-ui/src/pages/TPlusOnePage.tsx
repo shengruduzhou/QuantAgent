@@ -38,6 +38,7 @@ interface DoTPair {
   netPnl?: number | null;
   edgePct?: number | null;
   state?: string | null;
+  exitReason?: string | null;
   highSellFailed?: boolean | null;
   lowBuyFailed?: boolean | null;
   missedUpsidePct?: number | null;
@@ -51,6 +52,8 @@ interface DoTAnalysis {
   symbol?: string | null;
   summary: {
     pairCount: number;
+    pairsShown?: number | null;
+    unmeasuredPairs?: number | null;
     successRate?: number | null;
     failureRate?: number | null;
     highSellFailureRate?: number | null;
@@ -64,6 +67,28 @@ interface DoTAnalysis {
   byRegime: Record<string, unknown>;
   verdict?: string | null;
   reason?: string | null;
+}
+
+// The pair state is the exit TRIGGER; a take-profit exit can still lose after
+// costs (round-29 R6 counted 209 such pairs labelled closed_profit).
+const EXIT_REASON_LABEL: Record<string, string> = {
+  take_profit_trigger: "止盈触发",
+  stop_trigger: "止损触发",
+  end_of_day_flatten: "尾盘平仓",
+  closed_profit: "止盈触发",
+  closed_stop: "止损触发",
+  closed_eod: "尾盘平仓",
+};
+
+function exitReasonLabel(reason?: string | null): string {
+  return reason ? EXIT_REASON_LABEL[reason] ?? reason : "退出原因未知";
+}
+
+function pairCountDetail(summary?: DoTAnalysis["summary"]): string {
+  if (!summary) return "persisted pairs";
+  const shown = summary.pairsShown;
+  const unmeasured = summary.unmeasuredPairs ? ` · ${summary.unmeasuredPairs} 未测量` : "";
+  return typeof shown === "number" && shown < summary.pairCount ? `明细显示最近 ${shown} 对，统计覆盖全部${unmeasured}` : `persisted pairs${unmeasured}`;
 }
 
 export function TPlusOnePage(): JSX.Element {
@@ -152,8 +177,8 @@ export function TPlusOnePage(): JSX.Element {
       </section>
 
       <WorkbenchMetricStrip metrics={[
-        { label: "做 T 对数", value: formatCompact(data?.summary.pairCount), detail: "persisted pairs", tone: "info", icon: ArrowsClockwise },
-        { label: "成功率", value: formatPercent(data?.summary.successRate), detail: "pair-level", tone: "positive", icon: CheckCircle },
+        { label: "做 T 对数", value: formatCompact(data?.summary.pairCount), detail: pairCountDetail(data?.summary), tone: "info", icon: ArrowsClockwise },
+        { label: "成功率", value: formatPercent(data?.summary.successRate), detail: "全部已测量配对 · 净收益 > 0", tone: "positive", icon: CheckCircle },
         { label: "失败率", value: formatPercent(data?.summary.failureRate), detail: "failure control", tone: "danger", icon: WarningCircle },
         { label: "高抛失败", value: formatPercent(data?.summary.highSellFailureRate), detail: "threshold 15%", tone: "warning", icon: TrendDown },
         { label: "低吸失败", value: formatPercent(data?.summary.lowBuyFailureRate), detail: "threshold 15%", tone: "warning", icon: TrendDown },
@@ -201,7 +226,7 @@ export function TPlusOnePage(): JSX.Element {
                         <td><strong className="tone-negative mono">{formatNumber(pair.sellPrice)}</strong><span>{pair.sellTime?.slice(11, 19) ?? "暂无时间"}</span></td>
                         <td className="numeric mono">{formatCompact(pair.quantity)}</td>
                         <td className={`numeric mono ${toneClass(pair.netPnl)}`} title={pair.netPnl == null ? UNMEASURED_TITLE : undefined}>{formatNumber(pair.netPnl)}</td>
-                        <td><StatusBadge status={pair.success ? "success" : pair.success === false ? "failed" : "partial"} label={pair.state ?? "unknown"} /></td>
+                        <td><StatusBadge status={pair.success ? "success" : pair.success === false ? "failed" : "partial"} label={`${exitReasonLabel(pair.exitReason ?? pair.state)} · ${pair.success ? "净盈利" : pair.success === false ? "净亏损" : "未测量"}`} /></td>
                         <td>{pair.highSellFailed ? "高抛失败" : pair.lowBuyFailed ? "低吸失败" : pair.success ? "成功" : "暂无判定"}</td>
                         <td>{pair.issues?.[0]?.message ?? "minute fill available"}</td>
                       </tr>

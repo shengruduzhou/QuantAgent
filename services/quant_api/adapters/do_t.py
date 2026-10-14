@@ -94,6 +94,10 @@ class DoTAdapter:
             "pred_eod_restore_prob", "entry_mode_adverse_risk",
         ]
         schema = lazy.collect_schema()
+        # The summary describes every pair in the source (after the symbol
+        # filter), not the page sent to the browser: round-29 R6 saw the
+        # success rate change with the page size.
+        population = _pair_population(lazy, schema)
         frame = (
             lazy.select([name for name in columns if name in schema])
             .sort("trade_date", descending=True)
@@ -101,21 +105,13 @@ class DoTAdapter:
             .collect()
         )
         pairs = []
-        wins = 0
-        total_net = 0.0
-        high_fail = 0
-        low_fail = 0
         for index, row in enumerate(frame.to_dicts()):
             net_ret = _float(row.get("net_ret"))
             state = str(row.get("state") or "")
             mode = str(row.get("mode") or "")
             success = net_ret > 0 if net_ret is not None else None
-            wins += int(success is True)
-            total_net += net_ret or 0.0
             high_failed = "sell" in mode and ("stop" in state or "restore" in state)
             low_failed = "buy" in mode and ("stop" in state or "breakdown" in state)
-            high_fail += int(high_failed)
-            low_fail += int(low_failed)
             entry_status = row.get("entry_fill_status")
             exit_status = row.get("exit_fill_status")
             quantity = _float(row.get("filled_qty")) or _float(row.get("requested_qty"))
@@ -134,6 +130,9 @@ class DoTAdapter:
                 "netPnl": net_ret,
                 "edgePct": _float(row.get("gross_ret")),
                 "state": state or None,
+                # state is the exit trigger; it says nothing about the outcome
+                # (a take-profit exit can still lose after costs).
+                "exitReason": _EXIT_REASON.get(state, state or None),
                 "entryStatus": entry_status,
                 "exitStatus": exit_status,
                 "highSellFailed": high_failed,
@@ -147,17 +146,20 @@ class DoTAdapter:
                 "issues": [],
             })
         report = read_json(directory / "factor_combo_report.json", {}) or {}
-        count = len(pairs)
+        count = population["pairs"]
+        measured = population["measured"]
         return {
             "sourceId": source_id,
             "symbol": symbol,
             "summary": {
                 "pairCount": count,
-                "successRate": wins / count if count else None,
-                "failureRate": 1.0 - wins / count if count else None,
-                "highSellFailureRate": high_fail / count if count else None,
-                "lowBuyFailureRate": low_fail / count if count else None,
-                "totalNetPnl": total_net if count else None,
+                "pairsShown": len(pairs),
+                "unmeasuredPairs": count - measured,
+                "successRate": population["wins"] / measured if measured else None,
+                "failureRate": population["losses"] / measured if measured else None,
+                "highSellFailureRate": population["high_fail"] / count if count else None,
+                "lowBuyFailureRate": population["low_fail"] / count if count else None,
+                "totalNetPnl": population["net_sum"] if measured else None,
                 "returnContribution": _nested_metric(report, "metrics", "annualized_uplift"),
                 "drawdownContribution": None,
                 "qualityScore": _nested_metric(report, "metrics", "hit_rate"),
@@ -253,6 +255,31 @@ class DoTAdapter:
             "pairs": [],
             "byRegime": {},
         }
+
+
+_EXIT_REASON = {
+    "closed_profit": "take_profit_trigger",
+    "closed_stop": "stop_trigger",
+    "closed_eod": "end_of_day_flatten",
+}
+
+
+def _pair_population(lazy: pl.LazyFrame, schema: Any) -> dict[str, Any]:
+    """Pair counts over the whole (filtered) source, independent of paging."""
+    net = pl.col("net_ret").cast(pl.Float64) if "net_ret" in schema else pl.lit(None, dtype=pl.Float64)
+    mode = pl.col("mode").cast(pl.Utf8).fill_null("") if "mode" in schema else pl.lit("")
+    state = pl.col("state").cast(pl.Utf8).fill_null("") if "state" in schema else pl.lit("")
+    stopped = state.str.contains("stop")
+    row = lazy.select(
+        pl.len().alias("pairs"),
+        net.is_not_null().sum().alias("measured"),
+        (net > 0).fill_null(False).sum().alias("wins"),
+        (net <= 0).fill_null(False).sum().alias("losses"),
+        net.sum().alias("net_sum"),
+        (mode.str.contains("sell") & (stopped | state.str.contains("restore"))).sum().alias("high_fail"),
+        (mode.str.contains("buy") & (stopped | state.str.contains("breakdown"))).sum().alias("low_fail"),
+    ).collect().to_dicts()[0]
+    return {key: (float(value) if key == "net_sum" else int(value or 0)) for key, value in row.items()}
 
 
 def _float(value: Any) -> float | None:
