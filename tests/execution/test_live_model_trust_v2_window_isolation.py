@@ -77,6 +77,9 @@ def test_strict_and_statistical_return_files_must_end_before_fresh_start(tmp_pat
         artifact_roots={"bundle": tmp_path},
     )
     assert result.ok is False
+    # No acceptance calendar in this bundle: that is itself a failure, and it
+    # must not switch the window-isolation checks off.
+    assert "acceptance_calendar:missing" in result.reasons
     assert "strict_backtest_returns:end_not_strictly_before_fresh_oos" in result.reasons
     assert "statistical_returns:end_not_strictly_before_fresh_oos" in result.reasons
 

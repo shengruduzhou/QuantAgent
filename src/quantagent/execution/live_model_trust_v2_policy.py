@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from quantagent.execution.acceptance_calendar import load_acceptance_calendar
 from quantagent.execution.live_model_evidence import (
     recompute_statistical_evidence,
     validate_fresh_predictions,
@@ -82,10 +83,22 @@ def verify_governed_live_model_trust_v2(
 
     fresh_path = resolved.get("fresh_oos_predictions")
     fresh_summary_path = resolved.get("fresh_oos")
+    calendar_path = resolved.get("acceptance_calendar")
     if fresh_path and fresh_summary_path:
+        # A missing calendar is a failure, not a reason to skip the FRESH
+        # checks: the window-isolation checks below key off fresh_start_date.
+        calendar = None
+        if not calendar_path:
+            reasons.append("acceptance_calendar:missing")
         try:
             derived = validate_fresh_predictions(fresh_path)
             summary = _read_json_object(Path(fresh_summary_path), "fresh_oos")
+            if calendar_path:
+                calendar = load_acceptance_calendar(
+                    calendar_path,
+                    expected_model_id=str(payload.get("model_id") or ""),
+                    expected_source_commit=str(payload.get("source_commit") or ""),
+                )
         except ValueError as exc:
             reasons.append(str(exc))
         else:
@@ -103,6 +116,13 @@ def verify_governed_live_model_trust_v2(
                 reasons.append("fresh_oos:start_date_mismatch_predictions")
             if str(summary.get("end_date") or "") != derived.end_date:
                 reasons.append("fresh_oos:end_date_mismatch_predictions")
+            if calendar is not None and derived.session_dates != calendar.sessions:
+                missing = sorted(set(calendar.sessions).difference(derived.session_dates))
+                unexpected = sorted(set(derived.session_dates).difference(calendar.sessions))
+                reasons.append(
+                    "fresh_oos_predictions:session_set_mismatch_acceptance_calendar:"
+                    f"missing={missing[:10]}:unexpected={unexpected[:10]}"
+                )
             fresh_start_date = derived.start_date
             evidence.update(
                 {
@@ -113,6 +133,16 @@ def verify_governed_live_model_trust_v2(
                     "fresh_prediction_symbols": derived.symbols,
                 }
             )
+            if calendar is not None:
+                evidence.update(
+                    {
+                        "fresh_session_set_exact_match": derived.session_dates == calendar.sessions,
+                        "acceptance_calendar_days": calendar.trading_days,
+                        "acceptance_calendar_session_set_sha256": calendar.session_set_sha256,
+                        "acceptance_calendar_source_identity": calendar.source_identity,
+                        "acceptance_calendar_source_version": calendar.source_version,
+                    }
+                )
 
     strict_returns_path = resolved.get("strict_backtest_returns")
     strict_summary_path = resolved.get("strict_backtest")

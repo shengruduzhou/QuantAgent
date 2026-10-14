@@ -22,6 +22,7 @@ import re
 from typing import Any, Mapping
 
 from quantagent.config.paths import quant_paths
+from quantagent.execution.acceptance_calendar import load_acceptance_calendar
 from quantagent.execution.trusted_backtest_semantics import (
     TRUSTED_EXECUTION_SEMANTICS,
     trusted_cost_model_config,
@@ -47,6 +48,7 @@ REQUIRED_ARTIFACT_ROLES: tuple[str, ...] = (
     "strict_backtest_returns",
     "statistical_returns",
     "statistical_gates",
+    "acceptance_calendar",
     "fresh_oos_predictions",
     "fresh_oos",
     "risk_capacity",
@@ -59,6 +61,7 @@ JSON_ARTIFACT_ROLES: frozenset[str] = frozenset(
         "data_lineage",
         "strict_backtest",
         "statistical_gates",
+        "acceptance_calendar",
         "fresh_oos",
         "risk_capacity",
     }
@@ -306,6 +309,18 @@ def verify_live_model_trust_v2(
     strict_returns = bindings.get("strict_backtest_returns")
     statistical_returns = bindings.get("statistical_returns")
     fresh_predictions = bindings.get("fresh_oos_predictions")
+    calendar_binding = bindings.get("acceptance_calendar")
+    acceptance_calendar = None
+    calendar_path = paths.get("acceptance_calendar")
+    if calendar_path is not None:
+        try:
+            acceptance_calendar = load_acceptance_calendar(
+                calendar_path,
+                expected_model_id=model_id,
+                expected_source_commit=source_commit,
+            )
+        except ValueError as exc:
+            reasons.append(str(exc))
 
     trainer = docs.get("trainer_manifest", {})
     if trainer:
@@ -327,6 +342,29 @@ def verify_live_model_trust_v2(
             reasons.append("pre_registration:candidate_family_invalid")
         if prereg_budget is None:
             reasons.append("pre_registration:max_search_trials_invalid")
+        if acceptance_calendar is not None and calendar_binding is not None:
+            if prereg.get("acceptance_calendar_sha256") != calendar_binding.sha256:
+                reasons.append("pre_registration:acceptance_calendar_sha256_mismatch")
+            if (
+                prereg.get("acceptance_calendar_session_set_sha256")
+                != acceptance_calendar.session_set_sha256
+            ):
+                reasons.append(
+                    "pre_registration:acceptance_calendar_session_set_sha256_mismatch"
+                )
+            if str(prereg.get("acceptance_window_id") or "") != acceptance_calendar.acceptance_window_id:
+                reasons.append("pre_registration:acceptance_calendar_window_mismatch")
+            if str(prereg.get("acceptance_start_date") or "") != acceptance_calendar.window_start_date:
+                reasons.append("pre_registration:acceptance_calendar_start_mismatch")
+            if str(prereg.get("acceptance_end_date") or "") != acceptance_calendar.window_end_date:
+                reasons.append("pre_registration:acceptance_calendar_end_mismatch")
+            calendar_retrieved = _parse_timestamp(acceptance_calendar.source_retrieved_at)
+            calendar_as_of = _parse_timestamp(acceptance_calendar.source_as_of)
+            if prereg_at is not None:
+                if calendar_retrieved is None or calendar_retrieved > prereg_at:
+                    reasons.append("pre_registration:calendar_retrieved_after_registration")
+                if calendar_as_of is None or calendar_as_of > prereg_at:
+                    reasons.append("pre_registration:calendar_as_of_after_registration")
 
     search = docs.get("search_ledger", {})
     trials = _positive_int(search.get("trial_count")) if search else None
@@ -355,6 +393,16 @@ def verify_live_model_trust_v2(
             reasons.append("data_lineage:pit_not_true")
         if lineage.get("universe_pit") is not True:
             reasons.append("data_lineage:universe_pit_not_true")
+        if acceptance_calendar is not None and calendar_binding is not None:
+            if lineage.get("acceptance_calendar_sha256") != calendar_binding.sha256:
+                reasons.append("data_lineage:acceptance_calendar_sha256_mismatch")
+            if (
+                lineage.get("acceptance_calendar_session_set_sha256")
+                != acceptance_calendar.session_set_sha256
+            ):
+                reasons.append("data_lineage:acceptance_calendar_session_set_sha256_mismatch")
+            if str(lineage.get("acceptance_window_id") or "") != acceptance_calendar.acceptance_window_id:
+                reasons.append("data_lineage:acceptance_calendar_window_mismatch")
 
     strict = docs.get("strict_backtest", {})
     if strict:
@@ -416,6 +464,30 @@ def verify_live_model_trust_v2(
             reasons.append("fresh_oos:acceptance_window_id_missing")
         if fresh_predictions and fresh.get("predictions_sha256") != fresh_predictions.sha256:
             reasons.append("fresh_oos:predictions_sha256_mismatch")
+        if acceptance_calendar is not None and calendar_binding is not None:
+            if fresh.get("acceptance_calendar_sha256") != calendar_binding.sha256:
+                reasons.append("fresh_oos:acceptance_calendar_sha256_mismatch")
+            if (
+                fresh.get("acceptance_calendar_session_set_sha256")
+                != acceptance_calendar.session_set_sha256
+            ):
+                reasons.append("fresh_oos:acceptance_calendar_session_set_sha256_mismatch")
+            if fresh_window != acceptance_calendar.acceptance_window_id:
+                reasons.append("fresh_oos:acceptance_calendar_window_mismatch")
+            if fresh_start is None or fresh_start.isoformat() != acceptance_calendar.window_start_date:
+                reasons.append("fresh_oos:acceptance_calendar_start_mismatch")
+            if fresh_end is None or fresh_end.isoformat() != acceptance_calendar.window_end_date:
+                reasons.append("fresh_oos:acceptance_calendar_end_mismatch")
+            if fresh_days != acceptance_calendar.trading_days:
+                reasons.append(
+                    f"fresh_oos:trading_days_mismatch_acceptance_calendar:{fresh_days}!="
+                    f"{acceptance_calendar.trading_days}"
+                )
+            if acceptance_calendar.trading_days < min_fresh_oos_days:
+                reasons.append(
+                    f"acceptance_calendar:trading_days_below_{min_fresh_oos_days}:"
+                    f"{acceptance_calendar.trading_days}"
+                )
 
     if prereg and fresh:
         if str(prereg.get("acceptance_window_id") or "") != fresh_window:
@@ -430,6 +502,13 @@ def verify_live_model_trust_v2(
         reasons.append("search_ledger:completed_not_strictly_before_fresh_oos")
     if issued_at and fresh_end and issued_at.date() < fresh_end:
         reasons.append("v2_issued_before_fresh_oos_end")
+    if acceptance_calendar is not None and issued_at is not None:
+        calendar_retrieved = _parse_timestamp(acceptance_calendar.source_retrieved_at)
+        calendar_as_of = _parse_timestamp(acceptance_calendar.source_as_of)
+        if calendar_retrieved is None or calendar_retrieved > issued_at:
+            reasons.append("acceptance_calendar:retrieved_after_certificate_issue")
+        if calendar_as_of is None or calendar_as_of > issued_at:
+            reasons.append("acceptance_calendar:as_of_after_certificate_issue")
 
     training_cutoff = _parse_date(lineage.get("training_cutoff")) if lineage else None
     validation_cutoff = _parse_date(lineage.get("validation_cutoff")) if lineage else None
@@ -473,6 +552,18 @@ def verify_live_model_trust_v2(
         "fresh_oos_start": None if fresh_start is None else fresh_start.isoformat(),
         "fresh_oos_end": None if fresh_end is None else fresh_end.isoformat(),
         "acceptance_window_id": fresh_window or None,
+        "acceptance_calendar_sha256": (
+            None if calendar_binding is None else calendar_binding.sha256
+        ),
+        "acceptance_calendar_session_set_sha256": (
+            None if acceptance_calendar is None else acceptance_calendar.session_set_sha256
+        ),
+        "acceptance_calendar_source_identity": (
+            None if acceptance_calendar is None else acceptance_calendar.source_identity
+        ),
+        "acceptance_calendar_source_version": (
+            None if acceptance_calendar is None else acceptance_calendar.source_version
+        ),
         "pbo": pbo,
         "dsr_probability": dsr,
         "spa_p_value": spa,
