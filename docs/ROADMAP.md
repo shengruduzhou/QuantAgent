@@ -40,10 +40,28 @@
    绩效指标 8 份、rank-IC 约 10 份（最小截面数不一致）、做T 路径的 3 份涨跌停拷贝。
    以 `execution/cost_model`、`quant_math/performance`、`factors/evaluation`、`market_rules/ashare`
    为唯一实现。冲击定律改为波动率缩放会改变规范数字，需预注册并经用户批准。
+   **Cycle 32 状态（不改数字的部分已完成）**：rank-IC 13 处委托 `cross_sectional_rank_ic`、绩效 6 处委托
+   `sharpe_ratio`/`max_drawdown`（冻结拷贝等价测试 ≤1e-12）。**仍需预注册重基线才能统一的差异**（数值例）：
+   - `paper_report` Sharpe 用 ddof=0：n=20 时比 ddof=1 高 2.6%；回撤不含初始资金点：初始 100 万、NAV 90/95/96 万
+     → 报 0% 而真实 −10%（`strict_v8` 报 10%）。
+   - `backtest/engine.py` 年化指数 252/len(nav)（应为收益数）：11 点 NAV 1.00→1.10 报 +788% 而非 +1004%。
+   - `v7_experiment`/`model_comparison` 年化 `(1+日均)^252`：同一 252 日序列 −22.0% vs 几何 −25.2%。
+   - `beta_decomposition` 用 244 日、其余 252：Sharpe 差 1.6%。`v7_experiment` Sharpe 分母 `std+1e-12`、退化时 0.0。
+   - `v7_experiment._rank_ic` 先排名后丢 NaN 标签（例：0.832 vs 0.800）且退化日记 0.0 计入均值（例：0.5 vs 1.0）。
+   - `fusion.factor_ic_series` 常数因子截面：n=7 时得 5.6e-17（计入均值），n=8 时得 NaN。
+   - `information_coefficient` 的 HAC t 按输入行顺序而非日期排序计算自协方差（非重叠 t 已按日期排序）。
+   - 成本：`backtest/engine.py`/`CostModelConfig` 印花税固定 5 bps（2023-08-28 前少收 5 bps）；佣金 2.5/3.0 bps 并存；
+     冲击三处默认一致（10·√p bps），未见 100× 差异。做T 3 份涨跌停拷贝与 `market_rules` 不等价（无日期、920xxx）。
 4. **持久化多重检验台账。** 接到 `audit-nonlinear-factors`、`search-factor-fusion`、RD-Agent；
    DSR 一律用同族累计 N。
 5. **退役 v7 银层面板。** 约 89 处引用改为经 `quant_paths` 的单一常量指向 U0/r29，随后归档。
 6. **重叠标签 IC 的 t 值**改用非重叠 cohort（`factors/evaluation`）；筛选用 |t| ≥ 3。
+   **Cycle 32 已完成**：`quant_math.performance.nonoverlapping_cohort_t_stat`（h 个错位 cohort t 的均值，未定义日以 NaN
+   占位保持对齐；Richardson & Smith 1991）；`ICSummary.(rank_)nonoverlap_t_stat`；`governance_metrics` 新闸门
+   `min_nonoverlap_rank_t_stat=3.0`、`lifecycle` 的 validated 需 ≥3（NaN 不通过）；RD-Agent 门委托且数值不变。
+   零假设校准（AR(1) φ=0.98 因子、600 面板×750 日×50 名，固定种子）：|t|>1.96 拒绝率 h=5 HAC 7.7% vs 非重叠 3.2%，
+   h=20 HAC 11.8% vs 3.3%；非重叠 |t|≥3 为 0.17%。遗留：RD-Agent 门的 IC 序列先删未定义日再分 cohort（缺日会串组），
+   改正会改门的数字，未改。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控
    对可成交限价的名义金额留容差（直接改限价会让恰好 10% 权重的订单被单票上限拒绝）。
 8. **E2（非线性设定消融）**在 P1-1 之后、按修订后的预注册（加入 rank 目标线性对照、选择折延长到 2019）。

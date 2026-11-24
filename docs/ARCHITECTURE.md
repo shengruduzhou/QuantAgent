@@ -37,10 +37,10 @@ crontab + CI 推导，而非沿用旧文档）。治理规则见 [GOVERNANCE.md]
 
 | 概念 | 权威实现 | 已知残留重复（ROADMAP P1-3） |
 |---|---|---|
-| A 股交易规则（涨跌停、整手、T+1、印花税日程） | `market_rules/ashare.py` | `quant_math/ashare.py` 已委托；do-T 研究路径有 3 份 `_symbol_limit_band` 拷贝 |
-| 交易成本 | `execution/cost_model.AShareCostModel` | `market_rules.trading_costs`（纸面/streaming，佣金默认值不同）、`backtest/fill_model`、`intraday_fill.CostConfig` |
-| 绩效指标 | `quant_math/performance` | `strict_v8._compute_metrics`、`paper_report`、`backtest/engine.py` 各有一份 |
-| 截面 rank-IC | `factors/evaluation` | 约 10 份私有拷贝，最小截面数不一致 |
+| A 股交易规则（涨跌停、整手、T+1、印花税日程） | `market_rules/ashare.py` | `quant_math/ashare.py` 已委托；do-T 研究路径 3 份 `_symbol_limit_band`（`execution/intraday_features`、`training/do_t_roundtrip_labels`、`research/intraday_dot_ev_backtest`）**不等价故未委托**：无日期（创业板 2020-08-24 前应为 10%）、`920xxx` 北交所按 10% 而非 30% |
+| 交易成本 | `execution/cost_model.AShareCostModel` | 未改（改默认值会改规范数字）。`market_rules.trading_costs` 佣金 2.5 vs 3.0 bps；`quant_math/transaction_cost.CostModelConfig`（`backtest/engine.py`、`fill_model`）佣金 2.5 bps 且**印花税固定 5 bps 不分日期**（2023-08-28 前每笔卖出少收 5 bps）；`intraday_fill.CostConfig` 3.0 bps、固定 5 bps 印花税、滑点 8 + 价差 6 bps。冲击定律三处默认均为 10·√p bps |
+| 绩效指标 | `quant_math/performance` | Cycle 32：`strict_v8`、`paper_report`（显式 `ddof=0`）、`backtest/engine.py`、`multi_objective_loss`、`walk_forward_sleeve_allocator`、`beta_decomposition` 的 Sharpe/回撤已委托（≤1e-12）。年化口径仍各异（见 ROADMAP P1-3）：观测频率年化（strict/paper）、固定 252、`beta_decomposition` 244、`(1+均值)^252`（`v7_experiment`、`model_comparison`）、`engine.py` 指数 252/len(nav) |
+| 截面 rank-IC | `factors/evaluation.cross_sectional_rank_ic` | Cycle 32：13 处已委托（各自最小截面数 1/2/3/5/20/可配置、inf 处理经显式参数保留，冻结拷贝等价测试）。未委托：`fusion.schemes.factor_ic_series`（常数截面返回 ~1e-17 而非 NaN）、`training/v7_experiment._rank_ic`（先排名后丢 NaN、退化日记 0.0）、`training/diagnostics`（按月混合，非逐日）、`scripts/factor_full_judgment`（全宇宙排名后再筛可交易）、冻结的 `regime_weight_meta`、做T 资金流脚本、playbook 宽表 `corrwith` |
 | 走式切分 | `training/splitters.py` + `quant_math/purged_cv` | 若干私有 `_walk_forward_splits` |
 | 风控 | `paper/risk.RiskEngine`（订单路径上的唯一一个） | `risk/kill_switch`、`risk/risk_gate` 只服务 `production-readiness` 报告 |
 | 存储路径 | `config/paths.quant_paths()`（`QUANTAGENT_HOME`） | — |
