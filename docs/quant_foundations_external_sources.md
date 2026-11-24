@@ -40,7 +40,7 @@ Data responsibility in QuantAgent:
 | Minute K / tick / depth | TickFlow | Fuyao public capability currently does not include these |
 | News / announcement full text / research reports | existing evidence/news pipeline | Fuyao public capability currently does not include full text |
 | Qlib research dataset / handler / workflow baseline | Qlib | fit learnable processors only on the training interval |
-| Dated ST / risk-warning state | SZSE short-name register (SZSE); cninfo announcements (SSE/BSE, ENG_ST30) | re-read 2026-11-24: Fuyao K-line, snapshot and Market Dump carry no name, ST flag or limit ratio, and `stock-basics` is "敬请期待"; Qlib has no ST history. Never infer ST from price bands |
+| Dated ST / risk-warning state | SZSE short-name register (SZSE); SSE/BSE from 2026-07-27: dated TickFlow full-universe name snapshots + cninfo announcements and dated short names (ENG_ST31) | re-read 2026-11-24: Fuyao K-line, snapshot and Market Dump carry no name, ST flag or limit ratio, and `stock-basics` is "敬请期待"; Qlib has no ST history. Never infer ST from price bands |
 
 Market Dump endpoints currently pinned by the upstream API contract:
 

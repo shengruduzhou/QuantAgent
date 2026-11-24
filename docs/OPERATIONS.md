@@ -18,7 +18,7 @@
 
 | 时间（JST，工作日） | 脚本 | 作用 | 状态 |
 |---|---|---|---|
-| 06:00 | `scripts/catchup_supervisor.sh` | 先刷新 ST 证据（`u0_st_register_refresh.sh`），再补齐前向面板 | **每日 ABORT**：深市已覆盖，沪市 1,210 个种子没有通过验收的带日期 ST 证据（fail-closed，设计如此；见 DATA.md） |
+| 06:00 | `scripts/catchup_supervisor.sh` | 先刷新 ST 证据（`u0_st_register_refresh.sh`：公告、深市登记、TickFlow 名称快照、活跃公司简称、ENG_ST31 publish），再补齐前向面板 | 2026-11-24 前每日 ABORT（沪市无证据）；2026-11-25 起全部 3,273 个种子有证据，catchup 应恢复——以 `runtime/logs` 中当日日志为准 |
 | 08:00 | `scripts/coverage_guard.sh` | 覆盖守卫 + 前向推理 + 健康检查 | 运行但无数据可推 |
 | 16:30 | `scripts/fresh_blind_daily.py` | FRESH 窗盲测纸面日志 | `data_status=FAILED` 自 2026-08-14 |
 | 16:40 | `scripts/run_dot_fundflow_daily.sh` | 做T 资金流监控 | **从未运行**（文件无执行位）；做T 已定论无 edge，建议删除该 cron 行 |

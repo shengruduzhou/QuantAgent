@@ -30,11 +30,11 @@ v7 银层面板 runtime/data/v7/silver/market_panel（qlib_rescaled + akshare qf
 | U0 原始面板 | 2026-07-24 | 冻结；无定时生产者（22:00 的 `u0_full_universe_backfill.py` 是已被取代的缺失符号补抓器，不是日更，且未带 `--allow-network` 而空转） |
 | r29 认证 gold + 执行面板 | 2026-07-24 | 冻结；研究可用窗口 ≤ 2025-08-29（隔离窗见 GOVERNANCE.md） |
 | v7 银层面板 | 2026-08-05 | REFUTED 且停更 |
-| fresh_blind 前向面板 | 2026-08-05 | **停摆**：深市种子 2,063 个已有带日期 ST 证据；沪市 1,210 个没有通过验收的证据，catchup 每日 fail-closed |
+| fresh_blind 前向面板 | 2026-08-05 | **ST 证据已齐**（2026-11-25）：3,273 个种子（沪 1,210 + 深 2,063）在 2026-08-06→ 全部有带日期 ST 证据；下一次 06:00 catchup 起恢复补齐（以其日志为准） |
 | 行业图 sector_map | 2026-05-31 快照 | 缺 1,924 个认证符号；当期快照 = 前视，只可用于归因 |
-| ST 区间 | 深市 2026-11-24（每日刷新） | 深市：交易所简称变更登记（`pit/st_pit_evidence.parquet`，每日 06:00 刷新）；沪/北：**BLOCKED_BY_DATA**——ENG_ST30 公告重建未通过预注册 HOLDOUT（行精度 0.924 < 0.98），见下 |
+| ST 区间 | 2026-11-24（每日刷新） | `pit/st_pit_evidence.parquet`，每日 06:00 刷新。深市：交易所简称变更登记（2016→）；沪/北：**2026-07-27 起**为 ENG_ST31 前向锚定登记（预注册验证通过）；**2026-07-27 之前仍 BLOCKED_BY_DATA**（ENG_ST30 HOLDOUT 未过），见下 |
 
-### ST / 风险警示证据（ENG_ST30，2026-11-24）
+### ST / 风险警示证据（ENG_ST30 + ENG_ST31，2026-11-25）
 
 - **契约**：`quantagent.data.providers.st_pit` 区间表（`symbol, start_date, end_date(含), is_st, available_at`），
   ST 与非 ST 区间都必须显式给出；缺行即拒绝（不把"没有记录"读成"不是 ST"）。默认路径
@@ -43,10 +43,17 @@ v7 银层面板 runtime/data/v7/silver/market_panel（qlib_rescaled + akshare qf
   每日重取；认证用的 `pit/st_intervals.parquet`（2026-07-26）不改动。新登记与旧登记的 906 个历史区间完全一致。
 - **沪/北**：`scripts/u0_st_announcements.py` 从巨潮公告（类别"特别处理和退市" + 标题关键词）、公告正文生效日、
   公告上的当日简称重建区间。预注册 `docs/research/preregistrations/ENG_ST30_preregistration.md`：DEV（深市偶数尾号）
-  7 项全过；HOLDOUT 一次评测 M5b 行精度 0.924 < 0.98 ⇒ **沪/北不写入**，保持 BLOCKED_BY_DATA。
-  原始缓存（16,766 条公告、3,973 份正文、名称探针）在 `runtime/data/u0/pit/_st_announcements/`，可供后继方法复用。
-- **刷新**：`scripts/u0_st_register_refresh.sh`（由 06:00 `catchup_supervisor.sh` 调用）只重取尚未收盘的月份窗口；
-  `publish` 只发布通过验收的交易所。
+  7 项全过；HOLDOUT 一次评测 M5b 行精度 0.924 < 0.98 ⇒ **十年历史不写入**，2026-07-27 之前保持 BLOCKED_BY_DATA。
+  原始缓存（16,766 条公告、3,973 份正文、名称探针）在 `runtime/data/u0/pit/_st_announcements/`。
+- **沪/北前向（ENG_ST31，`scripts/u0_st_forward.py`）**：从带日期的全市场名称快照（TickFlow `get_instruments`，
+  A0 = 2026-07-26 19:39 CST；此后每日 05:00 CST 一张）出发，按 ENG_ST30 冻结分类器解析的巨潮公告向前推进状态；
+  每张快照和每条巨潮当日简称（活跃公司逐家抓取全部公告）都必须与推进状态一致，否则自上次确认起记 UNKNOWN（无证据行）。
+  预注册 `docs/research/preregistrations/ENG_ST31_preregistration.md`：深市 2026-07-27→2026-11-24 一次验证
+  V1–V5 全过（235,036 行 0 错、19/19 变更同日、0 UNKNOWN）⇒ 沪/北 2026-07-27 起写入。
+  **每日监控**：`publish` 每天用同一方法重算深市并与当天登记对比，V1/V2/V5 低于阈值或 V4 超界即撤下沪/北行（fail-closed）。
+- **刷新**：`scripts/u0_st_register_refresh.sh`（由 06:00 `catchup_supervisor.sh` 调用）：重取未收盘月份的公告、
+  深市登记、新快照、活跃公司简称，再 `u0_st_forward.py publish`（先发深市，再按决策规则与监控追加沪/北）。
+  交易日历 `pit/trading_calendar.parquet` 止于 2026-12-31，年底前必须延长，否则构建拒绝运行。
 
 ### r29 认证面板完整性（Round 31 复核，≤ 2025-08-29）
 
@@ -269,6 +276,6 @@ AI_quant_venv/bin/python3 scripts/u0_pit_readiness.py
 |---|---|---|
 | Level-2（逐笔 / 十档） | BLOCKED | TickFlow 未授权；公开源仅五档 L1；QMT 为 Windows 客户端 |
 | 深历史分钟线 | BLOCKED | TickFlow 日内未授权；公开源仅滚动窗口 |
-| 历史 ST 区间（沪/北） | BLOCKED_BY_DATA | 无带日期登记；cninfo 公告重建（ENG_ST30）未通过预注册 HOLDOUT；Fuyao/HiThink、Qlib 均无 ST 历史（2026-11-24 复核）；baostock `isST` 需 10030 端口 |
+| 历史 ST 区间（沪/北，2026-07-27 之前） | BLOCKED_BY_DATA | 无带日期登记；cninfo 公告重建（ENG_ST30）未通过预注册 HOLDOUT（2026-07-27 起由 ENG_ST31 覆盖）；Fuyao/HiThink、Qlib 均无 ST 历史（2026-11-24 复核）；baostock `isST` 需 10030 端口 |
 | 财务报表 / 估值（TickFlow） | UNAUTHORIZED | 需另购权限；akshare/新浪为替代路径 |
 | baostock / mootdx | BLOCKED_BY_ENVIRONMENT | 运行环境只放行 80/443 |
