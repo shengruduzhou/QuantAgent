@@ -1,20 +1,23 @@
-# QuantAgent V7 Codex 指令 / Codex Guide
+# QuantAgent 协作规则 / Contributor & Agent Guide
 
 ## 项目目的 / Project Purpose
 
-QuantAgent V7 是面向 A 股散户现实约束的 PIT quant research system。仓库不是 toy LLM trading demo，不提供 financial advice，不承诺收益。研究输出必须经过测试、回测、风控、paper trading 和 live-readiness reporting，才允许讨论任何 live execution path。
+QuantAgent 是面向 A 股散户现实约束的 PIT quant research system（历史代号 V7/V8 仍出现在部分模块与命令名中，属兼容命名）。仓库不是 toy LLM trading demo，不提供 financial advice，不承诺收益。研究输出必须经过测试、回测、风控、paper trading 和 live-readiness reporting，才允许讨论任何 live execution path。
 
-V7 覆盖：
+当前状态：**RESEARCH / NOT LIVE READY**；系统实际架构见 `docs/ARCHITECTURE.md`，研究结论见
+`docs/RESEARCH.md`，优先级见 `docs/ROADMAP.md`。覆盖范围：
 
 - Point-in-Time financial provider (TuShare / AkShare) + local Parquet/CSV cache。
-- Daily Evidence Ingestion Layer (`data/ingestion/*` + `EvidenceStore`)；每条 `EvidenceRecord` 必须带 source、published_at、available_at、raw_hash 和 confidence。
+- Evidence layer (`data/ingestion` 的 `DailyEvidenceJob` / `PolicyIngestor` / `EvidenceStore`，`data/evidence.canonical.EvidenceRecord`)；每条 `EvidenceRecord` 必须带 source、published_at、available_at、raw_hash 和 confidence。
 - Qlib CN market panel、technical features、label generation、training slices、backtest base。
 - Dynamic theme discovery、industry chain graph、stock pool hard gate。
 - Fundamental due diligence、Financial Fraud Risk、News Credibility、Intrinsic Valuation。
-- Multi-horizon Alpha: 1 / 5 / 20 / 60 / 120 / 126 days。**生产模型 = FT-Transformer sleeves**（`cli/v8_deep.py train-v8-deep` + `configs/production_blend.json`，单命令物化 `scripts/materialize_production_composite.py`）。Ridge/ElasticNet 为 v7 classical 基线；`models/v7_deep_alpha.py` 等启发式 scorer 非生产（见文件头 STATUS WARNING）。
+- Multi-horizon Alpha: 1 / 5 / 20 / 60 / 120 / 126 days。**不存在已验证的生产模型**：`configs/production_blend.json`（v8.9 FT-Transformer sleeves）被标注为
+`historical_unvalidated`——训练于被证伪的 v7 银层面板与前视 ST 宇宙，且 PBO 0.886（likely_overfit）；
+在认证 r29 数据上重训并通过 `docs/GOVERNANCE.md` 全部闸门之前不得用于决策。
 - Purged walk-forward CV、model artifacts、metrics、acceptance gates。
 - A-share execution simulation：T+1、limit-up/down、suspension、ST、lot size、volume cap、slippage、cost、partial fills、failed order audit。
-- QMT execution-preparation、Risk Gate、Kill Switch、Reconciliation、Audit Replay。
+- QMT execution-preparation（`execution/qmt_gateway.py`，安全契约占位，无生产构造点）、Risk Gate、Kill Switch、Reconciliation。
 
 ## A 股安全约束 / A-share Safety Constraints
 
@@ -23,10 +26,10 @@ V7 覆盖：
 - Agents never emit orders：LLM / Agent 只能输出 evidence、views、constraints、confidence、risk flags、audit logs。
 - Optimizer never emits orders：Portfolio Construction 只能输出 `target_weights`。
 - Only `OrderManager` converts target weights into order intents。
-- QMT submit 前必须通过 risk gate、kill switch、execution constraint simulation、reconciliation、audit replay。
+- QMT submit 前必须通过 risk gate、kill switch、execution constraint simulation、reconciliation。
 - Production mode must not use synthetic fallback；mock data 只允许在 tests 和 smoke examples。
 - 不允许新增任何 guaranteed profitability 或收益保证表述。
-- **评测窗口纪律（2026-07 起）**：`configs/quarantined_windows.json` 定义禁评窗（被烧 holdout 2025-09-01→2026-05-18；冻结新鲜窗 2026-05-19+，正式首读 ≥120 交易日）。可信评测唯一入口 = `scripts/baseline_protocol.py` variant C（守卫 fail-closed）；任何数字引用须带 trust class（见 `BASELINE_TRUST_CLASSIFICATION.md`）。改进验收规则见 `ACCEPTANCE_RULES.md`。
+- **评测窗口纪律（2026-07 起）**：`configs/quarantined_windows.json` 定义禁评窗（被烧 holdout 2025-09-01→2026-05-18；冻结新鲜窗 2026-05-19+，正式首读 ≥120 交易日）。可信评测唯一入口 = `scripts/baseline_protocol.py` variant C（守卫 fail-closed）；任何数字引用须带 trust class；信任分级与改进验收规则见 `docs/GOVERNANCE.md`。
 
 ## Code Style / 代码规范
 
@@ -35,9 +38,12 @@ V7 覆盖：
 - 新增财务字段必须同时定义 `report_period`、`ann_date`、`available_at`，否则不能进入 PIT cache。
 - Optional dependencies must degrade gracefully；real-data commands must report actionable install/setup errors。
 - 优先做 wrappers、adapters、integration seams，不删除仍被引用的 SOTA components。
-- 删除 unused code 或 obsolete `.md` 前，必须证明未被 imports、CLI、tests、README、AGENTS 或 docs 引用。
+- 删除 unused code 或 obsolete `.md` 前，必须证明未被 imports、CLI、JobRunner 白名单、crontab、tests、README、AGENTS 或 docs 引用（Round 31 的可达性方法见 `docs/audits/HISTORY.md`）。
+- **文档只有一套**：README、AGENTS、CLAUDE 与 `docs/{ARCHITECTURE,DATA,GOVERNANCE,OPERATIONS,RESEARCH,ROADMAP,UI}.md`、
+  `docs/audits/HISTORY.md`、`docs/research/ledgers/`、`docs/research/preregistrations/`、ADR。新结论写进对应文档，
+  不再新建每轮审计目录或根目录报告；审计原始材料放 `runtime/archives/audits/<round>/`。
 - 所有 silver / gold artifact 必须伴随一份 `<lake_root>/manifests/<dataset>.json`（`quantagent.data.manifest.DataManifest`）。
-- 大数据/模型/报告默认写入 `E:\Project\QuantAgent\runtime\`（Windows）或 `~/AI_quant`（POSIX），通过 `QUANTAGENT_HOME` 环境变量覆盖。`quantagent.config.paths.quant_paths` 是单一来源。
+- 大数据/模型/报告默认写入仓库下 `runtime/`（Windows 为 `E:\Project\QuantAgent\runtime\`），通过 `QUANTAGENT_HOME` 环境变量覆盖；测试会把它指向临时目录，测试不得写真实 runtime。`quantagent.config.paths.quant_paths` 是单一来源。
 
 ## Institutional Workstation VNext / 一体式工作站
 
@@ -68,7 +74,6 @@ quantagent train-alpha-v7 --dataset ...
 quantagent train-alpha-v7 --dataset ... --model lightgbm           # real LightGBM, fail-loud if missing
 quantagent train-alpha-v7 --dataset ... --model xgboost --allow-model-downgrade   # ridge fallback only with the flag
 quantagent train-deep-alpha-v7 --dataset ... --horizons 1,5,20,60,120,126
-quantagent optimize-alpha-v7 --dataset ... --search-space search.json --sampler grid
 quantagent predict-alpha-v7 --model-dir ... --feature-dataset ...
 quantagent build-target-weights-v7 --predictions ... --market-panel ... --sector-map ...
 quantagent run-real-training-v7 --market-panel ... --labels ... --fundamentals-root ...
@@ -122,24 +127,23 @@ Model 不能标记 production-ready，除非：
   写成常量 `True`，NOT_RUN 不得当作 PASS，缺证据即 NOT_READY_INTEGRATION。
 - 缺失来源记 `BLOCKED_BY_DATA` 并列出**已实测过的候选来源**；部分覆盖（如仅
   SZSE 有简称变更登记）算 BLOCKED，不算通过。
-- 详见 `docs/ashare_data_foundation.md`。
+- 详见 `docs/DATA.md`。
 
-## New Modules / 新增模块
+## Core Modules / 核心模块
 
 - `quantagent.config.paths` — 统一 `E:\Project\QuantAgent\runtime\` 存储布局，环境变量 `QUANTAGENT_HOME` / `QUANTAGENT_DATA_ROOT` 覆盖。
 - `quantagent.training.splitters` — expanding / rolling / purged / chronological 走式 walk-forward 切分。
-- `quantagent.training.optimize` — alpha 超参 grid / random search，默认写 `E:\Project\QuantAgent\runtime\reports\v7\optimization\`。
 - `quantagent.factors.expr` — Alpha101-style 符号化因子 DSL，`Rank(TsMean(Returns(Close, 1), 5))`，零 lookahead 测试覆盖。
 - `quantagent.models.ft_transformer` — FT-Transformer 表格架构（PyTorch 可选）。
 - `quantagent.training.ft_transformer_trainer` — FT-Transformer trainer（AMP / checkpoint resume / 时序 validation 切分）。
 - `quantagent.cli.v7_storage` — `storage-info-v7` / `setup-qlib-v7`。
-- `quantagent.cli.v7_optimize` — `optimize-alpha-v7`。
 
 ## Testing Commands / 测试命令
 
-```powershell
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m pytest tests/
-C:\Users\shanh\AppData\Local\Programs\Python\Launcher\py.exe -m compileall src
+```bash
+AI_quant_venv/bin/python3 -m pytest tests/ -q          # 全量约 8 分钟
+AI_quant_venv/bin/python3 -m compileall -q src services scripts
+(cd apps/quant-ui && npx tsc --noEmit && npx vitest run)
 git diff --check
 ```
 

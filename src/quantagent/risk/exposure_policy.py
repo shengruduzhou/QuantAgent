@@ -231,7 +231,7 @@ class ExposurePolicy:
         return cls(**data)
 
 
-#: Pre-registered parameter sets (docs/audits/round30/roles/ENG_RISK30_preregistration.md).
+#: Pre-registered parameter sets (docs/research/preregistrations/ENG_RISK30_preregistration.md).
 #: Both are counted as trials. ``identity`` is a no-op policy used to prove the
 #: wiring itself is inert (multiplier always 1.0, history still validated).
 PRESETS: dict[str, ExposurePolicy] = {

@@ -217,7 +217,7 @@ def main() -> int:
         "3-sleeve blend does NOT match production (configs/production_blend.json), "
         "with 11 known non-reproducible feature columns (overlap spearman ~0.71). "
         "Scores must NOT be used as production or trusted-evaluation evidence. "
-        "See PRODUCTION_REPRODUCIBILITY_AUDIT.md Q6 / patch P6.",
+        "See PRODUCTION_REPRODUCIBILITY_AUDIT.md (removed in Round 31; git show 2c4e296:PRODUCTION_REPRODUCIBILITY_AUDIT.md) Q6 / patch P6.",
         file=_sys.stderr, flush=True,
     )
 

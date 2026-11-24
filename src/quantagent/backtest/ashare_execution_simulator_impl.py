@@ -47,7 +47,7 @@ class AShareExecutionSimulationConfig:
     # Target-weight rows are signal-dated. There is intentionally no supported
     # same-session execution mode at this production-grade boundary.
     execution_timing_semantics: str = EXECUTION_TIMING_SEMANTICS
-    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md): PROMOTED to trusted-evaluator
+    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md (removed in Round 31; git show 2c4e296:EVALUATOR_ORDER_DEDUP_BUG.md)): PROMOTED to trusted-evaluator
     # default 2026-07-06 with user approval. False is retained only for the
     # isolated forensic harness; the facade separately prevents unsafe brokers.
     fix_cross_day_order_dedup: bool = True

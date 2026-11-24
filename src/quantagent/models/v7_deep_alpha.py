@@ -1,6 +1,6 @@
 """Deep multi-horizon alpha model with feature-group towers.
 
-.. warning:: STATUS (2026-07-03, ARCHITECTURE_AUDIT.md §2)
+.. warning:: STATUS (2026-07-03, ARCHITECTURE_AUDIT.md (removed in Round 31; git show 2c4e296:ARCHITECTURE_AUDIT.md) §2)
    NOT the production model and NOT trained: weights are random-seeded
    deterministic numpy towers. This is the agentic V7 pipeline's
    graceful-degradation heuristic scorer only. The production alpha model is

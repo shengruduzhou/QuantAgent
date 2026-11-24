@@ -26,7 +26,7 @@ The environment follows the repository's canonical execution semantics:
   objective ("highest excess return, smallest drawdown") and was not isomorphic
   to the ``AGENTS.md`` max-drawdown acceptance gate. Turning a term on is an
   explicit caller decision, and must be justified by measurement -- see
-  ``docs/audits/round22/11_rl_reward.md``.
+  ``docs/audits/round22/11_rl_reward.md (removed in Round 31; git show 2c4e296:docs/audits/round22/11_rl_reward.md)``.
 
 This remains research infrastructure. Exported weights require strict replay,
 quarantine governance, statistical validation, and forward shadow evidence.

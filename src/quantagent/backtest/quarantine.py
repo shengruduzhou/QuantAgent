@@ -1,6 +1,6 @@
 """Quarantined-window guard for trusted evaluations.
 
-The burned final holdout (see HOLDOUT_CONTAMINATION_AUDIT.md) must not be
+The burned final holdout (see docs/governance/evidence/HOLDOUT_CONTAMINATION_AUDIT.md) must not be
 consumed by trusted evaluators by accident. This module is dependency-light
 so any script can import it: windows come from configs/quarantined_windows.json;
 if that file is missing the built-in default below still protects the burned
@@ -32,13 +32,13 @@ _BUILTIN_WINDOWS = [
         "start": "2025-09-01",
         "end": "2026-05-18",
         "reason": "burned final holdout (builtin fallback; config file unavailable)",
-        "evidence": "HOLDOUT_CONTAMINATION_AUDIT.md",
+        "evidence": "docs/governance/evidence/HOLDOUT_CONTAMINATION_AUDIT.md",
     },
     {
         "start": "2026-05-19",
         "end": "2027-12-31",
         "reason": "frozen fresh holdout (builtin fallback; config file unavailable)",
-        "evidence": "FRESH_HOLDOUT_FREEZE_MANIFEST.md",
+        "evidence": "docs/governance/evidence/FRESH_HOLDOUT_FREEZE_MANIFEST.md",
     },
 ]
 _BUILTIN_LOG_PATH = "runtime/state/holdout_access_log.jsonl"

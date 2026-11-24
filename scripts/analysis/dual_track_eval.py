@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """H-015 dual-track (L low-turnover vs H high-turnover) governed comparison.
 
-Common harness (DUAL_TURNOVER_STRATEGY_PROTOCOL.md). Frozen candidates
-(HYPOTHESIS_REGISTRY.md H-015). Corrected simulator, strict variant-C, H-008
+Common harness (DUAL_TURNOVER_STRATEGY_PROTOCOL.md (removed in Round 31; git show 2c4e296:DUAL_TURNOVER_STRATEGY_PROTOCOL.md)). Frozen candidates
+(docs/research/ledgers/HYPOTHESIS_REGISTRY.md H-015). Corrected simulator, strict variant-C, H-008
 folds, 8/15/25 bps, net metrics decide. Zero retrain, zero fresh-holdout.
 """
 from __future__ import annotations
@@ -274,7 +274,7 @@ def main() -> int:
                    "f2_cagr8": car["fold_cagrs"][1], "worst_dd8": car["worst_maxdd"],
                    "max_turnover": car["max_turnover"], "dsr": dsrs[CARRIER_REF]}
 
-    summary = {"protocol": "DUAL_TURNOVER_STRATEGY_PROTOCOL.md", "hypothesis": "H-015",
+    summary = {"protocol": "DUAL_TURNOVER_STRATEGY_PROTOCOL.md (removed in Round 31; git show 2c4e296:DUAL_TURNOVER_STRATEGY_PROTOCOL.md)", "hypothesis": "H-015",
                "cumulative_trials_N": N_TRIALS, "bench_ann": {f: round(bench_ann[f], 4) for f in folds},
                "carrier_ref": carrier_row, "pbo": pbo, "dsr": dsrs, "candidates": agg,
                "peak_rss_gib": round(rss_gib(), 2), "runtime_sec": round(time.time() - t0, 1)}

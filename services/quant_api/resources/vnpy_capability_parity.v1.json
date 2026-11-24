@@ -909,8 +909,8 @@
         "provider progress parser regression tests"
       ],
       "evidence": [
-        "docs/audits/vnpy_datamanager_control_loop_20260722.md",
-        "docs/audits/quant_ui_vnext_phase0_20260723.md",
+        "docs/audits/vnpy_datamanager_control_loop_20260722.md (git show 2c4e296:docs/audits/vnpy_datamanager_control_loop_20260722.md)",
+        "docs/audits/quant_ui_vnext_phase0_20260723.md (git show 2c4e296:docs/audits/quant_ui_vnext_phase0_20260723.md)",
         "browser verification: Runtime/Data Ops 2026-07-23"
       ],
       "limitations": [

@@ -1,6 +1,6 @@
 """The board test and the execution price must be the same measurement.
 
-Round 22 / R1 (backtest), closing F-03 from `docs/audits/round21/01_backtest.md`.
+Round 22 / R1 (backtest), closing F-03 from `docs/audits/round21/01_backtest.md (removed in Round 31; git show 2c4e296:docs/audits/round21/01_backtest.md)`.
 
 `EventDrivenBacktester` fills at `BacktestConfig.fill_price_column` (default the
 next bar's `open`) but used to decide tradability from `limit_up_mask` /

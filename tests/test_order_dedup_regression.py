@@ -1,4 +1,4 @@
-"""INC-E1 regression contract (EVALUATOR_ORDER_DEDUP_BUG.md).
+"""INC-E1 regression contract (EVALUATOR_ORDER_DEDUP_BUG.md (removed in Round 31; git show 2c4e296:EVALUATOR_ORDER_DEDUP_BUG.md)).
 
 A backtest must be able to re-trade the same (symbol, side) on later days.
 Before the fix it could not: OrderManager's idempotency dedupe used a

@@ -34,23 +34,30 @@
     "pbo_s8": 0.886,
     "pbo_s16": 0.882,
     "dsr_n27": 0.919,
-    "analysis": "PBO_DSR_ANALYSIS.md"
+    "analysis": "PBO_DSR_ANALYSIS.md (git show 2c4e296:PBO_DSR_ANALYSIS.md)"
   },
   "trust": {
     "class": "likely_overfit",
     "holdout_claim": "the 38.6% CAGR (2025-09-01..2026-05-15) is contaminated_holdout — never cite as clean OOS",
     "reference_config": "a-priori 3-sleeve average blend (HorizonEnsembleWeights 0.30/0.45/0.25)",
     "audits": [
-      "HOLDOUT_CONTAMINATION_AUDIT.md",
-      "BASELINE_TRUST_CLASSIFICATION.md",
-      "PBO_DSR_ANALYSIS.md"
+      "docs/governance/evidence/HOLDOUT_CONTAMINATION_AUDIT.md",
+      "docs/GOVERNANCE.md",
+      "PBO_DSR_ANALYSIS.md (git show 2c4e296:PBO_DSR_ANALYSIS.md)"
+    ],
+    "data_trust_class": "unverified_legacy_panel_lookahead_st",
+    "status": "historical_unvalidated",
+    "round31_findings": [
+      "D-01: the training dataset (lineage.dataset) omits, for their whole history, all 231 names on the 2026-05-31 ST list (look-ahead universe); 86% of the SZ ones were not ST at the time.",
+      "Its source is the v7 silver panel, REFUTED in Round 29 (qfq prices with raw volume, Eastmoney volume in lots, current ST broadcast).",
+      "Never re-evaluated on the certified r29 panel with the fixed evaluator. Do not use for decisions until rebuilt on certified data (docs/ROADMAP.md)."
     ]
   },
   "lineage": {
     "dataset": "runtime/data/v7/gold/training_dataset/training_dataset_alpha181_exec_v89_plus7clean.parquet",
     "dataset_sha256": "272e473612df576cc66f15e81b77f4f1b97d59563e3475aec2162c2d75a01095",
     "dataset_schema_json": null,
-    "dataset_schema_note": "plus7clean has no sibling schema json on disk (gap recorded in PRODUCTION_REPRODUCIBILITY_AUDIT.md Q5); per-sleeve feature schemas hashed below",
+    "dataset_schema_note": "plus7clean has no sibling schema json on disk (gap recorded in PRODUCTION_REPRODUCIBILITY_AUDIT.md (git show 2c4e296:PRODUCTION_REPRODUCIBILITY_AUDIT.md) Q5); per-sleeve feature schemas hashed below",
     "train_window": "2018-01-02..2024-06-30",
     "prediction_window": "2024-08-09..2026-05-07",
     "ensemble_composite_sha256": "c982e3a5105e6c2c01af1faa099b83b64a8d30a7719fbbb30d1dd5f304b0be85",

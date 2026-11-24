@@ -52,7 +52,7 @@ this builder reproduces ``build_hold_band_weights`` exactly -- see
 ``quantagent.portfolio.hold_band`` itself would be the better home for it, but
 that module is outside this round's write scope and is consumed by the
 production book, where a turnover change is a strategy change and needs its own
-evidence. Recorded in ``docs/audits/round23/11_rl_ablation.md`` for routing.
+evidence. Recorded in ``docs/audits/round23/11_rl_ablation.md (removed in Round 31; git show 2c4e296:docs/audits/round23/11_rl_ablation.md)`` for routing.
 
 :func:`hold_band_book_from_predictions` therefore builds a book with an actual
 holding period: names enter only on rebalance sessions, are protected by a

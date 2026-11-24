@@ -2,7 +2,12 @@
 
 Read `AGENTS.md` first and follow every repository safety/PIT rule. Then read:
 
+- `docs/ARCHITECTURE.md` (what actually runs), `docs/GOVERNANCE.md` (quarantine,
+  trust classes, acceptance rules) and `docs/ROADMAP.md` (current priorities)
 - `docs/quant_foundations_external_sources.md`
+
+Write new findings into the existing documents (see AGENTS.md "文档只有一套");
+do not create per-round audit directories or root-level reports.
 
 Before modifying A-share data adapters, factor fusion, nonlinear/interactions,
 model-comparison flow, or the market workbench, use web access to refresh the

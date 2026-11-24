@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Track C factor batch 1 (DUAL_TRACK_FACTOR_BATCH_PLAN.md): PIT-safe defensive /
+"""Track C factor batch 1 (DUAL_TRACK_FACTOR_BATCH_PLAN.md (removed in Round 31; git show 2c4e296:DUAL_TRACK_FACTOR_BATCH_PLAN.md)): PIT-safe defensive /
 low-turnover factors evaluated on the pre-quarantine H-008 fold span.
 
 CPU-only, no fresh/burned holdout (all data < 2025-09-01, asserted). Writes
-FACTOR_CANDIDATE_LEDGER.csv + a per-factor verdict.
+docs/research/ledgers/FACTOR_CANDIDATE_LEDGER.csv + a per-factor verdict.
 """
 from __future__ import annotations
 import sys
@@ -208,7 +208,7 @@ def main() -> int:
     t0 = time.time()
     if args.batch == "dsl":
         panel, meta, refs = build_dsl_frame()
-        out = REPO / "FACTOR_CANDIDATE_LEDGER.csv"
+        out = REPO / "docs/research/ledgers/FACTOR_CANDIDATE_LEDGER.csv"
     else:
         panel, meta, refs = build_fundamental_frame()
         out = REPO / "FACTOR_CANDIDATE_LEDGER_fundamental.csv"

@@ -13,13 +13,13 @@ cd "$(dirname "$0")/.." || exit 1
 # DISABLED (P-F, 2026-07-03): this loop scores with the SUPERSEDED, data-
 # corrupted v8.8 generation via forward_daily_inference.py (3-sleeve blend
 # that does not match production, 11 non-reproducible feature columns).
-# See FORWARD_SCORING_TIMER_AUDIT.md and PRODUCTION_REPRODUCIBILITY_AUDIT.md Q6.
+# See FORWARD_SCORING_TIMER_AUDIT.md (removed in Round 31; git show 2c4e296:FORWARD_SCORING_TIMER_AUDIT.md) and PRODUCTION_REPRODUCIBILITY_AUDIT.md (removed in Round 31; git show 2c4e296:PRODUCTION_REPRODUCIBILITY_AUDIT.md) Q6.
 # Production blend is materialized by scripts/materialize_production_composite.py
 # (configs/production_blend.json); a valid forward path requires patch P6
 # (feature-fidelity fix + repoint to the plus7 run).
 if [ "${QUANTAGENT_ALLOW_DEPRECATED_FORWARD:-0}" != "1" ]; then
   echo "run_forward_daily.sh is DISABLED: it uses the corrupted v8.8 generation." >&2
-  echo "See FORWARD_SCORING_TIMER_AUDIT.md. Set QUANTAGENT_ALLOW_DEPRECATED_FORWARD=1 to override." >&2
+  echo "See FORWARD_SCORING_TIMER_AUDIT.md (removed in Round 31; git show 2c4e296:FORWARD_SCORING_TIMER_AUDIT.md). Set QUANTAGENT_ALLOW_DEPRECATED_FORWARD=1 to override." >&2
   exit 2
 fi
 # ---------------------------------------------------------------------------

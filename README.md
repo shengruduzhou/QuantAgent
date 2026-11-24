@@ -1,315 +1,67 @@
-# QuantAgent V7 / A-share PIT Research System
+# QuantAgent
 
-QuantAgent V7 是面向 A 股现实约束的 Point-in-Time quant research system。它不是 toy LLM trading demo，不提供 financial advice，不承诺收益，也不默认连接真实券商。工程目标是用真实数据、严格 OOS、交易成本、风控和 paper/backtest 报告生成可审计证据。
+QuantAgent 是面向 A 股现实约束的 **Point-in-Time 量化研究、回测与纸面交易系统**。
+它不提供投资建议、不承诺收益、不连接真实券商（实盘路径终态为 `LIVE_DISABLED`）。
+工程目标是用认证数据、严格样本外、交易成本、风控和纸面账户产出**可审计的证据**——
+包括诚实的否定结论。
 
-## Safety Boundary
+**当前状态（2026-11-24）：RESEARCH / NOT LIVE READY。** 仓库内没有通过成本与统计闸门的
+可交易 edge；详见 [docs/RESEARCH.md](docs/RESEARCH.md) 与 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-- `QMTGateway` 默认 `dry_run=True`、`live_trading_enabled=False`。
-- Agent / LLM 只能输出 evidence、views、constraints、confidence、risk flags、audit logs。
-- Optimizer / portfolio construction 只能输出 `target_weights`。
-- 只有 `OrderManager` 可以把 `target_weights` 转成 order intents。
-- QMT submit 前必须经过 Risk Gate、Kill Switch、execution constraint simulation、Reconciliation、Audit Replay。
-- Production / real-data path 禁止 synthetic fallback；mock data 只允许在 tests 和 smoke examples。
+## 文档 / Documentation
 
-## Runtime Layout
+| 文档 | 内容 |
+|---|---|
+| [AGENTS.md](AGENTS.md) | 仓库规则、安全约束、代码规范（人与 AI 协作者必读） |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 实际运行的入口、研究链路、每个概念的权威实现、安全边界 |
+| [docs/DATA.md](docs/DATA.md) | 数据血缘、认证 r29 面板、PIT 契约、供应商能力与单位口径 |
+| [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | 隔离窗、信任分级、验收规则、forward paper 协议 |
+| [docs/RESEARCH.md](docs/RESEARCH.md) | 研究结论摘要、统计工具校准、试验台账（`docs/research/ledgers/`） |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 环境、定时任务现状、任务控制、纸面账户、Web 工作站运维 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 优先级路线图 |
+| [docs/audits/HISTORY.md](docs/audits/HISTORY.md) | 历轮审计的发现与修复 |
+| [docs/UI.md](docs/UI.md) | 前端代码地图 |
 
-所有大数据、模型、predictions、target weights、reports、logs、cache 默认写入仓库外的 runtime：
-
-```text
-E:\Project\QuantAgent\runtime\
-  data\raw\qlib\cn_data\
-  data\v7\raw\akshare\fundamentals\
-  data\v7\silver\market_panel\
-  data\v7\silver\fundamentals\
-  data\v7\silver\valuation\
-  data\v7\silver\factors\
-  data\v7\gold\training_dataset\
-  data\v7\manifests\
-  models\v7_alpha\
-  predictions\
-  target_weights\
-  reports\v7\optimization\
-  reports\v7\paper_report\
-  logs\
-  cache\
-```
-
-`quantagent.config.paths.quant_paths()` 是单一来源。`QUANTAGENT_HOME` 覆盖全局 root，`QUANTAGENT_DATA_ROOT` 只覆盖 data tier。
-
-## Institutional Workstation / 网页工作站
-
-Linux 下从项目根目录启动 VNext-only 研究工作站：
+## 快速开始 / Quick start（Linux）
 
 ```bash
-python3 -m pip install -e ".[web]"
-./scripts/run_quant_ui.sh \
-  --runtime /home/shanhefu/QuantAgent/runtime \
-  --host 127.0.0.1 \
-  --port 8000
+AI_quant_venv/bin/python3 -m pip install -e ".[all,test]"
+AI_quant_venv/bin/python3 -m pytest tests/ -q          # 约 8 分钟
+./scripts/run_quant_ui.sh --runtime "$PWD/runtime" --host 127.0.0.1 --port 8000
 ```
 
-打开 `http://127.0.0.1:8000`。该脚本会先构建 React production SPA，再启动同时托管
-Web 与 `/api` 的 FastAPI process；因此修改前端后不要直接复用旧 `dist`。只启动后端或
-由 systemd 管理时可使用：
+运行时数据（数据、模型、报告、日志）位于 `runtime/`（`QUANTAGENT_HOME` 可覆盖；
+`quantagent.config.paths.quant_paths()` 是单一来源），不进入 git。
+
+## 可信评测 / Trusted evaluation
+
+唯一可信的收益数字入口是规范评估器（默认读取认证 r29 执行面板）：
 
 ```bash
-python3 -m services.quant_api \
-  --runtime /home/shanhefu/QuantAgent/runtime \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --no-reload
+AI_quant_venv/bin/python3 scripts/baseline_protocol.py --help
 ```
 
-完整开发、验证和故障排查命令见 `docs/quant_ui_runbook.md`。
+任何数字的引用都必须带 {窗口, 试验数 N, 信任分级, artifact 路径}；隔离窗由
+`configs/quarantined_windows.json` 强制，见 [docs/GOVERNANCE.md](docs/GOVERNANCE.md)。
 
-工作站中的「策略实验室」把研究假设、审核因子、滚动 OOS 训练、目标权重、
-严格 A 股回测、风控 Gate 和 paper report 连接为一个可验证、可取消、实时回传的
-研究闭环。系统设置提供进程内存 API 会话连接器；不开放任意 Bash，密钥不进入
-argv、日志、Runtime 或浏览器存储。设计与安全契约见
-`docs/architecture/strategy-operations-workbench.md`。
+## 主要命令 / Main commands
 
-「研究运行」（`/runs`）是这条闭环的后半段：启动之后的阶段进度、CPU/内存/显存占用、
-实时日志、异常诊断、闸门判定、成本后净值、全部产物和最终结论都在这里，可暂停、继续、
-停止、按原参数重试，也可以最多四项并排对比。研究闭环的三条产品契约：
-
-- **研究被否决 ≠ 系统故障。** 走完流程但被 PBO/DSR/SPA 或协议闸门否决的运行是
-  终态 `rejected`（退出码 3），证据完整保留并给出补救方向；工程故障才是 `failed`，
-  并附带命名的原因、证据行和下一步动作。
-- **任务不会因为重启而消失。** 训练进程在独立 session 中运行、直接写日志文件，
-  API 崩溃或重启后会被重新接管并继续跟踪；确实无法判定时如实标注"退出状态未知"，
-  不会伪造结论。
-- **发起前就拦住可算的错误。** 基准标的不在面板内、折数不足以支撑
-  选择段 + holdout 协议等问题在启动前阻塞，而不是等训练跑完再中止。
-
-先用「试点宇宙」在少量标的上验证配置与链路，再切换到全宇宙；试点结论不可外推，
-系统会在清单和验证结果里标注这一点。
-
-## Windows Setup
-
-```powershell
-cd E:\Project\QuantAgent
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-.\.venv\Scripts\python.exe -m pip install -U pip wheel setuptools
-.\.venv\Scripts\python.exe -m pip install -e ".[data,training,research,optimization]"
-.\.venv\Scripts\python.exe -m pip install pyqlib akshare polars lightgbm xgboost torch cvxpy
-$env:QUANTAGENT_HOME = "E:\Project\QuantAgent\runtime"
-
-.\.venv\Scripts\quantagent.exe storage-info-v7 --ensure
-```
-
-## A股全宇宙数据底座 (U0)
-
-全宇宙行情、身份与 PIT 元数据统一走 `src/quantagent/data/ashare/`，详见
-[docs/ashare_data_foundation.md](docs/ashare_data_foundation.md)。要点：
-
-- 所有落盘行都带 provenance（source / source_endpoint / retrieved_at /
-  available_at / quality_status），供应商永不在同一只股票内混用。
-- 面板为 **raw 未复权**，复权因子单独成表；复权口径由除权日因子回放取证，
-  不靠字段声明。
-- U0 就绪关卡由**真实产物**推导（capability matrix / coverage matrix /
-  validation report / PIT interval manifests），无硬编码通过项。
-- 本运行环境只放行 TCP 80/443，故 baostock(10030)、mootdx/pytdx(7709) 不可用；
-  Level-2 无合法通路（TickFlow `depth.get` 未授权，公开源仅五档 L1，QMT 为
-  Windows 客户端），如实记为外部授权阻塞。
+CLI 入口为 `quantagent`（`quantagent --help` 列出全部命令）。研究闭环：
 
 ```bash
-AI_quant_venv/bin/python3 scripts/ashare_capability_probe.py --allow-network
-AI_quant_venv/bin/python3 scripts/u0_security_master.py --allow-network
-AI_quant_venv/bin/python3 scripts/u0_acquire_bars.py --allow-network \
-    --providers tickflow --staging-name tickflow_raw --max-minutes 600
-AI_quant_venv/bin/python3 scripts/u0_pit_intervals.py calendar --allow-network
-AI_quant_venv/bin/python3 scripts/u0_assemble_panel.py
-AI_quant_venv/bin/python3 scripts/u0_validate.py --allow-network
-AI_quant_venv/bin/python3 scripts/u0_audit.py
+quantagent run-full-real-training-v7 --market-panel <panel> --labels <labels> ...   # 数据集 → 训练 → 预测 → 目标权重 → 回测
+quantagent audit-nonlinear-factors ...      # 治理化线性 vs 非线性对比（隔离窗、PBO、DSR、SPA）
+quantagent search-factor-fusion ...         # 因子融合 Pareto 前沿（试验数由搜索空间决定）
+quantagent synthesize-factors-v7 ...        # 受限 DSL 因子发现（含显著性门）
+quantagent paper-clear-kill-switch --ledger <ops.jsonl> --confirm --author <name> --reason "<理由>"
 ```
 
-采集可中断续跑：按 symbol 分区落盘 + ledger；`PERMANENT`/`ENTITLEMENT` 失败
-不重试，`TRANSIENT`/`RATE_LIMITED` 会重试；`<staging>.cancel` 可安全停止。
+Web 工作站（策略实验室、研究运行、Factor Lab、回测、风控、纸面账户）通过 JobRunner
+白名单启动上述命令，不开放任意 shell。
 
-## Qlib 历史数据
+## 安全边界 / Safety boundary
 
-Qlib CN instruments 使用 uppercase exchange prefix，例如 `SH600519`、`SZ000001`，不是 AkShare 的 `600519.SH` 后缀风格。官方 free Qlib CN release 覆盖 `2000-01-04 .. 2020-09-25`；超过这个日期必须用自备 PIT CSV/Parquet 通过 Qlib `scripts/dump_bin.py` dump，或者走下面的 AkShare 近年行情面板。
-
-```powershell
-.\.venv\Scripts\quantagent.exe setup-qlib-v7 `
-  --region cn `
-  --interval 1d `
-  --target-dir E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --run `
-  --allow-community-fallback
-
-.\.venv\Scripts\quantagent.exe check-qlib-v7 `
-  --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --region cn `
-  --symbols SH600519,SZ000001 `
-  --start-date 2018-01-01 `
-  --end-date 2020-09-25
-```
-
-## AkShare 近年数据
-
-近年 OHLCV 直接用 AkShare 构建 PIT market panel。日线 `available_at` 标记为下一 business day，避免 close 当天被训练当作盘中可用信息。
-
-> **注意（DEF-026）**：这个「下一 business day」的盖章只对**盘中**语义成立。日频训练数据集
-> 走 `build_market_features`，它会把 `available_at` 重新盖成 `trade_date` 本身 ——
-> 因为 `v7_label_builder` 的标签窗口在 `close(t)` 就打开，盖成 t+1 会让**每一行**的
-> 可用时点落在它自己的标签窗口里面（实测 100%），而且 `available_at` 是
-> `merge_pit_features` 的 as-of join key，于是窗口内发布的外部特征会被并进来
-> （实测对 `t→t+1` 标签 rank IC = +1.0000）。
-> 若直接拿 provider 面板当训练集用（绕过 `build_market_features`），
-> `evaluate_label_alignment` 会 fail-closed 拦下，见 `scripts/m5_leakage_audit.py`。
-
-```powershell
-.\.venv\Scripts\quantagent.exe build-akshare-market-panel-v7 `
-  --symbols 600519.SH,600036.SH,000001.SZ `
-  --provider-uri-for-range E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --as-of-date 2026-05-17 `
-  --allow-network
-
-.\.venv\Scripts\quantagent.exe build-akshare-v7 `
-  --symbols 600519.SH,600036.SH,000001.SZ `
-  --start-date 2015-01-01 `
-  --end-date 2026-05-15 `
-  --allow-network
-
-.\.venv\Scripts\quantagent.exe smoke-akshare-v7 `
-  --symbols 600519.SH,000001.SZ `
-  --start-date 2024-01-01 `
-  --end-date 2024-12-31 `
-  --as-of-date 2024-12-31 `
-  --allow-network
-```
-
-## LLM API Setup
-
-LLM 默认 disabled，不阻塞非 LLM 训练。不要把 key 写入源码、配置或日志；只在本地 shell 或安全 secret store 设置。Google AI Studio / Gemini API 使用 `GOOGLE_API_KEY`，model id 以 AI Studio 或 `models.list` 返回值为准。
-
-```powershell
-$env:GOOGLE_API_KEY = "<local-only-never-commit>"
-$env:QUANTAGENT_LLM_PROVIDER = "gemini"
-$env:QUANTAGENT_LLM_ENABLED = "true"
-$env:QUANTAGENT_LLM_ALLOW_NETWORK = "true"
-$env:QUANTAGENT_LLM_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
-$env:QUANTAGENT_LLM_MODEL = "<google-ai-studio-model-id>"
-$env:QUANTAGENT_LLM_API_KEY_ENV = "GOOGLE_API_KEY"
-```
-
-LLM 只用于解释、归因、财报摘要、新闻可信度、Theme Discovery、industry-chain reasoning、Financial Fraud Risk 解释等研究辅助。最终交易只能来自 deterministic/cvxpy target-weight builder、Risk Gate 和 `OrderManager`。
-
-## End-to-End Paper Workflow
-
-下面链路从真实 market panel 开始，生成 labels、factors、gold training dataset、walk-forward OOS predictions、`target_weights` 和完整 paper report。你可以先用 `ridge` sanity；如果要求 GPU training，使用 `--model ft_transformer --ft-device cuda --require-gpu`，CUDA 不可用时命令会 fail-loud，不会悄悄退回 CPU。
-
-```powershell
-.\.venv\Scripts\quantagent.exe build-labels-v7 `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet
-
-.\.venv\Scripts\quantagent.exe materialize-factors-v7 `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --backend polars
-
-.\.venv\Scripts\quantagent.exe run-full-real-training-v7 `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
-  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\silver\fundamentals `
-  --model ridge `
-  --split-mode rolling `
-  --purge-days 126 `
-  --embargo-days 5 `
-  --optimizer-backend auto `
-  --objective max_expected_alpha `
-  --initial-cash 1000000 `
-  --paper-report-output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
-```
-
-GPU FT-Transformer 训练示例：
-
-```powershell
-.\.venv\Scripts\quantagent.exe auto-train-v7 `
-  --symbols auto `
-  --provider-uri E:\Project\QuantAgent\runtime\data\raw\qlib\cn_data `
-  --model ft_transformer `
-  --ft-device cuda `
-  --require-gpu `
-  --split-mode rolling `
-  --purge-days 126 `
-  --embargo-days 5 `
-  --initial-cash 1000000
-```
-
-`run-full-real-training-v7` 只读取 `sample_role=validation` 的 walk-forward out-of-sample predictions；如果出现 in-sample predictions，会直接 raise。输出包括：
-
-- `runtime\models\v7_alpha\metrics.json`
-- `runtime\predictions\predictions.parquet`
-- `runtime\target_weights\target_weights.parquet`
-- `runtime\reports\v7\full_pipeline_report.json`
-- `runtime\reports\v7\walk_forward_backtest.json`
-- `runtime\reports\v7\paper_report\selected_stocks.csv`
-- `runtime\reports\v7\paper_report\target_weights.parquet`
-- `runtime\reports\v7\paper_report\trades.csv`
-- `runtime\reports\v7\paper_report\failed_orders.csv`
-- `runtime\reports\v7\paper_report\holdings.csv`
-- `runtime\reports\v7\paper_report\pnl.csv`
-- `runtime\reports\v7\paper_report\paper_report.json`
-- `runtime\reports\v7\paper_report\paper_report.md`
-- `runtime\reports\v7\paper_report\paper_report.html`
-
-`selected_stocks.csv` 会列出买了什么股、首次买入日、交易次数、期末市值和估算单票盈亏；`trades.csv` 会列出什么时候买卖；`pnl.csv` 会列出 daily NAV、daily PnL、drawdown。
-
-## Separate Risk / Backtest Commands
-
-如果你要自己训练风控回测，可以拆开执行：
-
-```powershell
-.\.venv\Scripts\quantagent.exe build-training-dataset-v7 `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --labels E:\Project\QuantAgent\runtime\data\v7\labels.parquet `
-  --fundamentals-root E:\Project\QuantAgent\runtime\data\v7\silver\fundamentals
-
-.\.venv\Scripts\quantagent.exe train-alpha-v7 `
-  --dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet `
-  --model ridge `
-  --split-mode rolling `
-  --purge-days 126 `
-  --embargo-days 5
-
-.\.venv\Scripts\quantagent.exe predict-alpha-v7 `
-  --model-dir E:\Project\QuantAgent\runtime\models\v7_alpha `
-  --feature-dataset E:\Project\QuantAgent\runtime\data\v7\gold\training_dataset\training_dataset.parquet
-
-.\.venv\Scripts\quantagent.exe build-target-weights-v7 `
-  --predictions E:\Project\QuantAgent\runtime\predictions\predictions.parquet `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --optimizer-backend cvxpy `
-  --objective max_information_ratio_proxy
-
-.\.venv\Scripts\quantagent.exe run-paper-backtest-v7 `
-  --target-weights E:\Project\QuantAgent\runtime\target_weights\target_weights.parquet `
-  --market-panel E:\Project\QuantAgent\runtime\data\v7\silver\market_panel\market_panel.parquet `
-  --initial-cash 1000000 `
-  --output-dir E:\Project\QuantAgent\runtime\reports\v7\paper_report
-
-.\.venv\Scripts\quantagent.exe v7-live-readiness-report `
-  --metrics E:\Project\QuantAgent\runtime\models\v7_alpha\metrics.json `
-  --paper-report E:\Project\QuantAgent\runtime\reports\v7\paper_report\paper_report.json
-```
-
-## Validation
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests/
-.\.venv\Scripts\python.exe -m compileall -q src
-git diff --check
-.\.venv\Scripts\quantagent.exe --help
-```
-
-`git diff --check` 在 Windows checkout 可能报告 CRLF warning；真正 whitespace error 必须修复。
-
-## System launch code
-cd /home/shanhefu/QuantAgent
-git switch main
-git pull --ff-only origin main
-
-python3 -m pip install -e ".[web]"
-./scripts/run_quant_ui_tmux.sh   --runtime /home/shanhefu/QuantAgent/runtime   --host 127.0.0.1   --port 8000
+- Agent / LLM 只输出证据、观点、约束与因子表达式；组合构建只输出 `target_weights`；
+  只有 `OrderManager` 生成订单意图。
+- `QMTGateway` 默认 `dry_run=True`、`live_trading_enabled=False`；实盘意图在路由前被拒绝。
+- 生产/真实数据路径禁止合成回退；mock 数据只用于测试。
