@@ -45,7 +45,7 @@
     {
       "module": "quantagent.cli.v8_portfolio",
       "category": "legacy_portfolio",
-      "replacement": "quantagent.portfolio.pareto_allocator",
+      "replacement": "none (pareto_allocator was test-only and was removed in Round 31)",
       "removal_after": "2026-10-01",
       "removed_in": "round31"
     }

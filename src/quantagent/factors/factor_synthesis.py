@@ -938,11 +938,14 @@ def _nonoverlapping_ic_tstat(daily_ic: pd.Series, horizon: int) -> float:
     daily IC series is oversized. Each of the h offset cohorts (every h-th date)
     is free of overlap; their t-stats are averaged.
     """
-    values = pd.to_numeric(pd.Series(daily_ic), errors="coerce").dropna().to_numpy(dtype=float)
+    # Cohorts are formed on the date sequence BEFORE dropping missing days, so
+    # a gap cannot shift dates into a neighbouring (overlapping) cohort.
+    values = pd.to_numeric(pd.Series(daily_ic), errors="coerce").to_numpy(dtype=float)
     step = max(1, int(horizon))
     stats: list[float] = []
     for offset in range(step):
         cohort = values[offset::step]
+        cohort = cohort[np.isfinite(cohort)]
         if cohort.size < 3:
             continue
         std = float(cohort.std(ddof=1))

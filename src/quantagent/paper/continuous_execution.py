@@ -446,12 +446,48 @@ def _ex_rights_reference_price(previous_close: float, row: pd.Series) -> float:
     return reference if np.isfinite(reference) and reference > 0 else previous_close
 
 
+def _lot_integral_share_ratio(
+    canonical: CanonicalLedger,
+    *,
+    initial_cash: float,
+    symbol: str,
+    ex_date: str,
+    candidates: Sequence[float],
+) -> float | None:
+    """First candidate ratio the canonical replay can fold, else None.
+
+    Canonical accounting scales every lot by one ratio and refuses a
+    fractional result (it has no cash-in-lieu policy). A position-level ratio
+    that makes the *total* whole can still leave a lot fractional when the
+    holding was bought in several lots, and a record that cannot be replayed
+    would make the account unrecoverable for good (Round 31 V-01). So each
+    candidate is dry-run against the replayed lots before anything is written.
+    """
+    from quantagent.domain.accounting import InvariantViolation
+    from quantagent.domain.orders import CorporateAction as CanonicalCorporateAction
+
+    _, account = canonical.replay(initial_cash=initial_cash)
+    for ratio in candidates:
+        try:
+            account.apply_corporate_action(
+                CanonicalCorporateAction(
+                    corporate_action_id="dry-run", symbol=symbol, ex_date=ex_date,
+                    share_ratio=float(ratio),
+                )
+            )
+        except InvariantViolation:
+            continue
+        return float(ratio)
+    return None
+
+
 def _apply_session_corporate_actions(
     broker: PaperBroker,
     market_panel: pd.DataFrame,
     *,
     as_of: str,
     canonical: CanonicalLedger,
+    initial_cash: float,
 ) -> list[dict[str, object]]:
     """Credit dividends and bonus/transfer shares due since the last session.
 
@@ -510,10 +546,26 @@ def _apply_session_corporate_actions(
         close = float(pd.to_numeric(row.get("close"), errors="coerce"))
         exact_new = shares * ratio
         new_shares = float(np.floor(exact_new + 1e-9))
-        cash_in_lieu = (exact_new - new_shares) * close if np.isfinite(close) else 0.0
+        whole_ratio = (shares + new_shares) / shares
+        share_ratio = 1.0
+        cash_in_lieu = 0.0
+        if ratio > 0.0:
+            chosen = _lot_integral_share_ratio(
+                canonical, initial_cash=initial_cash, symbol=symbol, ex_date=ex_date,
+                candidates=(1.0 + ratio, whole_ratio),
+            )
+            if chosen is None:
+                raise ContinuousPaperExecutionBlocked(
+                    f"corporate action {symbol} {ex_date} (+{ratio:g} shares per share) leaves "
+                    "a fractional entitlement on a multi-lot holding that canonical accounting "
+                    "cannot represent; reconcile the account manually before resuming"
+                )
+            share_ratio = chosen
+            if abs(chosen - (1.0 + ratio)) > 1e-12:
+                cash_in_lieu = (exact_new - new_shares) * close if np.isfinite(close) else 0.0
         result = broker.apply_corporate_action(
             symbol,
-            share_ratio=(shares + new_shares) / shares,
+            share_ratio=share_ratio,
             cash_per_share=(shares * cash + cash_in_lieu) / shares,
             ex_date=ex_date,
         )
@@ -1324,7 +1376,8 @@ def _execute_pending_for_session_locked(
         # Dividends and bonus shares go on the book before the session's first
         # mark, so the ex-date price drop is not measured as a loss.
         corporate_actions = _apply_session_corporate_actions(
-            broker, market_panel, as_of=as_of, canonical=canonical
+            broker, market_panel, as_of=as_of, canonical=canonical,
+            initial_cash=account_identity.initial_cash,
         )
         if corporate_actions:
             nav_before = canonical_state.portfolio.equity(prices.to_dict())

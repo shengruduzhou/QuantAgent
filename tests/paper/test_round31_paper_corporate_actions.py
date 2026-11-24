@@ -250,3 +250,48 @@ def test_star_sub_minimum_residual_can_be_fully_liquidated_on_paper(tmp_path):
     paper_day(tmp_path, "2024-06-06", panel, STAR_DATES)
     left = paper_state(tmp_path, "2024-06-06").portfolio.positions.get(STAR)
     assert left is None or left.total == 0, (left, fills_of(tmp_path))
+
+
+def _two_lot_rows(ratio):
+    rows = []
+    for d in DATES:
+        after = d >= "2024-06-06"
+        rows.append({"trade_date": d, "symbol": B1, "close": 10.0 / (1 + ratio) if after else 10.0,
+                     "volume": 1e9, "ca_cash_per_share": 0.0,
+                     "ca_share_ratio": ratio if d == "2024-06-06" else 0.0})
+    return rows
+
+
+def _hold_two_lots(tmp_path, panel):
+    record_target(tmp_path, "2024-06-03", {B1: 0.01})        # 1,000 shares
+    paper_day(tmp_path, "2024-06-04", panel, DATES)
+    record_target(tmp_path, "2024-06-04", {B1: 0.0115})      # +100 shares: a second lot
+    paper_day(tmp_path, "2024-06-05", panel, DATES)
+    return paper_state(tmp_path, "2024-06-05").portfolio.positions[B1].total
+
+
+def test_multi_lot_bonus_with_integral_lots_is_applied_and_replayable(tmp_path):
+    """Round 31 V-01: 10送3 on 1,000 + 100 shares keeps both lots whole."""
+    panel = paper_panel(_two_lot_rows(0.3))
+    total = _hold_two_lots(tmp_path, panel)
+    record_target(tmp_path, "2024-06-05", {B1: 0.0115})
+    paper_day(tmp_path, "2024-06-06", panel, DATES)
+    after = paper_state(tmp_path, "2024-06-06")          # replay must succeed
+    assert after.portfolio.positions[B1].total == total + int(total * 0.3)
+
+
+def test_multi_lot_fractional_bonus_fails_closed_without_writing(tmp_path):
+    """10转1.25 on 1,000 + 100 shares: 112.5 on the small lot. The loop must
+    block before appending a record that canonical replay could never fold."""
+    import pytest
+
+    from quantagent.paper.continuous_execution import ContinuousPaperExecutionBlocked
+
+    panel = paper_panel(_two_lot_rows(0.125))
+    _hold_two_lots(tmp_path, panel)
+    records_before = len(CanonicalLedger(str(tmp_path / "canonical.jsonl")).read())
+    record_target(tmp_path, "2024-06-05", {B1: 0.0115})
+    with pytest.raises(ContinuousPaperExecutionBlocked, match="fractional entitlement"):
+        paper_day(tmp_path, "2024-06-06", panel, DATES)
+    assert len(CanonicalLedger(str(tmp_path / "canonical.jsonl")).read()) == records_before
+    paper_state(tmp_path, "2024-06-05")                  # still recoverable

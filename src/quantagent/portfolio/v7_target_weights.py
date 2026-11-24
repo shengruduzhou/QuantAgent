@@ -1014,7 +1014,9 @@ def _project_and_validate_long_only_target(
         if projected.loc[symbol] <= cap + tolerance:
             continue
         if previous.loc[symbol] > cap + tolerance and str(symbol) not in immovable_symbols:
-            mandatory_trim += float(projected.loc[symbol]) - cap
+            # Only the part of the trim below the previous weight is new
+            # turnover forced by the cap (Round 31 V-04).
+            mandatory_trim += max(0.0, min(float(previous.loc[symbol]), float(projected.loc[symbol])) - cap)
         if previous.loc[symbol] <= cap + tolerance or str(symbol) not in immovable_symbols:
             # A tradeable, unlocked holding that drifted above its cap is
             # trimmed to the cap: the sell is always feasible, and the hard cap

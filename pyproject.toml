@@ -13,6 +13,9 @@ dependencies = [
   "pydantic>=2.7",
   "pyyaml>=6.0",
   "typer>=0.12",
+  # pandas DataFrame.to_markdown() needs it (v8 result tables, stratified-IC
+  # reports); it is never imported directly, so import scans miss it.
+  "tabulate>=0.9",
   # Unconditional production import in quantagent.data.ashare.http, the shared
   # paced/retrying transport every public A-share adapter uses. It is core, not
   # optional: without it the data foundation cannot import at all. Omitting it

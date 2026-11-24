@@ -58,6 +58,9 @@ class RuntimeIndexer:
         self._lock = RLock()
         self._rebuild_lock = RLock()
         self._refreshing = False
+        #: Bumped by invalidate(); a rebuild whose walk started before the bump
+        #: cannot have seen the new artifacts, so it must not mark the index fresh.
+        self._generation = 0
         self._artifacts: list[dict] = []
         self._indexed_at = 0.0
 
@@ -82,7 +85,13 @@ class RuntimeIndexer:
 
         def run() -> None:
             try:
-                self._rebuild()
+                while True:
+                    with self._lock:
+                        generation = self._generation
+                    self._rebuild()
+                    with self._lock:
+                        if self._generation == generation:
+                            break
             finally:
                 self._refreshing = False
 
@@ -91,11 +100,18 @@ class RuntimeIndexer:
     def _rebuild(self) -> list[dict]:
         # One walk at a time; readers are not blocked by the walk itself.
         with self._rebuild_lock:
+            with self._lock:
+                generation = self._generation
             artifacts = self._walk()
             with self._lock:
                 self._artifacts = artifacts
-                self._indexed_at = time.time()
-                self._write_cache()
+                if self._generation == generation:
+                    self._indexed_at = time.time()
+                    self._write_cache()
+                else:
+                    # Invalidated mid-walk (Round 31 V-02): serve what we have but
+                    # stay stale so the next scan rebuilds again.
+                    self._indexed_at = 0.0
                 return list(self._artifacts)
 
     def _walk(self) -> list[dict]:
@@ -254,6 +270,7 @@ class RuntimeIndexer:
 
     def invalidate(self) -> None:
         with self._lock:
+            self._generation += 1
             if getattr(self.settings, "index_background_refresh", False) and self._artifacts:
                 # Keep serving the current index; the next scan refreshes it.
                 self._indexed_at = 0.0

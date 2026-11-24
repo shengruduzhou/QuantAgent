@@ -585,8 +585,9 @@ class StrategyService:
                 reverse=True,
             ),
             "selectionRule": (
-                "labels prefer the widest available horizon schema, then newest; "
-                "other inputs prefer newest existing canonical path"
+                "inputs follow a declared priority with the certified r29 build first; "
+                "labels prefer the widest horizon schema, then priority; panel and labels "
+                "must come from the same build"
             ),
         }
 
