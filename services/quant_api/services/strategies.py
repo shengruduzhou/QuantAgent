@@ -480,16 +480,21 @@ class StrategyService:
         return None
 
     def defaults(self) -> dict[str, Any]:
+        # Candidates are listed in PRIORITY order: certified r29 artifacts first.
+        # Selection used to be newest-mtime, which picked the REFUTED v7 silver
+        # panel (qfq prices + raw volume) and a 14-row synthetic labels file a
+        # test had written into runtime/ (Round 31 D-03).
         groups = {
             "marketPanelPath": (
+                "runtime/data/gold/full_universe_r29/adjusted_market_panel.parquet",
                 "runtime/data/gold/full_universe/adjusted_market_panel.parquet",
-                "runtime/data/v7/silver/market_panel/market_panel.parquet",
-                "runtime/data/v7/full_universe/full_universe_market_panel.parquet",
                 "runtime/data/u0/panel/daily_bars_raw.parquet",
+                "runtime/data/v7/full_universe/full_universe_market_panel.parquet",
+                "runtime/data/v7/silver/market_panel/market_panel.parquet",
             ),
             "labelsPath": (
+                "runtime/data/gold/full_universe_r29/labels.parquet",
                 "runtime/data/gold/full_universe/labels.parquet",
-                "runtime/data/v7/labels.parquet",
             ),
             "fundamentalsRoot": (
                 "runtime/data/v7/silver/fundamentals",
@@ -504,6 +509,7 @@ class StrategyService:
                 "runtime/data/u0/pit/disclosures.parquet",
             ),
             "trainingDatasetPath": (
+                "runtime/data/gold/full_universe_r29/dataset.parquet",
                 "runtime/data/gold/full_universe/training_dataset.parquet",
                 "runtime/data/v7/gold/training_dataset/training_dataset.parquet",
             ),
@@ -517,9 +523,9 @@ class StrategyService:
         evidence: list[dict[str, Any]] = []
         options: dict[str, list[dict[str, Any]]] = {}
         for field, candidates in groups.items():
-            found: list[tuple[int, float, str]] = []
+            found: list[tuple[int, int, str]] = []
             field_options: list[dict[str, Any]] = []
-            for candidate in candidates:
+            for priority, candidate in enumerate(candidates):
                 path = safe_project_path(self.settings, candidate)
                 is_expected_input = path.is_dir() if field == "fundamentalsRoot" else path.is_file()
                 available_horizons: list[int] = []
@@ -545,7 +551,7 @@ class StrategyService:
                     }
                     evidence.append(option)
                     coverage_score = len(available_horizons) if field == "labelsPath" else 0
-                    found.append((coverage_score, stat.st_mtime, candidate))
+                    found.append((coverage_score, -priority, candidate))
                 else:
                     option = {
                         "field": field,
