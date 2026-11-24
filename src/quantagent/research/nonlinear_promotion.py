@@ -192,7 +192,8 @@ def evaluate_nonlinear_promotion(
         measured,
         champion,
         horizon=horizon,
-        n_trials=max(1, int(comparison.n_trials)),
+        # Cumulative family N (trial ledger), never just this run's arms.
+        n_trials=max(1, int(comparison.n_trials), int(getattr(comparison, "family_trials", 0))),
     )
     spa_pvalue, spa_cohorts = _worst_case_spa(
         measured,

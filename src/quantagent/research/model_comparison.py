@@ -239,6 +239,15 @@ class ComparisonReport:
     generated_at: str
     #: Rows removed because their label window touches a quarantined holdout.
     quarantine_rows_dropped: int = 0
+    #: Cumulative family trial count (prior ledger trials + this run's arms).
+    #: 0 means no family history was supplied; DSR then falls back to
+    #: ``n_trials``. See ``quantagent.research.trial_ledger``.
+    family_trials: int = 0
+
+    @property
+    def dsr_trials(self) -> int:
+        """The N every deflated Sharpe ratio for this report must use."""
+        return max(int(self.n_trials), int(self.family_trials))
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -248,6 +257,8 @@ class ComparisonReport:
             "verdictReasons": list(self.verdict_reasons),
             "champion": self.champion,
             "nTrials": int(self.n_trials),
+            "familyTrials": int(self.family_trials),
+            "dsrTrials": int(self.dsr_trials),
             "pbo": _round(self.pbo),
             "dsrProbability": _round(self.dsr_probability),
             "config": {
@@ -560,8 +571,13 @@ def run_model_comparison(
     config: ComparisonConfig | None = None,
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
+    prior_family_trials: int = 0,
 ) -> ComparisonReport:
     """Fit every arm on identical folds and return one verdict.
+
+    ``prior_family_trials`` is the family's cumulative trial count *before* this
+    run (``TrialLedger.family_count``). It can only raise the N fed to the
+    deflated Sharpe ratio, never lower it below this run's arm count.
 
     ``panel`` must carry ``trade_date``, ``symbol``, ``config.label_column`` and
     the ``factor_columns``. Outcome labels may be missing on inference dates;
@@ -572,6 +588,8 @@ def run_model_comparison(
     until targets are evaluated through the strict A-share execution simulator.
     """
     cfg = config or ComparisonConfig()
+    if int(prior_family_trials) < 0:
+        raise ValueError("prior_family_trials must be non-negative")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ---- data validity -------------------------------------------------
@@ -746,7 +764,13 @@ def run_model_comparison(
         )
 
     report = _decide(
-        results, cfg, n_trials, fold_windows, generated_at, invalid_models=invalid_models
+        results,
+        cfg,
+        n_trials,
+        fold_windows,
+        generated_at,
+        invalid_models=invalid_models,
+        family_trials=n_trials + int(prior_family_trials),
     )
     return replace(report, quarantine_rows_dropped=quarantine_rows_dropped)
 
@@ -1028,7 +1052,9 @@ def _decide(
     fold_windows: list[dict[str, str]],
     generated_at: str,
     invalid_models: set[str] | None = None,
+    family_trials: int = 0,
 ) -> ComparisonReport:
+    family_trials = max(int(n_trials), int(family_trials))
     measured = [arm for arm in results if arm.status == "measured"]
     failed = [arm for arm in results if arm.status == "failed"]
     invalid = set(invalid_models or ())
@@ -1054,6 +1080,7 @@ def _decide(
             dsr_probability=float("nan"),
             fold_windows=fold_windows,
             generated_at=generated_at,
+            family_trials=family_trials,
         )
 
     incremental = [
@@ -1105,7 +1132,7 @@ def _decide(
                     champion_arm.daily_returns,
                     per_period,
                     periods_per_year=252,
-                    n_trials=max(n_trials, per_period.size),
+                    n_trials=max(family_trials, per_period.size),
                 )
             )
 
@@ -1161,6 +1188,7 @@ def _decide(
         dsr_probability=dsr,
         fold_windows=fold_windows,
         generated_at=generated_at,
+        family_trials=family_trials,
     )
 
 

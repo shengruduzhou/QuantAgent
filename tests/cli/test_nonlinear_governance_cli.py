@@ -25,7 +25,15 @@ def test_legacy_nonlinear_cli_never_claims_production_eligibility(tmp_path, monk
         ]
     ).to_csv(panel_path, index=False)
 
-    comparison = SimpleNamespace(as_dict=lambda: {"verdict": "production_accepted"})
+    comparison = SimpleNamespace(
+        as_dict=lambda: {"verdict": "production_accepted"},
+        arms=[],
+        fold_windows=[],
+        generated_at="2026-01-05T00:00:00+00:00",
+        champion="gbm",
+        verdict="production_accepted",
+        dsr_trials=134,
+    )
     promotion = SimpleNamespace(
         accepted=True,
         champion="gbm",

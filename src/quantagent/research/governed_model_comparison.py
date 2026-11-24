@@ -100,14 +100,20 @@ def run_governed_model_comparison(
     promotion_config: NonlinearPromotionConfig | None = None,
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
+    prior_family_trials: int = 0,
 ) -> GovernedModelComparison:
-    """Legacy-compatible research path; never grants production eligibility."""
+    """Legacy-compatible research path; never grants production eligibility.
+
+    ``prior_family_trials`` comes from ``TrialLedger.family_count`` so the DSR in
+    both the raw comparison and the promotion gate uses the cumulative family N.
+    """
     comparison = run_model_comparison(
         panel,
         factor_columns,
         config=comparison_config,
         regime_by_date=regime_by_date,
         progress=progress,
+        prior_family_trials=prior_family_trials,
     )
     promotion = evaluate_nonlinear_promotion(comparison, config=promotion_config)
     governance = {
@@ -115,7 +121,7 @@ def run_governed_model_comparison(
         "researchOnly": True,
         "economicBacktestCertified": False,
         "productionBlockers": [
-            "legacy research path has no ExperimentLedger cumulative multiplicity binding",
+            "legacy research path has no Stage-4 ExperimentLedger fingerprint lineage (family N comes from the trial ledger)",
             "legacy research path has no one-shot FinalHoldoutLedger qualification",
             "model_comparison economic returns are not yet position-carrying/executable under A-share trading constraints",
         ],

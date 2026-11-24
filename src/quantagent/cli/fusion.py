@@ -7,7 +7,10 @@ scheme, and writes the candidate set, the Pareto frontier and a hashed manifest.
 
 The command deliberately exposes no ``--n-trials`` flag: the trial count is a
 property of the enumerated search space, and letting an operator declare it
-would make the deflated Sharpe ratio meaningless.
+would make the deflated Sharpe ratio meaningless. Every enumerated candidate is
+appended to the persistent trial ledger (family ``nonlinear_fusion``) and the
+DSR uses the cumulative family N read from it, which can only add to the
+enumerated count.
 
 The PBO/DSR/SPA/PIT/benchmark/holdout checks emitted here are a research-screening
 layer, not a production authorization certificate. The CLI does not own the
@@ -17,6 +20,7 @@ certification, so even a passing research screen remains production-ineligible.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 import re
@@ -30,6 +34,15 @@ from quantagent.research.foundation_gates import (
     evaluate_research_gates,
     fusion_statistical_evidence,
 )
+from quantagent.research.trial_ledger import (
+    FAMILY_NONLINEAR_FUSION,
+    TrialLedger,
+    TrialRecord,
+    config_hash,
+    current_git_hash,
+)
+
+COMMAND_ID = "search-factor-fusion"
 
 
 # Factor panels often carry labels beside features for convenience. A typo in
@@ -71,6 +84,43 @@ def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
         )
 
 
+def _fusion_trials(result: Any, *, run_config_hash: str, git_hash: str) -> list[TrialRecord]:
+    """One ledger entry per enumerated candidate -- controls included, as they count into N."""
+    windows = result.fold_windows
+    window = {
+        "start": min((str(w["trainStart"]) for w in windows), default=""),
+        "end": max((str(w["testEnd"]) for w in windows), default=""),
+    }
+    preferred = result.preferred.candidate_id if result.preferred is not None else None
+    frontier = set(result.frontier)
+    run_id = f"{run_config_hash[:12]}@{result.generated_at}"
+    records: list[TrialRecord] = []
+    for candidate in result.candidates:
+        if candidate.candidate_id == preferred:
+            verdict = "preferred"
+        elif candidate.candidate_id in frontier:
+            verdict = "frontier"
+        else:
+            verdict = "dominated"
+        records.append(
+            TrialRecord(
+                family=FAMILY_NONLINEAR_FUSION,
+                trial_id=f"{run_id}:{candidate.candidate_id}",
+                command=COMMAND_ID,
+                git_hash=git_hash,
+                config_hash=run_config_hash,
+                window=window,
+                metrics={
+                    **dict(candidate.metrics),
+                    "scheme": candidate.scheme,
+                    "isControl": bool(candidate.is_control),
+                },
+                verdict=verdict,
+            )
+        )
+    return records
+
+
 def _pit_evidence(frame: pd.DataFrame) -> bool | None:
     if "point_in_time_valid" in frame.columns:
         values = frame["point_in_time_valid"].dropna()
@@ -103,7 +153,7 @@ def _fusion_gate_payload(gate: Any, evidence: dict[str, object]) -> dict[str, ob
             "stage4Governed": False,
             "researchOnly": True,
             "productionBlockers": [
-                "factor-fusion CLI has no authoritative ExperimentLedger cumulative-trial binding",
+                "factor-fusion CLI has no Stage-4 ExperimentLedger fingerprint lineage (family N comes from the trial ledger)",
                 "--holdout-untouched is a research assertion, not a one-shot FinalHoldoutLedger seal",
                 "factor-fusion outcome clock is not bound to the Stage-4 executable-label contract",
                 "factor-fusion economics are not certified through the strict position-carrying A-share simulator",
@@ -219,12 +269,35 @@ def search_factor_fusion(
     def _progress(stage: str, completed: int, total: int) -> None:
         typer.echo(f"[{completed} / {total}] {stage}")
 
+    # Family history first; a damaged ledger fails closed before any compute.
+    ledger = TrialLedger()
+    ledger_summary = ledger.family_summary(FAMILY_NONLINEAR_FUSION)
+    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
     result = run_fusion_search(
         factor_panel=factor_panel,
         forward_panel=forward_panel,
         config=config,
         benchmark_returns=benchmark_returns,
         progress=_progress,
+        prior_family_trials=prior_family_trials,
+    )
+    run_config_hash = config_hash(
+        {
+            "command": COMMAND_ID,
+            "factorPanel": str(factor_panel_path.resolve()),
+            "forwardReturns": str(forward_returns_path.resolve()),
+            "forwardColumn": resolved_column,
+            "config": dataclasses.asdict(config),
+        }
+    )
+    trials = _fusion_trials(result, run_config_hash=run_config_hash, git_hash=current_git_hash())
+    ledger.record_trials(trials)
+    ledger_summary.update(
+        {
+            "runTrials": len(trials),
+            "cumulativeTrials": prior_family_trials + len(trials),
+            "dsrTrials": int(result.dsr_trials),
+        }
     )
     paths = save_fusion_artifacts(result, output_dir=output_dir)
 
@@ -234,6 +307,7 @@ def search_factor_fusion(
         preferred_id=preferred.candidate_id if preferred is not None else None,
         benchmark_returns=benchmark_returns,
         periods_per_year=config.periods_per_year,
+        n_trials=result.dsr_trials,
     )
     gate = evaluate_research_gates(
         pbo=result.pbo,
@@ -245,12 +319,14 @@ def search_factor_fusion(
     )
     gate_payload = _fusion_gate_payload(gate, evidence)
     gate_payload["preferredCandidate"] = evidence.get("preferred")
+    gate_payload["trialLedger"] = ledger_summary
     output_dir.mkdir(parents=True, exist_ok=True)
     gate_path = output_dir / "promotion_gate.json"
     gate_path.write_text(json.dumps(gate_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     typer.echo(
-        f"n_trials={result.n_trials} frontier={len(result.frontier)} "
+        f"n_trials={result.n_trials} family_trials={result.dsr_trials} "
+        f"frontier={len(result.frontier)} "
         f"pbo={result.pbo:.4f} benchmark={result.benchmark_mode}"
     )
     if preferred is not None:
