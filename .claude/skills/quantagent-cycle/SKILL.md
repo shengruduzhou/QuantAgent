@@ -35,6 +35,12 @@ The organization (agents in `.claude/agents/`):
 8. **Reassess**: update ROADMAP/RESEARCH/DATA/HISTORY in place (no new report files),
    and memory notes for the next session.
 
+If a custom agent type is not registered in the current host (observed in the desktop
+app on 2026-11-25: `.claude/agents/*` created mid-session were not offered as
+`subagent_type`), spawn `general-purpose` and make the brief's first line
+"Read `.claude/agents/<role>.md` and adopt that role"; for read-only auditors also state
+"do not edit files" in the brief, since the frontmatter `disallowedTools` is then not applied.
+
 Concurrency budget: ≤ 3 Opus agents at once (more hits usage limits); read-only audits
 may use `sonnet`. Resume an interrupted agent with `SendMessage` instead of restarting.
 
