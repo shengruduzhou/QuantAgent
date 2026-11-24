@@ -92,6 +92,17 @@ class PaperBrokerAdapter(BrokerBase):
                 "at an observed price or not at all",
             )
         self._last_prices[order.symbol] = market.last_price
+        held = self.broker.portfolio.positions.get(order.symbol)
+        # Selling the whole holding is the one case A-share rules allow an odd
+        # lot (e.g. a 150-share STAR residual below the 200-share minimum). The
+        # OMS sizes such sells exactly; without the flag the venue rounded them
+        # to zero and the residual could never be sold (R31-RISK-08).
+        is_full_liquidation = (
+            order.side is OrderSide.SELL
+            and held is not None
+            and not held.is_flat
+            and abs(float(order.quantity) - float(held.total)) < 1e-9
+        )
         paper_order = po.Order(
             symbol=order.symbol,
             side=po.BUY if order.side is OrderSide.BUY else po.SELL,
@@ -100,6 +111,7 @@ class PaperBrokerAdapter(BrokerBase):
             limit_price=self._price_bound(order, market),
             board=market.board,
             strategy_id=order.strategy_version or None,
+            is_full_liquidation=is_full_liquidation,
         )
         self._paper_ids[order.client_order_id] = paper_order.order_id
         canonical_order_id = self._pending_canonical.pop(order.client_order_id, None)

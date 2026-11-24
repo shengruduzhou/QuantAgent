@@ -326,12 +326,20 @@ def paper_clear_kill_switch(
             scope.upper(), key, human_confirmation=True,
             author=author.strip(), reason=reason.strip(),
         )
+        peak_rebased_to = None
+        if cleared and scope.upper() == "PORTFOLIO":
+            # The drawdown latch measures against the all-time peak; clearing it
+            # without re-anchoring that peak re-latches at the next session.
+            peak_rebased_to = engine.rebase_drawdown_peak(
+                author=author.strip(), reason=reason.strip()
+            )
     typer.echo(json_dump({
         "cleared": cleared,
         "scope": scope.upper(),
         "key": key,
         "activeBefore": active_before,
         "activeAfter": engine.kill_switch.active(),
+        "peakRebasedTo": peak_rebased_to,
     }))
     if not cleared:
         raise typer.Exit(code=1)
