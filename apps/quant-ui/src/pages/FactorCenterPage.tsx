@@ -32,6 +32,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { mutableTemplate, type JobLaunchPayload } from "../domain/jobTemplates";
 import { useApi } from "../hooks/useApi";
 import { formatNumber, formatPercent } from "../utils/format";
+import { verdictTone } from "../utils/verdictTone";
 import { useVNextChartPalette } from "../vnext/theme";
 import {
   ActionableState,
@@ -635,11 +636,15 @@ function pipelineStateLabel(state: PipelineState): string {
 
 // A verdict string is only a pass when it says so; "rejected" used to render
 // as PASSED because any non-empty verdict did.
-function verdictState(verdict?: string | null): PipelineState {
-  const text = (verdict ?? "").toLowerCase();
+export function verdictState(verdict?: string | null): PipelineState {
+  const text = (verdict ?? "").trim();
   if (!text) return "pending";
-  if (["reject", "fail", "invalid", "drop"].some((word) => text.includes(word))) return "failed";
-  if (["pass", "accept", "approved"].some((word) => text.includes(word))) return "passed";
+  // Negation-aware: "not_passed" / "no_pass" used to match "pass" and render
+  // PASSED (Round 31 F15). The shared classifier checks negation first.
+  const normalised = text.toLowerCase().replace(/accept(ed)?|approved?/g, "passed");
+  const tone = verdictTone(normalised);
+  if (tone === "danger" || /reject|invalid|drop/.test(normalised)) return "failed";
+  if (tone === "success") return "passed";
   return "recorded";
 }
 

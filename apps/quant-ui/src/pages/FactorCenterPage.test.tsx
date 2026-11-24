@@ -1,9 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
 import type { Factor } from "../api/types";
-import { FactorCenterPage } from "./FactorCenterPage";
+import { FactorCenterPage, verdictState } from "./FactorCenterPage";
 
 vi.mock("../components/EChart", () => ({
   EChart: () => <div role="img" aria-label="因子图表" />,
@@ -155,4 +155,17 @@ test("a stage only says PASSED when a gate judged it; approval needs IC evidence
   await waitFor(() => expect(screen.getAllByText(/RECORDED · 未判定/).length).toBeGreaterThan(0));
   expect(screen.queryByText("PASSED")).toBeNull();
   expect(approve).toBeDisabled();
+});
+
+describe("verdictState (Round 31 F15)", () => {
+  it("does not render a negated verdict as PASSED", () => {
+    expect(verdictState("not_passed")).toBe("failed");
+    expect(verdictState("NO_PASS")).toBe("failed");
+    expect(verdictState("rejected")).toBe("failed");
+    expect(verdictState("passed")).toBe("passed");
+    expect(verdictState("accepted")).toBe("passed");
+    expect(verdictState("not_accepted")).toBe("failed");
+    expect(verdictState("")).toBe("pending");
+    expect(verdictState("recorded")).toBe("recorded");
+  });
 });

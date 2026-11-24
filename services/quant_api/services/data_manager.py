@@ -8,6 +8,7 @@ import sqlite3
 from tempfile import NamedTemporaryFile
 from typing import Any, Iterator
 
+import numpy as np
 import pandas as pd
 
 from services.quant_api.config import ApiSettings, project_relative, safe_project_path
@@ -135,6 +136,30 @@ class DataManagerService:
             })
         return items
 
+    _SESSIONS_CACHE: dict[str, tuple[float, frozenset[pd.Timestamp]]] = {}
+
+    def _reference_sessions(self) -> frozenset[pd.Timestamp]:
+        """Exchange sessions observed in the U0 raw panel (cached by mtime)."""
+        path = self.settings.runtime_root / "data" / "u0" / "panel" / "daily_bars_raw.parquet"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return frozenset()
+        cached = self._SESSIONS_CACHE.get(str(path))
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
+            import pyarrow.compute as pc
+            import pyarrow.parquet as pq
+
+            column = pq.read_table(path, columns=["trade_date"]).column("trade_date")
+            unique = pd.to_datetime(pc.unique(column).to_pandas(), errors="coerce").dropna()
+            sessions = frozenset(unique.dt.normalize())
+        except Exception:  # noqa: BLE001 - an unreadable calendar means "unverified", not failure
+            return frozenset()
+        self._SESSIONS_CACHE[str(path)] = (mtime, sessions)
+        return sessions
+
     def inspect_dataset(
         self,
         value: str,
@@ -157,6 +182,12 @@ class DataManagerService:
         observed_symbols: set[str] = set()
         duplicate_count = 0
         scanned_rows = 0
+        # Shallow mode: exact dataset-level duplicate detection on integer keys
+        # (symbol id, timestamp ns). It replaces per-row strftime + Python tuple
+        # sets, which took ~34 s of the 42 s on the certified panel and only
+        # caught duplicates inside one 100k-row batch (Round 31 F4 / D-10).
+        symbol_ids: dict[str, int] = {}
+        key_batches: list[np.ndarray] = []
         database_path: str | None = None
         connection: sqlite3.Connection | None = None
         if deep:
@@ -178,15 +209,26 @@ class DataManagerService:
                 scanned_rows += int(valid.sum())
                 observed_symbols.update(str(item) for item in symbols.unique())
                 observed_dates.update(pd.Timestamp(item).normalize() for item in dates.unique())
-                pairs = list(zip(symbols.astype(str), dates.dt.strftime("%Y-%m-%dT%H:%M:%S")))
                 if connection is None:
-                    duplicate_count += len(pairs) - len(set(pairs))
+                    categorical = pd.Categorical(symbols.astype(str))
+                    lookup = np.array(
+                        [symbol_ids.setdefault(str(name), len(symbol_ids)) for name in categorical.categories],
+                        dtype=np.int64,
+                    )
+                    keys = np.empty(len(categorical), dtype=[("symbol", np.int64), ("stamp", np.int64)])
+                    keys["symbol"] = lookup[categorical.codes]
+                    keys["stamp"] = dates.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+                    key_batches.append(keys)
                 else:
+                    pairs = list(zip(symbols.astype(str), dates.dt.strftime("%Y-%m-%dT%H:%M:%S")))
                     before = connection.total_changes
                     connection.executemany("INSERT OR IGNORE INTO seen(symbol, stamp) VALUES (?, ?)", pairs)
                     duplicate_count += len(pairs) - (connection.total_changes - before)
             if connection is not None:
                 connection.commit()
+            elif key_batches:
+                all_keys = np.concatenate(key_batches)
+                duplicate_count = int(len(all_keys) - len(np.unique(all_keys)))
         finally:
             if connection is not None:
                 connection.close()
@@ -195,8 +237,19 @@ class DataManagerService:
 
         ordered_dates = sorted(observed_dates)
         missing_business_days: list[str] = []
+        calendar_basis = "business_days_unverified"
         if ordered_dates:
             expected = set(pd.bdate_range(ordered_dates[0], ordered_dates[-1]).normalize())
+            sessions = self._reference_sessions()
+            if sessions:
+                # Weekdays the exchange did not trade (holidays) are not gaps.
+                # Where the U0 session record covers the range, only real
+                # sessions count; beyond it the weekday candidates remain.
+                covered_end = max(sessions)
+                expected = {
+                    day for day in expected if day > covered_end or day in sessions
+                }
+                calendar_basis = "u0_observed_sessions"
             missing_business_days = [item.date().isoformat() for item in sorted(expected - observed_dates)]
         stat = path.stat()
         return {
@@ -211,14 +264,15 @@ class DataManagerService:
             "dateStart": ordered_dates[0].date().isoformat() if ordered_dates else None,
             "dateEnd": ordered_dates[-1].date().isoformat() if ordered_dates else None,
             "duplicateKeys": duplicate_count,
-            "duplicateMode": "exact" if deep else "within_batch",
+            "duplicateMode": "exact",
             "missingBusinessDayCandidates": missing_business_days[:240],
             "missingBusinessDayCount": len(missing_business_days),
             "dateColumn": date_column,
             "symbolColumn": symbol_column,
+            "calendarBasis": calendar_basis,
             "warnings": [
                 "business-day gaps are candidates; exchange holidays require the canonical trading calendar"
-            ] if missing_business_days else [],
+            ] if missing_business_days and calendar_basis != "u0_observed_sessions" else [],
         }
 
     def _provider_payload(self, spec: DataProviderSpec) -> dict[str, Any]:
