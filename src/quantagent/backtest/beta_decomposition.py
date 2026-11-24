@@ -112,9 +112,8 @@ def classify_strategy(panel: dict, *, multi_window_ok: bool | None = None,
                       style_attribution: dict | None = None) -> tuple[str, list[str]]:
     """User's selection logic -> label + flags.
 
-    ``style_attribution`` is a
-    :meth:`quantagent.backtest.factor_model_attribution.AttributionReport.as_dict`
-    payload. When it is supplied and its strictest measured level is FF3 or
+    ``style_attribution`` is a style-attribution payload (``{"levels": ...}``,
+    the format of the removed ``factor_model_attribution.AttributionReport``). When it is supplied and its strictest measured level is FF3 or
     Carhart, that level's alpha replaces the CAPM alpha in the decision.
 
     Without it this function promotes on a single-benchmark Jensen alpha, which

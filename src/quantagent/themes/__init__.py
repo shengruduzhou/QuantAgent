@@ -1,4 +1,3 @@
-from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.industry_chain_reasoner import (
     IndustryChainReasonerConfig,
     reason_industry_chain,
@@ -23,7 +22,6 @@ __all__ = [
     "PolicyDocument",
     "StockPoolGateConfig",
     "apply_stock_pool_gate",
-    "build_industry_chain_graph",
     "build_thematic_universe",
     "discover_themes",
     "estimate_lifecycle",

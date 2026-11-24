@@ -2,8 +2,9 @@
 
 Supported V7/V8 command aliases and the governed V8 ensemble commands remain
 registered so existing automation has a stable CLI contract. Only reproduction-
-only research, intraday and legacy portfolio modules require
-``QUANTAGENT_ENABLE_LEGACY_CLI``.
+only the intraday do-T reproduction commands require
+``QUANTAGENT_ENABLE_LEGACY_CLI`` (the v7 research/optimize and v8 portfolio
+legacy modules were removed in Round 31 after their 2026-10-01 removal date).
 """
 
 from __future__ import annotations
@@ -46,10 +47,7 @@ def _legacy_enabled() -> bool:
 
 LEGACY_CLI_ENABLED = _legacy_enabled()
 if LEGACY_CLI_ENABLED:
-    from quantagent.cli import v7_optimize  # noqa: F401,E402
-    from quantagent.cli import v7_research  # noqa: F401,E402
     from quantagent.cli import v8_intraday  # noqa: F401,E402
-    from quantagent.cli import v8_portfolio  # noqa: F401,E402
 
 
 __all__ = ["LEGACY_CLI_ENABLED", "app"]

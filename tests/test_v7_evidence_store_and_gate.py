@@ -1,7 +1,6 @@
 import pandas as pd
 import pytest
 
-from quantagent.backtest import build_pit_evidence_slice
 from quantagent.data.ingestion import (
     EVIDENCE_COLUMNS,
     EvidenceStore,
@@ -215,34 +214,10 @@ def test_evidence_store_round_trip(tmp_path):
     assert quality["pit_violation_count"] == 0
 
 
-def test_build_pit_evidence_slice_drops_future_rows():
-    frame = pd.DataFrame(
-        [
-            {"evidence_id": "a", "available_at": "2026-05-10"},
-            {"evidence_id": "b", "available_at": "2026-05-20"},
-        ]
-    )
-    sliced = build_pit_evidence_slice(frame, "2026-05-14")
-    assert list(sliced["evidence_id"]) == ["a"]
 
 
-@pytest.mark.parametrize("available_column", ["available_at", "known_at"])
-def test_build_pit_evidence_slice_requires_availability_column(available_column):
-    frame = pd.DataFrame([{"symbol": "600001.SH", "report_period": "2024-12-31"}])
-    with pytest.raises(ValueError, match=f"availability column '{available_column}'"):
-        build_pit_evidence_slice(frame, "2025-01-15", available_column)
 
 
-def test_build_pit_evidence_slice_keeps_only_proven_available_rows():
-    frame = pd.DataFrame(
-        {"evidence_id": ["past", "boundary", "future", "missing", "invalid"],
-         "known_at": ["2025-01-01", "2025-01-15", "2025-02-01", None, "invalid"]}
-    )
-    original = frame.copy(deep=True)
-    sliced = build_pit_evidence_slice(frame, "2025-01-15", "known_at")
-    assert list(sliced["evidence_id"]) == ["past", "boundary"]
-    pd.testing.assert_frame_equal(frame, original)
-    assert build_pit_evidence_slice(frame.iloc[:0], "2025-01-15").empty
 
 
 def test_evidence_quality_report_counts_duplicates_missing_columns_and_pit():

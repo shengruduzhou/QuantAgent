@@ -3,20 +3,16 @@ import pandas as pd
 from quantagent.data.ingestion import (
     DailyEvidenceJob,
     DailyEvidenceJobConfig,
-    DisclosureIngestor,
     EVIDENCE_COLUMNS,
     EvidenceIngestor,
-    FinancialIngestor,
-    NewsIngestor,
-    OrderContractIngestor,
     PolicyIngestor,
-    RegulatoryPenaltyIngestor,
     SourceCredibilityRegistry,
     SourceProfile,
     SourceTier,
     attach_source_profile,
     merge_user_profiles,
 )
+
 
 
 def test_source_registry_resolves_known_hosts_to_correct_tier():
@@ -122,53 +118,7 @@ def test_policy_ingestor_reads_local_cache(tmp_path):
     assert frame["source_reliability"].iloc[0] >= 0.90  # gov.cn is OFFICIAL_PRIMARY
 
 
-def test_disclosure_ingestor_tags_event_types(tmp_path):
-    cache_dir = tmp_path / "disclosure"
-    cache_dir.mkdir(parents=True)
-    (cache_dir / "ann.csv").write_text(
-        "source_name,url,title,body,published_at,symbol\n"
-        "www.sse.com.cn,https://example,关于签订重大合同的公告,与XX签订订单50亿元,2026-04-15,600519.SH\n"
-        "www.sse.com.cn,https://example,关于收到警示函的公告,监管警示函,2026-04-20,000858.SZ\n",
-        encoding="utf-8",
-    )
-    ingestor = DisclosureIngestor(local_cache_root=str(cache_dir))
-    config = DailyEvidenceJobConfig(as_of_date="2026-05-14", cache_root=str(tmp_path / "evidence"))
-    frame = ingestor.fetch(config, SourceCredibilityRegistry())
-    events = set(frame["event_type"].tolist())
-    assert "order_confirmed" in events
-    assert "regulatory_penalty" in events
 
 
-def test_news_ingestor_flags_rumours(tmp_path):
-    cache_dir = tmp_path / "news"
-    cache_dir.mkdir(parents=True)
-    (cache_dir / "n.csv").write_text(
-        "source_name,url,title,body,published_at\n"
-        "www.eastmoney.com,https://www.eastmoney.com/n1,据传公司将获得大订单,据传 the order is coming,2026-05-13\n",
-        encoding="utf-8",
-    )
-    ingestor = NewsIngestor(local_cache_root=str(cache_dir))
-    config = DailyEvidenceJobConfig(as_of_date="2026-05-14", cache_root=str(tmp_path / "evidence"))
-    frame = ingestor.fetch(config, SourceCredibilityRegistry())
-    assert bool(frame.iloc[0]["rumor_risk_flag"]) is True
-    # Confidence must be penalised after rumour flag
-    assert float(frame.iloc[0]["confidence"]) < 0.55
 
 
-def test_news_ingestor_caps_single_low_reliability_core_signal(tmp_path):
-    cache_dir = tmp_path / "news"
-    cache_dir.mkdir(parents=True)
-    (cache_dir / "n.csv").write_text(
-        "source_name,url,title,body,published_at\n"
-        "xueqiu.com,https://xueqiu.com/n1,CATL 300750.SZ gets huge order,EV battery and energy storage demand rises,2026-05-13\n",
-        encoding="utf-8",
-    )
-    ingestor = NewsIngestor(local_cache_root=str(cache_dir))
-    config = DailyEvidenceJobConfig(as_of_date="2026-05-14", cache_root=str(tmp_path / "evidence"))
-    frame = ingestor.fetch(config, SourceCredibilityRegistry())
-
-    assert "300750.SZ" in frame.iloc[0]["affected_symbols"]
-    assert "ev_supply_chain" in frame.iloc[0]["theme_candidates"]
-    assert bool(frame.iloc[0]["core_pool_signal_allowed"]) is False
-    assert float(frame.iloc[0]["confidence"]) <= 0.34
-    assert "single_low_reliability_source" in frame.iloc[0]["risk_flags"]

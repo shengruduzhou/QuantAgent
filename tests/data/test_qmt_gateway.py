@@ -13,7 +13,6 @@ import json
 import pandas as pd
 import pytest
 
-from quantagent.data.ashare import source_precedence as sp
 from quantagent.data.providers import qmt_entitlement as ent
 from quantagent.data.providers import qmt_gateway as gw
 from quantagent.data.providers import qmt_skills as sk
@@ -323,113 +322,5 @@ def _panel(rows):
     return pd.DataFrame(rows)
 
 
-class TestReconciliation:
-    def _row(self, **kw):
-        base = {"symbol": "600000.SH", "trade_date": "2026-07-24", "open": 9.08,
-                "high": 9.12, "low": 9.02, "close": 9.04, "volume": 50_675_100.0,
-                "amount": 459_278_100.0}
-        base.update(kw)
-        return base
-
-    def test_exact_match(self):
-        report = sp.reconcile(_panel([self._row()]), _panel([self._row()]))
-        assert report["outcome_counts"].get(sp.MISMATCH_VALUE, 0) == 0
-        assert report["outcome_counts"][sp.MATCH] >= 6
-
-    def test_amount_mismatch_detected(self):
-        report = sp.reconcile(_panel([self._row()]),
-                              _panel([self._row(amount=500_000_000.0)]))
-        assert report["outcome_counts"].get(sp.MISMATCH_VALUE, 0) >= 1
-
-    def test_volume_unit_mismatch_is_its_own_outcome(self):
-        """手 vs shares is a schema defect, not a data disagreement."""
-        report = sp.reconcile(_panel([self._row()]),
-                              _panel([self._row(volume=506_751.0)]))
-        assert report["outcome_counts"].get(sp.MISMATCH_UNIT, 0) == 1
-
-    def test_adjustment_mismatch_detected_from_constant_ratio(self):
-        adjusted = self._row(open=9.08 * 2, high=9.12 * 2, low=9.02 * 2, close=9.04 * 2)
-        report = sp.reconcile(_panel([self._row()]), _panel([adjusted]))
-        assert report["results"][0]["adjustment_mismatch"] is True
-        assert report["outcome_counts"].get(sp.MISMATCH_ADJUSTMENT, 0) == 4
-
-    def test_missing_in_qmt_is_expected_not_a_defect(self):
-        report = sp.reconcile(_panel([self._row()]), _panel([]).reindex(
-            columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
-        ))
-        assert report["outcome_counts"].get(sp.MISSING_IN_QMT, 0) >= 1
-
-    def test_duplicate_rows_reported(self):
-        report = sp.reconcile(_panel([self._row(), self._row()]), _panel([self._row()]))
-        assert report["duplicate_rows"]["u0"] == 1
 
 
-class TestPatchGovernance:
-    def _reco(self, outcome, field_name="close", u0=9.04, qmt=9.10):
-        return {"results": [{
-            "symbol": "600000.SH", "trade_date": "2026-07-24",
-            "comparisons": [{"field_name": field_name, "u0_value": u0,
-                             "qmt_value": qmt, "outcome": outcome, "detail": ""}],
-        }]}
-
-    def test_value_disagreement_does_not_overturn_u0(self):
-        patches = sp.propose_patches(self._reco(sp.MISMATCH_VALUE))
-        assert patches[0].decision == sp.REJECTED_U0_AUTHORITATIVE
-        assert patches[0].applied is False
-
-    def test_gap_is_filled_from_qmt(self):
-        patches = sp.propose_patches(self._reco(sp.MISSING_IN_U0, u0=None))
-        assert patches[0].decision == sp.APPROVED
-        assert patches[0].applied is True
-
-    def test_unit_mismatch_is_never_patched(self):
-        patches = sp.propose_patches(self._reco(sp.MISMATCH_UNIT, field_name="volume"))
-        assert patches[0].decision == sp.REJECTED_UNIT_MISMATCH
-
-    def test_adjustment_mismatch_is_never_patched(self):
-        patches = sp.propose_patches(self._reco(sp.MISMATCH_ADJUSTMENT))
-        assert patches[0].decision == sp.REJECTED_U0_AUTHORITATIVE
-
-    def test_every_patch_records_full_provenance(self):
-        """All provenance keys present; old_value is legitimately null on a gap fill."""
-        patch = sp.propose_patches(self._reco(sp.MISSING_IN_U0, u0=None))[0]
-        record = patch.to_dict()
-        for key in ("old_provider", "new_provider", "old_value", "new_value",
-                    "reason", "validation", "old_hash", "new_hash", "decision"):
-            assert key in record, f"{key} missing from the patch record"
-        # A gap fill displaced nothing, so old_value must be null -- recording a
-        # value there would misrepresent the panel as having held one.
-        assert record["old_value"] is None
-        assert record["new_value"] is not None
-        for key in ("old_provider", "new_provider", "reason", "validation",
-                    "old_hash", "new_hash", "decision"):
-            assert record[key], f"{key} must be populated on every patch"
-
-    def test_overwrite_candidate_records_both_values(self):
-        patch = sp.propose_patches(self._reco(sp.MISMATCH_VALUE, u0=9.04, qmt=9.10))[0]
-        record = patch.to_dict()
-        assert record["old_value"] == 9.04
-        assert record["new_value"] == 9.10
-        assert record["old_hash"] != record["new_hash"]
-
-    def test_rejected_patches_stay_in_the_ledger(self):
-        """An audit that only lists applied changes hides what was declined."""
-        patches = sp.propose_patches(self._reco(sp.MISMATCH_VALUE))
-        panel = _panel([{"symbol": "600000.SH", "trade_date": "2026-07-24", "close": 9.04}])
-        result, ledger = sp.apply_patches(panel, patches)
-        assert ledger["patches_considered"] == 1
-        assert ledger["patches_applied"] == 0
-        assert ledger["patches_rejected"] == 1
-        assert len(ledger["records"]) == 1
-        assert result.loc[0, "close"] == 9.04  # untouched
-
-    def test_approved_patch_is_applied_with_provenance_stamp(self):
-        patches = sp.propose_patches(self._reco(sp.MISSING_IN_U0, u0=None, qmt=9.10))
-        panel = _panel([{"symbol": "600000.SH", "trade_date": "2026-07-24", "close": None}])
-        result, ledger = sp.apply_patches(panel, patches)
-        assert ledger["patches_applied"] == 1
-        assert result.loc[0, "close"] == 9.10
-        assert "u0_verified->qmt_xtdata" in str(result.loc[0, "patch_provenance"])
-
-    def test_u0_is_first_in_precedence(self):
-        assert sp.PRECEDENCE[0] == sp.PROVIDER_U0

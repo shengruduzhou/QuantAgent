@@ -9,7 +9,6 @@ from quantagent.backtest.ashare_execution_simulator import (
     simulate_ashare_target_weights,
     validate_cash_account_target_weights,
 )
-from quantagent.portfolio.alpha_portfolio import AlphaPortfolioConfig, build_alpha_portfolio
 
 
 def test_cash_target_guard_accepts_long_and_zero_weights() -> None:
@@ -58,28 +57,6 @@ def test_strict_cash_simulator_fails_before_short_leg_can_be_silently_dropped() 
         simulate_ashare_target_weights(targets, market)
 
 
-def test_research_long_short_constructor_may_exist_but_is_not_cash_executable() -> None:
-    date = pd.Timestamp("2026-01-05")
-    predictions = pd.DataFrame(
-        {
-            "trade_date": [date] * 10,
-            "symbol": [f"60000{i}.SH" for i in range(10)],
-            "alpha_score": list(range(10)),
-        }
-    )
-    weights = build_alpha_portfolio(
-        predictions,
-        config=AlphaPortfolioConfig(
-            book_fraction=0.2,
-            max_name_weight=0.5,
-            rebalance_interval=1,
-            long_short=True,
-            min_names_per_date=1,
-        ),
-    )
-    assert (weights.to_numpy() < 0).any()
-    with pytest.raises(UnsupportedStockShortError):
-        validate_cash_account_target_weights(weights)
 
 
 def test_successful_cash_simulation_stamps_execution_capability() -> None:
