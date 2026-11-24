@@ -182,3 +182,28 @@ quality_status
 
 A provider switch inside one symbol history is a `SourceBoundary`; do not splice
 vendors silently.  Missing evidence is `BLOCKED_BY_DATA`, not a synthetic fill.
+
+## 7. PIT fundamentals / consensus sources（Cycle 32 desk research，2026-11-25）
+
+用途：ROADMAP P1-1 若判定日频量价 long-only 无成本后 edge，研究转向基本面/一致预期数据。
+以下为当日网页核对结论（WebFetch 摘要级；字段级结论须在实际接入前用 live probe 复核）。
+
+| 来源 | 可用于 PIT 的时间戳 | 结论 |
+|---|---|---|
+| Fuyao `financials` / `financial-indicators` | `report_date_ms`（标"披露日"），但文档所有示例中都等于 `period_end_ms`，且文档称无独立公告日字段 | **`available_at` 未被证明**：在 live probe 证明晚披露公司的 `report_date_ms ≠ period_end_ms` 之前，按 period end 处理并 fail closed；报表字段很薄（资产负债 7 项、现金流 6 项）；无预测/一致预期端点；估值仅最新快照；行业为同花顺当期成分 |
+| TuShare Pro `income`/`balancesheet`/`cashflow`/`fina_indicator` | `ann_date`、`f_ann_date`；`report_type`(1–12)、`update_flag` 标记更正 | 首选候选；需 2000 积分；只用首次公告行，防止更正行覆盖原值 |
+| TuShare `forecast` / `express` | `ann_date`、`first_ann_date` | 2000 积分（vip 版 5000） |
+| TuShare `report_rc`（卖方盈利预测，2010 起） | `report_date` | 2000 积分仅试用 10 次/日；8000 积分 10 万次/日；可做预测修正广度/盈余意外 |
+| TuShare `index_member_all`（申万三级） | `in_date` / `out_date` | 2000 积分；可替代当期快照行业图（ROADMAP P2-4）；申万重分类是否回溯未核实 |
+| AkShare 新浪/同花顺报表 | 只有报告期，无公告日 | 单独使用**不 PIT 安全** |
+| AkShare 东财 datacenter（`stock_yjyg_em`/`stock_yjkb_em`/`stock_yysj_em` 含实际披露时间） | 公告日期 | 主机为 data.eastmoney.com（非 push2），本机可达性未测 |
+| 巨潮 `stock_zh_a_disclosure_report_cninfo` | 公告时间 | 可作公告日的独立交叉核对；使用条款/robots 未核实 |
+
+文献（已核对出处）：Liu, Stambaugh & Yuan (2019) "Size and value in China", *JFE* 134(1):48–69,
+doi:10.1016/j.jfineco.2019.03.008 —— 剔除最小 30% 壳价值股，EP 吸收 B/M；Truong (2011) *JIFMIM*
+21(5):637–661, doi:10.1016/j.intfin.2011.04.002 —— 1994–2009 年 A 股 PEAD，多空约 9–9.5%/年；
+Leippold, Wang & Zhou (2022) *JFE* 145(2):64–82, doi:10.1016/j.jfineco.2021.08.017 —— 流动性是最强
+预测变量，小盘短周期可预测性受散户主导（全文未能打开，量级未核实）。三者都是**多空或毛收益**证据，
+不能直接推出 long-only、T+1、散户成本下的净收益。
+
+待用户确认：TuShare 账户积分档位（决定 1–3 项是否可行，属付费服务决策）。
