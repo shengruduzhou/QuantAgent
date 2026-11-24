@@ -1,0 +1,337 @@
+# 运维手册 / Operations
+
+本文件合并原 `docs/quant_ui_runbook.md`、`quant_ops_control_loop_qa.md`、
+`scripts/systemd/INSTALL.md` 与 v8 训练监控说明。架构见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 0. 环境 / Environment
+
+- Python：`AI_quant_venv/bin/python3`（cron 与 CLAUDE.md 使用同一个）；`pip install -e ".[all]"`。
+- 全量测试：`AI_quant_venv/bin/python3 -m pytest tests/ -q`（约 8 分钟）。测试会把
+  `QUANTAGENT_HOME` 指向临时目录；需要读真实 runtime 的手工检查设
+  `QUANTAGENT_TEST_USE_REAL_RUNTIME=1`。
+- 前端：`cd apps/quant-ui && npx tsc --noEmit && npx vitest run && npx vite build`。
+  **修改前端后必须重新构建 `dist/`**，API 只托管已构建的产物。
+- 凭据只经由白名单环境变量（如 `HITHINK_FINANCE_API_KEY`、`TICKFLOW_API_KEY`）进入进程；
+  不读、不打印、不提交 `.env`。
+
+## 1. 定时任务 / Scheduled jobs（用户 crontab，2026-11-24 实测状态）
+
+| 时间（JST，工作日） | 脚本 | 作用 | 状态 |
+|---|---|---|---|
+| 06:00 | `scripts/catchup_supervisor.sh` | 补齐前向面板 | **每日 ABORT**：缺沪/北带日期 ST 证据（fail-closed，设计如此） |
+| 08:00 | `scripts/coverage_guard.sh` | 覆盖守卫 + 前向推理 + 健康检查 | 运行但无数据可推 |
+| 16:30 | `scripts/fresh_blind_daily.py` | FRESH 窗盲测纸面日志 | `data_status=FAILED` 自 2026-08-14 |
+| 16:40 | `scripts/run_dot_fundflow_daily.sh` | 做T 资金流监控 | **从未运行**（文件无执行位）；做T 已定论无 edge，建议删除该 cron 行 |
+| 17:30 | `scripts/stage10_daily.sh` | 概念链日扫 | 运行，但数据源限流时复用缓存；health check 偶发崩溃 |
+| 18:30 | `scripts/fresh_blind_healthcheck.py` | 健康检查 | 每日 UNHEALTHY（面板滞后 110 天），告警写 `runtime/paper/fresh_blind/ALERT.txt` |
+| 18:45 | `scripts/shadow_day_registry.py` | 影子日登记 | 正常；有效日最后为 2026-08-07 |
+| 22:00 | `scripts/u0_full_universe_backfill.py fetch` | U0 回填 | **空转**：未带 `--allow-network` 而按设计拒绝联网 |
+
+调度只用 cron；systemd 单元已在 Round 31 删除（从未安装）。
+
+## 2. 任务控制 / Job control（JobRunner）
+
+- 状态机：`queued → starting → running ⇄ paused → succeeded|failed|cancelled|rejected`。
+  `rejected`（退出码 3）是研究闸门否决的**结论**，不是故障。
+- 每个任务经 `scripts/job_supervisor.py`：真实退出码写 `<job>.status.json`，stdout 直写日志
+  文件（不走管道），`start_new_session=True`；API 重启后据状态文件或存活进程重新接管，
+  两者皆无则如实记录 `exitStatusObserved=false`。
+- `pause`/`resume` = 整棵进程树 SIGSTOP/SIGCONT，不释放显存。失败原因由
+  `services/quant_api/services/job_diagnostics.py` 从日志归类，归不了类记 `unclassified`。
+- `retry` 只对 `failed`/`cancelled`，以原参数重放；退出码 0 仍要求声明产物相对基线有新证据。
+
+## 3. 纸面账户 / Paper account
+
+- 连续纸面循环：`quantagent paper-*` 命令（`src/quantagent/cli/paper.py`）；HTTP：
+  `/api/paper/*`。实盘路径终态 `LIVE_DISABLED`。
+- 风控：日亏 ≥ 开盘权益 5% ⇒ 当日停止买入、次日恢复；回撤 ≥ 20%（相对历史峰值）⇒
+  只减仓锁，人工解除：
+  `quantagent paper-clear-kill-switch --confirm --author <名字> --reason "<≥8 字理由>"`
+  （解除时把回撤峰值重新锚定到当前权益，见 HISTORY Round 31）。
+- 未提供行业图（`--sector-map` / `QUANTAGENT_PAPER_SECTOR_MAP`）时一切 BUY 被拒绝
+  `industry_unmeasured`。
+- 分红送转在每个执行日按认证面板的 `ca_*` 列入账（Round 31 起）。
+
+## 4. Web 工作站 / Workstation runbook
+
+### Recommended startup
+
+项目根目录执行一个命令；它会使用指定的 TickFlow/QuantAgent runtime、安装缺失的
+frontend dependencies、重新构建 VNext production SPA，并由同一个 FastAPI process
+同时提供 Web 与 API：
+
+```bash
+./scripts/run_quant_ui.sh \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+生产式后台运行建议使用 tmux 启动器：
+
+```bash
+./scripts/run_quant_ui_tmux.sh \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+启动器会立即返回 session、日志路径和 attach 命令，并创建三个 pane：服务进程、实时日志、`watch -n 0.1 nvidia-smi`。已存在同名 session 时不会重复启动。Web 资源卡使用约 1 秒的服务端采样，避免 0.1 秒轮询压垮浏览器；0.1 秒刷新只保留在 tmux 本机监控 pane。
+
+日常代码未变化、只想复用已经构建的 `dist` 时可以追加 `--skip-build`。修改 frontend
+后不要使用该选项，否则浏览器看到的仍会是旧 bundle。
+
+```text
+Web:     http://127.0.0.1:8000
+API:     http://127.0.0.1:8000/api
+OpenAPI: http://127.0.0.1:8000/docs
+```
+
+不再要求同时维护 `8000 + 5173` 两个进程。控制中心页面还可以启动 allowlisted
+backtest/train/infer research jobs。产品入口已完成 VNext-only cutover；`?ui=legacy`
+不会再恢复旧 shell。
+
+启动后，完整策略工作流使用左侧「策略实验室」：
+
+1. 填写研究假设、失效条件和真实 Runtime 输入路径；
+2. 配置因子库、模型、walk-forward 切分、Top-K、集中度、换手和风险 Gate；
+3. 先「校验」，再「保存版本」；
+4. 明确勾选 Human Gate 后启动；
+5. 页面通过 SSE 实时显示数据构建、训练、组合、回测、风控和 paper report 日志；
+6. 完成后从回测工作站、风险管理、模型注册表和 Runtime 检查持久化产物。
+
+系统设置中的「API 会话连接器」可配置 TickFlow/TuShare/OpenAI research/Alpaca
+会话。密钥只保存在 API 进程内存，不进 URL、argv、日志、Runtime 或浏览器存储。
+它不是任意 Bash 终端：只有声明了对应 provider 的 allowlisted 任务可以读取。
+
+### Backend API
+
+#### Install
+
+在项目根目录执行：
+
+```bash
+python3 -m pip install -e ".[web]"
+```
+
+如当前环境已安装 FastAPI、Uvicorn 与 HTTPX，可直接启动。
+
+#### Start
+
+仅启动 API/复用已有 frontend build：
+
+```bash
+python3 -m services.quant_api \
+  --runtime /home/shanhefu/QuantAgent/runtime \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --no-reload
+```
+
+默认监听：
+
+```text
+http://127.0.0.1:8000
+```
+
+命令行参数优先；同时保留以下环境变量以兼容 service/tmux/systemd：
+
+```bash
+QUANT_UI_HOST=127.0.0.1
+QUANT_UI_PORT=8000
+QUANT_UI_RELOAD=false
+QUANT_UI_LOG_LEVEL=info
+```
+
+OpenAPI：
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+#### Smoke check
+
+无需启动 HTTP port：
+
+```bash
+python3 scripts/quant_ui_api_smoke.py
+```
+
+#### Runtime Explorer examples
+
+```bash
+curl "http://127.0.0.1:8000/api/system/runtime-index?kind=backtest&pageSize=20"
+curl "http://127.0.0.1:8000/api/system/runtime-index?runId=v89_rankfix_20260613_1044&horizon=short_5d"
+curl "http://127.0.0.1:8000/api/system/runtime-index?modifiedAfter=2026-06-01T00:00:00%2B00:00"
+```
+
+`strategy`、`model`、`symbol` filters 只匹配 artifact metadata/path，不会为搜索而扫描大型 Parquet 内容。
+股票级检索使用 backtest/model/selection domain API。
+
+#### Research job example
+
+Job API 不接受 shell command，只接受 allowlisted command ID。所有 input/output path 必须位于项目内部，
+output 还必须位于 `runtime/`：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/jobs/backtest" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commandId": "run-strict-a-share-backtest-v8",
+    "parameters": {
+      "target_weights_path": "runtime/reports/example/target_weights.parquet",
+      "market_panel_path": "runtime/data/v7/silver/market_panel/market_panel.parquet",
+      "output_dir": "runtime/reports/quant_ui_jobs/example_backtest"
+    }
+  }'
+```
+
+任务状态、日志与 SSE：
+
+```text
+GET /api/jobs/{job_id}
+GET /api/jobs/{job_id}/logs
+GET /api/jobs/{job_id}/stream
+```
+
+策略实验室使用下列受治理 API：
+
+```text
+POST /api/strategies/validate
+POST /api/strategies
+POST /api/strategies/launch
+GET  /api/jobs/{job_id}/stream
+GET  /api/connections
+POST /api/connections/{provider_id}
+DELETE /api/connections/{provider_id}
+```
+
+#### Safety
+
+- API 默认 read-only。
+- Job API 只接受 allowlisted QuantAgent research commands。
+- 策略闭环只能由 `/api/strategies/launch` 原子校验、保存版本并提交；不暴露可绕过 Human Gate 的直接策略 Job 路由。
+- Job output 必须位于项目 `runtime/`。
+- 不提供 live-trading/QMT enable command。
+- Model checkpoint 只返回 metadata，不返回 binary content。
+- API path 输出统一转换为项目相对路径。
+
+### Frontend
+
+#### Install
+
+首次启动时在项目根目录执行：
+
+```bash
+cd apps/quant-ui
+npm install
+```
+
+#### Start
+
+仅启动 frontend：
+
+```bash
+./scripts/run_quant_ui_frontend.sh
+```
+
+推荐的 production-style integrated startup：
+
+```bash
+./scripts/run_quant_ui.sh --runtime /home/shanhefu/QuantAgent/runtime
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:8000
+```
+
+仅在 frontend development mode 下使用 Vite：
+
+```bash
+./scripts/run_quant_ui_frontend.sh
+```
+
+Development mode 默认使用 `http://127.0.0.1:5173`，并代理 `/api` 到
+`http://127.0.0.1:8000`。如 backend 不在默认地址，可设置：
+
+```bash
+VITE_API_BASE=http://127.0.0.1:8000/api npm run dev
+```
+
+生产构建与本地预览：
+
+```bash
+cd apps/quant-ui
+npm run build
+npm run preview
+```
+
+#### Frontend verification
+
+```bash
+cd apps/quant-ui
+npm run typecheck
+npm run test
+npm run build
+```
+
+### Runtime connection
+
+- Backend 只索引项目 `runtime/` 和项目内已知 factor/source metadata。
+- Runtime index 使用缓存，未变化的 artifact 不会重复解析。
+- Parquet/CSV/JSON/log 通过 parser registry 读取；checkpoint 仅暴露 metadata。
+- 标准交易必须通过 order blotter schema gate；研究事件不会伪装成真实成交。
+- 缺失逐笔因子贡献、模型分数、T+1 fill 时间等字段时，API 返回 availability/issues，UI 显示「暂无数据」。
+
+#### Runtime cleanup
+
+Runtime Explorer 的「安全清理」页通过 backend 重新计算候选，不接受任意路径：
+
+```text
+GET  /api/system/runtime-cleanup
+POST /api/system/runtime-cleanup
+```
+
+执行前必须选择候选并输入 `DELETE`。Protected roots 包括 raw/silver/manifests、
+canonical model registry 和当前关键 V8 baselines。
+
+本次已删除 test-generated V7 registry、明确命名为 test/demo/smoke 的临时产物、
+历史 smoke reports 和被新版 capture 取代的旧 Quant UI 截图。累计释放
+`62,291,591 bytes`，审计记录：
+
+```text
+runtime/reports/quant_ui/cleanup/cleanup_20260619T184836Z.json
+```
+
+约 39.79 GB 的 superseded large training datasets 仍保留为「人工复核」候选，
+没有自动删除。
+
+### Existing QuantAgent integration
+
+- 回测读取由 `services/quant_api/adapters/backtests.py` 适配现有 strict backtest、paper replay 与 stock-level artifact。
+- 因子目录由 `services/quant_api/adapters/factors.py` 读取现有 factor registry、source definitions 和 runtime evaluation。
+- 模型训练/推理由 `services/quant_api/adapters/models.py` 统一发现 Deep FT、recursive registry、RL policy、T+1 joblib bundle 和 generic binary artifact；映射 metrics、backtest evaluation、predictions、policy weights、feature importance 和 repository-relative artifact metadata。
+- 选股与风控分别由 `selection.py`、`risk.py` 读取现有 hybrid pool、decision trace、risk events 和 code-derived rules。
+- 新研究任务通过 `services/quant_api/services/jobs.py` 的 allowlist 调用已有 QuantAgent CLI；不复制训练、回测或风控实现。
+- 如新增 artifact 格式，只需在 runtime parser registry 或对应 adapter 增加映射，前端 schema 无需跟随核心代码变化。
+
+### Current implementation
+
+- Dashboard：真实净值/回撤、风险雷达、系统健康、透明漏斗、风险暴露、Top 贡献标的、交易明细。
+- Stock Replay：K 线、成交量、买卖点、T+1 做 T 点、交易表与 Decision Inspector 联动。
+- Backtest Lab、Factor Center、Selection Logic、Model Lab、Risk Center、Runtime Explorer、Reports。
+- Model Lab：所有已识别模型 family、搜索/过滤、能力覆盖、训练曲线、预测/权重、persisted evaluation、artifact inventory 和最多 6 模型横向对比。
+- Global command palette：`Ctrl/Cmd + K` 页面导航与股票代码直达复盘。
+- Responsive terminal：desktop high-density view；mobile 使用 icon rail、横向 catalog/tabs 和单列 analysis panels，不产生 document-level horizontal overflow。
+- T+1 Analysis：pair 收益、成功/失败控制、逐笔数量与数据质量。
+- Job API：allowlisted backtest/train/infer research jobs 与 SSE logs。
+
+### Known limitations
+
+- 当前 runtime 没有持久化的字段不会由 UI 猜测；例如逐笔 factor contribution、SHAP、risk score 可能为空。
+- 单因子独立交易只在真实 artifact 存在时展示，不复用多因子交易冒充。
+- 部分 T+1 research artifact 只有 pair-level 结果，没有可映射到 K 线的 intraday fill timestamp。
+- 首次 runtime index 会受 artifact 数量和 Parquet metadata 读取速度影响，后续使用缓存。
+- Web 系统不启用 live trading；所有研究任务仍受 QuantAgent safety gate 约束。

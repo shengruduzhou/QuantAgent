@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """H-025 / EXP-025: sourced price-volume factor batch 3 (fu_20260713 mission).
 
-13 a-priori candidates (frozen in HYPOTHESIS_REGISTRY.md H-025 BEFORE this run):
+13 a-priori candidates (frozen in docs/research/ledgers/HYPOTHESIS_REGISTRY.md H-025 BEFORE this run):
 academically sourced families not explicitly spanned by the existing pool
 (lottery MAX, realized skew, downside semivol, vol-of-vol, overnight
 decomposition, FIP, volume stability, price-volume divergence, quiet volume,

@@ -13,7 +13,6 @@ from quantagent.fundamental.due_diligence import build_fundamental_due_diligence
 from quantagent.models.v7_multi_horizon import predict_v7_multi_horizon_alpha
 from quantagent.portfolio.strategic_tactical_allocator import construct_v7_portfolio
 from quantagent.themes.company_exposure_mapper import map_company_exposures
-from quantagent.themes.industry_chain_graph import build_industry_chain_graph
 from quantagent.themes.policy_crawler import local_policy_documents
 from quantagent.themes.policy_schema_extractor import extract_policy_schema_evidence
 from quantagent.themes.stock_pool_selector import build_stock_pool_selection

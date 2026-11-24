@@ -956,7 +956,7 @@ def build(run_tests: bool = False) -> dict:
 
 
 #: The requirements that constitute each gate, transcribed from the role reports in
-#: docs/architecture/module1_role_reports.md rather than inferred from module
+#: docs/architecture/module1_role_reports.md (removed in Round 31; git show 2c4e296:docs/architecture/module1_role_reports.md) rather than inferred from module
 #: membership. Naming them explicitly is what makes the *exclusions* auditable: a
 #: derivation keyed on "every requirement whose module is orders" would demote the
 #: stage for a UI item, and one keyed on nothing at all was the placeholder this

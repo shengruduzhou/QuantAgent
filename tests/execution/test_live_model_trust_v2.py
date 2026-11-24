@@ -8,6 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quantagent.execution.acceptance_calendar import (
+    build_acceptance_calendar_payload,
+    canonical_session_set_sha256,
+)
 from quantagent.execution.live_model_trust import evaluate_live_model_trust
 from quantagent.execution.live_model_trust_v2 import (
     EXECUTION_TIMING_ASSURANCE,
@@ -29,10 +33,10 @@ from quantagent.training.semantics import FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VER
 
 MODEL_ID = "ft-fresh-2026-v2"
 SOURCE_COMMIT = "a" * 40
-WINDOW_ID = "fresh-2026-02-02_2026-07-31"
+WINDOW_ID = "fresh-2026-02-24_2026-08-31"
 FAMILY = ["linear_control", "ft_transformer"]
 SELECTED = "ft_transformer"
-ISSUED_AT = datetime(2026, 8, 2, tzinfo=timezone.utc)
+ISSUED_AT = datetime(2026, 9, 2, tzinfo=timezone.utc)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -94,10 +98,30 @@ def _write_strict_returns(path: Path) -> tuple[float, float]:
     )
 
 
-def _write_fresh_predictions(path: Path) -> tuple[int, str, str]:
-    dates = pd.bdate_range("2026-02-02", periods=130)
+def _fresh_sessions() -> tuple[str, ...]:
+    # 2026 SSE/SZSE-style test window. Weekend filtering alone is insufficient:
+    # remove weekday exchange closures inside the window explicitly.
+    weekday_closures = {
+        "2026-04-06",  # Qingming
+        "2026-05-01",
+        "2026-05-04",
+        "2026-05-05",  # Labour Day closure
+        "2026-06-19",  # Dragon Boat
+    }
+    sessions = tuple(
+        day.date().isoformat()
+        for day in pd.bdate_range("2026-02-24", "2026-08-31")
+        if day.date().isoformat() not in weekday_closures
+    )
+    assert len(sessions) == 130
+    return sessions
+
+
+def _write_fresh_predictions(path: Path) -> tuple[int, str, str, tuple[str, ...]]:
+    sessions = _fresh_sessions()
     rows: list[dict[str, object]] = []
-    for idx, day in enumerate(dates):
+    for idx, session in enumerate(sessions):
+        day = pd.Timestamp(session)
         rows.extend(
             [
                 {"trade_date": day.date().isoformat(), "symbol": "600000.SH", "prediction": 0.01 + idx * 1e-6},
@@ -105,7 +129,7 @@ def _write_fresh_predictions(path: Path) -> tuple[int, str, str]:
             ]
         )
     pd.DataFrame(rows).to_csv(path, index=False)
-    return len(dates), dates[0].date().isoformat(), dates[-1].date().isoformat()
+    return len(sessions), sessions[0], sessions[-1], sessions
 
 
 def _build_evidence(tmp_path: Path):
@@ -120,12 +144,35 @@ def _build_evidence(tmp_path: Path):
     files["model_checkpoint"].write_bytes(b"governed-ft-checkpoint-v2\x00\x01")
     stat_report = _write_selection_matrix(files["statistical_returns"])
     portfolio_total, benchmark_total = _write_strict_returns(files["strict_backtest_returns"])
-    fresh_days, fresh_start, fresh_end = _write_fresh_predictions(files["fresh_oos_predictions"])
+    fresh_days, fresh_start, fresh_end, fresh_sessions = _write_fresh_predictions(
+        files["fresh_oos_predictions"]
+    )
+    calendar_payload = build_acceptance_calendar_payload(
+        model_id=MODEL_ID,
+        source_commit=SOURCE_COMMIT,
+        acceptance_window_id=WINDOW_ID,
+        window_start_date=fresh_start,
+        window_end_date=fresh_end,
+        sessions=fresh_sessions,
+        source_provider="SSE_SZSE_OFFICIAL_ARCHIVE",
+        source_identity="sse-szse-2026-session-calendar",
+        source_version="2026.rules+holiday-notices.v1",
+        source_retrieved_at="2025-12-22T08:00:00+08:00",
+        source_as_of="2025-12-22T08:00:00+08:00",
+        source_locators=[
+            "SSE:2026-trading-rules",
+            "SSE:2026-holiday-arrangement",
+            "SZSE:2026-holiday-arrangement",
+        ],
+    )
+    _write_json(files["acceptance_calendar"], calendar_payload)
 
     checkpoint_sha = sha256_file(files["model_checkpoint"])
     strict_returns_sha = sha256_file(files["strict_backtest_returns"])
     statistical_sha = sha256_file(files["statistical_returns"])
     predictions_sha = sha256_file(files["fresh_oos_predictions"])
+    calendar_sha = sha256_file(files["acceptance_calendar"])
+    calendar_session_sha = calendar_payload["session_set_sha256"]
     assert strict_returns_sha != statistical_sha
 
     _write_json(files["trainer_manifest"], _common() | {
@@ -142,6 +189,8 @@ def _build_evidence(tmp_path: Path):
         "acceptance_window_id": WINDOW_ID,
         "acceptance_start_date": fresh_start,
         "acceptance_end_date": fresh_end,
+        "acceptance_calendar_sha256": calendar_sha,
+        "acceptance_calendar_session_set_sha256": calendar_session_sha,
     })
     _write_json(files["search_ledger"], _common() | {
         "trial_count": 50,
@@ -157,6 +206,9 @@ def _build_evidence(tmp_path: Path):
         "universe_pit": True,
         "training_cutoff": "2025-12-31",
         "validation_cutoff": "2026-01-30",
+        "acceptance_window_id": WINDOW_ID,
+        "acceptance_calendar_sha256": calendar_sha,
+        "acceptance_calendar_session_set_sha256": calendar_session_sha,
     })
     _write_json(files["strict_backtest"], _common() | {
         "metric_semantics": REQUIRED_METRIC_SEMANTICS,
@@ -189,6 +241,8 @@ def _build_evidence(tmp_path: Path):
         "end_date": fresh_end,
         "acceptance_window_id": WINDOW_ID,
         "predictions_sha256": predictions_sha,
+        "acceptance_calendar_sha256": calendar_sha,
+        "acceptance_calendar_session_set_sha256": calendar_session_sha,
     })
     _write_json(files["risk_capacity"], _common() | {
         "passed": True,
@@ -235,6 +289,11 @@ def test_valid_bundle_uses_separate_return_evidence(tmp_path: Path) -> None:
     assert report.evidence["provenance_assurance"] == PROVENANCE_ASSURANCE
     assert report.evidence["execution_timing_assurance"] == EXECUTION_TIMING_ASSURANCE
     assert report.evidence["fresh_oos_days"] == 130
+    assert report.evidence["fresh_session_set_exact_match"] is True
+    assert report.evidence["acceptance_calendar_days"] == 130
+    assert report.evidence["acceptance_calendar_session_set_sha256"] == canonical_session_set_sha256(
+        _fresh_sessions()
+    )
     assert report.evidence["statistical_observed_days"] == 160
     assert report.evidence["strict_return_days"] == 120
     assert report.evidence["benchmark_excess_positive"] is True
@@ -343,10 +402,10 @@ def test_trial_types_ledger_and_budget_are_hard_gates(tmp_path: Path) -> None:
     assert "search_ledger:trial_count_exceeds_pre_registered_budget" in evaluate_live_model_trust(manifest, artifact_roots=roots).reasons
 
 
-def test_timing_policy_and_12_role_completeness_are_hard_gates(tmp_path: Path) -> None:
+def test_timing_policy_and_13_role_completeness_are_hard_gates(tmp_path: Path) -> None:
     manifest, _, files, _, roots, _ = _issue(tmp_path)
     def contaminate(doc: dict) -> None:
-        doc["training_cutoff"] = "2026-02-02"; doc["validation_cutoff"] = "2026-02-03"
+        doc["training_cutoff"] = "2026-02-24"; doc["validation_cutoff"] = "2026-02-25"
     _rewrite_and_rebind(manifest, "data_lineage", files["data_lineage"], contaminate)
     reasons = evaluate_live_model_trust(manifest, artifact_roots=roots).reasons
     assert any("training_cutoff_not_before_fresh_oos" in r for r in reasons)
@@ -366,7 +425,7 @@ def test_timing_policy_and_12_role_completeness_are_hard_gates(tmp_path: Path) -
     assert any("v2_policy_mismatch:execution_timing_assurance" in r for r in reasons)
 
     _, _, locations, roots = _build_evidence(tmp_path / "missing")
-    assert len(REQUIRED_ARTIFACT_ROLES) == 12
+    assert len(REQUIRED_ARTIFACT_ROLES) == 13  # + acceptance_calendar
     locations.pop("strict_backtest_returns")
     with pytest.raises(ValueError, match="artifact role mismatch"):
         issue_governed_live_model_trust_v2(
@@ -379,3 +438,61 @@ def test_canonical_ft_semantics_is_locked_to_trainer_source() -> None:
     assert REQUIRED_TRAINER_OBJECTIVE_SEMANTICS == FT_TRANSFORMER_OBJECTIVE_SEMANTICS_VERSION
     source = Path("src/quantagent/training/ft_transformer_trainer.py").read_text(encoding="utf-8")
     assert 'OBJECTIVE_SEMANTICS_VERSION = "ft_transformer_objective_v2_per_date_listwise_validation"' in source
+
+
+def test_same_count_and_boundaries_but_wrong_interior_session_fails_calendar_gate(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    frame = pd.read_csv(files["fresh_oos_predictions"])
+    # 2026-04-06 is a weekday but an exchange closure in the bound calendar.
+    frame.loc[frame["trade_date"] == "2026-04-07", "trade_date"] = "2026-04-06"
+    frame = frame.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+    frame.to_csv(files["fresh_oos_predictions"], index=False)
+    new_sha = sha256_file(files["fresh_oos_predictions"])
+    fresh = _read(files["fresh_oos"]); fresh["predictions_sha256"] = new_sha; _write_json(files["fresh_oos"], fresh)
+    risk = _read(files["risk_capacity"]); risk["predictions_sha256"] = new_sha; _write_json(files["risk_capacity"], risk)
+    payload = _read(manifest)
+    for role in ("fresh_oos_predictions", "fresh_oos", "risk_capacity"):
+        payload["artifacts"][role]["sha256"] = sha256_file(files[role])
+    _write_json(manifest, payload)
+    reasons = evaluate_live_model_trust(manifest, artifact_roots=roots).reasons
+    assert any("fresh_oos_predictions:session_set_mismatch_acceptance_calendar" in r for r in reasons)
+    assert not any("trading_days_mismatch_predictions" in r for r in reasons)
+    assert not any("start_date_mismatch_predictions" in r for r in reasons)
+    assert not any("end_date_mismatch_predictions" in r for r in reasons)
+
+
+def test_rebinding_calendar_file_alone_cannot_rewrite_pre_registered_window(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    calendar = _read(files["acceptance_calendar"])
+    calendar["sessions"][30] = "2026-04-06"
+    calendar["sessions"] = sorted(calendar["sessions"])
+    calendar["session_set_sha256"] = canonical_session_set_sha256(calendar["sessions"])
+    _write_json(files["acceptance_calendar"], calendar)
+    payload = _read(manifest)
+    payload["artifacts"]["acceptance_calendar"]["sha256"] = sha256_file(
+        files["acceptance_calendar"]
+    )
+    _write_json(manifest, payload)
+    reasons = evaluate_live_model_trust(manifest, artifact_roots=roots).reasons
+    assert "pre_registration:acceptance_calendar_sha256_mismatch" in reasons
+    assert "pre_registration:acceptance_calendar_session_set_sha256_mismatch" in reasons
+    assert "data_lineage:acceptance_calendar_sha256_mismatch" in reasons
+    assert "fresh_oos:acceptance_calendar_sha256_mismatch" in reasons
+
+
+def test_calendar_source_must_exist_before_pre_registration(tmp_path: Path) -> None:
+    manifest, _, files, _, roots, _ = _issue(tmp_path)
+    calendar = _read(files["acceptance_calendar"])
+    calendar["source"]["retrieved_at"] = "2026-01-16T00:00:00+00:00"
+    calendar["source"]["as_of"] = "2026-01-16T00:00:00+00:00"
+    _write_json(files["acceptance_calendar"], calendar)
+    calendar_sha = sha256_file(files["acceptance_calendar"])
+    for role in ("pre_registration", "data_lineage", "fresh_oos"):
+        doc = _read(files[role]); doc["acceptance_calendar_sha256"] = calendar_sha; _write_json(files[role], doc)
+    payload = _read(manifest)
+    for role in ("acceptance_calendar", "pre_registration", "data_lineage", "fresh_oos"):
+        payload["artifacts"][role]["sha256"] = sha256_file(files[role])
+    _write_json(manifest, payload)
+    reasons = evaluate_live_model_trust(manifest, artifact_roots=roots).reasons
+    assert "pre_registration:calendar_retrieved_after_registration" in reasons
+    assert "pre_registration:calendar_as_of_after_registration" in reasons

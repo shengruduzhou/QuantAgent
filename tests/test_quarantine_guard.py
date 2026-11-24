@@ -13,7 +13,7 @@ from quantagent.backtest.quarantine import (
 )
 
 W = [QuarantineWindow(start=pd.Timestamp("2025-09-01"), end=pd.Timestamp("2026-05-18"),
-                      reason="burned holdout", evidence="HOLDOUT_CONTAMINATION_AUDIT.md")]
+                      reason="burned holdout", evidence="docs/governance/evidence/HOLDOUT_CONTAMINATION_AUDIT.md")]
 
 
 class TestCheckWindow:
@@ -75,7 +75,7 @@ class TestMessagesAndConfig:
     def test_message_content(self):
         msg = violation_message("2025-09-01", "2026-05-15", W[0])
         assert "QUARANTINE VIOLATION" in msg
-        assert "HOLDOUT_CONTAMINATION_AUDIT.md" in msg
+        assert "docs/governance/evidence/HOLDOUT_CONTAMINATION_AUDIT.md" in msg
         assert "--allow-quarantined" in msg
 
     def test_config_file_loads_burned_window(self):

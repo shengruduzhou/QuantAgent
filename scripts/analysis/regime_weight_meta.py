@@ -50,7 +50,7 @@ QUAR = pd.Timestamp("2025-09-01")
 BPS = (8.0, 15.0, 25.0)
 OUT = REPO / "runtime/reports/v89_closed_loop/wf_h008/exp023_regime_weight_meta"
 COMPONENTS = ("d1", "quality", "sector_rs")
-# frozen protocol constants (HYPOTHESIS_REGISTRY.md H-023; none searched)
+# frozen protocol constants (docs/research/ledgers/HYPOTHESIS_REGISTRY.md H-023; none searched)
 TRAIL_START = pd.Timestamp("2018-01-02")
 PANEL_CAP = pd.Timestamp("2025-08-29")   # hard cap: labels never touch quarantine
 HORIZON = 10                             # label horizon, matches min-hold-10 book

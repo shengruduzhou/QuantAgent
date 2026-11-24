@@ -14,7 +14,6 @@ from services.quant_api.routes.fuyao_playbooks import router as fuyao_playbooks_
 from services.quant_api.routes.market import router as market_router
 from services.quant_api.routes.paper_execution import router as paper_execution_router
 from services.quant_api.routes.parity import router as parity_router
-from services.quant_api.routes.walkforward_risk import router as walkforward_risk_router
 from services.quant_api.routes.production_readiness import router as production_readiness_router
 from services.quant_api.services import ServiceContainer
 
@@ -48,7 +47,6 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     app.include_router(market_router)
     app.include_router(fuyao_playbooks_router)
     app.include_router(parity_router)
-    app.include_router(walkforward_risk_router)
     app.include_router(production_readiness_router)
     app.include_router(paper_execution_router)
     app.include_router(events_router)
@@ -79,4 +77,14 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def __getattr__(name: str):
+    # Lazily build the default application on first access (``uvicorn
+    # services.quant_api.app:app`` resolves it with getattr). Building it at
+    # import time made every ``from services.quant_api.app import create_app``
+    # construct a container on the default runtime, acquire the paper writer
+    # lock and rewrite the job store (Round 31 F8).
+    if name == "app":
+        application = create_app()
+        globals()["app"] = application
+        return application
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

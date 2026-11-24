@@ -441,7 +441,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "max_sota_correlation", "use_llm", "allow_network", "llm_model",
             "llm_start_round", "llm_candidates_per_round",
             "rag_escalation_round", "llm_timeout_seconds", "memory_path",
-            "train_end", "exclude_st", "min_validation_icir",
+            "train_end", "exclude_st", "min_validation_icir", "min_validation_tstat",
         },
         "path_inputs": {"market_panel_path", "labels_path", "memory_path"},
         "path_outputs": {"output_dir"},
@@ -842,17 +842,21 @@ COMMANDS: dict[str, dict[str, Any]] = {
     },
     "build-full-universe-gold": {
         "type": "data",
-        "entrypoint": "scripts/build_full_universe_gold.py",
-        "required": set(),
-        "allowed": {"output", "max_symbols", "start_date", "adjustment",
-                    "horizons", "seasoning_days", "journal"},
-        "path_inputs": {"journal"},
+        # The builder that produced the certified r29 artifact (its manifest's
+        # rebuild_command). The older scripts/build_full_universe_gold.py has no
+        # execution panel and could not reproduce it (Round 31 D-06). An
+        # explicit output is required so a web run never overwrites a
+        # certified directory by default.
+        "entrypoint": "scripts/build_u0_full_universe_gold.py",
+        "required": {"output"},
+        "allowed": {"output", "max_symbols", "start_date", "end_date", "adjustment",
+                    "folds", "phase", "u0_root"},
+        "path_inputs": {"u0_root"},
         "path_outputs": {"output"},
-        "fixed_outputs": (
-            "runtime/data/gold/full_universe/training_slice_certificate.json",
-        ),
+        "fixed_outputs": (),
         "control": set(),
-        "choices": {"adjustment": {"none", "qfq", "hfq"}},
+        "choices": {"adjustment": {"none", "qfq", "hfq"},
+                    "phase": {"all", "dataset", "execution"}},
     },
     "report-u0-bar-readiness": {
         "type": "data",

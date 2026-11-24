@@ -13,14 +13,6 @@ from quantagent.factors.governance_metrics import (
     correlation_clusters,
     evaluate_factor_candidate,
 )
-from quantagent.factors.lifecycle_state import (
-    FACTOR_STAGES,
-    FactorLifecycleLedger,
-    FactorLifecycleSnapshot,
-    FactorLifecycleTransition,
-    LifecycleEvidence,
-    decide_lifecycle_transition,
-)
 
 try:
     from quantagent.factors import alpha101 as alpha101
@@ -38,15 +30,10 @@ except Exception:
 __all__ = [
     "FACTOR_LABEL_SCHEMA_VERSION",
     "FACTOR_LABEL_SEMANTICS",
-    "FACTOR_STAGES",
     "ExecutableLabelBuildResult",
     "FactorGateConfig",
     "FactorGovernanceReport",
     "FactorPromotionContext",
-    "FactorLifecycleLedger",
-    "FactorLifecycleSnapshot",
-    "FactorLifecycleTransition",
-    "LifecycleEvidence",
     "FactorMeta",
     "FactorOutput",
     "FactorRegistry",
@@ -56,7 +43,6 @@ __all__ = [
     "cicc_ashare80",
     "cicc_high_freq",
     "correlation_clusters",
-    "decide_lifecycle_transition",
     "default_registry",
     "evaluate_factor_candidate",
     "executable_factor_decay_curve",

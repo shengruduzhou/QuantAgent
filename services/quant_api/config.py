@@ -24,6 +24,12 @@ class ApiSettings:
     #: (env ``QUANTAGENT_PAPER_SECTOR_MAP``). Without it a paper BUY is refused
     #: ``industry_unmeasured`` rather than waved through.
     paper_sector_map: Path | None = None
+    #: Serve the last runtime index while a single background thread rebuilds
+    #: it, instead of blocking the request that finds it stale (a full rescan
+    #: of the ~99 GB runtime took 30-47 s; Round 31 F3). Off by default so
+    #: library/test callers keep synchronous, immediately-consistent scans; the
+    #: production default_settings() turns it on.
+    index_background_refresh: bool = False
 
     def ensure(self) -> "ApiSettings":
         for path in (self.runtime_root, self.cache_root, self.jobs_root):
@@ -44,6 +50,7 @@ def default_settings() -> ApiSettings:
         cache_root=paths.cache / "quant_ui",
         jobs_root=paths.home / "jobs" / "quant_ui",
         paper_sector_map=Path(sector_map).expanduser() if sector_map else None,
+        index_background_refresh=True,
     ).ensure()
 
 

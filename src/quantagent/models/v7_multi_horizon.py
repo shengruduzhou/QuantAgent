@@ -1,6 +1,6 @@
 """Hand-weighted heuristic multi-horizon baseline.
 
-.. warning:: STATUS (2026-07-03, ARCHITECTURE_AUDIT.md §2)
+.. warning:: STATUS (2026-07-03, ARCHITECTURE_AUDIT.md (removed in Round 31; git show 2c4e296:ARCHITECTURE_AUDIT.md) §2)
    NOT the production model and NOT trained — fixed hand-tuned weights for
    the agentic V7 pipeline fallback. Production = FT-Transformer sleeves +
    configs/production_blend.json.

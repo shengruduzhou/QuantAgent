@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EXP-008 fold evaluation (WALK_FORWARD_PROTOCOL_H008.md §3-5).
+"""EXP-008 fold evaluation (WALK_FORWARD_PROTOCOL_H008.md (removed in Round 31; git show 2c4e296:WALK_FORWARD_PROTOCOL_H008.md) §3-5).
 
 Pre-registered candidates ONLY (N=6, no additions, no per-fold tuning):
   C1_apriori_avg   0.30*short + 0.45*mid + 0.25*long on raw scores (NaN->0)
@@ -227,7 +227,7 @@ def main() -> int:
         return round(norm_cdf((sr - sr0) * math.sqrt(len(r) - 1) / denom), 4)
 
     summary = {
-        "protocol": "WALK_FORWARD_PROTOCOL_H008.md", "n_candidates": len(names),
+        "protocol": "WALK_FORWARD_PROTOCOL_H008.md (removed in Round 31; git show 2c4e296:WALK_FORWARD_PROTOCOL_H008.md)", "n_candidates": len(names),
         "cumulative_trials_N": 50, "folds": {f: results[f] for f in folds},
         "aggregates": agg, "fold_block_pbo": pbo,
         "dsr_stitched": {n: dsr(n) for n in names},

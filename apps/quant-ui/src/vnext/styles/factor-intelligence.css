@@ -316,6 +316,7 @@
 .factor-evidence-card.state-passed { box-shadow: inset 0 2px var(--iw-positive); }
 .factor-evidence-card.state-failed { box-shadow: inset 0 2px var(--iw-danger); }
 .factor-evidence-card.state-pending { box-shadow: inset 0 2px var(--iw-warning); }
+.factor-evidence-card.state-recorded { box-shadow: inset 0 2px var(--iw-cyan); }
 
 .factor-evidence-card span,
 .factor-evidence-card strong,
@@ -490,6 +491,7 @@
 .factor-pipeline-grid > button.state-passed::after { background: var(--iw-positive); }
 .factor-pipeline-grid > button.state-failed::after { background: var(--iw-danger); }
 .factor-pipeline-grid > button.state-pending::after { background: var(--iw-warning); }
+.factor-pipeline-grid > button.state-recorded::after { background: var(--iw-cyan); }
 
 .factor-pipeline-grid > button:hover,
 .factor-pipeline-grid > button.active {
@@ -556,6 +558,7 @@
 .pipeline-state.state-passed { border-color: var(--iw-positive); color: var(--iw-positive); }
 .pipeline-state.state-failed { border-color: var(--iw-danger); color: var(--iw-danger); }
 .pipeline-state.state-pending { border-color: var(--iw-warning); color: var(--iw-warning); }
+.pipeline-state.state-recorded { border-color: var(--iw-cyan); color: var(--iw-cyan); }
 
 .factor-pipeline-detail span,
 .factor-inspector-stage span {

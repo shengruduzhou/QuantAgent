@@ -269,6 +269,9 @@ class RiskEngine:
         self.session_start_equity: float | None = None
         #: All-time peak equity; drawdown is measured against it.
         self.peak_equity: float | None = None
+        #: True once a human clear re-anchored the peak; inception equity can
+        #: then no longer lift it back above the reviewed level.
+        self._peak_rebased = False
         self.last_portfolio_decision: RiskDecision | None = None
         #: Exchange session on which a daily-loss breach halted new buys.
         self.loss_halted_session: str | None = None
@@ -324,7 +327,12 @@ class RiskEngine:
                     self._start_equity_by_session.setdefault(
                         session, float(payload["session_start_equity"])
                     )
-                if _finite(payload.get("peak_equity")):
+                if _finite(payload.get("peak_rebased_to")):
+                    # A reviewed re-anchor replaces the running peak; later marks
+                    # may raise it again, earlier ones no longer count.
+                    self.peak_equity = float(payload["peak_rebased_to"])
+                    self._peak_rebased = True
+                elif _finite(payload.get("peak_equity")):
                     self._observe_peak(float(payload["peak_equity"]))
             elif event.event_type == lg.MARK_TO_MARKET and _finite(payload.get("equity")):
                 equity = float(payload["equity"])
@@ -346,9 +354,44 @@ class RiskEngine:
         return False
 
     def observe_inception_equity(self, equity: float) -> None:
-        """The account's opening capital is a NAV observation like any other."""
+        """The account's opening capital is a NAV observation like any other.
+
+        Except after a reviewed re-anchor: otherwise every venue start would
+        restore the pre-clear peak and re-latch the drawdown switch at once.
+        """
+        if self._peak_rebased:
+            return
         if _finite(equity) and float(equity) > 0:
             self._observe_peak(float(equity))
+
+    def latest_observed_equity(self) -> float | None:
+        """Newest durable equity observation: the last close, else the latest
+        recorded session-start equity."""
+        latest_start = max(self._start_equity_by_session.items(), default=None)
+        if self._last_close is not None and (
+            latest_start is None or (self._last_close[0] or "") >= latest_start[0]
+        ):
+            return float(self._last_close[1])
+        return float(latest_start[1]) if latest_start is not None else None
+
+    def rebase_drawdown_peak(self, *, author: str, reason: str) -> float | None:
+        """Re-anchor the drawdown peak to the latest observed equity.
+
+        Called by the audited human clear of the PORTFOLIO (drawdown) latch.
+        Without it the clear was decorative: the next session rebuilt the old
+        all-time peak, measured the same drawdown and latched again (Round 31
+        R31-RISK-05). The re-anchor is journaled so every venue replays it.
+        """
+        equity = self.latest_observed_equity()
+        if equity is None or not _finite(equity) or equity <= 0:
+            return None
+        self.peak_equity = float(equity)
+        self._peak_rebased = True
+        self._journal(lg.RISK_STATE_UPDATED, {
+            "session": self.session_date, "peak_rebased_to": float(equity),
+            "rebase_author": author, "rebase_reason": reason,
+        })
+        return float(equity)
 
     def begin_session(self, session: str, *, opening_equity: float | None = None) -> None:
         """Key turnover and daily loss to an exchange session, not process life.

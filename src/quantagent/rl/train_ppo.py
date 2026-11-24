@@ -71,7 +71,7 @@ def equal_weight_book_from_predictions(
     transaction cost. Use
     :func:`quantagent.rl.books.hold_band_book_from_predictions` when the
     benchmark is supposed to represent something anyone would actually hold; see
-    ``docs/audits/round23/11_rl_ablation.md`` for the before/after measurement.
+    ``docs/audits/round23/11_rl_ablation.md (removed in Round 31; git show 2c4e296:docs/audits/round23/11_rl_ablation.md)`` for the before/after measurement.
     """
     if top_k <= 0:
         raise ValueError("top_k must be positive")

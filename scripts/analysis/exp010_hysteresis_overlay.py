@@ -2,7 +2,7 @@
 """EXP-010 / H-010: hysteresis fixes for the R2 trend overlay (FINAL overlay
 iteration this cycle — line stops after this run regardless of outcome).
 
-Pre-registered (HYPOTHESIS_REGISTRY.md H-010, N=2):
+Pre-registered (docs/research/ledgers/HYPOTHESIS_REGISTRY.md H-010, N=2):
   R2a_confirm5   switch 1.0 -> 0.5 only after 5 consecutive closes below MA60;
                  switch back only after 5 consecutive closes at/above MA60
   R2b_ema_gross  g_t = EMA(alpha=0.2) of the raw binary R2 gross

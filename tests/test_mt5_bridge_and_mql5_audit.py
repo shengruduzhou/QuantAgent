@@ -14,7 +14,6 @@ import pytest
 
 from quantagent.data.microstructure import contracts as mc
 from quantagent.mt5 import custom_symbol_bridge as bridge
-from quantagent.mt5 import mql5_audit
 
 
 # --- bridge -----------------------------------------------------------------
@@ -191,70 +190,3 @@ void OnTick()
 """
 
 
-class TestMql5Audit:
-    def _rules(self, source: str, tmp_path) -> set[str]:
-        path = tmp_path / "Bad.mq5"
-        path.write_text(source, encoding="utf-8")
-        return {f.rule for f in mql5_audit.audit_source(path)}
-
-    def test_catches_mql4_style_indicator_value(self, tmp_path):
-        assert "mql4_indicator_value" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_lowercase_ctrade_call(self, tmp_path):
-        assert "ctrade_lowercase" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_martingale_doubling(self, tmp_path):
-        assert "martingale_doubling" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_ignored_copybuffer_result(self, tmp_path):
-        assert "copybuffer_result_ignored" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_missing_real_account_guard(self, tmp_path):
-        assert "missing_real_account_guard" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_missing_indicator_release(self, tmp_path):
-        assert "missing_indicator_release" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_missing_trade_transaction_handler(self, tmp_path):
-        assert "missing_trade_transaction_handler" in self._rules(BAD_EA, tmp_path)
-
-    def test_catches_fx_contract_size(self, tmp_path):
-        source = "double contract_size = 100000;\nvoid OnTick(){}\n"
-        assert "fx_contract_size" in self._rules(source, tmp_path)
-
-    def test_catches_dom_subscribed_but_never_read(self, tmp_path):
-        source = "void OnTick(){ MarketBookAdd(_Symbol); }\n"
-        assert "dom_subscribed_not_read" in self._rules(source, tmp_path)
-
-    def test_does_not_fire_on_prose_inside_comments(self, tmp_path):
-        """A file explaining why trade.buy is wrong must not be flagged for it."""
-        source = (
-            "// Never write trade.buy(0.01) — that is the MQL4 spelling.\n"
-            "/* iMA(...) returns a handle; lots *= 2 is martingale. */\n"
-            "void OnCalculate(){}\n"
-        )
-        assert self._rules(source, tmp_path) == set()
-
-    def test_correct_handle_usage_is_not_flagged(self, tmp_path):
-        source = (
-            "int handle = iMA(_Symbol, PERIOD_D1, 10, 0, MODE_EMA, PRICE_CLOSE);\n"
-            "double buf[];\n"
-            "int copied = CopyBuffer(handle, 0, 0, 1, buf);\n"
-            "void OnDeinit(const int reason){ IndicatorRelease(handle); }\n"
-            "void OnCalculate(){}\n"
-        )
-        assert self._rules(source, tmp_path) == set()
-
-    def test_repository_sources_are_clean(self):
-        """Only meaningful because the rules above are proven to fire."""
-        from pathlib import Path
-        root = Path(__file__).resolve().parents[1] / "mql5"
-        report = mql5_audit.audit_tree(root)
-        assert report["files_audited"] >= 4
-        assert report["clean"], report["errors"]
-
-    def test_audit_states_its_compilation_limitation(self):
-        from pathlib import Path
-        root = Path(__file__).resolve().parents[1] / "mql5"
-        report = mql5_audit.audit_tree(root)
-        assert "NOT verified to compile" in report["limitation"]

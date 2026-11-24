@@ -1,7 +1,7 @@
 """Declared friction and applied friction are one number, and impact is a law.
 
 Round 22 / R1 (backtest), closing F-04 and F-05 from
-`docs/audits/round21/01_backtest.md`.
+`docs/audits/round21/01_backtest.md (removed in Round 31; git show 2c4e296:docs/audits/round21/01_backtest.md)`.
 
 **F-04.** `CostModelConfig.slippage_bps` (5.0) sat inside every `BacktestConfig`,
 was serialised with the run and quoted by reports, while the engine actually

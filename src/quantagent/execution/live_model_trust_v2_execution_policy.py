@@ -1,7 +1,9 @@
 """Trace-complete governed model-trust policy.
 
-The historical schema-v2 binder knows twelve core evidence roles. Economic
-execution timing additionally requires two inseparable strict artifacts:
+The schema-v2 binder knows thirteen core evidence roles (the twelve original
+ones plus the authoritative ``acceptance_calendar`` that fixes the exact FRESH
+session set). Economic execution timing additionally requires two inseparable
+strict artifacts:
 
 * ``strict_target_weights`` — the exact signal-dated target schedule supplied to
   the strict simulator;
@@ -9,9 +11,9 @@ execution timing additionally requires two inseparable strict artifacts:
   order/skip/error trace.
 
 The pair prevents a trace from proving only a selectively retained subset of
-signals. New governed issuance requires all fourteen roles. Historical intact
-12-role certificates remain readable as evidence but never receive trace-proven
-timing assurance.
+signals. New governed issuance requires all fifteen roles. Certificates issued
+before the calendar role existed no longer verify: they cannot prove which
+sessions their FRESH window counted (none had been issued for a live model).
 
 Supplemental artifacts are read exactly once into immutable bytes. The SHA-256
 check and semantic parser consume those same bytes so a filesystem replacement

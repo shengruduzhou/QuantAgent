@@ -8,8 +8,8 @@ const sources = import.meta.glob("../**/*.{ts,tsx}", { query: "?raw", import: "d
  * That module is the single place holding the `{status, data, issues}`
  * envelope, the AbortSignal wiring and `compactApiErrorPayload` (which turns a
  * FastAPI 422 body into readable operator text). A page that calls `fetch`
- * directly gets none of it: `WalkForwardRiskPage` used to poll every 2s with no
- * cancellation and surfaced a bare "HTTP 500" to the operator.
+ * directly gets none of it: a page that did (the removed WalkForwardRiskPage)
+ * polled every 2s with no cancellation and surfaced a bare "HTTP 500".
  */
 describe("all requests go through the shared API client", () => {
   // `refetch()` from react-query is not a network primitive; exclude it.
@@ -21,7 +21,8 @@ describe("all requests go through the shared API client", () => {
 
   it("actually scans the product source", () => {
     expect(productionFiles.length).toBeGreaterThan(60);
-    expect(productionFiles.some(([path]) => path.endsWith("WalkForwardRiskPage.tsx"))).toBe(true);
+    expect(productionFiles.some(([path]) => path.endsWith("api/client.ts"))).toBe(false);
+    expect(productionFiles.some(([path]) => path.includes("/vnext/"))).toBe(true);
   });
 
   it("detects a raw fetch when one exists", () => {

@@ -533,14 +533,14 @@ export function GovernancePage(): JSX.Element {
               <dl className="governance-facts">
                 <div><dt>判定</dt><dd>{data.u0BarPit.bseIdentity?.decision ?? "—"}</dd></div>
                 <div><dt>权威/master</dt><dd>{data.u0BarPit.bseIdentity?.authoritativeCount ?? "—"} / {data.u0BarPit.bseIdentity?.masterCount ?? "—"}</dd></div>
-                <div><dt>真占位码</dt><dd>{data.u0BarPit.bseIdentity?.truePlaceholders?.length ? data.u0BarPit.bseIdentity.truePlaceholders.join(",") : "0（无占位）"}</dd></div>
+                <div><dt>真占位码</dt><dd>{data.u0BarPit.bseIdentity?.truePlaceholders == null ? "—（未测量）" : data.u0BarPit.bseIdentity.truePlaceholders.length ? data.u0BarPit.bseIdentity.truePlaceholders.join(",") : "0（无占位）"}</dd></div>
               </dl>
             </div>
           </div>
           <dl className="governance-facts">
             <div><dt>PIT 已闭合字段</dt><dd>{data.u0BarPit.pitMetadataSourcing?.closedFields?.length ? data.u0BarPit.pitMetadataSourcing.closedFields.join(", ") : "—"}</dd></div>
             <div><dt>退市日已取</dt><dd>{data.u0BarPit.pitMetadataSourcing?.delistingDatesSourced ?? "—"}</dd></div>
-            <div><dt>PIT 仍阻塞</dt><dd>{data.u0BarPit.pitMetadataSourcing?.blockedFields?.length ? data.u0BarPit.pitMetadataSourcing.blockedFields.join(", ") : "无"}</dd></div>
+            <div><dt>PIT 仍阻塞</dt><dd>{data.u0BarPit.pitMetadataSourcing?.blockedFields == null ? "—（未测量）" : data.u0BarPit.pitMetadataSourcing.blockedFields.length ? data.u0BarPit.pitMetadataSourcing.blockedFields.join(", ") : "无"}</dd></div>
             <div><dt>身份补录 / 双身份冲突</dt><dd>{data.u0BarPit.reconciliation?.supplementalAdditions ?? "—"} / {data.u0BarPit.reconciliation?.dualIdentityCollisions ?? "—"}</dd></div>
             <div><dt>STAR 覆盖</dt><dd>{data.u0BarPit.reconciliation?.starCovered ?? "—"} / {data.u0BarPit.reconciliation?.starTotal ?? "—"}</dd></div>
           </dl>

@@ -156,7 +156,7 @@ if want_step retrain; then
   banner "  blend sleeves (config-driven production blend) -> $BLEND_PRED"
   # Single source of truth: configs/production_blend.json (weights, rank mode).
   # Replaces the old run_v8_deep_sweep.blend() 3-sleeve average, which did NOT
-  # match production (see PRODUCTION_REPRODUCIBILITY_AUDIT.md Q1).
+  # match production (see PRODUCTION_REPRODUCIBILITY_AUDIT.md (removed in Round 31; git show 2c4e296:PRODUCTION_REPRODUCIBILITY_AUDIT.md) Q1).
   run $PY scripts/materialize_production_composite.py \
     --config configs/production_blend.json \
     --model-run "$RETRAIN" --from-sleeves --out "$BLEND_PRED"

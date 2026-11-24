@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """EXP-009 / H-009: a-priori drawdown/regime gross-exposure overlays.
 
-Pre-registered rules (HYPOTHESIS_REGISTRY.md, frozen BEFORE execution):
+Pre-registered rules (docs/research/ledgers/HYPOTHESIS_REGISTRY.md, frozen BEFORE execution):
   R1_dd_tiers    bench 60d rolling-peak drawdown at t-1: <8% -> 1.0,
                  8-15% -> 0.5, >=15% -> 0.3
   R2_trend_ma60  bench close(t-1) >= MA60 -> 1.0 else 0.5

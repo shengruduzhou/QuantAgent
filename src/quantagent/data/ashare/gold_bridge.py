@@ -967,6 +967,10 @@ def build_labels(
     for horizon in horizons:
         exit_price = grouped["close"].shift(-(1 + horizon))
         result[f"forward_return_{horizon}d"] = exit_price / entry_price - 1.0
+        # The measured exit session (the symbol's own (h+1)-th next row). Purged
+        # checkpoint selection needs it; without it certified labels could not
+        # train the FT path (Round 31 D-07).
+        result[f"label_end_{horizon}d"] = grouped["trade_date"].shift(-(1 + horizon))
 
     infeasible = pd.Series(False, index=result.index)
     reasons: dict[str, int] = {}

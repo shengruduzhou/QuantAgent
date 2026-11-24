@@ -303,7 +303,7 @@ def contract_for(family: str) -> EventContract:
 # ---------------------------------------------------------------------------
 #: Session phases, in the order they occur on a normal SSE/SZSE/BSE trading day.
 #: Times are Asia/Shanghai. Sources are recorded in
-#: ``docs/research/A股高频回测模型说明.md``; the simulator imports these rather
+#: ``docs/research/A股高频回测模型说明.md (removed in Round 31; git show 2c4e296:docs/research/A股高频回测模型说明.md)``; the simulator imports these rather
 #: than hard-coding minutes at the call site.
 PHASE_OPENING_AUCTION = "OPENING_CALL_AUCTION"
 PHASE_PRE_OPEN_QUIET = "PRE_OPEN_NO_CANCEL"

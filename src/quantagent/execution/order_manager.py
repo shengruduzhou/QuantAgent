@@ -352,6 +352,7 @@ class OrderManager:
                 continue
             current = positions.get(str(symbol))
             current_shares = int(getattr(current, "available_shares", 0) + getattr(current, "frozen_shares", 0)) if current else 0
+            available_shares = int(getattr(current, "available_shares", 0)) if current else 0
             raw_target = float(weight) * nav / price
             if current_shares == 0 and abs(float(weight)) <= self.config.negligible_weight:
                 continue
@@ -370,18 +371,30 @@ class OrderManager:
                 side = OrderSide.SELL
                 desired_sell = current_shares - raw_target
                 target_is_zero = float(weight) <= self.config.negligible_weight
+                # Only today's available shares can be sold: T+1-frozen shares
+                # (e.g. bonus shares credited on the ex-date) list next session.
+                # Sizing the sell on available + frozen made the venue reject the
+                # whole order instead of selling what it could (R31-RISK-07).
+                capped_by_t_plus_one = desired_sell > available_shares
+                desired_sell = min(desired_sell, float(available_shares))
                 quantity = _round_delta_quantity(
                     self.rule_engine,
                     str(symbol),
                     "sell",
                     desired_sell,
-                    is_full_liquidation=(target_is_zero and self.config.allow_odd_lot_sell_only_for_full_liquidation),
+                    is_full_liquidation=(
+                        target_is_zero
+                        and not capped_by_t_plus_one
+                        and self.config.allow_odd_lot_sell_only_for_full_liquidation
+                    ),
                     order_type="LIMIT",
                 )
                 if quantity <= 0:
                     self._skip(
                         str(symbol), side, 0, float(weight), price,
-                        "skipped_not_full_odd_lot_liquidation" if desired_sell > 0 and not target_is_zero else "skipped_below_min_lot",
+                        "skipped_t_plus_one_locked" if capped_by_t_plus_one and available_shares <= 0
+                        else "skipped_not_full_odd_lot_liquidation" if desired_sell > 0 and not target_is_zero
+                        else "skipped_below_min_lot",
                         now, delta_value, implied_shares=-desired_sell,
                     )
                     continue

@@ -461,6 +461,15 @@ def main() -> int:
         panel = panel[panel["trade_date"] <= args.end_date]
 
     master = _read(u0 / "security_master.parquet")
+    # B shares quote in HKD/USD; an A-share CNY research universe must not carry
+    # them (Round 31 D-08: 16 B shares were in the r29 dataset, labels and
+    # panels and were excluded only at the evaluator's entry).
+    if "security_type" in master.columns:
+        b_shares = set(master.loc[master["security_type"] != "A_share", "symbol"].astype(str))
+        if b_shares:
+            print(f"      excluding {len(b_shares)} non-A-share securities (B shares)", flush=True)
+            panel = panel[~panel["symbol"].astype(str).isin(b_shares)]
+            master = master[~master["symbol"].astype(str).isin(b_shares)]
     # Session counts since listing come from the FULL history, before any date
     # cut: the IPO no-limit window and the seasoning rule are anchored on the
     # listing session, not on whichever row the build happens to start at.

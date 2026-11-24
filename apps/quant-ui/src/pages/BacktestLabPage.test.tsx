@@ -85,3 +85,39 @@ test("defaults to a run with NAV, never marks an empty run ready, and states cos
   expect(screen.getByText(/不可引用 · trust: unclassified/)).toHaveTextContent("cost excludes slippage");
   expect(screen.getByText(/不可引用/)).toHaveTextContent("含不可交易标的");
 });
+
+test("honours ?backtestId= from other pages and says so when the requested run is missing", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const data = /\/backtests\/[^/]+\/equity/.test(url)
+      ? [{ datetime: "2026-01-01", nav: 1, drawdown: 0, dailyReturn: 0 }]
+      : runs;
+    return new Response(JSON.stringify({ status: "ready", data, issues: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }));
+  const client = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  render(
+    <QueryClientProvider client={client()}>
+      <MemoryRouter initialEntries={["/backtests?backtestId=run-b"]}>
+        <BacktestLabPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  const radios = await screen.findAllByRole("radio");
+  await waitFor(() => expect(radios[1]).toBeChecked());
+  expect(radios[0]).not.toBeChecked();
+  expect(screen.queryByText(/不存在于当前 runtime/)).toBeNull();
+  cleanup();
+
+  render(
+    <QueryClientProvider client={client()}>
+      <MemoryRouter initialEntries={["/backtests?backtestId=ghost-run"]}>
+        <BacktestLabPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText(/ghost-run 不存在于当前 runtime/)).toBeInTheDocument();
+});

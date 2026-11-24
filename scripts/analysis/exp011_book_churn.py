@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """EXP-011 / H-011: book-construction churn control (Track A, first batch).
 
-Pre-registered candidates (BOOK_CHURN_CONTROL_EXPERIMENT.md, frozen at commit
+Pre-registered candidates (BOOK_CHURN_CONTROL_EXPERIMENT.md (removed in Round 31; git show 2c4e296:BOOK_CHURN_CONTROL_EXPERIMENT.md), frozen at commit
 1994cd4 BEFORE any evaluation run — no additions, no post-hoc tuning):
   B1_buffer30        enter top-10, retain while eligible rank < 30
   B2_minhold10       10-trading-day minimum hold (slot lock), age=1 on entry
@@ -228,7 +228,7 @@ def main() -> int:
         return round(norm_cdf((sr - sr0) * math.sqrt(len(r) - 1) / denom), 4)
 
     summary: dict[str, object] = {
-        "protocol": "BOOK_CHURN_CONTROL_EXPERIMENT.md", "carrier": CARRIER,
+        "protocol": "BOOK_CHURN_CONTROL_EXPERIMENT.md (removed in Round 31; git show 2c4e296:BOOK_CHURN_CONTROL_EXPERIMENT.md)", "carrier": CARRIER,
         "baseline_frozen": BASE, "cumulative_trials_N": N_TRIALS, "rules": {},
         "fold_block_pbo_6books": pbo, "dsr_stitched": {n: dsr(n) for n in books},
         "sensitivity_15bps": sens15,

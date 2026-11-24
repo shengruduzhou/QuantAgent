@@ -12,7 +12,7 @@ asserts:
 
 The final test concats every adapter output and runs
 :func:`validate_pit_safety` — this is the cross-source PIT lint that
-:doc:`docs/v8_gap_report.md` flagged as missing in P0.
+:doc:`docs/v8_gap_report.md (removed in Round 31; git show 2c4e296:docs/v8_gap_report.md)` flagged as missing in P0.
 """
 
 from __future__ import annotations

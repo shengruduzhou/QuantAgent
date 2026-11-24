@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -27,6 +28,9 @@ from quantagent.execution.order_manager import OrderManager, OrderManagerConfig
 from quantagent.backtest.dividend_tax import POLICY as DIVIDEND_TAX_POLICY, DividendTaxLots
 from quantagent.execution.broker_base import OrderSide
 from quantagent.execution.virtual_broker import VirtualBroker
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from quantagent.risk.exposure_policy import ExposurePolicy
 
 
 @dataclass(frozen=True)
@@ -43,7 +47,7 @@ class AShareExecutionSimulationConfig:
     # Target-weight rows are signal-dated. There is intentionally no supported
     # same-session execution mode at this production-grade boundary.
     execution_timing_semantics: str = EXECUTION_TIMING_SEMANTICS
-    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md): PROMOTED to trusted-evaluator
+    # INC-E1 (EVALUATOR_ORDER_DEDUP_BUG.md (removed in Round 31; git show 2c4e296:EVALUATOR_ORDER_DEDUP_BUG.md)): PROMOTED to trusted-evaluator
     # default 2026-07-06 with user approval. False is retained only for the
     # isolated forensic harness; the facade separately prevents unsafe brokers.
     fix_cross_day_order_dedup: bool = True
@@ -69,6 +73,12 @@ class AShareExecutionSimulationResult:
     #: Dividend cash / bonus shares credited to held positions (raw-price panels
     #: that publish corporate-action columns only; empty otherwise).
     corporate_action_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: One row per signal date when an exposure policy scaled the targets
+    #: (risk.exposure_policy decision records); empty when no policy was given.
+    exposure_decisions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: (trade_date, nav, invested_value) per session close -- the exact history
+    #: the exposure policy read; empty when no policy was given.
+    account_path: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def write_risk_events(self, path: str | Path) -> Path:
         target = Path(path)
@@ -89,12 +99,21 @@ def simulate_ashare_target_weights(
     target_weight_history: pd.DataFrame,
     market_panel: pd.DataFrame,
     config: AShareExecutionSimulationConfig | None = None,
+    *,
+    exposure_policy: "ExposurePolicy | None" = None,
 ) -> AShareExecutionSimulationResult:
     """Replay signal-dated targets on the next available market-session close.
 
     Invalid timing/data never falls back to same-day execution.  The generic
     simulator records an ``execution_error`` and skips that signal atomically;
     :func:`run_strict_backtest_v8` validates the trace and rejects such a run.
+
+    ``exposure_policy`` (opt-in, round 30): at each signal date ``t`` the
+    policy decides a gross multiplier from the account's own session closes
+    ``<= t`` (inception = initial cash), the signal's weights are scaled by it,
+    and the scaled target executes at the next session like any other. Without
+    a policy this function is byte-for-byte the previous code path. A
+    fail-closed decision raises instead of liquidating on a data gap.
     """
     config = config or AShareExecutionSimulationConfig()
     audit_log_dir = config.audit_log_dir or str(quant_paths().logs / "v7_backtest")
@@ -196,6 +215,9 @@ def simulate_ashare_target_weights(
 
         broker.on_trade(_on_fill)
 
+    exposure_rows: list[dict[str, object]] = []
+    account_obs: list[tuple[pd.Timestamp, float, float]] = []
+
     schedule: dict[pd.Timestamp, tuple[pd.Timestamp, pd.Series]] = {}
     for signal_date, weights in target.iterrows():
         signal_date = pd.Timestamp(signal_date).normalize()
@@ -230,6 +252,10 @@ def simulate_ashare_target_weights(
     # Signals determine trades, while every observed session in the evaluation
     # window determines valuation. Do not extend the evaluated window implicitly.
     valuation_sessions = sessions[(sessions >= min(schedule)) & (sessions <= max(schedule))] if schedule else []
+    if exposure_policy is not None and schedule:
+        # Inception: the account is initial cash, nothing invested, at the
+        # close of the first scheduled signal session.
+        account_obs.append((schedule[min(schedule)][0], float(config.initial_cash), 0.0))
     for execution_date in valuation_sessions:
         signal_date, weights = schedule.get(execution_date, (None, pd.Series(dtype=float)))
         day_market = market[market["trade_date"] == execution_date]
@@ -342,7 +368,12 @@ def simulate_ashare_target_weights(
         manager.last_skipped_orders.clear()
         if signal_date is not None:
             current_weights = _current_weights(broker, prices)
-            adjusted = _apply_st_policy(weights.astype(float), current_weights, day_market, config)
+            signal_weights = weights.astype(float)
+            if exposure_policy is not None:
+                signal_weights = signal_weights * _exposure_multiplier(
+                    exposure_policy, account_obs, signal_date, execution_date, exposure_rows,
+                )
+            adjusted = _apply_st_policy(signal_weights, current_weights, day_market, config)
             nav = _mark_to_market_nav(broker, prices)
             day_signal_id = f"bt-sig-{signal_date:%Y%m%d}-exec-{execution_date:%Y%m%d}"
             states = manager.reconcile(adjusted, prices, nav, signal_id=day_signal_id)
@@ -446,6 +477,10 @@ def simulate_ashare_target_weights(
 
         nav_after = _mark_to_market_nav(broker, prices)
         nav_rows.append((execution_date, nav_after))
+        if exposure_policy is not None:
+            account_obs.append(
+                (execution_date, float(nav_after), float(nav_after) - float(broker.ledger.cash))
+            )
         for position in broker.query_positions():
             price = _position_price(position, prices)
             position_rows.append(
@@ -483,6 +518,19 @@ def simulate_ashare_target_weights(
                 round(tax_lots.latent_tax(last_session), 2) if last_session is not None else 0.0
             ),
         }
+    extra: dict[str, object] = {}
+    if exposure_policy is not None:
+        metadata["exposure_policy"] = {
+            **exposure_policy.to_dict(),
+            "policy_sha256": exposure_policy.sha256,
+            "applied_at": "signal_date_close_scales_next_session_target",
+        }
+        extra = {
+            "exposure_decisions": pd.DataFrame(exposure_rows),
+            "account_path": pd.DataFrame(
+                account_obs, columns=["trade_date", "nav", "invested_value"]
+            ),
+        }
     return AShareExecutionSimulationResult(
         nav=pd.Series(dict(nav_rows), name="nav").sort_index(),
         order_audit=order_audit,
@@ -493,7 +541,38 @@ def simulate_ashare_target_weights(
         config=metadata,
         execution_trace=pd.DataFrame(trace_rows),
         corporate_action_audit=pd.DataFrame(ca_rows),
+        **extra,
     )
+
+
+def _exposure_multiplier(
+    policy: "ExposurePolicy",
+    account_obs: list[tuple[pd.Timestamp, float, float]],
+    signal_date: pd.Timestamp,
+    execution_date: pd.Timestamp,
+    exposure_rows: list[dict[str, object]],
+) -> float:
+    """Decide at the signal close from session closes ``<= signal_date`` only."""
+    from quantagent.risk.exposure_policy import (
+        ExposureDecisionRefused,
+        account_history_frame,
+        decide_exposure,
+    )
+
+    history = account_history_frame(
+        [row[0] for row in account_obs],
+        [row[1] for row in account_obs],
+        [row[2] for row in account_obs],
+    )
+    decision = decide_exposure(history, policy, decision_date=signal_date)
+    exposure_rows.append({
+        **decision.to_dict(),
+        "reasons": ";".join(decision.reasons),
+        "execution_date": pd.Timestamp(execution_date).date().isoformat(),
+    })
+    if not decision.ok:
+        raise ExposureDecisionRefused(decision)
+    return float(decision.multiplier)
 
 
 def _next_market_session(signal_date: pd.Timestamp, sessions: pd.DatetimeIndex) -> pd.Timestamp | None:

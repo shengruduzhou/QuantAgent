@@ -2,7 +2,7 @@
   "version": 1,
   "declared": "2026-07-13",
   "declared_before_any_fresh_read": true,
-  "source": "H-028 section 8 + FRESH_HOLDOUT_FREEZE_MANIFEST.md champion freeze (19e05f4) + EVALUATION_PROTOCOL_V2.md section 2",
+  "source": "H-028 section 8 + docs/governance/evidence/FRESH_HOLDOUT_FREEZE_MANIFEST.md champion freeze (19e05f4) + docs/GOVERNANCE.md section 2",
   "note": "Single source of truth for the one-time FRESH first read. Guard lift happens via config change referencing this file — never via override.",
   "frozen_candidates": {
     "S0": {"id": "eqw_eligible_benchmark", "definition": "point-in-time equal-weight eligible A-share benchmark, same universe protocol as candidates"},

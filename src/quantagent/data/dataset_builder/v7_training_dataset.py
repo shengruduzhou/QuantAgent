@@ -186,11 +186,29 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     # Deterministic, de-duplicated column order so the contract (and its hash)
     # is stable across builds of the same logical schema.
     feature_columns = sorted(dict.fromkeys(feature_columns))
+    # Group-based selection bypasses _feature_columns, so refuse here as well.
+    own_label_columns = {f"forward_return_{h}d" for h in desired_horizons} | {
+        f"label_end_{h}d" for h in desired_horizons
+    }
+    refused_columns = _refused_feature_columns(
+        dataset, [c for c in dataset.columns if c not in own_label_columns]
+    )
+    feature_columns = [c for c in feature_columns if c not in refused_columns]
+    if not feature_columns:
+        raise ValueError("training dataset has no usable feature columns after leakage refusal")
     schema_drift: dict[str, list[str]] = {}
     if config.expected_feature_schema_path:
         dataset, feature_columns, schema_drift = _reconcile_pinned_schema(
             dataset, feature_columns, config.expected_feature_schema_path,
         )
+        pinned_refused = _refused_feature_columns(dataset, feature_columns)
+        if pinned_refused:
+            # A pinned contract that demands a post-decision column is itself
+            # the defect; fail closed instead of silently training on it.
+            raise ValueError(
+                "pinned feature schema includes columns that are unknown at the decision close: "
+                f"{sorted(pinned_refused.items())}"
+            )
 
     if config.strict_mode:
         _strict_mode_assert(dataset, feature_columns, desired_horizons, config)
@@ -213,6 +231,7 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
         "available_at_policy": "close-derived features are available at the close of their own trade_date; all joins use available_at <= trade_date",
         "source_name": config.source_name,
         "schema_drift": schema_drift,
+        "refused_feature_columns": dict(sorted(refused_columns.items())),
     }
 
     quality = evaluate_data_quality_gates(
@@ -494,12 +513,49 @@ def _reconcile_pinned_schema(
     return dataset, list(expected), drift
 
 
+TRADABILITY_MASK_COLUMNS: tuple[str, ...] = ("is_st", "is_suspended", "is_limit_up", "is_limit_down")
+
+#: Provenance markers that make a tradability flag a look-ahead: the value is
+#: today's list broadcast to every historical date (Round 29 R4-F01; Round 31 D-02).
+_SNAPSHOT_PROVENANCE_MARKERS = ("current_snapshot", "broadcast")
+
+
+def _refused_feature_columns(frame: pd.DataFrame, columns: Iterable[str]) -> dict[str, str]:
+    """Columns that must never be model features, with the reason.
+
+    Feature selection is a blacklist over whatever the input panel carries, so a
+    certified gold ``dataset.parquet`` (which stores ``entry_close_t1`` and
+    ``forward_return_*`` next to its features) or a silver panel whose ``is_st``
+    is a current-snapshot broadcast would otherwise hand the model information
+    from after the decision close. Name-based refusal is shared with the factor
+    DSL (:func:`quantagent.factors.expression_safety.is_post_decision_column`).
+    """
+    from quantagent.factors.expression_safety import is_post_decision_column
+
+    refused: dict[str, str] = {}
+    for column in columns:
+        if is_post_decision_column(column):
+            refused[str(column)] = "post_decision_column"
+    for flag in ("is_st",):
+        provenance_column = f"{flag}_provenance"
+        if flag in columns and provenance_column in frame.columns:
+            provenance = frame[provenance_column].astype(str).str.lower()
+            if provenance.str.contains("|".join(_SNAPSHOT_PROVENANCE_MARKERS)).any():
+                refused[flag] = "current_snapshot_broadcast_flag"
+    return refused
+
+
 def _feature_columns(frame: pd.DataFrame, horizons: Iterable[int]) -> list[str]:
     forbidden = set(FORBIDDEN_INFERENCE_COLUMNS)
     forbidden.update(f"forward_return_{h}d" for h in horizons)
     forbidden.update(f"label_end_{h}d" for h in horizons)
+    # Tradability states are universe/execution masks, not alpha inputs; the
+    # auto-selector never promotes them (a pinned contract may still carry one).
+    forbidden.update(TRADABILITY_MASK_COLUMNS)
+    numeric_columns = list(frame.select_dtypes(include=[np.number, bool]).columns)
+    forbidden.update(_refused_feature_columns(frame, numeric_columns))
     selected: list[str] = []
-    for column in frame.select_dtypes(include=[np.number, bool]).columns:
+    for column in numeric_columns:
         if column in forbidden:
             continue
         values = pd.to_numeric(frame[column], errors="coerce")

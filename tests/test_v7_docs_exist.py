@@ -1,34 +1,61 @@
+"""The authoritative documentation set exists, states the safety boundary, and
+does not link to files that are gone (Round 31 consolidated 185 Markdown files
+into this small set)."""
+from __future__ import annotations
+
+import re
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
 
-def test_v7_docs_and_config_exist_and_cover_required_boundaries():
-    docs = [
-        Path("README.md"),
-        Path("AGENTS.md"),
-        Path("docs/V7_系统架构与Agent接口.md"),
-        Path("docs/V7_证据摄取与交易规则.md"),
-        Path("docs/V7_realdata_training_pipeline.md"),
-        Path("docs/V7_PIT_data_contract.md"),
-        Path("docs/V7_training_dataset_schema.md"),
-        Path("docs/V7_live_readiness_gates.md"),
-        Path("configs/v7.default.yaml"),
-    ]
-    for path in docs:
-        assert path.exists(), path
+AUTHORITATIVE = [
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/ARCHITECTURE.md",
+    "docs/DATA.md",
+    "docs/GOVERNANCE.md",
+    "docs/OPERATIONS.md",
+    "docs/RESEARCH.md",
+    "docs/ROADMAP.md",
+    "docs/audits/HISTORY.md",
+]
+
+
+def test_authoritative_docs_exist_and_cover_required_boundaries():
+    texts = []
+    for name in AUTHORITATIVE:
+        path = REPO / name
+        assert path.exists(), name
         text = path.read_text(encoding="utf-8")
-        assert len(text) > 200, path
-
-    combined = "\n".join(path.read_text(encoding="utf-8") for path in docs[:-1])
+        assert len(text) > 200, name
+        texts.append(text)
+    combined = "\n".join(texts)
     for term in [
         "EvidenceRecord",
         "Point-in-Time",
         "target_weights",
         "OrderManager",
-        "VirtualBroker",
         "T+1",
-        "Risk Gate",
-        "Audit",
-        "Theme Discovery",
-        "Financial Fraud Risk",
+        "LIVE_DISABLED",
+        "configs/quarantined_windows.json",
+        "scripts/baseline_protocol.py",
+        "DO NOT ENABLE",
     ]:
         assert term in combined, term
+    assert (REPO / "configs/v7.default.yaml").exists()
+
+
+_LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
+
+
+def test_local_links_in_authoritative_docs_resolve():
+    broken = []
+    for name in AUTHORITATIVE:
+        path = REPO / name
+        for target in _LINK.findall(path.read_text(encoding="utf-8")):
+            if "://" in target or target.startswith("mailto:"):
+                continue
+            if not (path.parent / target).resolve().exists():
+                broken.append(f"{name} -> {target}")
+    assert broken == []

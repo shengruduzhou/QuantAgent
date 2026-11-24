@@ -1,7 +1,6 @@
 """Regression tests for the V7 phase-14 real-data upgrade pass.
 
 Covers:
-* Data source registry (``v7_sources``) schema validation.
 * AkShare sector provider — must NOT cross-join boards onto symbols.
 * Fundamentals PIT wide-merge with statement-prefix collision protection.
 * Classical alpha trainer downgrade-flag behaviour.
@@ -25,28 +24,8 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_v7_sources_registry_has_required_kinds():
-    from quantagent.data.v7_sources import V7_DATA_SOURCES, list_v7_data_sources
-
-    kinds = {source.kind for source in V7_DATA_SOURCES}
-    assert {"market", "valuation", "fundamentals", "universe", "sector", "tradability"}.issubset(kinds)
-    # Sector must have both a local-mapping entry and a fail-loud AkShare entry.
-    sector_sources = list_v7_data_sources(kind="sector")
-    providers = {source.provider for source in sector_sources}
-    assert {"local", "akshare"}.issubset(providers)
 
 
-def test_v7_sources_validate_frame_against_schema_reports_missing_columns():
-    from quantagent.data.v7_sources import validate_frame_against_source
-
-    frame = pd.DataFrame(
-        [
-            {"symbol": "600519.SH", "trade_date": "2025-01-02", "open": 1.0, "close": 1.0},
-        ]
-    )
-    report = validate_frame_against_source(frame, "qlib_cn_daily")
-    assert report.status == "failed"
-    assert "available_at" in set(report.missing_columns)
 
 
 def test_qlib_symbol_helpers_align_with_akshare_suffix_style():

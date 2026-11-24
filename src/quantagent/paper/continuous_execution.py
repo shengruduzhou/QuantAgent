@@ -395,6 +395,10 @@ def _market_state(
         previous_close = float(pd.to_numeric(previous_row["close"], errors="coerce"))
         if not np.isfinite(previous_close) or previous_close <= 0:
             raise ContinuousPaperExecutionBlocked(f"invalid previous close for {symbol}")
+        # On an ex-date the exchange bands prices around the ex-rights reference
+        # (除权除息参考价), not the raw previous close; using the raw close made
+        # every ex-date name look limit-down and refused its orders (R31-RISK-02).
+        previous_close = _ex_rights_reference_price(previous_close, row)
 
         _assert_execution_price_provenance(pd.DataFrame([previous_row, row]), symbol=symbol)
         is_suspended = _required_market_flag(row, "is_suspended")
@@ -421,6 +425,153 @@ def _market_state(
         prices[symbol] = close
 
     return snapshots, pd.Series(prices, dtype=float)
+
+
+def _corporate_action_terms(row: pd.Series) -> tuple[float, float]:
+    """(cash per share, additional shares per share) published on a panel row."""
+    def _value(name: str) -> float:
+        if name not in row.index:
+            return 0.0
+        value = pd.to_numeric(row[name], errors="coerce")
+        return float(value) if np.isfinite(value) else 0.0
+
+    return max(_value("ca_cash_per_share"), 0.0), max(_value("ca_share_ratio"), 0.0)
+
+
+def _ex_rights_reference_price(previous_close: float, row: pd.Series) -> float:
+    cash, ratio = _corporate_action_terms(row)
+    if cash == 0.0 and ratio == 0.0:
+        return previous_close
+    reference = (previous_close - cash) / (1.0 + ratio)
+    return reference if np.isfinite(reference) and reference > 0 else previous_close
+
+
+def _lot_integral_share_ratio(
+    canonical: CanonicalLedger,
+    *,
+    initial_cash: float,
+    symbol: str,
+    ex_date: str,
+    candidates: Sequence[float],
+) -> float | None:
+    """First candidate ratio the canonical replay can fold, else None.
+
+    Canonical accounting scales every lot by one ratio and refuses a
+    fractional result (it has no cash-in-lieu policy). A position-level ratio
+    that makes the *total* whole can still leave a lot fractional when the
+    holding was bought in several lots, and a record that cannot be replayed
+    would make the account unrecoverable for good (Round 31 V-01). So each
+    candidate is dry-run against the replayed lots before anything is written.
+    """
+    from quantagent.domain.accounting import InvariantViolation
+    from quantagent.domain.orders import CorporateAction as CanonicalCorporateAction
+
+    _, account = canonical.replay(initial_cash=initial_cash)
+    for ratio in candidates:
+        try:
+            account.apply_corporate_action(
+                CanonicalCorporateAction(
+                    corporate_action_id="dry-run", symbol=symbol, ex_date=ex_date,
+                    share_ratio=float(ratio),
+                )
+            )
+        except InvariantViolation:
+            continue
+        return float(ratio)
+    return None
+
+
+def _apply_session_corporate_actions(
+    broker: PaperBroker,
+    market_panel: pd.DataFrame,
+    *,
+    as_of: str,
+    canonical: CanonicalLedger,
+    initial_cash: float,
+) -> list[dict[str, object]]:
+    """Credit dividends and bonus/transfer shares due since the last session.
+
+    The certified execution panel publishes ``ca_cash_per_share`` (cash per
+    share) and ``ca_share_ratio`` (additional shares per share) on each
+    ex-date. Without this step the paper account marked an ex-date's price
+    drop as a loss, which tripped the daily-loss halt and the drawdown latch
+    (Round 31 R31-RISK-01). Holdings only change on execution sessions, so
+    every ex-date after the latest canonical session and up to ``as_of``
+    applies to the current book. Semantics follow the canonical simulator:
+    whole new shares, the fractional remainder paid as cash in lieu at the
+    ex-date close; dividends are credited gross. Each action is idempotent
+    per (symbol, ex-date) through the canonical ledger.
+    """
+    if not {"ca_cash_per_share", "ca_share_ratio"} & set(market_panel.columns):
+        return []
+    held = {
+        symbol: quantity
+        for symbol, quantity in _position_quantities(broker.portfolio).items()
+        if quantity > 0
+    }
+    if not held:
+        return []
+    records = canonical.read()
+    applied_keys: set[tuple[str, str]] = set()
+    sessions: list[str] = []
+    for record in records:
+        if record.trade_date:
+            sessions.append(str(record.trade_date)[:10])
+        action = record.corporate_action
+        if action:
+            applied_keys.add((str(action.get("symbol")), str(action.get("exDate"))[:10]))
+    previous_sessions = [session for session in sessions if session < as_of]
+    if not previous_sessions:
+        return []
+    window_start = max(previous_sessions)
+
+    frame = market_panel[market_panel["symbol"].astype(str).isin(held)].copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce").dt.normalize()
+    frame = frame[
+        (frame["trade_date"] > pd.Timestamp(window_start))
+        & (frame["trade_date"] <= pd.Timestamp(as_of))
+    ].sort_values(["trade_date", "symbol"])
+    applied: list[dict[str, object]] = []
+    for _, row in frame.iterrows():
+        cash, ratio = _corporate_action_terms(row)
+        if cash == 0.0 and ratio == 0.0:
+            continue
+        symbol = str(row["symbol"])
+        ex_date = row["trade_date"].date().isoformat()
+        if (symbol, ex_date) in applied_keys:
+            continue
+        shares = float(_position_quantities(broker.portfolio).get(symbol, 0.0))
+        if shares <= 0:
+            continue
+        close = float(pd.to_numeric(row.get("close"), errors="coerce"))
+        exact_new = shares * ratio
+        new_shares = float(np.floor(exact_new + 1e-9))
+        whole_ratio = (shares + new_shares) / shares
+        share_ratio = 1.0
+        cash_in_lieu = 0.0
+        if ratio > 0.0:
+            chosen = _lot_integral_share_ratio(
+                canonical, initial_cash=initial_cash, symbol=symbol, ex_date=ex_date,
+                candidates=(1.0 + ratio, whole_ratio),
+            )
+            if chosen is None:
+                raise ContinuousPaperExecutionBlocked(
+                    f"corporate action {symbol} {ex_date} (+{ratio:g} shares per share) leaves "
+                    "a fractional entitlement on a multi-lot holding that canonical accounting "
+                    "cannot represent; reconcile the account manually before resuming"
+                )
+            share_ratio = chosen
+            if abs(chosen - (1.0 + ratio)) > 1e-12:
+                cash_in_lieu = (exact_new - new_shares) * close if np.isfinite(close) else 0.0
+        result = broker.apply_corporate_action(
+            symbol,
+            share_ratio=share_ratio,
+            cash_per_share=(shares * cash + cash_in_lieu) / shares,
+            ex_date=ex_date,
+        )
+        applied_keys.add((symbol, ex_date))
+        applied.append(dict(result) | {"exDate": ex_date})
+    return applied
 
 
 def _execution_orders(
@@ -1222,6 +1373,14 @@ def _execute_pending_for_session_locked(
             ),
             industry_map=industry_map,
         )
+        # Dividends and bonus shares go on the book before the session's first
+        # mark, so the ex-date price drop is not measured as a loss.
+        corporate_actions = _apply_session_corporate_actions(
+            broker, market_panel, as_of=as_of, canonical=canonical,
+            initial_cash=account_identity.initial_cash,
+        )
+        if corporate_actions:
+            nav_before = canonical_state.portfolio.equity(prices.to_dict())
         # Every held and target symbol's session price, so the venue values the
         # whole book: with only the order's own price the second name raised
         # UnpriceablePosition mid-batch and left a phantom SUBMITTED order.

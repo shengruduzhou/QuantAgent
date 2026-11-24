@@ -16,8 +16,12 @@ export function BacktestLabPage(): JSX.Element {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const backtests = useApi<BacktestSummary[]>(["backtest-lab"], "/backtests");
-  const [selectedId, setSelectedId] = useState(searchParams.get("run") ?? "");
+  // Other pages link here with ?backtestId= (the API's name); ?run= is this
+  // page's own selection key. Both name the same subject.
+  const requestedId = searchParams.get("run") ?? searchParams.get("backtestId") ?? "";
+  const [selectedId, setSelectedId] = useState(requestedId);
   const runs = backtests.data?.data ?? [];
+  const requestedMissing = Boolean(requestedId) && backtests.isSuccess && !runs.some((run) => run.id === requestedId);
 
   // The default subject is the newest run that actually has a NAV artifact.
   // runs[0] used to be board_chase - no NAV, every metric 暂无 - under a
@@ -58,6 +62,7 @@ export function BacktestLabPage(): JSX.Element {
         { label: "换手率", value: formatPercent(primary?.turnover), detail: `${formatCompact(primary?.tradeCount)} trades · ${formatCompact(primary?.fillCount)} fills`, tone: "warning", icon: ShieldCheck },
         { label: "总成本", value: primaryCost.value, detail: primaryCost.basis, tone: primaryCost.understated || !primaryCost.recorded ? "warning" : "neutral", icon: Coins },
       ]} />
+      {requestedMissing ? <TruthNotice tone="warning">请求的回测 {requestedId} 不存在于当前 runtime，下面显示的是默认回测 {primary?.name ?? ""}，不是你链接的那个。</TruthNotice> : null}
       {primaryCaveats.length ? <TruthNotice tone="warning">不可引用 · {primaryCaveats.join(" · ")}</TruthNotice> : null}
 
       <section className="backtest-grid">

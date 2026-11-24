@@ -285,34 +285,54 @@ def test_strategy_cli_signature_contains_every_allowlisted_search_parameter() ->
 def test_strategy_defaults_expose_selectable_inputs_and_prefer_label_coverage(
     quant_ui_settings,
 ) -> None:
-    narrow = (
-        quant_ui_settings.runtime_root
-        / "data"
-        / "gold"
-        / "full_universe"
-        / "labels.parquet"
-    )
-    wide = quant_ui_settings.runtime_root / "data" / "v7" / "labels.parquet"
+    gold = quant_ui_settings.runtime_root / "data" / "gold"
+    narrow = gold / "full_universe" / "labels.parquet"
+    wide = gold / "full_universe_r29" / "labels.parquet"
     _write_labels(narrow, horizons=(1, 5))
     _write_labels(wide, horizons=(1, 5, 20, 60, 120))
+    # Panel and labels must come from one build, so the certified build needs
+    # its own panel for its labels to be selectable.
+    _write_labels(gold / "full_universe_r29" / "adjusted_market_panel.parquet", horizons=(1,))
+    # A labels file written into runtime/ by tooling (Round 31 D-03: a 14-row
+    # test fixture) is not a candidate at all.
+    _write_labels(quant_ui_settings.runtime_root / "data" / "v7" / "labels.parquet",
+                  horizons=(1, 5, 20, 60, 120, 126))
     app = create_app(quant_ui_settings)
 
     response = request(app, "GET", "/api/strategies/defaults")
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["selected"]["labelsPath"] == "runtime/data/v7/labels.parquet"
+    assert data["selected"]["labelsPath"] == "runtime/data/gold/full_universe_r29/labels.parquet"
     label_options = data["options"]["labelsPath"]
     assert {item["path"] for item in label_options} == {
+        "runtime/data/gold/full_universe_r29/labels.parquet",
         "runtime/data/gold/full_universe/labels.parquet",
-        "runtime/data/v7/labels.parquet",
     }
     assert next(
         item
         for item in label_options
-        if item["path"] == "runtime/data/v7/labels.parquet"
+        if item["path"] == "runtime/data/gold/full_universe_r29/labels.parquet"
     )["availableHorizons"] == [1, 5, 20, 60, 120]
     assert len(data["options"]["fundamentalsRoot"]) == 2
+
+
+def test_strategy_defaults_prefer_certified_inputs_over_newer_files(quant_ui_settings) -> None:
+    """Newest-mtime used to pick the REFUTED v7 silver panel (Round 31 D-03)."""
+    import os
+    import time
+
+    root = quant_ui_settings.runtime_root / "data"
+    certified = root / "gold" / "full_universe_r29" / "labels.parquet"
+    legacy = root / "gold" / "full_universe" / "labels.parquet"
+    _write_labels(certified, horizons=(1, 5))
+    _write_labels(legacy, horizons=(1, 5))
+    _write_labels(root / "gold" / "full_universe_r29" / "adjusted_market_panel.parquet", horizons=(1,))
+    _write_labels(root / "gold" / "full_universe" / "adjusted_market_panel.parquet", horizons=(1,))
+    later = time.time() + 3600
+    os.utime(legacy, (later, later))
+    data = request(create_app(quant_ui_settings), "GET", "/api/strategies/defaults").json()["data"]
+    assert data["selected"]["labelsPath"] == "runtime/data/gold/full_universe_r29/labels.parquet"
 
 
 def test_label_rebuild_and_horizon_blend_are_allowlisted_without_free_shell() -> None:

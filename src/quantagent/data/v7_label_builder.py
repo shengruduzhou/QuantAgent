@@ -1,6 +1,6 @@
 """Forward label generation for V7 model training.
 
-NOTE (2026-07-10, EVALUATOR_VALIDITY_AUDIT_IC016.md): the PRODUCTION training
+NOTE (2026-07-10, EVALUATOR_VALIDITY_AUDIT_IC016.md (removed in Round 31; git show 2c4e296:EVALUATOR_VALIDITY_AUDIT_IC016.md)): the PRODUCTION training
 datasets (``*_exec_*``, incl. plus7clean/plus7clean_fund) do NOT use this
 module's close(t)->close(t+h) convention. They are re-labelled by
 ``scripts/build_executable_labels_dataset.py`` to the DELAY-1 executable form

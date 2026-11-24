@@ -114,7 +114,12 @@ def run_trace_proven_strict_backtest_v8(
             f"{trace_schedule_sha}!={target_schedule_sha}"
         )
 
-    metrics = _compute_metrics(sim.nav, sim.order_audit, initial_nav=cfg.initial_cash)
+    metrics = _compute_metrics(
+        sim.nav,
+        sim.order_audit,
+        initial_nav=cfg.initial_cash,
+        corporate_actions=getattr(sim, "corporate_action_audit", None),
+    )
     realized_trades = _realized_round_trip_pnl(sim.order_audit)
     by_stock = _profit_by_stock(realized_trades, sim.order_audit)
     by_sector = _profit_by_sector(by_stock, sector_map)

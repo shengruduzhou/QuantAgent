@@ -169,6 +169,7 @@ def _fill_cost_breakdown(order_audit: pd.DataFrame | None) -> tuple[float, float
 def _realized_round_trip_pnl(
     order_audit: pd.DataFrame,
     cost_model: "AShareCostModel | None" = None,
+    corporate_actions: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """FIFO-match buy/sell fills per symbol into closed round-trip trades.
 
@@ -178,6 +179,15 @@ def _realized_round_trip_pnl(
     charged to the matched quantity, so ``net_pnl`` is a faithful realised
     PnL per closed trade. Lots still open at the end are left unrealised and
     excluded — the NAV already reflects their mark-to-market.
+
+    ``corporate_actions`` is the simulator's ``corporate_action_audit``. On a
+    raw-price panel a 10-for-10 bonus halves the price, so matching fills alone
+    booked it as a -50% losing trade and the bonus shares as an unmatched sell
+    (round-29 R10-F04). Each credit is applied to the open lots the way the
+    simulator applies it to the position: quantity scaled to the new share
+    count, the cash credit (dividend + cash in lieu) taken off the lot's cost
+    basis. A delisting write-off closes the lots at zero, and dividend tax
+    withheld at a sale is charged to the trades that sale closes.
     """
     from collections import deque
 
@@ -195,7 +205,18 @@ def _realized_round_trip_pnl(
     f["side"] = f["side"].astype(str).str.lower()
     f["filled_quantity"] = f["filled_quantity"].astype(float).abs()
     f["avg_price"] = pd.to_numeric(f["avg_price"], errors="coerce")
-    f = f.dropna(subset=["avg_price"]).sort_values("trade_date")
+    f = f.dropna(subset=["avg_price"]).sort_values("trade_date", kind="stable")
+    ca_events: dict[str, list[dict]] = {}
+    sale_tax: dict[tuple[str, object], float] = {}
+    if corporate_actions is not None and not corporate_actions.empty:
+        for event in corporate_actions.to_dict("records"):
+            symbol = str(event.get("symbol"))
+            when = pd.Timestamp(event.get("trade_date"))
+            if str(event.get("basis") or "") == "dividend_tax":
+                key = (symbol, when)
+                sale_tax[key] = sale_tax.get(key, 0.0) + float(-(event.get("cash_credit") or 0.0))
+            else:
+                ca_events.setdefault(symbol, []).append({**event, "trade_date": when})
 
     def _fee_per_share(row: pd.Series, side: str, qty: float, price: float) -> float:
         if qty <= 0:
@@ -212,29 +233,60 @@ def _realized_round_trip_pnl(
         return total / qty
 
     trades: list[dict] = []
-    for sym, g in f.groupby("symbol"):
+
+    def _close(sym, lots, qty, price, date, sell_fee_ps, tax_total=0.0) -> None:
+        remaining = qty
+        while remaining > 1e-9 and lots:
+            lot = lots[0]
+            matched = min(remaining, lot[0])
+            gross = matched * (price - lot[1])
+            cost = matched * lot[3] + matched * sell_fee_ps + tax_total * matched / qty
+            trades.append({
+                "symbol": sym, "buy_date": lot[2], "sell_date": date,
+                "quantity": matched, "buy_price": lot[1], "sell_price": price,
+                "gross_pnl": gross, "cost": cost, "net_pnl": gross - cost,
+            })
+            lot[0] -= matched
+            remaining -= matched
+            if lot[0] <= 1e-9:
+                lots.popleft()
+
+    def _apply_credit(lots, event) -> None:
+        shares_before = float(event.get("shares_before") or 0.0)
+        if shares_before <= 0:
+            return
+        scale = (shares_before + float(event.get("bonus_shares") or 0.0)) / shares_before
+        credit_per_share = float(event.get("cash_credit") or 0.0) / shares_before
+        for lot in lots:
+            lot[1] = (lot[1] - credit_per_share) / scale
+            lot[3] = lot[3] / scale
+            lot[0] = lot[0] * scale
+
+    symbols = sorted(set(f["symbol"].astype(str)) | set(ca_events))
+    for sym in symbols:
+        g = f[f["symbol"].astype(str) == sym]
         lots: deque[list[float]] = deque()  # [qty, price, date, buy_fee_per_share]
-        for _, r in g.iterrows():
+        # Credits land at the session open (before that session's fills).
+        stream = [(pd.Timestamp(e["trade_date"]), 0, e) for e in ca_events.get(sym, [])]
+        stream += [(pd.Timestamp(r["trade_date"]), 1, r) for _, r in g.iterrows()]
+        stream.sort(key=lambda item: (item[0], item[1]))
+        for when, kind, item in stream:
+            if kind == 0:
+                if str(item.get("basis") or "") == "delisting_writeoff":
+                    open_qty = sum(lot[0] for lot in lots)
+                    if open_qty > 1e-9:
+                        _close(sym, lots, open_qty, 0.0, item["trade_date"], 0.0)
+                else:
+                    _apply_credit(lots, item)
+                continue
+            r = item
             qty, price, date, side = r["filled_quantity"], r["avg_price"], r["trade_date"], r["side"]
             if side == "buy":
                 lots.append([qty, price, date, _fee_per_share(r, "buy", qty, price)])
             elif side == "sell":
                 sell_fee_ps = _fee_per_share(r, "sell", qty, price)
-                remaining = qty
-                while remaining > 1e-9 and lots:
-                    lot = lots[0]
-                    matched = min(remaining, lot[0])
-                    gross = matched * (price - lot[1])
-                    cost = matched * lot[3] + matched * sell_fee_ps
-                    trades.append({
-                        "symbol": sym, "buy_date": lot[2], "sell_date": date,
-                        "quantity": matched, "buy_price": lot[1], "sell_price": price,
-                        "gross_pnl": gross, "cost": cost, "net_pnl": gross - cost,
-                    })
-                    lot[0] -= matched
-                    remaining -= matched
-                    if lot[0] <= 1e-9:
-                        lots.popleft()
+                tax_total = sale_tax.pop((sym, when), 0.0)
+                _close(sym, lots, qty, price, date, sell_fee_ps, tax_total)
     return pd.DataFrame(trades, columns=cols)
 
 
@@ -244,6 +296,7 @@ def _compute_metrics(
     *,
     periods: int = 252,
     initial_nav: float | None = None,
+    corporate_actions: pd.DataFrame | None = None,
 ) -> StrictBacktestMetrics:
     if nav is None or nav.empty:
         # NaN, not 0.0: no NAV series means no backtest ran, and zeros here are
@@ -329,7 +382,7 @@ def _compute_metrics(
             n_fills = int(len(filled))
 
     # Realised round-trip trade statistics (FIFO-matched, net of cost).
-    rt = _realized_round_trip_pnl(order_audit)
+    rt = _realized_round_trip_pnl(order_audit, corporate_actions=corporate_actions)
     if not rt.empty:
         net = rt["net_pnl"].astype(float)
         n_trades = int(len(net))
@@ -511,6 +564,10 @@ class StrictBacktestArtifactSet:
     # Dividend cash / bonus shares the simulator credited (raw execution panels
     # only). Kept in memory for callers that report on it.
     corporate_action_audit: pd.DataFrame | None = None
+    # Opt-in exposure policy (round 30): its per-signal decision records and
+    # the account history it read. None when no policy was applied.
+    exposure_decisions: pd.DataFrame | None = None
+    account_path: pd.DataFrame | None = None
 
     def write(self, output_dir: str | Path) -> dict[str, Path]:
         out = Path(output_dir)
@@ -555,6 +612,12 @@ class StrictBacktestArtifactSet:
             json.dumps(self.factor_weights, indent=2, default=str),
             encoding="utf-8",
         )
+        if self.exposure_decisions is not None:
+            paths["exposure_decisions"] = out / "exposure_decisions.csv"
+            self.exposure_decisions.to_csv(paths["exposure_decisions"], index=False)
+        if self.account_path is not None:
+            paths["account_path"] = out / "account_path.csv"
+            self.account_path.to_csv(paths["account_path"], index=False)
         return paths
 
 
@@ -569,8 +632,14 @@ def run_strict_backtest_v8(
     sector_map: pd.DataFrame | None = None,
     factor_weights: Mapping[str, float] | None = None,
     config: AShareExecutionSimulationConfig | None = None,
+    exposure_policy=None,
 ) -> StrictBacktestArtifactSet:
-    """Run the existing strict simulator + emit the full v8 report bundle."""
+    """Run the existing strict simulator + emit the full v8 report bundle.
+
+    ``exposure_policy`` is opt-in (round 30, risk.exposure_policy): the gross
+    multiplier decided at each signal close scales that signal's target. With
+    ``None`` the canonical path is unchanged.
+    """
     cfg = config or AShareExecutionSimulationConfig()
     # Non-blocking quarantine check (P-G): warn + stamp, never alter execution.
     trust_stamp = quarantine_trust_stamp(
@@ -585,11 +654,19 @@ def run_strict_backtest_v8(
             f"(see {trust_stamp['quarantine_evidence']}).",
             file=_sys.stderr, flush=True,
         )
-    sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
-        target_weights, market_panel, cfg,
+    if exposure_policy is None:
+        sim: AShareExecutionSimulationResult = simulate_ashare_target_weights(
+            target_weights, market_panel, cfg,
+        )
+    else:
+        sim = simulate_ashare_target_weights(
+            target_weights, market_panel, cfg, exposure_policy=exposure_policy,
+        )
+    ca_audit = getattr(sim, "corporate_action_audit", None)
+    metrics = _compute_metrics(
+        sim.nav, sim.order_audit, initial_nav=cfg.initial_cash, corporate_actions=ca_audit
     )
-    metrics = _compute_metrics(sim.nav, sim.order_audit, initial_nav=cfg.initial_cash)
-    realized_trades = _realized_round_trip_pnl(sim.order_audit)
+    realized_trades = _realized_round_trip_pnl(sim.order_audit, corporate_actions=ca_audit)
     by_stock = _profit_by_stock(realized_trades, sim.order_audit)
     by_sector = _profit_by_sector(by_stock, sector_map)
 
@@ -640,6 +717,8 @@ def run_strict_backtest_v8(
         config=artifact_config,
         trust_stamp=trust_stamp,
         corporate_action_audit=getattr(sim, "corporate_action_audit", None),
+        exposure_decisions=(sim.exposure_decisions if exposure_policy is not None else None),
+        account_path=(sim.account_path if exposure_policy is not None else None),
     )
 
 

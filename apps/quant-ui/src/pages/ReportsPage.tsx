@@ -7,6 +7,7 @@ import { Panel } from "../components/Panel";
 import { StateView } from "../components/StateView";
 import { UNMEASURED_TITLE, formatNumber, formatPercent, toneClass } from "../utils/format";
 import { downloadOfflineResearchHtml, type OfflineResearchReport } from "../utils/researchReport";
+import { citationCaveats } from "../utils/backtestCaveats";
 
 const PROMOTION_POLICY = [
   ["PBO", "≤ 0.25", "组合/模型搜索的数据挖掘风险上限"],
@@ -22,14 +23,23 @@ export function ReportsPage(): JSX.Element {
   const navigate = useNavigate();
   const overview = useApi<SystemOverview>(["reports-overview"], "/system/overview");
   const backtests = useApi<BacktestSummary[]>(["reports-backtests"], "/backtests");
-  const risk = useApi<RiskOverview>(["reports-risk"], "/risk/overview");
   const data = overview.data?.data;
   const latest = data?.latestBacktest;
+  // Risk must describe the SAME run as the headline. Without backtestId the API
+  // picked the first indexed run, so the export mixed two subjects (Round 31 F2).
+  const risk = useApi<RiskOverview>(
+    ["reports-risk", latest?.id],
+    latest?.id ? "/risk/overview" : null,
+    latest?.id ? { backtestId: latest.id } : undefined,
+  );
+  const caveats = citationCaveats(latest ?? undefined);
+  const citable = caveats.length === 0;
 
   if (overview.isLoading) return <StateView state="loading" />;
   if (!data) return <StateView state="empty" title="没有系统概览产物" detail="Quant API 返回了空的 /api/system/overview：runtime 里还没有被索引的回测、模型或风控 artifact。报告页保持只读、不生成任何数字。下一步：在策略实验室跑一次完整研究闭环，或在 Runtime 工作站重建索引。" />;
 
   const limitations = [
+    ...(citable ? [] : [`NOT CITABLE — ${caveats.join("; ")}`]),
     "若 runtime 未持久化 promotion_gate.json，则 PBO / DSR / SPA 视为未提供证据，不得标记 production eligible。",
     "缺少逐笔 signal reason、factor contribution 或 cashAfter 的历史实验保持 unavailable，不从结果反推原因。",
     "只有 daily return、没有 minute fill price/quantity 的 T+1 历史记录必须继续标记 daily-only。",
@@ -51,7 +61,9 @@ export function ReportsPage(): JSX.Element {
   const offlineReport: OfflineResearchReport = {
     title: latest?.name ?? "QuantAgent 当前量化研究状态",
     generatedAt: report.generatedAt,
-    subtitle: "基于持久化 runtime artifact 的离线研究报告。缺失证据保持缺失，不构成投资建议。",
+    subtitle: citable
+      ? "基于持久化 runtime artifact 的离线研究报告。缺失证据保持缺失，不构成投资建议。"
+      : `不可引用（NOT CITABLE）：${caveats.join("；")}。以下数字仅作审计线索，不是业绩。`,
     sections: [
       {
         title: "收益与回撤",
@@ -71,8 +83,8 @@ export function ReportsPage(): JSX.Element {
           ["单票最大亏损", formatNumber(risk.data?.data.maxSingleStockLoss)],
           ["单日最大亏损", formatPercent(risk.data?.data.maxDailyLoss)],
           ["连续亏损天数", String(risk.data?.data.consecutiveLossDays ?? "—")],
-          ["流动性风险", formatPercent(risk.data?.data.liquidityRisk)],
-          ["跌停风险", formatPercent(risk.data?.data.limitDownRisk)],
+          ["流动性事件占比", formatPercent(risk.data?.data.liquidityRisk)],
+          ["跌停事件占比", formatPercent(risk.data?.data.limitDownRisk)],
         ],
       },
       {
@@ -117,6 +129,7 @@ export function ReportsPage(): JSX.Element {
       <section className="report-grid">
         <Panel title="策略逻辑摘要" eyebrow="Strategy Summary">
           <ReportParagraph icon={TrendUp} title="收益与执行">
+            {citable ? null : <strong>不可引用：{caveats.join("；")}。</strong>}
             当前主回测总收益为 {formatPercent(latest?.totalReturn)}，年化收益 {formatPercent(latest?.annualReturn)}，
             Sharpe {formatNumber(latest?.sharpe)}，最大回撤 {formatPercent(latest?.maxDrawdown)}。
             指标只来自已识别 artifact；收盘信号的合规执行口径必须至少为 T+1。
@@ -154,8 +167,8 @@ export function ReportsPage(): JSX.Element {
             <li><strong>单票最大亏损</strong><span>{formatNumber(risk.data?.data.maxSingleStockLoss)}</span></li>
             <li><strong>单日最大亏损</strong><span>{formatPercent(risk.data?.data.maxDailyLoss)}</span></li>
             <li><strong>连续亏损天数</strong><span>{risk.data?.data.consecutiveLossDays ?? "暂无"}</span></li>
-            <li><strong>流动性风险</strong><span>{formatPercent(risk.data?.data.liquidityRisk)}</span></li>
-            <li><strong>跌停风险</strong><span>{formatPercent(risk.data?.data.limitDownRisk)}</span></li>
+            <li><strong>流动性事件占比</strong><span>{formatPercent(risk.data?.data.liquidityRisk)}</span></li>
+            <li><strong>跌停事件占比</strong><span>{formatPercent(risk.data?.data.limitDownRisk)}</span></li>
           </ul>
         </Panel>
 

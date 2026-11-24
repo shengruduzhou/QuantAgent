@@ -32,6 +32,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { mutableTemplate, type JobLaunchPayload } from "../domain/jobTemplates";
 import { useApi } from "../hooks/useApi";
 import { formatNumber, formatPercent } from "../utils/format";
+import { verdictTone } from "../utils/verdictTone";
 import { useVNextChartPalette } from "../vnext/theme";
 import {
   ActionableState,
@@ -79,7 +80,10 @@ interface FactorCorrelation {
 type UtilityFilter = "all" | "active" | "candidate" | "rejected" | "unevaluated";
 type UtilityClass = Exclude<UtilityFilter, "all">;
 type FactorView = "hypothesis" | "formula" | "validation" | "pipeline" | "correlation" | "lineage";
-type PipelineState = "passed" | "failed" | "pending" | "unavailable";
+// "recorded" = the artifact or declaration exists but no pass criterion was
+// applied to it. Only a gate that judged something may say "passed": round-29
+// R6 found "计算与覆盖率 PASSED" meaning only that a code path existed.
+type PipelineState = "passed" | "recorded" | "failed" | "pending" | "unavailable";
 
 const UTILITY_LABELS: Record<UtilityFilter, string> = {
   all: "全部",
@@ -420,7 +424,7 @@ export function FactorCenterPage(): JSX.Element {
               {latestReview ? <div className={`latest-review review-${latestReview.action}`}><span>{latestReview.action.toUpperCase()} · {latestReview.createdAt.slice(0, 16)}</span><p>{latestReview.note}</p></div> : null}
               <textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="记录证据、差异、风险与复核结论…" aria-label="人工复核说明" />
               <div className="factor-review-actions">
-                <button type="button" disabled={reviewBusy} onClick={() => void submitReview("approve")}><CheckCircle size={13} />研究通过</button>
+                <button type="button" disabled={reviewBusy || !hasIcEvidence(metrics)} title={hasIcEvidence(metrics) ? undefined : "没有 IC 评估证据，不能记为研究通过；先运行因子评估"} onClick={() => void submitReview("approve")}><CheckCircle size={13} />研究通过</button>
                 <button type="button" disabled={reviewBusy} onClick={() => void submitReview("revise")}><ArrowClockwise size={13} />要求修订</button>
                 <button type="button" disabled={reviewBusy} onClick={() => void submitReview("reject")}><X size={13} />驳回</button>
               </div>
@@ -468,10 +472,10 @@ function HypothesisView({ factor, metrics }: { factor: Factor; metrics?: FactorB
     <section className="factor-hypothesis-copy"><span>ECONOMIC HYPOTHESIS</span><h3>{factor.description ?? "尚未持久化人工研究假设。"}</h3><p>方向：{factor.direction} · Horizon：{factor.horizonDays ? `${factor.horizonDays}D` : "未声明"} · 频率：{factor.frequency ?? "未声明"}</p></section>
     <section className="factor-equation"><Code size={18} /><code>{factor.formula ?? "公式不可提取；请从代码位置与输入字段继续审计。"}</code></section>
     <div className="factor-evidence-grid">
-      <EvidenceCard label="输入字段" value={factor.requiredColumns.join(", ") || "未声明"} state={factor.requiredColumns.length ? "passed" : "pending"} />
-      <EvidenceCard label="PIT" value={factor.pitSafe === true ? "通过声明" : factor.pitSafe === false ? "未通过" : "待审计"} state={factor.pitSafe === true ? "passed" : factor.pitSafe === false ? "failed" : "pending"} />
-      <EvidenceCard label="验证结论" value={metrics?.verdict ?? factor.lifecycle ?? "待评估"} state={metrics?.verdict ? "passed" : "pending"} />
-      <EvidenceCard label="来源" value={factor.sourceKind} state={factor.sourceKind === "synthesized" ? "pending" : "passed"} />
+      <EvidenceCard label="输入字段" value={factor.requiredColumns.join(", ") || "未声明"} state={factor.requiredColumns.length ? "recorded" : "pending"} />
+      <EvidenceCard label="PIT" value={factor.pitSafe === true ? "通过声明" : factor.pitSafe === false ? "未通过" : "待审计"} state={factor.pitSafe === true ? "recorded" : factor.pitSafe === false ? "failed" : "pending"} />
+      <EvidenceCard label="验证结论" value={metrics?.verdict ?? factor.lifecycle ?? "待评估"} state={verdictState(metrics?.verdict)} />
+      <EvidenceCard label="来源" value={factor.sourceKind} state={factor.sourceKind === "synthesized" ? "pending" : "recorded"} />
     </div>
   </div>;
 }
@@ -499,7 +503,7 @@ function ValidationView({ metrics, loading, icOption, decayOption }: { metrics?:
     <div className="factor-validation-grid">
       <WorkbenchPanel eyebrow="SOURCE-BACKED SERIES" title="IC / RankIC 时间序列">{metrics?.icSeries.length || metrics?.rankIcSeries.length ? <EChart option={icOption} className="factor-chart" /> : <ActionableState title="没有独立 IC 序列" detail="先运行 factor judgment / discovery evaluation，再从对应 artifact 读取。" icon={ChartLineUp} />}</WorkbenchPanel>
       <WorkbenchPanel eyebrow="HORIZON DECAY" title="衰减曲线">{metrics?.decay.length ? <EChart option={decayOption} className="factor-chart" /> : <ActionableState title="没有衰减评估" detail="至少需要两个持有期的 source-backed IC 指标。" icon={ChartLineUp} />}</WorkbenchPanel>
-      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={typeof value !== "number" || Number.isNaN(value) ? "unavailable" : value >= 0 ? "passed" : "failed"} />)}</div></WorkbenchPanel>
+      <WorkbenchPanel eyebrow="REGIME ROBUSTNESS" title="市场环境稳健性"><div className="regime-evidence">{Object.entries(metrics?.regimeIc ?? {}).map(([name, value]) => <EvidenceCard key={name} label={name} value={formatNumber(value, 4)} state={typeof value !== "number" || Number.isNaN(value) ? "unavailable" : "recorded"} />)}</div></WorkbenchPanel>
       <WorkbenchPanel eyebrow="ARTIFACT CONTRACT" title="独立验证能力"><div className="factor-availability">{Object.entries(metrics?.availability ?? {}).map(([name, available]) => <div key={name}><span>{name}</span><StatusBadge status={available ? "ready" : "unavailable"} label={available ? "可用" : "缺失"} /></div>)}</div><TruthNotice tone="warning">没有独立 trade / signal artifact 时，不复用多因子买卖点。</TruthNotice></WorkbenchPanel>
     </div>
   </div>;
@@ -510,16 +514,16 @@ interface PipelineStage { id: string; title: string; detail: string; evidence: s
 function buildWorkflow(factor?: Factor, metrics?: FactorBacktest, review?: FactorReview): PipelineStage[] {
   const hasRegime = Object.values(metrics?.regimeIc ?? {}).some((value) => value !== null && value !== undefined);
   const definitions: Array<[string, string, PipelineState]> = [
-    ["evidence", "PROPOSE", factor?.description ? "passed" : "pending"],
-    ["formula", "IMPLEMENT", factor?.formula ? "passed" : "pending"],
-    ["schema", "IMPLEMENT", factor?.requiredColumns.length ? "passed" : "pending"],
-    ["pit", "VALIDATE", factor?.pitSafe === true ? "passed" : factor?.pitSafe === false ? "failed" : "pending"],
-    ["compute", "VALIDATE", factor?.codeLocation || factor?.sourceKind === "synthesized" ? "passed" : "pending"],
-    ["ic", "EVALUATE", metrics?.ic !== null && metrics?.ic !== undefined ? "passed" : "unavailable"],
-    ["decay", "EVALUATE", metrics?.decay.length ? "passed" : "unavailable"],
+    ["evidence", "PROPOSE", factor?.description ? "recorded" : "pending"],
+    ["formula", "IMPLEMENT", factor?.formula ? "recorded" : "pending"],
+    ["schema", "IMPLEMENT", factor?.requiredColumns.length ? "recorded" : "pending"],
+    ["pit", "VALIDATE", factor?.pitSafe === true ? "recorded" : factor?.pitSafe === false ? "failed" : "pending"],
+    ["compute", "VALIDATE", typeof metrics?.coverage === "number" ? "recorded" : "pending"],
+    ["ic", "EVALUATE", hasIcEvidence(metrics) ? "recorded" : "unavailable"],
+    ["decay", "EVALUATE", metrics?.decay.length ? "recorded" : "unavailable"],
     ["orthogonal", "EVALUATE", "unavailable"],
-    ["regime", "EVALUATE", hasRegime ? "passed" : "unavailable"],
-    ["backtest", "IMPACT", metrics?.availability?.summaryMetrics ? "passed" : "unavailable"],
+    ["regime", "EVALUATE", hasRegime ? "recorded" : "unavailable"],
+    ["backtest", "IMPACT", metrics?.availability?.summaryMetrics ? "recorded" : "unavailable"],
     ["review", "HUMAN GATE", review ? (review.action === "approve" ? "passed" : review.action === "reject" ? "failed" : "pending") : "pending"],
     ["registry", "PROMOTE", factor && isActiveFactor(factor) ? "passed" : "pending"],
   ];
@@ -627,11 +631,29 @@ function UsageFlag({ label, active }: { label: string; active?: boolean | null }
 }
 
 function pipelineStateLabel(state: PipelineState): string {
-  return state === "passed" ? "PASSED" : state === "failed" ? "FAILED" : state === "pending" ? "PENDING" : "NO ARTIFACT";
+  return state === "passed" ? "PASSED" : state === "recorded" ? "RECORDED · 未判定" : state === "failed" ? "FAILED" : state === "pending" ? "PENDING" : "NO ARTIFACT";
+}
+
+// A verdict string is only a pass when it says so; "rejected" used to render
+// as PASSED because any non-empty verdict did.
+export function verdictState(verdict?: string | null): PipelineState {
+  const text = (verdict ?? "").trim();
+  if (!text) return "pending";
+  // Negation-aware: "not_passed" / "no_pass" used to match "pass" and render
+  // PASSED (Round 31 F15). The shared classifier checks negation first.
+  const normalised = text.toLowerCase().replace(/accept(ed)?|approved?/g, "passed");
+  const tone = verdictTone(normalised);
+  if (tone === "danger" || /reject|invalid|drop/.test(normalised)) return "failed";
+  if (tone === "success") return "passed";
+  return "recorded";
+}
+
+function hasIcEvidence(metrics?: FactorBacktest): boolean {
+  return [metrics?.ic, metrics?.rankIc].some((value) => typeof value === "number" && Number.isFinite(value));
 }
 
 function pipelineStateIcon(state: PipelineState): JSX.Element {
-  return state === "passed" ? <CheckCircle size={18} weight="fill" /> : state === "failed" ? <X size={18} /> : state === "pending" ? <ArrowClockwise size={18} /> : <WarningCircle size={18} />;
+  return state === "passed" ? <CheckCircle size={18} weight="fill" /> : state === "recorded" ? <CheckCircle size={18} /> : state === "failed" ? <X size={18} /> : state === "pending" ? <ArrowClockwise size={18} /> : <WarningCircle size={18} />;
 }
 
 function toneFromMetric(value?: number | null): WorkbenchTone {

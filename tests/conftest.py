@@ -48,3 +48,27 @@ def _disarm_ambient_environment() -> None:
 # Runs at conftest import, before collection — a fixture would be too late,
 # because importing a test module can already trigger the dotenv load.
 _disarm_ambient_environment()
+
+
+def _isolate_runtime_home() -> None:
+    """Point ``QUANTAGENT_HOME`` at a throwaway directory for the whole run.
+
+    Without this, any code path that resolves the default storage layout
+    (``quant_paths()`` / ``ApiSettings`` defaults) writes into the operator's
+    real ``runtime/``: Round 31 found ``auto-train-v7`` tests leaving a 14-row
+    synthetic ``runtime/data/v7/labels.parquet`` that the Strategy Workbench
+    then offered as its default labels, and importing ``services.quant_api.app``
+    taking the real paper writer lock. Tests that genuinely read certified
+    runtime artifacts reference them by explicit path, which this does not
+    change. ``QUANTAGENT_TEST_USE_REAL_RUNTIME=1`` opts out.
+    """
+    if os.environ.get("QUANTAGENT_TEST_USE_REAL_RUNTIME") == "1":
+        return
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="quantagent-test-home-")
+    os.environ["QUANTAGENT_HOME"] = home
+    os.environ.pop("QUANTAGENT_DATA_ROOT", None)
+
+
+_isolate_runtime_home()
