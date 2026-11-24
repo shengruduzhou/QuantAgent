@@ -83,7 +83,7 @@ for i in $(seq 1 "$MAX_ITERS"); do
   # staging kept -> next iteration retries only the failed symbols.
   if [ $rc -eq 75 ]; then
     echo "FETCH_INCOMPLETE rc=75 -- retrying failed symbols next iteration"
-    sleep 60
+    sleep $((60 * i))   # escalating back-off lets vendor throttling clear
     continue
   fi
   if [ $rc -ne 0 ] && [ $rc -ne 124 ]; then
@@ -98,6 +98,8 @@ read -r pmax target state <<< "$(target_and_state)"
 echo "--- post-loop $(date -Is): panel_max=$pmax target=$target state=$state"
 if [ "$state" != "CURRENT" ]; then
   echo "NOT_CONVERGED after $MAX_ITERS iters (panel_max=$pmax target=$target)"
+  echo "last FETCH_INCOMPLETE report (unfetched symbols block the merge; fix or register an evidenced exclusion):"
+  grep FETCH_INCOMPLETE_RETRY "$LOG" | tail -1
   echo "=== catchup supervisor end-incomplete $(date -Is) ==="
   exit 4
 fi

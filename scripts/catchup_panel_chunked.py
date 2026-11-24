@@ -176,6 +176,8 @@ def main() -> int:
     if lock is None:
         print(json.dumps({"appended": 0, "note": "another catch-up holds the staging lock; skipped"}))
         return 0
+    for orphan in PANEL.parent.glob(f".{PANEL.name}.tmp-*"):
+        orphan.unlink()  # left by a SIGKILL during a previous atomic write; we hold the lock
 
     panel = pd.read_parquet(PANEL)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
