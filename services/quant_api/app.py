@@ -79,4 +79,14 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def __getattr__(name: str):
+    # Lazily build the default application on first access (``uvicorn
+    # services.quant_api.app:app`` resolves it with getattr). Building it at
+    # import time made every ``from services.quant_api.app import create_app``
+    # construct a container on the default runtime, acquire the paper writer
+    # lock and rewrite the job store (Round 31 F8).
+    if name == "app":
+        application = create_app()
+        globals()["app"] = application
+        return application
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
