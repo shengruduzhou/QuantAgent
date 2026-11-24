@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from quantagent.quant_math.performance import newey_west_t_stat
+from quantagent.quant_math.performance import newey_west_t_stat, nonoverlapping_cohort_t_stat
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,10 @@ class ICSummary:
     t_stat: float
     rank_t_stat: float
     positive_ratio: float
+    # Non-overlapping-cohort t-stats (ROADMAP P1-6, GOVERNANCE R2: screen on
+    # |t| >= 3).  NaN when the label horizon is unknown.
+    nonoverlap_t_stat: float = np.nan
+    rank_nonoverlap_t_stat: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,11 @@ def information_coefficient(
     t-stat is not inflated by the label's own construction.  When the horizon
     cannot be determined the estimator falls back to its sample-size bandwidth
     and a warning is emitted -- the t-stat is then NOT overlap-corrected.
+
+    ``summary.(rank_)nonoverlap_t_stat`` is the average of the ``h``
+    non-overlapping cohort t-stats (``nonoverlapping_cohort_t_stat``); screens
+    use it with |t| >= 3 (GOVERNANCE R2).  The HAC t is kept for continuity but
+    is oversized for h > 1 (measured: ~12% rejections at nominal 5% for h=20).
     """
     horizon = horizon_days if horizon_days is not None else infer_horizon_days(return_column)
     if horizon is None:
@@ -161,6 +170,8 @@ def information_coefficient(
         t_stat=newey_west_t_stat(ic, horizon_days=horizon),
         rank_t_stat=newey_west_t_stat(rank_ic, horizon_days=horizon),
         positive_ratio=float((rank_ic.dropna() > 0).mean()) if rank_ic.dropna().shape[0] else np.nan,
+        nonoverlap_t_stat=_nonoverlap_t(ic, horizon),
+        rank_nonoverlap_t_stat=_nonoverlap_t(rank_ic, horizon),
     )
     return ICResult(ic_by_date=ic, rank_ic_by_date=rank_ic, summary=summary)
 
@@ -447,6 +458,13 @@ def _corr_by_date(
         index=pd.Index([pd.Timestamp(key) for key in series.index]),
         dtype=float,
     )
+
+
+def _nonoverlap_t(series: pd.Series, horizon: int | None) -> float:
+    # Cohorts need the session order; undefined dates stay as NaN placeholders.
+    if horizon is None or series.empty:
+        return np.nan
+    return nonoverlapping_cohort_t_stat(series.sort_index(), horizon)
 
 
 def _safe_mean(series: pd.Series) -> float:
