@@ -41,6 +41,7 @@ from quantagent.backtest.ashare_execution_simulator import (
     AShareExecutionSimulationResult,
     simulate_ashare_target_weights,
 )
+from quantagent.quant_math.performance import max_drawdown, sharpe_ratio
 from quantagent.backtest.quarantine import (
     FORENSICS_TRUST_CLASS,
     check_window,
@@ -354,15 +355,13 @@ def _compute_metrics(
     ann_return = float((1.0 + total_return) ** (1.0 / elapsed_years) - 1.0) if elapsed_years > 0 and total_return > -1.0 else -1.0
     if len(daily_ret) >= 2:
         std = float(daily_ret.std(ddof=1))
-        sharpe = float(daily_ret.mean() / std * (obs_per_year ** 0.5)) if std > 1e-12 else 0.0
+        sharpe = sharpe_ratio(daily_ret, periods_per_year=obs_per_year) if std > 1e-12 else 0.0
         vol = float(std * (obs_per_year ** 0.5))
     else:
         sharpe = 0.0
         vol = 0.0
     nav_curve = np.concatenate(([base_nav], nav_clean.to_numpy(dtype=float)))
-    peaks = np.maximum.accumulate(nav_curve)
-    drawdowns = nav_curve / peaks - 1.0
-    max_dd = float(abs(drawdowns.min())) if len(drawdowns) else 0.0
+    max_dd = abs(max_drawdown(pd.Series(nav_curve)))
     # `ann_return * 10` is a fabricated stand-in: with no drawdown Calmar is
     # undefined (division by zero), not ten times the return. quant_math's
     # own implementation returns nan here, and republishing a made-up finite

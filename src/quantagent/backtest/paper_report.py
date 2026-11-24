@@ -11,6 +11,8 @@ import pandas as pd
 from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationResult
 from quantagent.execution.broker_base import OrderSide
 from quantagent.execution.cost_model import AShareCostModel
+from quantagent.quant_math.performance import sharpe_ratio
+from quantagent.quant_math.risk_metrics import drawdown
 
 
 @dataclass(frozen=True)
@@ -163,7 +165,7 @@ def _pnl_frame(
     frame.columns = ["trade_date", "nav"]
     frame["daily_pnl"] = frame["nav"].diff().fillna(frame["nav"] - float(initial_cash))
     frame["daily_return"] = frame["nav"].pct_change().fillna(frame["nav"] / float(initial_cash) - 1.0)
-    frame["drawdown"] = frame["nav"] / frame["nav"].cummax() - 1.0
+    frame["drawdown"] = drawdown(frame["nav"])
     if market_panel is not None and benchmark_symbol:
         bench = market_panel.copy()
         bench["trade_date"] = pd.to_datetime(bench["trade_date"], errors="coerce")
@@ -294,7 +296,13 @@ def _summary(
     )
     daily_std = float(daily_returns.std(ddof=0)) if len(daily_returns) else 0.0
     annualized_volatility = float(daily_std * (observations_per_year**0.5))
-    sharpe = float(daily_returns.mean() / daily_std * (observations_per_year**0.5)) if daily_std > 0 else None
+    # ddof=0 (population std) is this report's historic convention; governed
+    # numbers use ddof=1 -- see ARCHITECTURE.md single-source table.
+    sharpe = (
+        sharpe_ratio(daily_returns, periods_per_year=observations_per_year, ddof=0)
+        if daily_std > 0
+        else None
+    )
     benchmark_return = None
     benchmark_max_drawdown = None
     information_ratio = None

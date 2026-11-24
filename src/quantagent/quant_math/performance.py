@@ -7,11 +7,24 @@ from statistics import NormalDist
 from quantagent.quant_math.risk_metrics import drawdown
 
 
-def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
+def sharpe_ratio(
+    returns: pd.Series,
+    risk_free_rate: float = 0.0,
+    periods_per_year: float = 252,
+    *,
+    ddof: int = 1,
+) -> float:
+    """Annualised Sharpe: ``sqrt(periods_per_year) * mean(excess) / std(excess)``.
+
+    ``periods_per_year`` may be fractional (an observed observation rate).
+    ``ddof=1`` is the sample standard deviation used by every governed number;
+    ``ddof=0`` exists only so the paper report keeps its historic population
+    convention explicitly rather than through a private copy.
+    """
     excess = returns.dropna() - risk_free_rate / periods_per_year
-    if excess.empty or excess.std(ddof=1) == 0:
+    if excess.empty or excess.std(ddof=ddof) == 0:
         return np.nan
-    return float(np.sqrt(periods_per_year) * excess.mean() / excess.std(ddof=1))
+    return float(np.sqrt(periods_per_year) * excess.mean() / excess.std(ddof=ddof))
 
 
 def probabilistic_sharpe_ratio(

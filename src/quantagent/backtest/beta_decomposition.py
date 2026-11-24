@@ -20,6 +20,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quantagent.quant_math.performance import max_drawdown as _max_drawdown
+from quantagent.quant_math.performance import sharpe_ratio
+
 ANN = 244
 
 
@@ -33,14 +36,11 @@ def sharpe(daily: pd.Series, rf: float = 0.0) -> float:
     d = daily.dropna()
     if len(d) < 2 or d.std() < 1e-12:
         return float("nan")
-    return float((d.mean() - rf / ANN) / d.std() * np.sqrt(ANN))
+    return sharpe_ratio(d, risk_free_rate=rf, periods_per_year=ANN)
 
 
 def max_drawdown(nav: pd.Series) -> float:
-    nav = nav.dropna()
-    if nav.empty:
-        return float("nan")
-    return float(abs((nav / nav.cummax() - 1).min()))
+    return abs(_max_drawdown(nav))
 
 
 def beta_alpha(strat: pd.Series, bench: pd.Series, rf: float = 0.0) -> dict:

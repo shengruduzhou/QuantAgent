@@ -27,6 +27,7 @@ from quantagent.domain.orders import (
     Side,
     Signal,
 )
+from quantagent.quant_math.performance import max_drawdown, sharpe_ratio
 from quantagent.quant_math.transaction_cost import CostModelConfig
 
 
@@ -796,12 +797,10 @@ def _performance_report(
         return {}
     ann_ret = (nav.iloc[-1] / nav.iloc[0]) ** (252 / max(len(nav), 1)) - 1.0 if nav.iloc[0] > 0 else 0.0
     vol = float(returns.std(ddof=1) * np.sqrt(252)) if len(returns) > 1 else 0.0
-    sharpe = float((returns.mean() * 252) / vol) if vol > 1e-12 else 0.0
+    sharpe = sharpe_ratio(returns, periods_per_year=252) if vol > 1e-12 else 0.0
     downside = returns[returns < 0].std(ddof=1) * np.sqrt(252) if len(returns[returns < 0]) > 1 else 0.0
     sortino = float((returns.mean() * 252) / downside) if downside and downside > 1e-12 else 0.0
-    peak = nav.cummax()
-    drawdown = nav / peak - 1.0
-    max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
+    max_dd = max_drawdown(nav)
     calmar = float(ann_ret / abs(max_dd)) if max_dd < -1e-12 else 0.0
     traded_notional = 0.0
     cost = 0.0
