@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git stash*)"
+    ],
+    "ask": [
+      "Edit(configs/quarantined_windows.json)",
+      "Write(configs/quarantined_windows.json)",
+      "Bash(crontab *)"
+    ]
+  }
+}

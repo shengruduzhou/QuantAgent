@@ -58,18 +58,21 @@ jobs:
       SMOKE_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '21' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/ci-constraints.txt
 
       - name: Install public-data smoke runtime
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -e . "baostock>=0.9.3"
+          python -m pip install --upgrade pip wheel setuptools -c requirements/ci-constraints.txt
+          python -m pip install -e . "baostock==0.9.4" -c requirements/ci-constraints.txt
 
       - name: Pull raw daily, 5m, 60m and independent market calendar
         shell: bash
@@ -146,7 +149,7 @@ jobs:
 
       - name: Upload market-data smoke manifests
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: market-data-smoke-${{ github.run_id }}
           path: |
@@ -160,18 +163,21 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/ci-constraints.txt
 
       - name: Install tested AKShare compatibility version
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -e . "akshare==1.18.84"
+          python -m pip install --upgrade pip wheel setuptools -c requirements/ci-constraints.txt
+          python -m pip install -e . "akshare==1.18.84" -c requirements/ci-constraints.txt
           python - <<'PY'
           import akshare as ak
           print(f"AKShare runtime version: {ak.__version__}")
@@ -245,7 +251,7 @@ jobs:
 
       - name: Upload AKShare source diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: akshare-source-smoke-${{ github.run_id }}
           path: |

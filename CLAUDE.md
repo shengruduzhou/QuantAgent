@@ -6,6 +6,17 @@ Read `AGENTS.md` first and follow every repository safety/PIT rule. Then read:
   trust classes, acceptance rules) and `docs/ROADMAP.md` (current priorities)
 - `docs/quant_foundations_external_sources.md`
 
+## Organization / 多 agent 组织
+
+Work is done by a persistent agent organization (versioned in `.claude/`):
+department agents in `.claude/agents/` (quant-researcher, data-engineer,
+software-engineer, product-ux; read-only auditors math-stat-auditor and
+code-security-auditor with veto; qa-release), the cycle protocol in the
+`quantagent-cycle` skill, the merge checklist in `quantagent-release-gate`, and
+path-scoped rules in `.claude/rules/`. The lead session coordinates and
+integrates; no agent approves its own work. Resume from `docs/ROADMAP.md` and the
+latest Cycle entry in `docs/audits/HISTORY.md`.
+
 Write new findings into the existing documents (see AGENTS.md "文档只有一套");
 do not create per-round audit directories or root-level reports.
 

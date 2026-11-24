@@ -35,7 +35,14 @@ reports/
 !/reports/v6/v6_readiness_report.md
 !/reports/v6/v6_readiness_report.json
 
-.claude/
+# Local Claude Code state stays untracked; the agent organization is versioned.
+.claude/*
+!.claude/agents/
+!.claude/rules/
+!.claude/settings.json
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/quantagent-*/
 logs/
 AI_quant/
 AI_quant_runtime/

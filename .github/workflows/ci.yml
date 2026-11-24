@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -45,7 +45,7 @@ jobs:
           python -m pytest tests/ -q --junitxml=pytest-results.xml 2>&1 | tee pytest.log
       - name: Upload pytest diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: pytest-diagnostics
           path: |
@@ -60,11 +60,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -89,11 +89,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: false
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -120,7 +120,7 @@ jobs:
           echo "QMT live probe: NOT_RUN_PLATFORM (hosted runner is Linux; QMT/MiniQMT requires Windows + broker entitlement)" | tee qmt-platform-verdict.txt
       - name: Upload QMT platform verdict
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: qmt-platform-verdict
           path: qmt-platform-verdict.txt
@@ -134,11 +134,11 @@ jobs:
         working-directory: apps/quant-ui
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: false
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.12.0"
           cache: "npm"
@@ -152,7 +152,7 @@ jobs:
           npm run typecheck 2>&1 | tee typecheck.log
       - name: Upload TypeScript diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: frontend-typecheck-diagnostics
           path: apps/quant-ui/typecheck.log
@@ -165,7 +165,7 @@ jobs:
           npm test -- --run src/components/MonitorTable.test.tsx 2>&1 | tee monitor-table-test.log
       - name: Upload MonitorTable diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: monitor-table-test-diagnostics
           path: apps/quant-ui/monitor-table-test.log
@@ -186,7 +186,7 @@ jobs:
             2>&1 | tee workstation-ux-test.log
       - name: Upload workstation UX diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: workstation-ux-test-diagnostics
           path: apps/quant-ui/workstation-ux-test.log
@@ -199,7 +199,7 @@ jobs:
           npm test -- --run 2>&1 | tee frontend-test.log
       - name: Upload frontend test diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: frontend-test-diagnostics
           path: apps/quant-ui/frontend-test.log
@@ -212,7 +212,7 @@ jobs:
           npm run build:vite 2>&1 | tee frontend-build.log
       - name: Upload frontend build diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: frontend-build-diagnostics
           path: apps/quant-ui/frontend-build.log
