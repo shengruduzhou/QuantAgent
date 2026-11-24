@@ -186,6 +186,22 @@ def load_announcements(cache_dir: str | Path):
     return frame
 
 
+def _html_text(content: bytes) -> str:
+    """Visible text of an (often GB2312) cninfo HTML announcement."""
+    import re
+
+    head = content[:2048].decode("ascii", "ignore").lower()
+    match = re.search(r"charset\s*=\s*[\"']?([a-z0-9_-]+)", head)
+    charset = (match.group(1) if match else "utf-8").lower()
+    if charset in {"gb2312", "gbk", "gb_2312-80"}:
+        charset = "gb18030"                       # superset; avoids lossy decoding
+    html = content.decode(charset, "replace")
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?s)<[^>]+>", " ", html)
+    html = re.sub(r"&nbsp;|&#160;", " ", html)
+    return re.sub(r"[ \t\r\f\v]+", " ", html)
+
+
 def cmd_pdf(args: argparse.Namespace) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from quantagent.data.ashare import st_announcements as sa
@@ -195,6 +211,10 @@ def cmd_pdf(args: argparse.Namespace) -> int:
     wanted = frame[frame["event"].isin(sa.STATE_EVENTS)]
     if args.plates:
         wanted = wanted[wanted["plate"].isin(args.plates.split(","))]
+    if args.shard:
+        index, count = (int(x) for x in args.shard.split("/"))
+        ids = wanted["announcementId"].astype(str)
+        wanted = wanted[ids.map(lambda a: int(hashlib.md5(a.encode()).hexdigest(), 16) % count) == index]
     out = Path(args.cache) / "pdf_text"
     out.mkdir(parents=True, exist_ok=True)
     import io
@@ -219,7 +239,7 @@ def cmd_pdf(args: argparse.Namespace) -> int:
                 record["text"] = "\n".join((page.extract_text() or "")
                                            for page in reader.pages[:6])
             else:
-                record["text"] = resp.content.decode("utf-8", "replace")
+                record["text"] = _html_text(resp.content)
             fetched += 1
         except Exception as exc:  # noqa: BLE001 - recorded, not hidden
             record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -320,7 +340,17 @@ def load_sse_bulletins(cache_dir: str | Path):
 # ---------------------------------------------------------------------------
 
 REPO = Path(__file__).resolve().parents[1]
-U0 = REPO / "runtime/data/u0"
+
+
+def _u0_root() -> Path:
+    """``<data_root>/u0`` via ``quant_paths`` (honours ``QUANTAGENT_HOME``)."""
+    sys.path.insert(0, str(REPO / "src"))
+    from quantagent.config.paths import quant_paths
+
+    return quant_paths().data_root / "u0"
+
+
+U0 = _u0_root()
 SUFFIX = {"sh": ".SH", "sz": ".SZ", "bj": ".BJ"}
 CRAWL_START = "2001-01-01"
 WINDOW = ("2016-01-04", "2026-07-24")            # ENG_ST30 §3
@@ -680,8 +710,15 @@ def cmd_publish(args: argparse.Namespace) -> int:
     v2 = pd.concat([szse_eps.assign(method="exchange_register"),
                     recon.assign(method="cninfo_announcements_ENG_ST30")], ignore_index=True)
 
-    crawl_as_of = pd.Timestamp(args.as_of) if args.as_of else pd.Timestamp(
-        dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date())
+    if args.as_of:
+        crawl_as_of = pd.Timestamp(args.as_of)
+    else:
+        # a session's state is settled by its 09:25 pre-open; before that, the
+        # register vouches only for the previous day
+        cst = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        crawl_as_of = pd.Timestamp(cst.date())
+        if (cst.hour, cst.minute) < (9, 25):
+            crawl_as_of -= pd.Timedelta(days=1)
     as_of = min(crawl_as_of, szse_as_of) if accepted["SSE"] or accepted["BSE"] else szse_as_of
     master = pd.read_parquet(U0 / "security_master.parquet")
     master = master[master["security_type"].eq("A_share")]
@@ -704,7 +741,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
         "checks": {"C1": chk["C1"], "C2": {k: v for k, v in chk["C2"].items() if not k.endswith("detail")},
                    "C3": {"sse_pass": chk["C3"]["sse_pass"], "bse_pass": chk["C3"]["bse_pass"]}},
         "as_of": str(as_of.date()), "szse_register": str(szse_path), "szse_register_as_of": str(szse_as_of.date()),
-        "pit_evidence": {"path": "runtime/data/u0/pit/st_pit_evidence.parquet",
+        "pit_evidence": {"path": str(out / "st_pit_evidence.parquet"),
                          "coverage_start": PIT_COVERAGE_START, "rows": int(len(evidence)),
                          "symbols": int(evidence["symbol"].nunique()),
                          "contract": "quantagent.data.providers.st_pit (interval mode, end inclusive)"},
@@ -747,6 +784,7 @@ def main() -> int:
     pdf = sub.add_parser("pdf")
     pdf.add_argument("--cache", required=True)
     pdf.add_argument("--plates", default="")
+    pdf.add_argument("--shard", default="", help="i/n: fetch only this shard (parallel workers)")
     pdf.add_argument("--sleep", type=float, default=1.0)
     pdf.set_defaults(func=cmd_pdf)
     build = sub.add_parser("build")

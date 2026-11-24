@@ -36,6 +36,8 @@ data = [
   # source/schema/unit audit before this pin moves.
   "akshare==1.18.84",
   "tushare",
+  # ENG_ST30 risk-warning register: text of cninfo announcement PDFs.
+  "pypdf>=5,<7",
   # Real public A-share daily/minute history provider used by the research-only
   # factor cycle. Production certification remains governed by router integrity;
   # installing a package is not evidence of PIT/production quality.

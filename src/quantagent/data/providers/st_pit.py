@@ -14,12 +14,34 @@ A-share pre-open boundary (09:25 Asia/Shanghai) for that trade date.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
+
+
+HISTORICAL_ST_ENV = "QUANTAGENT_HISTORICAL_ST_PATH"
+
+
+def default_historical_st_path() -> str | None:
+    """``$QUANTAGENT_HISTORICAL_ST_PATH``, else the published ENG_ST30 table.
+
+    The published table (``<data_root>/u0/pit/st_pit_evidence.parquet``, written
+    by ``scripts/u0_st_announcements.py publish``) contains only exchanges that
+    passed the pre-registered acceptance; anything else has no rows and is
+    refused by :func:`attach_historical_st`. Returns ``None`` when neither
+    exists, so callers keep failing closed.
+    """
+    env = os.environ.get(HISTORICAL_ST_ENV)
+    if env:
+        return env
+    from quantagent.config.paths import quant_paths
+
+    path = quant_paths().data_root / "u0" / "pit" / "st_pit_evidence.parquet"
+    return str(path) if path.exists() else None
 
 
 class HistoricalSTCoverageError(RuntimeError):
@@ -250,7 +272,9 @@ def attach_historical_st(
 
 
 __all__ = [
+    "HISTORICAL_ST_ENV",
     "HistoricalSTCoverageError",
+    "default_historical_st_path",
     "HistoricalSTEvidence",
     "attach_historical_st",
     "load_historical_st_evidence",

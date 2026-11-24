@@ -46,12 +46,15 @@ _UNDO = r"(?:撤销|撤消|取消|解除)"
 
 #: Title fragments that make an announcement commentary rather than the event.
 _NOT_EVENT = re.compile(
-    r"可能|预计|或将|将可能|风险提示|提示性公告|进展|申请|意见|法律|律师|核查|说明|"
-    r"问询|回复|关注函|专项|自查|董事会关于|监事会|独立董事|会计师|审核|鉴证|"
-    r"报告书|摘要|更正|补充|延期|未能|暂停上市|恢复上市|终止上市|摘牌|"
-    r"情况的公告$|事项的公告$"
+    r"可能|预计|或将|将可能|风险提示|进展|申请|意见|法律|律师|核查|说明|"
+    r"问询|回复|关注函|专项|自查|监事会|独立董事|会计师|审核|鉴证|"
+    r"报告书|摘要|更正|补充|延期|未能|暂停上市|终止上市|摘牌|"
+    r"情况的公告$|事项的公告$|情形(?:已)?消除"
 )
 _DELIST_PERIOD = re.compile(r"进入退市整理期|退市整理期交易|退市整理期的公告|退市整理期首日")
+_NOT_STOCK = re.compile(r"债券|公司债|转债|优先股|票据")
+_HEDGED_CLAUSE = re.compile(
+    r"[、，,及和与暨]?(?:可能|或将|将可能|存在)[^、，,暨及的]{0,16}?" + _WARN)
 
 
 def classify_title(title: object) -> str:
@@ -65,15 +68,23 @@ def classify_title(title: object) -> str:
     text = re.sub(r"\s+", "", str(title or ""))
     if not text:
         return IGNORE
-    if _DELIST_PERIOD.search(text) and not re.search(r"可能|风险提示|进展", text):
+    if _DELIST_PERIOD.search(text) and not re.search(r"可能|进展", text) and (
+            not re.search(r"风险提示", text) or re.search(r"首日|第一次", text)):
+        # the first-day / first risk notice is published on the first session of
+        # the delisting period — the boundary itself; later reminders are not
         return DELIST_PERIOD
+    # "被实施其他风险警示、可能被实施退市风险警示": the hedged clause is commentary,
+    # the other clause is the event — drop only the hedged clause.
+    text = _HEDGED_CLAUSE.sub("", text)
+    if _NOT_STOCK.search(text) and "股票" not in text:
+        return IGNORE                          # a bond's / preferred share's warning
     if _NOT_EVENT.search(text):
         return IGNORE
     undo = re.search(_UNDO + r".{0,12}?" + _WARN, text)
     do = re.search(_DO + r".{0,12}?" + _WARN, text)
     if undo:
         rest = text[undo.end():]
-        keeps = re.search(r"(?:继续|仍|并|同时|后|暨).{0,8}?" + _DO + r".{0,10}?" + _WARN, rest) \
+        keeps = re.search(r"(?:继续|仍|并|同时|后|暨|及|和|、).{0,8}?" + _DO + r".{0,10}?" + _WARN, rest) \
             or re.search(r"变更为.{0,6}?" + _WARN, rest) \
             or re.search(r"部分", text[:undo.end() + 4])
         return TRANSITION if keeps else REVOKE
@@ -102,6 +113,10 @@ _START_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?:自|于|从)\s*" + _NUM_DATE + r"[^。；\n]{0,14}?(?:开市)?(?:时)?起[^。；\n]{0,20}?"
         r"(?:实施|实行|撤销|撤消|取消|被实施|被实行|复牌|恢复交易)")),
     ("resume_date", re.compile(r"(?:于|自)\s*" + _NUM_DATE + r"[^。；\n]{0,12}?复牌")),
+    ("delist_period_start", re.compile(
+        r"退市整理期[^。；\n]{0,16}?(?:起始日|首个交易日|第一个交易日|首日)[为是：:\s]*" + _NUM_DATE)),
+    ("delist_period_from", re.compile(
+        r"(?:自|于|从)\s*" + _NUM_DATE + r"[^。；\n]{0,10}?(?:起)?[^。；\n]{0,6}?进入退市整理期")),
 )
 
 
@@ -164,7 +179,8 @@ def resolve_effective_dates(events: pd.DataFrame, calendar: Calendar,
     out = events.copy()
     dates, bases = [], []
     texts = out["text"] if "text" in out.columns else pd.Series([None] * len(out), index=out.index)
-    for ann, text in zip(out["announcement_date"], texts):
+    kinds = out["event"] if "event" in out.columns else pd.Series([None] * len(out), index=out.index)
+    for ann, text, kind in zip(out["announcement_date"], texts, kinds):
         when, basis = extract_effective_date(text, ann)
         if when is not None:
             session = calendar.on_or_after(when)
@@ -172,9 +188,14 @@ def resolve_effective_dates(events: pd.DataFrame, calendar: Calendar,
             bases.append(f"body:{basis}")
             continue
         if fallback_sessions is not None:
-            dates.append(calendar.next_session_after(ann, fallback_sessions))
-            bases.append(f"rule:next_session+{fallback_sessions}"
-                         + ("" if text else ":no_text"))
+            # SZSE DEV calibration (ENG_ST30 §2b): implement / revoke / transition
+            # notices take effect the session after the announcement (the
+            # announcement day is a one-day suspension); the first-day notice of a
+            # delisting period is published on that first session itself.
+            n = 0 if kind == DELIST_PERIOD else fallback_sessions
+            dates.append(calendar.on_or_after(ann) if n == 0
+                         else calendar.next_session_after(ann, n))
+            bases.append(f"rule:next_session+{n}" + ("" if text else ":no_text"))
         else:
             dates.append(None)
             bases.append("unknown")
@@ -188,6 +209,58 @@ EPISODE_COLUMNS = [
     "start_announcement_date", "start_basis", "end_event_id", "end_announcement_date",
     "end_basis", "start_title", "end_title", "sec_name_at_start",
 ]
+
+
+def consolidate_delist_period(events: pd.DataFrame, *, days: int = 30) -> pd.DataFrame:
+    """One DELIST_PERIOD boundary per delisting period.
+
+    A delisting period is announced several times (the decision notice some
+    sessions ahead, then a notice on its first session). Within ``days`` of
+    each other a symbol's DELIST_PERIOD events are one boundary; the kept event
+    is the one dated from the body, else the first-day / first-reminder notice
+    (published on that session), else the latest.
+    """
+    if events.empty or "event" not in events.columns:
+        return events
+    is_dp = events["event"].eq(DELIST_PERIOD)
+    if not is_dp.any():
+        return events
+    dp = events[is_dp].sort_values(["symbol", "announcement_date"]).copy()
+    gap = dp.groupby("symbol")["announcement_date"].diff().dt.days
+    dp["_cluster"] = (gap.isna() | (gap > days)).cumsum()
+    basis = dp.get("effective_basis", pd.Series("", index=dp.index)).astype(str)
+    titles = dp.get("title", pd.Series("", index=dp.index)).astype(str)
+    dp["_rank"] = (basis.str.startswith("body:").astype(int) * 4
+                   + titles.str.contains("首日|第一次").astype(int) * 2)
+    keep = (dp.sort_values(["_cluster", "_rank", "announcement_date"])
+            .groupby("_cluster").tail(1).index)
+    return pd.concat([events[~is_dp], events.loc[keep]]).sort_index()
+
+
+def warning_kinds(title: object) -> frozenset[str]:
+    """Which warning a title implements or revokes: ``delist`` (退市风险警示,
+    *ST), ``other`` (其他风险警示 / 其他特别处理, ST) or ``generic`` (特别处理 /
+    风险警示 without a kind, as used before 2003)."""
+    text = re.sub(r"\s+", "", str(title or ""))
+    kinds = set()
+    if "退市风险警示" in text or re.search(r"退市风险[^警]{0,4}特别处理", text):
+        kinds.add("delist")
+    if re.search(r"其他风险警示|其他特别处理", text):
+        kinds.add("other")
+    return frozenset(kinds or {"generic"})
+
+
+def kinds_from_name(sec_name: object) -> frozenset[str] | None:
+    """Warning kinds a short name shows on the announcement date: ``*ST`` →
+    退市风险警示 in force, ``ST`` → only 其他风险警示; ``None`` if the name
+    carries no marker (it says nothing about which warning is in force)."""
+    name = re.sub(r"\s+", "", str(sec_name or "")).upper()
+    name = re.sub(r"^(?:G|S)(?=\*?S\s*T)", "", name)   # share-reform prefixes: G*ST, S*ST, SST
+    if name.startswith("*ST"):
+        return frozenset({"delist"})
+    if name.startswith("ST"):
+        return frozenset({"other"})
+    return None
 
 
 def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.DataFrame:
@@ -209,7 +282,7 @@ def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.
       an undated IMPLEMENT opens an UNKNOWN span until the next dated event.
     """
     records: list[dict] = []
-    frame = events[events["event"].isin(STATE_EVENTS)].copy()
+    frame = consolidate_delist_period(events[events["event"].isin(STATE_EVENTS)].copy())
     frame = frame.sort_values(["symbol", "announcement_date", "effective_date"], na_position="last")
     coverage_start = pd.Timestamp(coverage_start)
 
@@ -218,21 +291,27 @@ def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.
         last_close: pd.Timestamp | None = None
         for ev in group.itertuples():
             when = ev.effective_date if pd.notna(ev.effective_date) else None
+            kinds = warning_kinds(getattr(ev, "title", ""))
             if ev.event == IMPLEMENT or (ev.event == TRANSITION and open_ep is None):
                 if open_ep is not None:
-                    continue                                   # kind change inside an episode
+                    open_ep["kinds"] |= kinds                  # 叠加 / ST -> *ST inside an episode
+                    open_ep.setdefault("added", set()).update(kinds)
+                    continue
                 if ev.event == TRANSITION:
                     lo = last_close if last_close is not None else coverage_start
                     hi = when if when is not None else pd.Timestamp(ev.announcement_date)
                     if hi > lo:
                         records.append(_ep(symbol, lo, hi, STATE_UNKNOWN, None, ev,
                                            "transition_without_observed_start"))
+                start_kinds = {"other"} if ev.event == TRANSITION else set(kinds)
                 if when is None:
                     open_ep = {"start": pd.Timestamp(ev.announcement_date), "ev": ev,
-                               "state": STATE_UNKNOWN}
+                               "state": STATE_UNKNOWN, "kinds": start_kinds}
                 else:
-                    open_ep = {"start": when, "ev": ev, "state": STATE_TRUE}
+                    open_ep = {"start": when, "ev": ev, "state": STATE_TRUE,
+                               "kinds": start_kinds}
             elif ev.event == TRANSITION:
+                open_ep["kinds"] = {"other"} if "other" in kinds else (open_ep["kinds"] or {"generic"})
                 continue
             else:                                              # REVOKE / DELIST_PERIOD
                 if open_ep is None:
@@ -243,6 +322,18 @@ def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.
                                            "revoke_without_observed_start"))
                     last_close = hi
                     continue
+                if ev.event == REVOKE and "generic" not in kinds:
+                    # Revoking one warning while another stays in force is a
+                    # transition. Which warnings are in force comes from the short
+                    # name on the revocation date (*ST / ST) plus any 其他 warning
+                    # explicitly added (叠加) inside this episode.
+                    shown = kinds_from_name(getattr(ev, "sec_name", None))
+                    active = set(shown) if shown is not None else {"delist", "other"} & open_ep["kinds"]
+                    if "delist" in active and "other" in open_ep.get("added", set()):
+                        active.add("other")
+                    if active - kinds:
+                        open_ep["kinds"] = active - kinds
+                        continue
                 end = when
                 if open_ep["state"] == STATE_UNKNOWN or end is None:
                     hi = end if end is not None else pd.Timestamp(ev.announcement_date)

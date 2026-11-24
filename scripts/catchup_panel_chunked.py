@@ -26,6 +26,7 @@ import repair_fresh_window_20260704 as rep  # noqa: E402
 from quantagent.data.providers.st_pit import (  # noqa: E402
     HistoricalSTCoverageError,
     attach_historical_st,
+    default_historical_st_path,
     load_historical_st_evidence,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector  # noqa: E402
@@ -40,7 +41,7 @@ def _load_required_st_evidence(path: str | None):
     if not path:
         raise SystemExit(
             "historical ST PIT evidence is required; set --historical-st-path or "
-            "QUANTAGENT_HISTORICAL_ST_PATH. Current snapshot broadcast is forbidden."
+            "QUANTAGENT_HISTORICAL_ST_PATH, or publish the ENG_ST30 register. Current snapshot broadcast is forbidden."
         )
     try:
         return load_historical_st_evidence(path)
@@ -53,7 +54,7 @@ def main() -> int:
     parser.add_argument("--end", default=None, help="last date to fetch (default: today)")
     parser.add_argument(
         "--historical-st-path",
-        default=os.environ.get("QUANTAGENT_HISTORICAL_ST_PATH"),
+        default=default_historical_st_path(),
         help="dated PIT ST table (parquet/csv/jsonl); required",
     )
     args = parser.parse_args()

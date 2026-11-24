@@ -21,6 +21,7 @@ import pandas as pd
 from quantagent.data.providers.st_pit import (
     HistoricalSTCoverageError,
     attach_historical_st,
+    default_historical_st_path,
     load_historical_st_evidence,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector
@@ -80,7 +81,7 @@ def _load_required_evidence(path: str | None):
     if not path:
         raise SystemExit(
             "historical ST PIT evidence is required; set --historical-st-path or "
-            "QUANTAGENT_HISTORICAL_ST_PATH. The original current-snapshot repair is quarantined."
+            "QUANTAGENT_HISTORICAL_ST_PATH, or publish the ENG_ST30 register. The original current-snapshot repair is quarantined."
         )
     try:
         return load_historical_st_evidence(path)
@@ -97,7 +98,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--historical-st-path",
-        default=os.environ.get("QUANTAGENT_HISTORICAL_ST_PATH"),
+        default=default_historical_st_path(),
         help="dated PIT ST table (parquet/csv/jsonl); required",
     )
     args = parser.parse_args()

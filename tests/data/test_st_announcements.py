@@ -171,3 +171,109 @@ def test_merge_contiguous_joins_a_rename_inside_one_warning():
     ])
     merged = sa.merge_contiguous(rows)
     assert len(merged) == 1 and pd.isna(merged.iloc[0].effective_end)
+
+
+def test_default_st_path_is_env_then_published_table_then_none(tmp_path, monkeypatch):
+    from quantagent.data.providers import st_pit
+
+    monkeypatch.delenv("QUANTAGENT_HISTORICAL_ST_PATH", raising=False)
+    monkeypatch.delenv("QUANTAGENT_DATA_ROOT", raising=False)
+    monkeypatch.setenv("QUANTAGENT_HOME", str(tmp_path))
+    assert st_pit.default_historical_st_path() is None          # callers keep failing closed
+    published = tmp_path / "data/u0/pit/st_pit_evidence.parquet"
+    published.parent.mkdir(parents=True)
+    published.write_bytes(b"")
+    assert st_pit.default_historical_st_path() == str(published)
+    monkeypatch.setenv("QUANTAGENT_HISTORICAL_ST_PATH", "/explicit.parquet")
+    assert st_pit.default_historical_st_path() == "/explicit.parquet"
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("关于公司股票被实施其他风险警示暨公司股票停牌的提示性公告", sa.IMPLEMENT),
+        ("关于公司股票交易将被实施其他风险警示暨股票停复牌的提示性公告", sa.IMPLEMENT),
+        ("关于公司股票交易被实施其他风险警示、可能被实施退市风险警示暨股票停复牌的公告", sa.IMPLEMENT),
+        ("关于公司股票交易可能被实施退市风险警示的第三次提示性公告", sa.IGNORE),
+        ("关于公司股票交易可能被实施退市风险警示暨停牌的公告", sa.IGNORE),
+        ("关于公司股票交易被实施其他风险警示暨可能被实施退市风险警示相关事项的进展公告", sa.IGNORE),
+        ("关于公司股票进入退市整理期交易首日的风险提示公告", sa.DELIST_PERIOD),
+        ("关于公司股票进入退市整理期交易的第一次风险提示性公告", sa.DELIST_PERIOD),
+        ("关于公司股票进入退市整理期交易的第五次风险提示性公告", sa.IGNORE),
+    ],
+)
+def test_classify_title_dev_forms(title, expected):
+    # title forms found on the SZSE DEV half (ENG_ST30 §3); HOLDOUT never consulted
+    assert sa.classify_title(title) == expected
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("关于公司股票撤销退市风险警示及实施其他风险警示的公告", sa.TRANSITION),
+        ("关于2012年公司债券停牌暨实行风险警示的公告", sa.IGNORE),
+    ],
+)
+def test_classify_title_transition_and_bonds(title, expected):
+    assert sa.classify_title(title) == expected
+
+
+def test_delisting_period_notices_collapse_to_the_first_session_notice():
+    ev = _events([
+        ("000004.SZ", sa.IMPLEMENT, "2025-04-29", "2025-04-30"),
+        ("000004.SZ", sa.DELIST_PERIOD, "2026-06-13", "2026-06-15"),   # decision notice
+        ("000004.SZ", sa.DELIST_PERIOD, "2026-06-23", "2026-06-23"),   # first session notice
+    ])
+    ev.loc[ev.index[1], "title"] = "关于公司股票进入退市整理期交易的公告"
+    ev.loc[ev.index[2], "title"] = "关于公司股票进入退市整理期交易首日的风险提示公告"
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert eps.iloc[0].effective_end == T("2026-06-23")
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "2015年度业绩预告及存在被实施退市风险警示的提示性公告",
+        "关于主要银行账户被解除冻结暨相对应的其他风险警示情形消除的公告",
+    ],
+)
+def test_classify_title_commentary_forms(title):
+    assert sa.classify_title(title) == sa.IGNORE
+
+
+def test_revoking_one_warning_while_another_is_in_force_keeps_the_episode():
+    ev = _events([
+        ("002872.SZ", sa.IMPLEMENT, "2019-04-26", "2019-04-29"),
+        ("002872.SZ", sa.IMPLEMENT, "2019-06-05", "2019-06-06"),
+        ("002872.SZ", sa.REVOKE, "2020-07-10", "2020-07-13"),
+        ("002872.SZ", sa.REVOKE, "2021-05-10", "2021-05-11"),
+    ])
+    ev["title"] = ["关于公司股票被实行退市风险警示暨股票停牌的公告",
+                   "关于公司股票交易被实行其他风险警示的公告",
+                   "关于公司股票撤销退市风险警示的公告",
+                   "关于撤销其他风险警示暨股票停复牌的公告"]
+    ev["sec_name"] = ["天圣制药", "*ST天圣", "*ST天圣", "ST天圣"]
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert (eps.iloc[0].effective_start, eps.iloc[0].effective_end) == (
+        T("2019-04-29"), T("2021-05-11"))
+
+
+def test_short_name_on_the_revocation_date_decides_which_warning_remains():
+    ev = _events([
+        ("000036.SZ", sa.IMPLEMENT, "2009-04-28", "2009-04-29"),
+        ("000036.SZ", sa.REVOKE, "2010-06-03", "2010-06-04"),
+    ])
+    ev["title"] = ["关于股票实行退市风险警示的公告",
+                   "关于撤销对公司股票交易实施的其他特别处理的提示性公告"]
+    # the *ST -> ST step was never observed; the name "ST华联" says only 其他 is in force
+    ev["sec_name"] = ["*ST华联", "ST华联"]
+    eps = sa.build_episodes(ev, coverage_start=T("2001-01-01"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert eps.iloc[0].effective_end == T("2010-06-04")
+
+
+def test_old_board_titled_revocation_is_an_event():
+    assert sa.classify_title("董事会关于股票交易撤销其他特别处理和变更股票简称的公告") == sa.REVOKE
+    assert sa.classify_title("关于公司股票恢复上市和撤销股票交易退市风险警示及其他特别处理的公告") == sa.REVOKE
