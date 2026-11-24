@@ -222,6 +222,7 @@ def attach_historical_st(
         invalid_interval = merged["end_date"].isna() | (
             merged["trade_date"] > merged["end_date"]
         )
+        merged["is_st"] = merged["is_st"].astype("object")
         merged.loc[invalid_interval, ["is_st", "st_available_at"]] = pd.NA
 
     missing_status = merged["is_st"].isna() | merged["st_available_at"].isna()

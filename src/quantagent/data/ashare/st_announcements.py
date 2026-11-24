@@ -17,7 +17,7 @@ traded under the warning (inclusive); ``effective_end`` is the first session no
 longer under it (EXCLUSIVE). A span whose dates cannot be established is emitted
 with ``st_state == "UNKNOWN"`` rather than guessed.
 
-Method and acceptance thresholds: docs/audits/round30/roles/ENG_ST30_method.md.
+Method and acceptance thresholds: docs/research/preregistrations/ENG_ST30_preregistration.md.
 """
 from __future__ import annotations
 
@@ -319,3 +319,254 @@ def row_states(panel: pd.DataFrame, episodes: pd.DataFrame,
             hit = (d >= np.datetime64(row.effective_start)) & (d < np.datetime64(end))
             state[idx[hit]] = st_state
     return state
+
+
+# ---------------------------------------------------------------------------
+# Evaluation against a dated register (ENG_ST30 §3–4) and the PIT interval
+# contract consumed by ``quantagent.data.providers.st_pit``.
+# ---------------------------------------------------------------------------
+
+def merge_contiguous(episodes: pd.DataFrame) -> pd.DataFrame:
+    """Merge a symbol's TRUE spans that touch or overlap (a rename inside a
+    warning, e.g. ``ST国华`` → ``*ST国华``, is one episode, not two).
+
+    Input columns: ``symbol, effective_start, effective_end`` (end exclusive,
+    NaT = still open). Output has the same three columns.
+    """
+    if episodes.empty:
+        return episodes[["symbol", "effective_start", "effective_end"]].copy()
+    frame = episodes[["symbol", "effective_start", "effective_end"]].copy()
+    frame = frame.sort_values(["symbol", "effective_start"])
+    out: list[dict] = []
+    for symbol, group in frame.groupby("symbol", sort=True):
+        cur_s = cur_e = None
+        for row in group.itertuples(index=False):
+            start, end = row.effective_start, row.effective_end
+            if cur_s is None:
+                cur_s, cur_e = start, end
+                continue
+            if pd.isna(cur_e) or start <= cur_e:
+                if pd.isna(cur_e) or pd.isna(end):
+                    cur_e = pd.NaT
+                else:
+                    cur_e = max(cur_e, end)
+                continue
+            out.append({"symbol": symbol, "effective_start": cur_s, "effective_end": cur_e})
+            cur_s, cur_e = start, end
+        out.append({"symbol": symbol, "effective_start": cur_s, "effective_end": cur_e})
+    return pd.DataFrame(out, columns=["symbol", "effective_start", "effective_end"])
+
+
+def _overlaps(a_start, a_end, b_start, b_end) -> bool:
+    a_end = pd.Timestamp.max if pd.isna(a_end) else a_end
+    b_end = pd.Timestamp.max if pd.isna(b_end) else b_end
+    return bool(a_start < b_end and b_start < a_end)
+
+
+def _overlap_days(a_start, a_end, b_start, b_end) -> float:
+    a_end = pd.Timestamp("2262-01-01") if pd.isna(a_end) else a_end
+    b_end = pd.Timestamp("2262-01-01") if pd.isna(b_end) else b_end
+    return max(0.0, (min(a_end, b_end) - max(a_start, b_start)).days)
+
+
+def evaluate_reconstruction(recon: pd.DataFrame, truth: pd.DataFrame, rows: pd.DataFrame,
+                            calendar: Calendar, *, window: tuple[pd.Timestamp, pd.Timestamp],
+                            symbols: Sequence[str]) -> dict:
+    """ENG_ST30 §4 metrics for ``symbols`` (one validation half).
+
+    ``recon``: reconstructed episodes (``st_state`` TRUE/UNKNOWN); ``truth``:
+    register episodes (all TRUE); ``rows``: panel ``symbol, trade_date`` rows.
+
+    Operationalisation fixed before any HOLDOUT evaluation (amendment A1):
+    an episode "overlaps the window" when it covers any calendar day in it;
+    matched pairs are formed per register episode with the reconstructed TRUE
+    episode of largest calendar overlap; start agreement (M3) is measured on
+    matched pairs whose register start lies in the window, end agreement (M4)
+    on matched pairs whose register end lies in the window. Session distances
+    use the exchange calendar.
+    """
+    lo, hi = pd.Timestamp(window[0]), pd.Timestamp(window[1])
+    wanted = set(symbols)
+    truth_m = merge_contiguous(truth[truth["symbol"].isin(wanted)])
+    rec = recon[recon["symbol"].isin(wanted)]
+    rec_true = merge_contiguous(rec[rec["st_state"] == STATE_TRUE])
+
+    def in_window(frame: pd.DataFrame) -> pd.DataFrame:
+        end = frame["effective_end"].fillna(pd.Timestamp.max)
+        return frame[(frame["effective_start"] <= hi) & (end > lo)]
+
+    truth_w, rec_w = in_window(truth_m), in_window(rec_true)
+    rec_by_sym = {s: g for s, g in rec_true.groupby("symbol")}
+    truth_by_sym = {s: g for s, g in truth_m.groupby("symbol")}
+
+    recalled, start_ok, start_n, end_ok, end_n = 0, 0, 0, 0, 0
+    misses: list[dict] = []
+    start_errors: list[dict] = []
+    end_errors: list[dict] = []
+    for ep in truth_w.itertuples(index=False):
+        cands = rec_by_sym.get(ep.symbol)
+        best, best_days = None, 0.0
+        if cands is not None:
+            for c in cands.itertuples(index=False):
+                days = _overlap_days(ep.effective_start, ep.effective_end,
+                                     c.effective_start, c.effective_end)
+                if days > best_days:
+                    best, best_days = c, days
+        if best is None:
+            misses.append({"symbol": ep.symbol, "start": ep.effective_start,
+                           "end": ep.effective_end})
+            continue
+        recalled += 1
+        if lo <= ep.effective_start <= hi:
+            start_n += 1
+            d = calendar.distance(ep.effective_start, best.effective_start)
+            if abs(d) <= 1:
+                start_ok += 1
+            else:
+                start_errors.append({"symbol": ep.symbol, "truth": ep.effective_start,
+                                     "recon": best.effective_start, "sessions": d})
+        if pd.notna(ep.effective_end) and lo <= ep.effective_end <= hi:
+            end_n += 1
+            if pd.isna(best.effective_end):
+                end_errors.append({"symbol": ep.symbol, "truth": ep.effective_end,
+                                   "recon": None, "sessions": None})
+            else:
+                d = calendar.distance(ep.effective_end, best.effective_end)
+                if abs(d) <= 1:
+                    end_ok += 1
+                else:
+                    end_errors.append({"symbol": ep.symbol, "truth": ep.effective_end,
+                                       "recon": best.effective_end, "sessions": d})
+
+    precise = 0
+    false_eps: list[dict] = []
+    for ep in rec_w.itertuples(index=False):
+        cands = truth_by_sym.get(ep.symbol)
+        hit = cands is not None and any(
+            _overlaps(ep.effective_start, ep.effective_end, c.effective_start, c.effective_end)
+            for c in cands.itertuples(index=False))
+        if hit:
+            precise += 1
+        else:
+            false_eps.append({"symbol": ep.symbol, "start": ep.effective_start,
+                              "end": ep.effective_end})
+
+    sub = rows[rows["symbol"].isin(wanted)]
+    sub = sub[(sub["trade_date"] >= lo) & (sub["trade_date"] <= hi)]
+    truth_state = row_states(sub, truth_m.assign(st_state=STATE_TRUE))
+    rec_state = row_states(sub, rec)
+    t_true = truth_state == STATE_TRUE
+    r_true = rec_state == STATE_TRUE
+    n_t, n_r = int(t_true.sum()), int(r_true.sum())
+
+    def ratio(a: int, b: int) -> float | None:
+        return None if b == 0 else a / b
+
+    return {
+        "symbols": len(wanted), "rows": int(len(sub)),
+        "register_episodes_in_window": int(len(truth_w)),
+        "reconstructed_true_episodes_in_window": int(len(rec_w)),
+        "M1_episode_recall": ratio(recalled, len(truth_w)),
+        "M2_episode_precision": ratio(precise, len(rec_w)),
+        "M3_start_within_1_session": ratio(start_ok, start_n), "M3_n": start_n,
+        "M4_end_within_1_session": ratio(end_ok, end_n), "M4_n": end_n,
+        "M5a_row_recall": ratio(int((t_true & r_true).sum()), n_t),
+        "M5b_row_precision": ratio(int((t_true & r_true).sum()), n_r),
+        "M5c_register_true_marked_false": ratio(
+            int((t_true & (rec_state == "FALSE")).sum()), n_t),
+        "register_true_marked_unknown": ratio(
+            int((t_true & (rec_state == STATE_UNKNOWN)).sum()), n_t),
+        "unknown_rows": int((rec_state == STATE_UNKNOWN).sum()),
+        "M5_n_register_true": n_t, "M5_n_reconstructed_true": n_r,
+        "examples": {"missed_episodes": misses[:40], "false_episodes": false_eps[:40],
+                     "start_errors": start_errors[:40], "end_errors": end_errors[:40]},
+    }
+
+
+THRESHOLDS = {
+    "M1_episode_recall": (">=", 0.95),
+    "M2_episode_precision": (">=", 0.95),
+    "M3_start_within_1_session": (">=", 0.95),
+    "M4_end_within_1_session": (">=", 0.95),
+    "M5a_row_recall": (">=", 0.98),
+    "M5b_row_precision": (">=", 0.98),
+    "M5c_register_true_marked_false": ("<=", 0.01),
+}
+
+
+def acceptance(metrics: dict) -> dict:
+    """Apply the pre-registered HOLDOUT thresholds; a missing metric fails."""
+    verdict = {}
+    for key, (op, bound) in THRESHOLDS.items():
+        value = metrics.get(key)
+        ok = value is not None and (value >= bound if op == ">=" else value <= bound)
+        verdict[key] = {"value": value, "threshold": f"{op} {bound}", "pass": bool(ok)}
+    verdict["all_pass"] = all(v["pass"] for v in verdict.values() if isinstance(v, dict))
+    return verdict
+
+
+PIT_COLUMNS = ["symbol", "start_date", "end_date", "is_st", "available_at",
+               "point_in_time_valid", "source", "evidence_id"]
+
+
+def pit_intervals(episodes: pd.DataFrame, life: pd.DataFrame, *,
+                  as_of: pd.Timestamp, coverage_start: pd.Timestamp) -> pd.DataFrame:
+    """Complete ST/non-ST intervals in the ``st_pit`` interval contract.
+
+    ``episodes``: ``symbol, effective_start, effective_end (exclusive, NaT=open),
+    st_state (TRUE/UNKNOWN), available_at, source, evidence_id``.
+    ``life``: ``symbol, first_day, last_day`` (inclusive) — listing to delisting.
+
+    Every day of a symbol's life in ``[coverage_start, as_of]`` is TRUE, FALSE or
+    UNKNOWN. TRUE and FALSE become rows with an INCLUSIVE ``end_date``; UNKNOWN
+    spans get no row, so the strict loader refuses any market row inside one
+    (absence is never read as FALSE). A FALSE span's ``available_at`` is the
+    disclosure that ended the preceding warning, or the coverage/listing start.
+    """
+    as_of = pd.Timestamp(as_of).normalize()
+    coverage_start = pd.Timestamp(coverage_start).normalize()
+    one = pd.Timedelta(days=1)
+    by_symbol = {s: g.sort_values("effective_start") for s, g in episodes.groupby("symbol")}
+    out: list[dict] = []
+    for life_row in life.itertuples(index=False):
+        symbol = life_row.symbol
+        first = max(pd.Timestamp(life_row.first_day).normalize(), coverage_start)
+        last = min(pd.Timestamp(life_row.last_day).normalize()
+                   if pd.notna(life_row.last_day) else as_of, as_of)
+        if last < first:
+            continue
+        cursor, cursor_avail, cursor_src = first, first, "no_warning_disclosed"
+        spans = by_symbol.get(symbol)
+        rows = [] if spans is None else list(spans.itertuples(index=False))
+        for ep in rows:
+            start = pd.Timestamp(ep.effective_start).normalize()
+            end_excl = (pd.Timestamp(ep.effective_end).normalize()
+                        if pd.notna(ep.effective_end) else last + one)
+            if end_excl <= first or start > last:
+                continue
+            start = max(start, first)
+            end_incl = min(end_excl - one, last)
+            if start > cursor:
+                out.append({"symbol": symbol, "start_date": cursor, "end_date": start - one,
+                            "is_st": False, "available_at": cursor_avail,
+                            "source": cursor_src, "evidence_id": None})
+            if ep.st_state == STATE_TRUE:
+                avail = pd.Timestamp(ep.available_at) if pd.notna(ep.available_at) else start
+                out.append({"symbol": symbol, "start_date": start, "end_date": end_incl,
+                            "is_st": True, "available_at": min(avail, start),
+                            "source": ep.source, "evidence_id": ep.evidence_id})
+            cursor = max(cursor, end_incl + one)
+            end_avail = getattr(ep, "end_available_at", pd.NaT)
+            cursor_avail = (pd.Timestamp(end_avail) if pd.notna(end_avail) else cursor)
+            cursor_avail = min(cursor_avail, cursor)
+            cursor_src = ep.source
+        if cursor <= last:
+            out.append({"symbol": symbol, "start_date": cursor, "end_date": last,
+                        "is_st": False, "available_at": cursor_avail, "source": cursor_src,
+                        "evidence_id": None})
+    frame = pd.DataFrame(out, columns=[c for c in PIT_COLUMNS if c != "point_in_time_valid"])
+    frame["point_in_time_valid"] = True
+    # available_at is a disclosure DATE; the loader compares it with 09:25 CST.
+    frame["available_at"] = (pd.to_datetime(frame["available_at"]).dt.strftime("%Y-%m-%d")
+                             + "T00:00:00+08:00")
+    return frame[PIT_COLUMNS]

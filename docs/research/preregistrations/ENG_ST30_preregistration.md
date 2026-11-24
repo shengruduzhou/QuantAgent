@@ -117,3 +117,39 @@ snapshot), and the crawl returns announcements under plate `bj`.
 * HOLDOUT passes but any of C1–C3 fails for SSE → SSE stays `BLOCKED_BY_DATA`.
 * BSE per §6, independently.
 * No threshold, window or split is changed after any result is seen.
+
+## Amendment A1 — 2026-11-24, committed before any DEV or HOLDOUT metric was computed
+
+Nothing in §3 (split), §4 (thresholds), §5 (check thresholds) or §7 (decision rule)
+changes. Additions and clarifications only:
+
+1. **Second query on the same source.** A probe on 2026-11-24 showed that the BSE
+   implementation notice of 920023 (2026-04-28, "关于公司股票交易将被实施退市风险警示的
+   提示性公告") is *not* filed under category 特别处理和退市. The crawl therefore also pages
+   the cninfo title-keyword search (`searchkey` ∈ {风险警示, 特别处理, 退市整理}, which
+   matches titles only) per plate and month; both result sets are merged by
+   `announcementId`. Disclosure of what was seen in that probe: the 14 titles cninfo
+   returns for 920023 with keyword 风险警示 (2020→2026), the two 920023 titles of
+   2026-04 that mention 警示/停牌, three titles per plate from 2026-10 and the
+   per-plate keyword counts for 2024-04 and 2026-04. No SSE or SZSE episode was
+   computed.
+2. **Crawl end** extended to the run date (2026-11-24) so the register also covers
+   the frozen fresh window. The evaluation window of §3 is unchanged.
+3. **Metric operationalisation** (as implemented in
+   `quantagent.data.ashare.st_announcements.evaluate_reconstruction`): register rows
+   that touch (a rename inside one warning) are merged into one episode; an episode
+   overlaps the window if it covers any calendar day of it; each register episode is
+   matched to the same-symbol reconstructed TRUE episode with the largest calendar
+   overlap; M3 is measured on matched pairs whose register start lies in the window,
+   M4 on matched pairs whose register end lies in the window; distances are trading
+   sessions of the SSE/SZSE calendar.
+4. **HOLDOUT once.** `scripts/u0_st_announcements.py evaluate --split holdout` refuses
+   to run if the method files are uncommitted or if a HOLDOUT result already exists,
+   and records the method commit.
+5. **Outputs.** In addition to `st_intervals_v2.parquet`, `publish` writes
+   `runtime/data/u0/pit/st_pit_evidence.parquet` in the strict interval contract of
+   `quantagent.data.providers.st_pit` (complete TRUE *and* FALSE intervals per listed
+   A-share from 2016-01-04 to the as-of date; an UNKNOWN span gets no row, so any market
+   row inside it is refused rather than read as FALSE). SZSE rows come from a freshly
+   fetched SZSE register (`refresh-szse`); the certified `pit/st_intervals.parquet` of
+   2026-07-26 is not modified and remains the HOLDOUT ground truth.
