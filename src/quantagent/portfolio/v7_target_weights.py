@@ -167,6 +167,7 @@ def _hold_untradeable_positions(
     diagnostics.setdefault("held_untradeable", []).append(
         {"trade_date": str(date), "symbols": list(frozen)}
     )
+    out.attrs["pinned_untradeable"] = tuple(str(symbol) for symbol in frozen)
     return out
 
 
@@ -684,6 +685,7 @@ def build_v7_target_weights(
         weights = _hold_untradeable_positions(
             weights, previous_weights, rejected, date, diagnostics, release=stale
         )
+        pinned_untradeable = set(weights.attrs.get("pinned_untradeable", ()))
 
         # Holding-period lock (Phase 3.4): apply to the union of desired and
         # actually held names. A selected-only loop would allow a locked
@@ -730,6 +732,7 @@ def build_v7_target_weights(
                 per_name_cap=per_name_cap,
                 sector_lookup=sector_lookup,
                 config=config,
+                immovable_symbols=pinned_untradeable | set(locked_symbols),
             )
         previous_weights = weights[weights.abs() > 1e-12].copy()
 
@@ -975,6 +978,7 @@ def _project_and_validate_long_only_target(
     per_name_cap: pd.Series,
     sector_lookup: dict[str, str],
     config: V7TargetWeightsConfig,
+    immovable_symbols: set[str] | frozenset[str] = frozenset(),
 ) -> pd.Series:
     """Restore the final feasible set after holding and turnover constraints.
 
@@ -1001,11 +1005,22 @@ def _project_and_validate_long_only_target(
         config.max_weight_per_name
     )
     effective_caps = effective_caps.clip(upper=float(config.max_weight_per_name))
+    #: Turnover spent on trims that the hard caps force on drifted holdings.
+    #: It is outside the discretionary turnover budget, which only meters
+    #: rebalancing the strategy chose.
+    mandatory_trim = 0.0
     for symbol in projected.index:
         cap = float(effective_caps.loc[symbol])
         if projected.loc[symbol] <= cap + tolerance:
             continue
-        if previous.loc[symbol] <= cap + tolerance:
+        if previous.loc[symbol] > cap + tolerance and str(symbol) not in immovable_symbols:
+            mandatory_trim += float(projected.loc[symbol]) - cap
+        if previous.loc[symbol] <= cap + tolerance or str(symbol) not in immovable_symbols:
+            # A tradeable, unlocked holding that drifted above its cap is
+            # trimmed to the cap: the sell is always feasible, and the hard cap
+            # outranks the turnover budget. Raising here made the paper loop
+            # emit no target on a routine rally (R31-RISK-06). Only a pinned
+            # (untradeable) or holding-period-locked name is infeasible.
             projected.loc[symbol] = cap
             continue
         raise ValueError(
@@ -1049,7 +1064,7 @@ def _project_and_validate_long_only_target(
     if previous_weights is not None and config.max_turnover > 0:
         aligned_previous = previous_weights.reindex(projected.index).fillna(0.0)
         turnover = float((projected - aligned_previous).abs().sum())
-        if turnover > float(config.max_turnover) + tolerance:
+        if turnover > float(config.max_turnover) + mandatory_trim + tolerance:
             raise ValueError("long-only target exceeds the turnover cap")
     return projected
 
