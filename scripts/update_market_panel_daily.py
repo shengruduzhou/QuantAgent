@@ -23,6 +23,7 @@ from quantagent.data.providers.st_pit import (
     attach_historical_st,
     default_historical_st_path,
     load_historical_st_evidence,
+    require_symbol_coverage,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector
 
@@ -84,6 +85,11 @@ def main() -> int:
     if args.max_symbols:
         symbols = symbols[: args.max_symbols]
     prev_close = recent.sort_values("trade_date").groupby("symbol")["close"].last()
+
+    try:   # refuse before any vendor call if the window cannot be ST-attributed
+        require_symbol_coverage(st_evidence, symbols, last + pd.Timedelta(days=1), end)
+    except HistoricalSTCoverageError as exc:
+        raise SystemExit(f"historical ST evidence does not cover the append window: {exc}") from exc
 
     tf = _tf_client()
     start_fetch = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")

@@ -18,14 +18,14 @@
 
 | 时间（JST，工作日） | 脚本 | 作用 | 状态 |
 |---|---|---|---|
-| 06:00 | `scripts/catchup_supervisor.sh` | 补齐前向面板 | **每日 ABORT**：缺沪/北带日期 ST 证据（fail-closed，设计如此） |
+| 06:00 | `scripts/catchup_supervisor.sh` | 先刷新 ST 证据（`u0_st_register_refresh.sh`），再补齐前向面板 | **每日 ABORT**：深市已覆盖，沪市 1,210 个种子没有通过验收的带日期 ST 证据（fail-closed，设计如此；见 DATA.md） |
 | 08:00 | `scripts/coverage_guard.sh` | 覆盖守卫 + 前向推理 + 健康检查 | 运行但无数据可推 |
 | 16:30 | `scripts/fresh_blind_daily.py` | FRESH 窗盲测纸面日志 | `data_status=FAILED` 自 2026-08-14 |
 | 16:40 | `scripts/run_dot_fundflow_daily.sh` | 做T 资金流监控 | **从未运行**（文件无执行位）；做T 已定论无 edge，建议删除该 cron 行 |
 | 17:30 | `scripts/stage10_daily.sh` | 概念链日扫 | 运行，但数据源限流时复用缓存；health check 偶发崩溃 |
 | 18:30 | `scripts/fresh_blind_healthcheck.py` | 健康检查 | 每日 UNHEALTHY（面板滞后 110 天），告警写 `runtime/paper/fresh_blind/ALERT.txt` |
 | 18:45 | `scripts/shadow_day_registry.py` | 影子日登记 | 正常；有效日最后为 2026-08-07 |
-| 22:00 | `scripts/u0_full_universe_backfill.py fetch` | U0 回填 | **空转**：未带 `--allow-network` 而按设计拒绝联网 |
+| 22:00 | `scripts/u0_full_universe_backfill.py fetch` | U0 缺失符号补抓（已被 `u0_acquire_bars.py` 取代，不是日更） | **空转**：未带 `--allow-network` 而按设计拒绝联网；建议删除该 cron 行 |
 
 调度只用 cron；systemd 单元已在 Round 31 删除（从未安装）。
 

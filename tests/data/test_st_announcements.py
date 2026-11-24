@@ -325,3 +325,28 @@ def test_an_isolated_plain_name_between_st_names_does_not_cut():
     out = sa.apply_name_observations(episodes, names)
     assert list(out.st_state) == [sa.STATE_TRUE]
     assert out.iloc[0].effective_end == T("2020-06-09")
+
+
+def test_catchup_refuses_before_fetching_when_evidence_misses_seed_symbols(tmp_path):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "catchup_panel_chunked", repo / "scripts/catchup_panel_chunked.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pit = pd.DataFrame([{
+        "symbol": "000001.SZ", "start_date": T("2016-01-04"), "end_date": T("2026-11-24"),
+        "is_st": False, "available_at": "2016-01-04T00:00:00+08:00",
+        "point_in_time_valid": True, "source": "test", "evidence_id": None}])
+    path = tmp_path / "st.parquet"
+    pit.to_parquet(path, index=False)
+    evidence = load_historical_st_evidence(path)
+    module._require_st_coverage(evidence, ["000001.SZ"], T("2026-08-06"), T("2026-11-24"))
+    with pytest.raises(SystemExit, match="1 of 2 symbols have no ST evidence"):
+        module._require_st_coverage(evidence, ["000001.SZ", "600000.SH"],
+                                    T("2026-08-06"), T("2026-11-24"))

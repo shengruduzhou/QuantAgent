@@ -188,3 +188,32 @@ Method development on the SZSE DEV half (even last digit) only. §3–§7 unchan
    M1 0.990, M2 1.000, M3 0.989, M4 0.980, M5a 0.997, M5b 0.99996, M5c 0.0019
    (`runtime/data/u0/pit/_st_announcements/dev_eval_*.json`, last file). The method
    is frozen by the commit that adds this line; HOLDOUT is evaluated once on it.
+
+## Result — 2026-11-24 (HOLDOUT evaluated once, method commit 43738bd)
+
+| id | HOLDOUT (SZSE odd last digit, 1,600 securities, 3.14M rows) | threshold | |
+|----|----|----|----|
+| M1 | 0.955 (277/290 episodes) | ≥ 0.95 | pass |
+| M2 | 1.000 | ≥ 0.95 | pass |
+| M3 | 0.972 (n=253) | ≥ 0.95 | pass |
+| M4 | 0.979 (n=187) | ≥ 0.95 | pass |
+| M5a | 0.994 | ≥ 0.98 | pass |
+| **M5b** | **0.924** (7,590 of 99,972 reconstructed-TRUE rows are FALSE in the register) | ≥ 0.98 | **FAIL** |
+| M5c | 0.0061 | ≤ 0.01 | pass |
+
+**Decision (§7): HOLDOUT fails ⇒ no SSE/BSE rows are written; SSE and BSE stay
+`BLOCKED_BY_DATA`.** `publish` wrote `st_intervals_v2.parquet` /
+`st_pit_evidence.parquet` with SZSE rows only (exchange register fetched 2026-11-24).
+
+SSE/BSE checks, computed after the HOLDOUT for the record (they cannot change the
+decision): C1 **fail** (0.0067 of reconstructed-TRUE SH_Main rows outside the 5% band;
+bound 0.005); C2 pass (0.026 unexplained ST-like months; bound 0.05); C3 SSE pass (78/79
+snapshot names TRUE on 2026-07-24, none extra); BSE: no panel rows on 2026-07-24, not
+checkable. Raw results: `runtime/data/u0/pit/_st_announcements/{holdout_result,checks_result}.json`.
+
+Post-hoc diagnosis (**not** used to change this method): 7,590 of the false rows come from
+five episodes — a negated title ("股票交易不用被实行其他风险警示") read as an implementation;
+a transition that revokes 其他 and continues 退市 handled as the reverse; two revocations
+absent from the crawl, whose stale episodes then swallowed a later genuine episode and so
+also defeated the dated-name cut. Both SZSE halves are now spent: a successor method needs
+its own pre-registration and validation data not used here.

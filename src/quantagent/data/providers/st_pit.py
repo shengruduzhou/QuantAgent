@@ -271,6 +271,35 @@ def attach_historical_st(
     return merged.reset_index(drop=True)
 
 
+def require_symbol_coverage(
+    evidence: HistoricalSTEvidence,
+    symbols,
+    start,
+    end,
+) -> None:
+    """Raise :class:`HistoricalSTCoverageError` unless every symbol has evidence
+    for every calendar day in ``[start, end]``.
+
+    Callers run this before fetching market data, so a window the evidence
+    cannot cover is refused before any vendor call rather than after it.
+    """
+    symbols = sorted({str(s).strip() for s in symbols})
+    days = pd.date_range(pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize(), freq="D")
+    if not symbols or len(days) == 0:
+        return
+    covered = set(evidence.frame["symbol"].astype(str))
+    missing = [s for s in symbols if s not in covered]
+    if missing:
+        raise HistoricalSTCoverageError(
+            f"{len(missing)} of {len(symbols)} symbols have no ST evidence "
+            f"(e.g. {missing[:5]}) for {days[0].date()}..{days[-1].date()}"
+        )
+    probe = pd.DataFrame(
+        [(s, d) for s in symbols for d in days], columns=["symbol", "trade_date"]
+    )
+    attach_historical_st(probe, evidence)
+
+
 __all__ = [
     "HISTORICAL_ST_ENV",
     "HistoricalSTCoverageError",
@@ -278,4 +307,5 @@ __all__ = [
     "HistoricalSTEvidence",
     "attach_historical_st",
     "load_historical_st_evidence",
+    "require_symbol_coverage",
 ]

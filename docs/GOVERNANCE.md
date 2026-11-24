@@ -21,7 +21,7 @@
   `runtime/state/holdout_access_log.jsonl`。
 - 解除方式只有**修改配置**（在 PIT 重建、重新 QC、预注册之后），永远不是 override。
 - 诊断例外：`--allow-quarantined "<原因>"` 留痕，产出数字不得参与选择。
-- **当前状态（2026-11-24）**：FRESH 窗的数据管道自 2026-08-05 起停摆
+- **当前状态（2026-11-24）**：FRESH 窗的数据管道自 2026-08-05 起停摆（ENG_ST30 补齐了深市 ST 证据，沪市重建未通过预注册 HOLDOUT，见 DATA.md）
   （SH/BJ 没有带日期的 ST 证据，catchup 按设计 fail-closed），窗口**没有在积累**。
   见 [ROADMAP](ROADMAP.md) P0-1。
 

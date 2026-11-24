@@ -28,6 +28,7 @@ from quantagent.data.providers.st_pit import (  # noqa: E402
     attach_historical_st,
     default_historical_st_path,
     load_historical_st_evidence,
+    require_symbol_coverage,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector  # noqa: E402
 
@@ -47,6 +48,16 @@ def _load_required_st_evidence(path: str | None):
         return load_historical_st_evidence(path)
     except HistoricalSTCoverageError as exc:
         raise SystemExit(f"historical ST PIT evidence invalid: {exc}") from exc
+
+
+def _require_st_coverage(evidence, symbols, win_start, win_end) -> None:
+    """Refuse the catch-up before any vendor call when the dated ST evidence
+    cannot cover every seed symbol for the whole window (the merge step would
+    refuse those rows anyway, after hours of fetching)."""
+    try:
+        require_symbol_coverage(evidence, symbols, win_start, win_end)
+    except HistoricalSTCoverageError as exc:
+        raise SystemExit(f"historical ST evidence does not cover the catch-up window: {exc}") from exc
 
 
 def main() -> int:
@@ -95,6 +106,7 @@ def main() -> int:
     seed_symbols = sorted(
         panel.loc[panel["trade_date"] == panel_max, "symbol"].astype(str).unique()
     )
+    _require_st_coverage(evidence, seed_symbols, win_start, win_end)
 
     manifest = STAGING / "window.json"
     window_tag = f"{win_start.date()}_{win_end.date()}"

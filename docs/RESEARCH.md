@@ -46,4 +46,4 @@ Round 31 D-01）。它只能被视为**历史、未验证**的产物，在认证
 - R3_E2（治理化非线性设定消融）：分支 `agent/round30-fusion-e2`，**运行前必须修订**——
   其 CONFIRMED 规则以原始目标 ridge 为对照，会因目标而非模型类别"确认"非线性；
   需加入 rank 目标线性对照、把选择折延长到 2019、接入持久试验台账。
-- ENG_ST30（公告重建沪/北 ST 登记）：分支 `agent/round30-st-register`，草稿，未测试、未运行。
+- ENG_ST30（公告重建沪/北 ST 登记）：2026-11-24 执行；DEV 全过、HOLDOUT M5b 0.924 未过 ⇒ 沪/北保持 BLOCKED_BY_DATA（见 DATA.md 与预注册文件）。
