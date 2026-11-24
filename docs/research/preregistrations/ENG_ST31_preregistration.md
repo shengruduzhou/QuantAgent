@@ -235,3 +235,50 @@ span includes V, so one day cannot swing it.
 * This study does not touch the certified `pit/st_intervals.parquet`, the
   ENG_ST30 results, or any quarantined evaluation window. FRESH bars are
   appended only by the existing catch-up under its existing rules.
+
+## Amendment A1 — 2026-11-25, committed before validation (freezes the method)
+
+Nothing in §2.1 (anchors), §5 (set, window, thresholds) or §6–§7 changes. Clarifications
+and additions made while implementing and running DEV:
+
+1. **Pre-filter scope.** The negation rule applies to events the frozen classifier marks
+   IMPLEMENT, the continuation rule to events it marks REVOKE. A full revocation such as
+   "撤销…退市风险警示且不实施其他风险警示" therefore stays a revocation.
+2. **Fail closed on undated events.** An event announced on or after the first anchor
+   session that has no effective session (possible only when the trading calendar ends
+   first) makes the build refuse instead of skipping the event.
+3. **Before validation, `build` runs on SSE/BSE only.** It refuses SZSE until a
+   validation result exists (§4).
+4. **Evaluation operationalisation**, as implemented in `st_forward.evaluate_forward`
+   and `scripts/u0_st_forward.py evaluate`:
+   * Rows include the anchor session (2026-07-24), but only so that a flip on the first
+     session of V can be seen; row metrics count V only.
+   * For a security listed after A0, truth rows start at its listing session.
+   * Truth = `merge_contiguous` of the episodes that
+     `u0_pit_intervals._st_intervals_from_name_history` folds from a fresh register fetch.
+   * Information cut-off: events and names disclosed on or before 2026-11-24.
+     Snapshots: A1 only.
+   * Also reported, not gated: `V3_exact` (same session) and `V3_via_unknown`.
+5. **Daily refresh.** `u0_st_register_refresh.sh` takes a snapshot, fetches company names
+   and publishes through `u0_st_forward.py publish`. That command runs the unchanged
+   ENG_ST30 SZSE publish first, then appends SSE/BSE rows per §6–§7. The ENG_ST30
+   name-probe step is dropped, because nothing published depends on it.
+6. §3 has no item 3: the committed numbering is kept so that references stay valid.
+7. **DEV results at freeze** (`runtime/data/u0/pit/_st_forward/dev_eval_20261125T003641.json`;
+   SZSE even codes; anchors simulated from the register; cninfo names fetched per company
+   for the active sets — 103 / 132 / 122 companies):
+
+   | window | securities × sessions | V1 | V2 | V3 (exact) | V4 | V5 | restarts |
+   |---|---|---|---|---|---|---|---|
+   | 2025-07-28→2025-11-24 | 1,384 × 80 | 1.000 | 1.000 | 7/7 (7) | 0 | 1.000 | 0 |
+   | 2024-07-29→2024-11-22 | 1,375 × 78 | 1.000 | 1.000 | 6/6 (6) | 0 | 1.000 | 0 |
+   | 2025-03-03→2025-07-25 | 1,380 × 100 | 1.000 | 1.000 | 56/56 (56) | 0 | 1.000 | 0 |
+
+   Vendor anchor: A0's TickFlow names on the 1,393 DEV-half securities agree with the
+   register on 2026-07-24 for every security (63 ST in both, 0 disagreements).
+   Ablation on the stress window, for the record: with **no events**, the observations
+   catch all 56 transitions as contradictions (56 restarts, 356 UNKNOWN rows = 0.26%,
+   0 silently wrong rows); with events only (no observations) the result is unchanged.
+   The events part is in-sample here — the ENG_ST30 classifier and date rules were
+   calibrated on this half — which is why validation on unseen data is the test.
+   The method is frozen by the commit that adds this line; validation runs once on it.

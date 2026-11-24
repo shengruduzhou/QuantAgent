@@ -125,7 +125,8 @@ SUFFIX_OF = {"SSE": ".SH", "SZSE": ".SZ", "BSE": ".BJ"}
 EXCHANGE_OF = {".SH": "SSE", ".SZ": "SZSE", ".BJ": "BSE"}
 QUERY_URL = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
 STOCK_LISTS = ("szse_stock.json", "bj_stock.json")
-METHOD_FILES = ("src/quantagent/data/ashare/st_forward.py", "scripts/u0_st_forward.py")
+METHOD_FILES = ("src/quantagent/data/ashare/st_forward.py", "scripts/u0_st_forward.py",
+                "src/quantagent/data/ashare/st_announcements.py", "scripts/u0_st_announcements.py")
 
 
 def _st30():
@@ -558,7 +559,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         truth_all = pd.read_parquet(U0 / "pit/st_intervals.parquet")
         events, ann_names = _events()
         record["windows"] = {}
-        for start, end in DEV_WINDOWS:
+        chosen = [w for w in DEV_WINDOWS if not args.windows or w[0] in args.windows.split(",")]
+        for start, end in chosen:
             universe, snap_obs = _dev_inputs(start, end, calendar)
             obs = pd.concat([snap_obs, ann_names, _company_name_obs(f"dev_{start}")], ignore_index=True)
             is_name = obs["kind"].eq("name")
@@ -773,6 +775,7 @@ def main() -> int:
     bd.set_defaults(func=cmd_build)
     ev = sub.add_parser("evaluate")
     ev.add_argument("--split", choices=("dev", "validation"), required=True)
+    ev.add_argument("--windows", default="", help="dev only: comma-separated window starts")
     ev.set_defaults(func=cmd_evaluate)
     pb = sub.add_parser("publish")
     pb.add_argument("--as-of", default=None)

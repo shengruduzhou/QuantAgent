@@ -235,3 +235,12 @@ def test_listing_after_the_anchor_starts_unmarked():
     rows, _ = fwd.run_forward(universe=universe, events=_events(), observations=_obs(),
                               calendar=CAL, as_of=_ts("2026-08-06"))
     assert rows["trade_date"].min() == _ts("2026-08-04") and set(rows["state"]) == {"FALSE"}
+
+
+def test_an_event_without_an_effective_session_refuses():
+    ev = _events(_event("600001.SH", "IMPLEMENT", "2026-07-29", "2026-07-28",
+                        "关于公司股票被实施其他风险警示的公告", "甲公司", "i1"))
+    ev["effective_date"] = pd.NaT
+    with pytest.raises(ValueError, match="no effective session"):
+        fwd.run_forward(universe=_universe(), events=ev, observations=_obs(), calendar=CAL,
+                        as_of=_ts("2026-07-31"))

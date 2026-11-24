@@ -294,6 +294,16 @@ def run_forward(*, universe: pd.DataFrame, events: pd.DataFrame, observations: p
     """
     as_of = pd.Timestamp(as_of).normalize()
     prepared = prepare_events(events)
+    first_anchor = pd.Timestamp(universe["anchor_session"].min())
+    undated = prepared[prepared["effective_date"].isna()
+                       & (prepared["announcement_date"] >= first_anchor)
+                       & prepared["symbol"].isin(set(universe["symbol"]))]
+    if len(undated):
+        # only possible when the trading calendar ends before the event takes
+        # effect: refuse rather than silently skip a state change
+        raise ValueError(f"{len(undated)} state events have no effective session "
+                         f"(e.g. {undated['symbol'].iloc[0]} {undated['announcement_date'].iloc[0]:%Y-%m-%d}); "
+                         "extend the trading calendar")
     by_symbol = {s: list(g.itertuples(index=False)) for s, g in prepared.groupby("symbol")}
     obs_by_symbol = observations_for(observations, calendar)
     first = pd.Timestamp(universe["anchor_session"].min())
@@ -417,6 +427,7 @@ def evaluate_forward(recon: pd.DataFrame, truth: pd.DataFrame, calendar: Calenda
     }
     # transitions
     flips, matched_n, examples = [], 0, []
+    exact_n = via_unknown = 0
     for symbol, g in merged.groupby("symbol", sort=False):
         t = g["truth"].to_numpy()
         s = g["state"].to_numpy()
@@ -430,6 +441,8 @@ def evaluate_forward(recon: pd.DataFrame, truth: pd.DataFrame, calendar: Calenda
             for j in (i - 1, i, i + 1):
                 if 1 <= j < len(s) and s[j] == new and s[j - 1] == old:
                     ok = True
+            exact_n += int(s[i] == new and s[i - 1] == old)
+            via_unknown += int(s[i] == STATE_UNKNOWN or s[i - 1] == STATE_UNKNOWN)
             flips.append(symbol)
             matched_n += int(ok)
             if not ok:
@@ -438,6 +451,8 @@ def evaluate_forward(recon: pd.DataFrame, truth: pd.DataFrame, calendar: Calenda
     metrics["V3_n"] = len(flips)
     metrics["V3"] = matched_n / len(flips) if flips else None
     metrics["V3_misses"] = examples
+    metrics["V3_exact"] = exact_n                 # reported, not gated
+    metrics["V3_via_unknown"] = via_unknown
     bad = w[(w["state"] == STATE_TRUE) != w["truth"]]
     bad = bad[bad["state"] != STATE_UNKNOWN]
     metrics["wrong_rows_by_symbol"] = bad.groupby("symbol").size().sort_values(
