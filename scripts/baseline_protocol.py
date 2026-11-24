@@ -243,9 +243,36 @@ def _sharpe_uncertainty(nav: pd.Series) -> dict[str, object]:
     }
 
 
+def _exposure_summary(res) -> dict:
+    """What the opt-in exposure policy did: decisions, gross, re-anchors."""
+    decisions = getattr(res, "exposure_decisions", None)
+    path = getattr(res, "account_path", None)
+    out: dict = {"signal_decisions": 0}
+    if isinstance(decisions, pd.DataFrame) and not decisions.empty:
+        mult = pd.to_numeric(decisions["multiplier"], errors="coerce")
+        out.update({
+            "signal_decisions": int(len(decisions)),
+            "multiplier_mean": round(float(mult.mean()), 4),
+            "multiplier_min": round(float(mult.min()), 4),
+            "decisions_below_one_share": round(float((mult < 1.0).mean()), 4),
+            "vol_warmup_decisions": int((decisions["vol_status"] == "warmup").sum()),
+            "fail_closed_decisions": int((decisions["status"] != "ok").sum()),
+        })
+        if "reanchor_count" in decisions.columns and decisions["reanchor_count"].notna().any():
+            out["reanchors"] = int(pd.to_numeric(decisions["reanchor_count"], errors="coerce").max())
+    if isinstance(path, pd.DataFrame) and len(path) > 1:
+        sessions = path.iloc[1:]  # drop the inception row (all cash by construction)
+        frac = pd.to_numeric(sessions["invested_value"], errors="coerce") / pd.to_numeric(
+            sessions["nav"], errors="coerce")
+        out["invested_fraction_mean"] = round(float(frac.mean()), 4)
+        out["invested_fraction_sessions"] = int(frac.notna().sum())
+    return out
+
+
 def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: float,
                       start: str, end: str | None, top_k: int,
-                      trust_class: str | None = None) -> str:
+                      trust_class: str | None = None,
+                      exposure_policy=None) -> str:
     """Emit a UI-discoverable backtest artifact (metrics.json + nav.csv)."""
     d = Path(base_dir) / "backtest"
     d.mkdir(parents=True, exist_ok=True)
@@ -286,6 +313,12 @@ def _save_ui_backtest(base_dir: str, variant: str, res, m, bench, bench_ann: flo
     }
     if trust_class:
         metrics["trust_class"] = trust_class
+    if exposure_policy is not None:
+        # Not the canonical book: the gross was scaled by an opt-in policy.
+        metrics["exposure_policy"] = {"name": exposure_policy.name,
+                                      "policy_sha256": exposure_policy.sha256}
+        res.exposure_decisions.to_csv(d / "exposure_decisions.csv", index=False)
+        res.account_path.to_csv(d / "account_path.csv", index=False)
     (d / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     (d / "run_config.json").write_text(json.dumps({
         "strategy_version": "v89_closed_loop", "feature_policy": "judgment",
@@ -302,7 +335,15 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
              save_variant: str = "C_flags_eligible_delay1",
              allow_quarantined: str | None = None,
              panel_path: str | None = None,
-             allow_unverified_panel: str | None = None) -> dict:
+             allow_unverified_panel: str | None = None,
+             exposure_policy: str | None = None) -> dict:
+    # Opt-in gross-exposure policy (round 30). Resolved before any data is read
+    # so a bad spec fails fast; None keeps the canonical result bit-identical.
+    policy = None
+    if exposure_policy is not None:
+        from quantagent.risk.exposure_policy import load_exposure_policy
+
+        policy = load_exposure_policy(exposure_policy)
     # ---- quarantine guard (fail closed, BEFORE any data is read) ----------
     q_windows, q_log_path = load_windows()
     q_hit = check_window(start, end, q_windows)
@@ -438,6 +479,8 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         out["quarantine_override"] = q_record
     elif panel_meta.get("trust_class"):
         out["trust_class"] = panel_meta["trust_class"]
+    if policy is not None:
+        out["exposure_policy"] = {**policy.to_dict(), "policy_sha256": policy.sha256}
     for name in variants:
         v = spec[name]
         tw = _target_weights(
@@ -454,6 +497,7 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
         res = run_strict_backtest_v8(
             tw, use_panel, sector_map=sector,
             config=AShareExecutionSimulationConfig(initial_cash=1_000_000.0, slippage_bps=slippage_bps),
+            **({"exposure_policy": policy} if policy is not None else {}),
         )
         m = res.metrics
         ca_audit = getattr(res, "corporate_action_audit", None)
@@ -493,11 +537,14 @@ def evaluate(preds_path: str, *, top_k: int, start: str, end: str | None,
             "slippage_cost_cny": round(float(m.slippage_cost), 2),
             "st_unknown_buy_value_share": _st_unknown_buy_share(res.trades, panel),
         }
+        if policy is not None:
+            rec["exposure"] = _exposure_summary(res)
         out["variants"][name] = rec
         if save_backtest_dir and name == save_variant:
             saved = _save_ui_backtest(save_backtest_dir, name, res, m, bench, bench_ann, start, end, top_k,
                                       trust_class=(FORENSICS_TRUST_CLASS if q_record is not None
-                                                   else panel_meta.get("trust_class")))
+                                                   else panel_meta.get("trust_class")),
+                                      exposure_policy=policy)
             out["ui_backtest_dir"] = saved
         print(f"{name:28} ann {m.annualized_return:+8.2%} | excess {m.annualized_return - bench_ann:+8.2%} | "
               f"sharpe {m.sharpe:5.2f} | maxDD {m.max_drawdown:6.2%}")
@@ -535,6 +582,11 @@ def main() -> int:
                     help=("Use the legacy v7 silver panel (today's ST list broadcast to history: "
                           "look-ahead). Requires a justification; outputs are stamped "
                           f"trust_class={LEGACY_PANEL_TRUST_CLASS}."))
+    ap.add_argument("--exposure-policy", default=None, metavar="PRESET|JSON|PATH",
+                    help=("Opt-in gross-exposure policy (quantagent.risk.exposure_policy): a preset "
+                          "(identity, vt20, vt20_ddl), inline JSON or a .json file. The multiplier "
+                          "decided at each signal close from the book's own NAV scales that signal's "
+                          "target. Absent = the canonical evaluator, unchanged."))
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     try:
@@ -546,7 +598,8 @@ def main() -> int:
                        variants=[v.strip() for v in args.variants.split(",") if v.strip()],
                        allow_quarantined=args.allow_quarantined,
                        panel_path=args.panel,
-                       allow_unverified_panel=args.allow_unverified_panel)
+                       allow_unverified_panel=args.allow_unverified_panel,
+                       exposure_policy=args.exposure_policy)
     except QuarantineViolation as exc:
         print(str(exc), file=sys.stderr)
         return 3

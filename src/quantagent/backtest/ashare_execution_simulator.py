@@ -157,19 +157,33 @@ def simulate_ashare_target_weights(
     target_weight_history: pd.DataFrame,
     market_panel: pd.DataFrame,
     config: AShareExecutionSimulationConfig | None = None,
+    *,
+    exposure_policy=None,
 ) -> AShareExecutionSimulationResult:
-    """Run the public production-grade simulator and verify its timing trace."""
+    """Run the public production-grade simulator and verify its timing trace.
+
+    ``exposure_policy`` (a :class:`quantagent.risk.exposure_policy.ExposurePolicy`)
+    is opt-in; ``None`` keeps the canonical path unchanged.
+    """
     validate_signal_dated_target_weights(target_weight_history)
     validate_cash_account_target_weights(target_weight_history)
     measured_panel = validate_execution_market_panel(
         target_weight_history,
         market_panel,
     )
-    result = _impl.simulate_ashare_target_weights(
-        target_weight_history,
-        measured_panel,
-        config,
-    )
+    if exposure_policy is None:
+        result = _impl.simulate_ashare_target_weights(
+            target_weight_history,
+            measured_panel,
+            config,
+        )
+    else:
+        result = _impl.simulate_ashare_target_weights(
+            target_weight_history,
+            measured_panel,
+            config,
+            exposure_policy=exposure_policy,
+        )
     metadata = dict(result.config or {})
     metadata["stock_shorting_capability"] = "cash_long_only"
     metadata["execution_semantics_version"] = STRICT_CASH_ACCOUNT_SEMANTICS
