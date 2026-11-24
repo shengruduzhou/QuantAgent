@@ -431,8 +431,14 @@ def cross_sectional_rank_ic(
     sums = pd.DataFrame({"xy": dx * dy, "xx": dx * dx, "yy": dy * dy, "_date": data["_date"]}).groupby(
         "_date", sort=sort
     ).sum()
-    stats = grouped.agg(n=("_x", "size"), ux=("_x", "nunique"), uy=("_y", "nunique"))
-    defined = (stats["n"] >= int(min_names)) & (stats["ux"] >= 2) & (stats["uy"] >= 2)
+    if method == "spearman":
+        # Average ranks of a constant cross-section are exactly (n+1)/2, so
+        # zero rank dispersion <=> a constant side (cheaper than nunique).
+        defined = (grouped.size() >= int(min_names)) & (sums["xx"] > 0) & (sums["yy"] > 0)
+    else:
+        # Raw values: a constant side can leave ~1e-17 of rounding dispersion.
+        stats = grouped.agg(n=("_x", "size"), ux=("_x", "nunique"), uy=("_y", "nunique"))
+        defined = (stats["n"] >= int(min_names)) & (stats["ux"] >= 2) & (stats["uy"] >= 2)
     with np.errstate(invalid="ignore", divide="ignore"):
         corr = sums["xy"] / np.sqrt(sums["xx"] * sums["yy"])
     corr = corr.clip(-1.0, 1.0).where(defined.reindex(corr.index, fill_value=False))
