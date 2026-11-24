@@ -418,7 +418,10 @@ def cmd_build(args: argparse.Namespace) -> int:
     cache = Path(args.cache)
     fallback = None if args.fallback_sessions < 0 else args.fallback_sessions
     ann, events = build_events(cache, fallback_sessions=fallback)
-    episodes = sa.build_episodes(events, coverage_start=pd.Timestamp(CRAWL_START))
+    raw = sa.build_episodes(events, coverage_start=pd.Timestamp(CRAWL_START))
+    raw.to_parquet(cache / "episodes_raw.parquet", index=False)
+    names = _name_observations(cache, ann)
+    episodes = sa.apply_name_observations(raw, names)
     episodes["available_at"] = episodes["start_announcement_date"]
     episodes["end_available_at"] = episodes["end_announcement_date"]
     episodes["source"] = "cninfo announcements (ENG_ST30)"
@@ -434,9 +437,107 @@ def cmd_build(args: argparse.Namespace) -> int:
         "effective_basis": events["effective_basis"].str.split(":").str[0].value_counts().to_dict(),
         "events_with_pdf_text": int(events["announcement_id"].isin(_pdf_texts(cache)).sum()),
         "episodes_by_state": episodes["st_state"].value_counts().to_dict() if len(episodes) else {},
+        "dated_name_observations": int(len(names)),
+        "episodes_cut_by_dated_name": int(episodes["note"].eq("ended_between_dated_names").sum()),
         "fallback_sessions": fallback,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+    return 0
+
+
+PERIODIC = "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_sjdbg_szsh"
+
+
+def _name_observations(cache: Path, ann):
+    """Dated short names: every crawled announcement plus the name probe."""
+    import pandas as pd
+
+    live = ~ann["title"].astype(str).str.contains("已取消")   # withdrawn: shows today's name
+    frames = [pd.DataFrame({"symbol": ann.loc[live, "symbol"],
+                            "observed_on": ann.loc[live, "announcement_date"],
+                            "sec_name": ann.loc[live, "sec_name"]})]
+    for path in (cache / "name_probe").glob("*.json"):
+        try:
+            record = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001 - torn file; refetched by name-probe
+            continue
+        rows = record.get("rows") or []
+        if not rows:
+            continue
+        frame = pd.DataFrame(rows)
+        frame = frame[~frame["announcementTitle"].astype(str).str.contains("已取消")]
+        if frame.empty:
+            continue
+        frame["symbol"] = record["symbol"]
+        frame["observed_on"] = (pd.to_datetime(frame["announcementTime"], unit="ms", utc=True)
+                                .dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize())
+        frame["sec_name"] = frame["secName"].astype(str).str.replace(r"</?em>", "", regex=True)
+        frames.append(frame[["symbol", "observed_on", "sec_name"]])
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
+
+
+def cmd_name_probe(args: argparse.Namespace) -> int:
+    """Dated short names inside each reconstructed episode (amendment A2).
+
+    For every TRUE episode of at least ``--min-days`` the company's periodic
+    reports (annual, semi-annual, Q1, Q3) inside the episode are listed; the
+    short name cninfo prints on each is the name in force on that date.
+    """
+    import pandas as pd
+
+    cache = Path(args.cache)
+    out = cache / "name_probe"
+    out.mkdir(parents=True, exist_ok=True)
+    raw = pd.read_parquet(cache / "episodes_raw.parquet")
+    ann = pd.read_parquet(cache / "announcements.parquet")
+    org = ann.sort_values("announcement_date").groupby("symbol")["orgId"].last()
+    today = pd.Timestamp(dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date())
+    todo = raw[raw["st_state"].eq("TRUE")].copy()
+    todo["stop"] = todo["effective_end"].fillna(today)
+    todo = todo[(todo["stop"] - todo["effective_start"]).dt.days >= args.min_days]
+    if args.shard:
+        index, count = (int(x) for x in args.shard.split("/"))
+        keys = todo["symbol"] + todo["effective_start"].dt.strftime("%Y%m%d")
+        todo = todo[keys.map(lambda k: int(hashlib.md5(k.encode()).hexdigest(), 16) % count) == index]
+    fetched = 0
+    for ep in todo.itertuples(index=False):
+        target = out / f"{ep.symbol}_{ep.effective_start:%Y%m%d}.json"
+        is_open = pd.isna(ep.effective_end)
+        if target.exists():
+            try:
+                old = json.loads(target.read_text())
+                age = (dt.datetime.now(dt.timezone.utc)
+                       - dt.datetime.fromisoformat(old["retrieved_at"])).days
+                if old.get("stop") == str(ep.stop.date()) and not (is_open and age > 25):
+                    continue
+            except Exception:  # noqa: BLE001 - refetch an unreadable record
+                pass
+        org_id = org.get(ep.symbol)
+        if not org_id:
+            continue
+        lo = ep.effective_start + pd.Timedelta(days=4)
+        payload = {"pageNum": "1", "pageSize": str(PAGE_SIZE), "column": "szse",
+                   "tabName": "fulltext", "plate": "", "searchkey": "", "secid": "",
+                   "stock": f"{ep.symbol[:6]},{org_id}", "category": PERIODIC, "trade": "",
+                   "seDate": f"{lo:%Y-%m-%d}~{ep.stop:%Y-%m-%d}", "sortName": "",
+                   "sortType": "", "isHLtitle": "true"}
+        body = _post(payload, args.sleep)
+        total = int(body.get("totalAnnouncement") or 0)
+        rows = list(body.get("announcements") or [])
+        for page in range(2, max(1, -(-total // PAGE_SIZE)) + 1):
+            payload["pageNum"] = str(page)
+            rows.extend(_post(payload, args.sleep).get("announcements") or [])
+        keep = [{k: r.get(k) for k in ("announcementId", "announcementTime", "secName",
+                                       "announcementTitle")} for r in rows]
+        target.write_text(json.dumps({"symbol": ep.symbol, "start": str(ep.effective_start.date()),
+                                      "stop": str(ep.stop.date()), "total": total, "rows": keep,
+                                      "endpoint": QUERY_URL, "category": PERIODIC,
+                                      "retrieved_at": dt.datetime.now(dt.timezone.utc).isoformat()},
+                                     ensure_ascii=False))
+        fetched += 1
+        if fetched % 100 == 0:
+            print(f"name-probe fetched={fetched}/{len(todo)}", flush=True)
+    print(f"name-probe complete fetched={fetched} episodes={len(todo)}", flush=True)
     return 0
 
 
@@ -792,6 +893,12 @@ def main() -> int:
     build.add_argument("--fallback-sessions", type=int, default=1,
                        help="sessions after the announcement when the body states no date; -1 = UNKNOWN")
     build.set_defaults(func=cmd_build)
+    np_ = sub.add_parser("name-probe")
+    np_.add_argument("--cache", required=True)
+    np_.add_argument("--min-days", type=int, default=60)
+    np_.add_argument("--sleep", type=float, default=1.0)
+    np_.add_argument("--shard", default="")
+    np_.set_defaults(func=cmd_name_probe)
     ev = sub.add_parser("evaluate")
     ev.add_argument("--cache", required=True)
     ev.add_argument("--split", choices=("dev", "holdout"), required=True)

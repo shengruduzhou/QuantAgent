@@ -22,6 +22,7 @@ Method and acceptance thresholds: docs/research/preregistrations/ENG_ST30_prereg
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -52,6 +53,10 @@ _NOT_EVENT = re.compile(
     r"情况的公告$|事项的公告$|情形(?:已)?消除"
 )
 _DELIST_PERIOD = re.compile(r"进入退市整理期|退市整理期交易|退市整理期的公告|退市整理期首日")
+#: "第十次提示性公告": a periodic reminder of a state already in force
+_REMINDER = re.compile(r"第[一二三四五六七八九十百零〇两\d]+次")
+#: "将被实施…的提示性公告": announced ahead of the implementation notice
+_ADVANCE = re.compile(r"将(?:被)?(?:实施|实行|叠加)")
 _NOT_STOCK = re.compile(r"债券|公司债|转债|优先股|票据")
 _HEDGED_CLAUSE = re.compile(
     r"[、，,及和与暨]?(?:可能|或将|将可能|存在)[^、，,暨及的]{0,16}?" + _WARN)
@@ -78,7 +83,7 @@ def classify_title(title: object) -> str:
     text = _HEDGED_CLAUSE.sub("", text)
     if _NOT_STOCK.search(text) and "股票" not in text:
         return IGNORE                          # a bond's / preferred share's warning
-    if _NOT_EVENT.search(text):
+    if _NOT_EVENT.search(text) or _REMINDER.search(text):
         return IGNORE
     undo = re.search(_UNDO + r".{0,12}?" + _WARN, text)
     do = re.search(_DO + r".{0,12}?" + _WARN, text)
@@ -254,13 +259,36 @@ def kinds_from_name(sec_name: object) -> frozenset[str] | None:
     """Warning kinds a short name shows on the announcement date: ``*ST`` →
     退市风险警示 in force, ``ST`` → only 其他风险警示; ``None`` if the name
     carries no marker (it says nothing about which warning is in force)."""
-    name = re.sub(r"\s+", "", str(sec_name or "")).upper()
+    name = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(sec_name or ""))).upper()
     name = re.sub(r"^(?:G|S)(?=\*?S\s*T)", "", name)   # share-reform prefixes: G*ST, S*ST, SST
     if name.startswith("*ST"):
         return frozenset({"delist"})
     if name.startswith("ST"):
         return frozenset({"other"})
     return None
+
+
+def drop_superseded_advance_notices(events: pd.DataFrame, *, days: int = 20) -> pd.DataFrame:
+    """Drop a "将被实施…" advance notice when the implementation notice itself
+    follows within ``days`` (the advance notice is not the effective event;
+    alone, it is the only evidence and is kept)."""
+    if events.empty or "title" not in events.columns:
+        return events
+    imp = events[events["event"].eq(IMPLEMENT)]
+    advance = imp[imp["title"].astype(str).str.contains(_ADVANCE)]
+    if advance.empty:
+        return events
+    drop = []
+    later = imp[~imp.index.isin(advance.index)]
+    by_symbol = {s: g["announcement_date"] for s, g in later.groupby("symbol")}
+    for idx, row in advance.iterrows():
+        dates = by_symbol.get(row["symbol"])
+        if dates is None:
+            continue
+        gap = (dates - row["announcement_date"]).dt.days
+        if bool(((gap >= 0) & (gap <= days)).any()):
+            drop.append(idx)
+    return events.drop(index=drop)
 
 
 def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.DataFrame:
@@ -283,6 +311,7 @@ def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.
     """
     records: list[dict] = []
     frame = consolidate_delist_period(events[events["event"].isin(STATE_EVENTS)].copy())
+    frame = drop_superseded_advance_notices(frame)
     frame = frame.sort_values(["symbol", "announcement_date", "effective_date"], na_position="last")
     coverage_start = pd.Timestamp(coverage_start)
 
@@ -360,6 +389,61 @@ def build_episodes(events: pd.DataFrame, *, coverage_start: pd.Timestamp) -> pd.
     if result.empty:
         return pd.DataFrame(columns=EPISODE_COLUMNS + ["note"])
     return result
+
+
+def apply_name_observations(episodes: pd.DataFrame, names: pd.DataFrame, *,
+                            settle_days: int = 3) -> pd.DataFrame:
+    """Cut TRUE episodes that dated short names prove had already ended.
+
+    ``names``: ``symbol, observed_on, sec_name`` — the short name printed on a
+    cninfo disclosure of that date (a point-in-time fact; withdrawn filings,
+    which show today's name, are excluded by the caller). Inside a TRUE episode
+    ``[start, end)``, a name without an ST marker that is not followed by any
+    ST-marked name in the episode (more than ``settle_days`` after the start)
+    proves the warning had ended by then although no revocation was seen. The episode is kept TRUE up to and
+    including the last ST-marked observation before it, the gap to the
+    observation becomes UNKNOWN, and from the observation on the security is
+    not under a warning (the rest of the span is dropped).
+    """
+    if episodes.empty or names.empty:
+        return episodes
+    obs = names.dropna(subset=["observed_on"]).copy()
+    obs["observed_on"] = pd.to_datetime(obs["observed_on"]).dt.normalize()
+    obs["kinds"] = obs["sec_name"].map(kinds_from_name)
+    by_symbol = {s: g.sort_values("observed_on") for s, g in obs.groupby("symbol")}
+    out: list[dict] = []
+    one = pd.Timedelta(days=1)
+    for row in episodes.to_dict("records"):
+        seen = by_symbol.get(row["symbol"])
+        if row["st_state"] != STATE_TRUE or seen is None:
+            out.append(row)
+            continue
+        start = pd.Timestamp(row["effective_start"])
+        end = row["effective_end"] if pd.notna(row["effective_end"]) else pd.Timestamp.max
+        inside = seen[(seen["observed_on"] > start + pd.Timedelta(days=settle_days))
+                      & (seen["observed_on"] < end)]
+        # the cut is the first plain name after which no ST-marked name appears
+        # in the episode: an isolated plain name between ST names is an anomaly
+        marked_dates = inside.loc[inside["kinds"].notna(), "observed_on"]
+        last_marked = marked_dates.max() if len(marked_dates) else pd.NaT
+        plain = inside[inside["kinds"].isna()]
+        if pd.notna(last_marked):
+            plain = plain[plain["observed_on"] > last_marked]
+        if plain.empty:
+            out.append(row)
+            continue
+        cut = plain["observed_on"].iloc[0]
+        marked = inside[inside["kinds"].notna() & (inside["observed_on"] < cut)]
+        last_true = marked["observed_on"].iloc[-1] + one if len(marked) else start
+        true_part = dict(row, effective_end=last_true, note="cut_by_dated_name")
+        if last_true > start:
+            out.append(true_part)
+        if cut > last_true:
+            out.append(dict(row, effective_start=last_true, effective_end=cut,
+                            st_state=STATE_UNKNOWN, end_event_id=None,
+                            end_announcement_date=cut, end_basis="dated_name_without_st",
+                            note="ended_between_dated_names"))
+    return pd.DataFrame(out, columns=episodes.columns)
 
 
 def _ep(symbol, start, end, state, start_ev, end_ev, note) -> dict:

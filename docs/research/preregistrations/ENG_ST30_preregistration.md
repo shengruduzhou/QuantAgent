@@ -153,3 +153,38 @@ changes. Additions and clarifications only:
    row inside it is refused rather than read as FALSE). SZSE rows come from a freshly
    fetched SZSE register (`refresh-szse`); the certified `pit/st_intervals.parquet` of
    2026-07-26 is not modified and remains the HOLDOUT ground truth.
+
+## Amendment A2 — 2026-11-24, committed before HOLDOUT and before any SSE/BSE check
+
+Method development on the SZSE DEV half (even last digit) only. §3–§7 unchanged.
+
+1. **Rules derived from DEV.** Titles: "…的提示性公告" is the event's own title form;
+   hedged clauses (可能/或将/存在 …警示) are commentary and are removed before
+   classification; "…情形消除" and ordinal reminders ("第N次") are not events; bond /
+   preferred-share notices are not the stock's state; old "董事会关于撤销…" and
+   "恢复上市和撤销…" titles are events. One boundary per delisting period (the
+   first-session notice). An advance notice ("将被实施…") yields to an implementation
+   notice that follows within 20 days. Fallback dates (no date in the body):
+   implement / revoke / transition +1 session, delisting-period notice +0 (DEV: 270/277
+   starts, 152/155 revocations, 42/43 delisting periods).
+2. **Which warning remains after a revocation** is read from the short name cninfo
+   prints on the revocation date (*ST = 退市风险警示 in force, ST = only 其他) plus any
+   其他 warning explicitly added inside the episode.
+3. **Dated-name observations (same source).** The short name cninfo prints on a
+   disclosure is the name in force on that date. Inside a reconstructed TRUE episode
+   an observation without an ST marker that is not followed by any ST-marked observation
+   in the episode proves the warning had ended; the episode stays TRUE through the last
+   ST-marked observation and the gap becomes UNKNOWN. Withdrawn filings ("已取消"), which
+   show today's name, are not observations. Names
+   come from every crawled announcement plus a probe of the company's periodic reports
+   (annual / semi-annual / Q1 / Q3) inside each TRUE episode of ≥ 60 days. The TickFlow
+   snapshot used by C3 is **not** an input to the method.
+4. **Disclosure of non-DEV material seen during development:** per-plate counts of
+   classified events; to confirm that cninfo short names are point-in-time, the
+   periodic-report names of 920023 (BSE) and 600080 (SSE) for 2025-06→2026-11 and the six
+   latest 600080 announcements (all show the plain name before and the ST name after
+   their 2026 implementation). No SSE/BSE episode, row state or C-check was computed.
+5. **DEV results at freeze** (window 2016-01-04→2026-07-24, name probe complete):
+   M1 0.990, M2 1.000, M3 0.989, M4 0.980, M5a 0.997, M5b 0.99996, M5c 0.0019
+   (`runtime/data/u0/pit/_st_announcements/dev_eval_*.json`, last file). The method
+   is frozen by the commit that adds this line; HOLDOUT is evaluated once on it.

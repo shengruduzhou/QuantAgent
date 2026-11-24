@@ -277,3 +277,51 @@ def test_short_name_on_the_revocation_date_decides_which_warning_remains():
 def test_old_board_titled_revocation_is_an_event():
     assert sa.classify_title("董事会关于股票交易撤销其他特别处理和变更股票简称的公告") == sa.REVOKE
     assert sa.classify_title("关于公司股票恢复上市和撤销股票交易退市风险警示及其他特别处理的公告") == sa.REVOKE
+
+
+def test_a_dated_plain_name_inside_an_episode_cuts_it_to_unknown():
+    episodes = pd.DataFrame([{
+        "symbol": "000716.SZ", "effective_start": T("2010-04-28"), "effective_end": pd.NaT,
+        "st_state": sa.STATE_TRUE, "note": None, "end_event_id": None,
+        "end_announcement_date": pd.NaT, "end_basis": None,
+    }])
+    names = pd.DataFrame({
+        "symbol": ["000716.SZ"] * 3,
+        "observed_on": [T("2010-04-27"), T("2011-10-26"), T("2012-04-20")],
+        "sec_name": ["ST 南 方", "*ST南方", "南方食品"],
+    })
+    out = sa.apply_name_observations(episodes, names)
+    assert list(out.st_state) == [sa.STATE_TRUE, sa.STATE_UNKNOWN]
+    assert out.iloc[0].effective_end == T("2011-10-27")      # last ST-marked day included
+    assert (out.iloc[1].effective_start, out.iloc[1].effective_end) == (
+        T("2011-10-27"), T("2012-04-20"))
+
+
+def test_reminders_are_not_events_and_advance_notices_yield_to_the_implementation():
+    assert sa.classify_title("关于公司股票被实施其他风险警示的第十次提示性公告") == sa.IGNORE
+    ev = _events([
+        ("000809.SZ", sa.IMPLEMENT, "2024-04-11", "2024-04-12"),
+        ("000809.SZ", sa.IMPLEMENT, "2024-04-26", "2024-04-29"),
+    ])
+    ev["title"] = ["关于公司股票交易将被实施退市风险警示的提示性公告",
+                   "关于公司股票交易被实施退市风险警示暨股票停牌的公告"]
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert eps.iloc[0].effective_start == T("2024-04-29")
+    alone = sa.build_episodes(ev.iloc[[0]], coverage_start=T("2016-01-04"))
+    assert alone.iloc[0].effective_start == T("2024-04-12")   # the only evidence is kept
+
+
+def test_an_isolated_plain_name_between_st_names_does_not_cut():
+    episodes = pd.DataFrame([{
+        "symbol": "002642.SZ", "effective_start": T("2019-04-26"), "effective_end": T("2020-06-09"),
+        "st_state": sa.STATE_TRUE, "note": None, "end_event_id": None,
+        "end_announcement_date": pd.NaT, "end_basis": None,
+    }])
+    names = pd.DataFrame({
+        "symbol": ["002642.SZ"] * 3,
+        "observed_on": [T("2019-05-22"), T("2019-08-27"), T("2020-04-22")],
+        "sec_name": ["荣联科技", "*ST荣联", "*ST荣联"],
+    })
+    out = sa.apply_name_observations(episodes, names)
+    assert list(out.st_state) == [sa.STATE_TRUE]
+    assert out.iloc[0].effective_end == T("2020-06-09")
