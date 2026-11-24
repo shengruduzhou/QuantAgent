@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 import time
 from services.quant_api.config import ApiSettings, project_relative, stable_id
 from services.quant_api.runtime_indexer.contracts import resolve_artifact_contract
@@ -56,101 +56,132 @@ class RuntimeIndexer:
         self.settings = settings
         self.cache_path = settings.cache_root / "runtime_index.json"
         self._lock = RLock()
+        self._rebuild_lock = RLock()
+        self._refreshing = False
         self._artifacts: list[dict] = []
         self._indexed_at = 0.0
 
     def scan(self, *, force: bool = False) -> list[dict]:
+        background = bool(getattr(self.settings, "index_background_refresh", False))
         with self._lock:
-            if not force and self._artifacts and time.time() - self._indexed_at < self.settings.index_ttl_seconds:
+            fresh = self._artifacts and time.time() - self._indexed_at < self.settings.index_ttl_seconds
+            if not force and fresh:
+                return list(self._artifacts)
+            if not force and background and self._artifacts:
+                # Stale-while-revalidate: answer now, rebuild once in the background.
+                self._refresh_in_background()
                 return list(self._artifacts)
             if not force and self._load_cache_if_fresh():
                 return list(self._artifacts)
-            artifacts: list[dict] = []
-            for root, dirs, files in os.walk(self.settings.runtime_root):
-                root_path = Path(root)
-                dirs[:] = [
-                    name
-                    for name in dirs
-                    if name not in {"node_modules", "__pycache__"}
-                    and not self._is_internal_path(root_path / name)
-                    and not self._is_bulk_storage_path(root_path / name)
-                ]
-                for name in files:
-                    path = root_path / name
-                    if self._is_internal_path(path):
-                        continue
-                    try:
-                        stat = path.stat()
-                        relative = project_relative(self.settings, path)
-                        parser_name, _ = parser_for(path)
-                        contract = resolve_artifact_contract(
-                            path,
-                            self.settings,
-                            previewable=True,
-                        )
-                        contract_payload = contract.to_dict()
-                        fallback_kind, tags = _classify(relative, path.name)
-                        declared_kind = _canonical_declared_kind(contract_payload["declaredKind"])
-                        kind = declared_kind or fallback_kind
-                        declared_run_id = contract_payload["runId"]
-                        fallback_run_id = _run_id(relative)
-                        artifact = IndexedArtifact(
-                            id=stable_id("artifact", relative),
-                            kind=kind,
-                            name=path.name,
-                            path=relative,
-                            extension=path.suffix.lower(),
-                            sizeBytes=int(stat.st_size),
-                            modifiedAt=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                            status=(
-                                "error" if contract.validationStatus == "invalid"
-                                else "partial" if contract.freshnessStatus == "stale"
-                                else "ready"
-                            ),
-                            parser=parser_name,
-                            runId=declared_run_id or fallback_run_id,
-                            horizon=contract_payload["horizon"] or _horizon(relative),
-                            rows=contract_payload["rows"],
-                            dateStart=contract_payload["dateStart"],
-                            dateEnd=contract_payload["dateEnd"],
-                            tags=tags,
-                            schemaVersion=contract_payload["schemaVersion"],
-                            trustClass=contract_payload["trustClass"],
-                            validationStatus=contract_payload["validationStatus"],
-                            freshnessStatus=contract_payload["freshnessStatus"],
-                            staleReason=contract_payload["staleReason"],
-                            sourceTime=contract_payload["sourceTime"],
-                            manifestPath=contract_payload["manifestPath"],
-                            contentHash=contract_payload["contentHash"],
-                            declaredKind=contract_payload["declaredKind"],
-                            kindSource="manifest" if declared_kind else "path_heuristic",
-                            runIdSource="manifest" if declared_run_id else "path_heuristic" if fallback_run_id else None,
-                            producer=contract_payload["producer"],
-                            qualityStatus=contract_payload["qualityStatus"],
-                            dataAsOf=contract_payload["dataAsOf"],
-                            upstreamPaths=contract_payload["upstreamPaths"],
-                            capabilities=contract_payload["capabilities"],
-                            issues=contract_payload["contractIssues"],
-                        )
-                        artifacts.append(asdict(artifact))
-                    except (OSError, ValueError) as exc:
-                        relative = path.as_posix()
-                        artifacts.append(asdict(IndexedArtifact(
-                            id=stable_id("artifact", relative),
-                            kind="unknown",
-                            name=path.name,
-                            path=relative,
-                            extension=path.suffix.lower(),
-                            sizeBytes=0,
-                            modifiedAt="",
-                            status="error",
-                            issues=[{"code": "index_error", "message": str(exc), "recoverable": True}],
-                        )))
-            artifacts.sort(key=lambda item: item["modifiedAt"], reverse=True)
-            self._artifacts = artifacts
-            self._indexed_at = time.time()
-            self._write_cache()
-            return list(self._artifacts)
+        return self._rebuild()
+
+    def _refresh_in_background(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+
+        def run() -> None:
+            try:
+                self._rebuild()
+            finally:
+                self._refreshing = False
+
+        Thread(target=run, name="runtime-index-refresh", daemon=True).start()
+
+    def _rebuild(self) -> list[dict]:
+        # One walk at a time; readers are not blocked by the walk itself.
+        with self._rebuild_lock:
+            artifacts = self._walk()
+            with self._lock:
+                self._artifacts = artifacts
+                self._indexed_at = time.time()
+                self._write_cache()
+                return list(self._artifacts)
+
+    def _walk(self) -> list[dict]:
+        artifacts: list[dict] = []
+        for root, dirs, files in os.walk(self.settings.runtime_root):
+            root_path = Path(root)
+            dirs[:] = [
+                name
+                for name in dirs
+                if name not in {"node_modules", "__pycache__"}
+                and not self._is_internal_path(root_path / name)
+                and not self._is_bulk_storage_path(root_path / name)
+            ]
+            for name in files:
+                path = root_path / name
+                if self._is_internal_path(path):
+                    continue
+                try:
+                    stat = path.stat()
+                    relative = project_relative(self.settings, path)
+                    parser_name, _ = parser_for(path)
+                    contract = resolve_artifact_contract(
+                        path,
+                        self.settings,
+                        previewable=True,
+                    )
+                    contract_payload = contract.to_dict()
+                    fallback_kind, tags = _classify(relative, path.name)
+                    declared_kind = _canonical_declared_kind(contract_payload["declaredKind"])
+                    kind = declared_kind or fallback_kind
+                    declared_run_id = contract_payload["runId"]
+                    fallback_run_id = _run_id(relative)
+                    artifact = IndexedArtifact(
+                        id=stable_id("artifact", relative),
+                        kind=kind,
+                        name=path.name,
+                        path=relative,
+                        extension=path.suffix.lower(),
+                        sizeBytes=int(stat.st_size),
+                        modifiedAt=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                        status=(
+                            "error" if contract.validationStatus == "invalid"
+                            else "partial" if contract.freshnessStatus == "stale"
+                            else "ready"
+                        ),
+                        parser=parser_name,
+                        runId=declared_run_id or fallback_run_id,
+                        horizon=contract_payload["horizon"] or _horizon(relative),
+                        rows=contract_payload["rows"],
+                        dateStart=contract_payload["dateStart"],
+                        dateEnd=contract_payload["dateEnd"],
+                        tags=tags,
+                        schemaVersion=contract_payload["schemaVersion"],
+                        trustClass=contract_payload["trustClass"],
+                        validationStatus=contract_payload["validationStatus"],
+                        freshnessStatus=contract_payload["freshnessStatus"],
+                        staleReason=contract_payload["staleReason"],
+                        sourceTime=contract_payload["sourceTime"],
+                        manifestPath=contract_payload["manifestPath"],
+                        contentHash=contract_payload["contentHash"],
+                        declaredKind=contract_payload["declaredKind"],
+                        kindSource="manifest" if declared_kind else "path_heuristic",
+                        runIdSource="manifest" if declared_run_id else "path_heuristic" if fallback_run_id else None,
+                        producer=contract_payload["producer"],
+                        qualityStatus=contract_payload["qualityStatus"],
+                        dataAsOf=contract_payload["dataAsOf"],
+                        upstreamPaths=contract_payload["upstreamPaths"],
+                        capabilities=contract_payload["capabilities"],
+                        issues=contract_payload["contractIssues"],
+                    )
+                    artifacts.append(asdict(artifact))
+                except (OSError, ValueError) as exc:
+                    relative = path.as_posix()
+                    artifacts.append(asdict(IndexedArtifact(
+                        id=stable_id("artifact", relative),
+                        kind="unknown",
+                        name=path.name,
+                        path=relative,
+                        extension=path.suffix.lower(),
+                        sizeBytes=0,
+                        modifiedAt="",
+                        status="error",
+                        issues=[{"code": "index_error", "message": str(exc), "recoverable": True}],
+                    )))
+        artifacts.sort(key=lambda item: item["modifiedAt"], reverse=True)
+        return artifacts
 
     def filter(
         self,
@@ -223,6 +254,11 @@ class RuntimeIndexer:
 
     def invalidate(self) -> None:
         with self._lock:
+            if getattr(self.settings, "index_background_refresh", False) and self._artifacts:
+                # Keep serving the current index; the next scan refreshes it.
+                self._indexed_at = 0.0
+                self._refresh_in_background()
+                return
             self._artifacts = []
             self._indexed_at = 0.0
             if self.cache_path.exists():
