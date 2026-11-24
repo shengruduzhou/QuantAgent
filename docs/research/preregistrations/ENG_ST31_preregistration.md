@@ -282,3 +282,42 @@ and additions made while implementing and running DEV:
    The events part is in-sample here — the ENG_ST30 classifier and date rules were
    calibrated on this half — which is why validation on unseen data is the test.
    The method is frozen by the commit that adds this line; validation runs once on it.
+
+## Result — 2026-11-25 (validation evaluated once, method commit 0da7ef9)
+
+SZSE register fetched 2026-11-24 23:37 CST (7,510 name changes, latest 2026-11-24).
+
+| id | validation (SZSE, 2,908 securities × 81 sessions = 235,036 rows) | threshold | |
+|----|----|----|----|
+| V1 | 1.000 (9,498 emitted TRUE, 0 false) | ≥ 0.99 | pass |
+| V2 | 1.000 (0 register-TRUE rows emitted FALSE) | ≥ 0.99 | pass |
+| V3 | 1.000 — 19/19 transitions, **19 on the exact session**, 0 via UNKNOWN | ≥ 0.90 | pass |
+| V4 | 0.000 (0 UNKNOWN rows; 0 restarts) | ≤ 0.005 | pass |
+| V5 | 1.000 | ≥ 0.95 | pass |
+
+**Decision (§6): validation passes ⇒ SSE and BSE rows from 2026-07-27 are published.**
+
+* **Transitions:** the 19 are the 14 closes and 5 new warnings disclosed in §1.
+  Each traces to one cninfo notice:
+  * 14 revocations, 3 implementations and 2 delisting-period first days;
+  * 18 dated from the notice body, 1 by the +1-session fallback.
+* **First `publish`** (as-of 2026-11-24):
+  * Status `PUBLISHED`, and the §7 monitor passes over 2026-07-27→2026-11-24.
+  * SSE: 2,321 securities, 0 with UNKNOWN sessions, 80 under a warning on the as-of
+    date.
+  * BSE: 358 securities, 0 UNKNOWN, 3 under a warning.
+  * Fresh-window seed (3,273 symbols, 2026-08-06→2026-11-24): 0 uncovered, so the
+    catch-up's fail-fast check accepts the table.
+* **Files:**
+  * `runtime/data/u0/pit/_st_forward/{validation_result.json, validation_rows.parquet}`;
+  * the manifest section `eng_st31` in `runtime/data/u0/pit/st_manifest_v2.json`;
+  * the evidence before this publish, kept as
+    `_st_forward/st_pit_evidence.pre_eng_st31.parquet`.
+
+What this does **not** show:
+* SSE/BSE history before 2026-07-27, which stays `BLOCKED_BY_DATA` (ENG_ST30).
+* That the method transfers from SZSE to SSE beyond the shared CSRC disclosure
+  rules. For SSE the evidence is internal consistency: the carried state agreed
+  with every snapshot and dated name, with 0 contradictions.
+* That N = 19 bounds the transition error tightly. A one-sided 95% bound for 19/19
+  is about 0.85. The daily monitor (§7) keeps adding SZSE sessions.
