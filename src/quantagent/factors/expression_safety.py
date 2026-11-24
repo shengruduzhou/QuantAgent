@@ -35,6 +35,17 @@ _POST_DECISION_COLUMN = re.compile(
     re.IGNORECASE,
 )
 
+def is_post_decision_column(name: str) -> bool:
+    """True when a column name denotes information from after the decision close.
+
+    Shared by the factor DSL and the training-dataset builder so the two cannot
+    drift apart: a panel column such as ``entry_close_t1`` or
+    ``forward_return_20d`` must never become either a factor leaf or a model
+    feature.
+    """
+    return bool(_POST_DECISION_COLUMN.search(str(name)))
+
+
 #: Inputs a synthesized factor may read without being declared: daily OHLCV
 #: plus the point-in-time fundamentals the built-in blueprints use. A name
 #: pattern can only reject spellings someone thought of (round 29 missed
@@ -105,6 +116,7 @@ def validate_feature_expressions(expressions: list[str] | tuple[str, ...]) -> tu
 __all__ = [
     "expression_column_names",
     "expression_leakage_reasons",
+    "is_post_decision_column",
     "post_decision_column_reasons",
     "validate_feature_expression",
     "validate_feature_expressions",
