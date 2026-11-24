@@ -260,6 +260,8 @@ def main() -> int:
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--market-panel", default=PANEL)
     ap.add_argument("--labels", default=LABELS)
+    ap.add_argument("--allow-legacy-unstamped-labels", action="store_true",
+                    help="Accept a labels file without a label-convention stamp (recorded as legacy).")
     ap.add_argument("--label-column", default="forward_return_5d")
     ap.add_argument("--train-end", default="2024-07-31")
     ap.add_argument("--oos-end", default=None,
@@ -295,6 +297,14 @@ def main() -> int:
         args.market_panel,
         columns=[*_base_cols, *_fund_cols],
     )
+    from quantagent.data.label_contract import require_label_convention
+
+    label_check = require_label_convention(
+        args.labels,
+        allow_legacy_unstamped=args.allow_legacy_unstamped_labels,
+        consumer="evaluate_discovered_factors",
+    )
+    print(f"label convention: {label_check['label_convention']} ({label_check['label_convention_basis']})")
     labels = pd.read_parquet(
         args.labels, columns=["symbol", "trade_date", args.label_column, *references]
     )

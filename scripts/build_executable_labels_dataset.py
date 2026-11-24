@@ -32,6 +32,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from quantagent.data import label_contract  # noqa: E402
 from quantagent.factors.executable_labels import (  # noqa: E402
     FACTOR_LABEL_SEMANTICS,
     build_executable_forward_returns,
@@ -314,10 +315,15 @@ def main() -> int:
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    rebuilt.to_parquet(args.output, index=False)
+    # Stamp the label clock into the file so consumers can refuse to mix it
+    # with delay-0 labels (ROADMAP P1-2).
+    label_contract.write_labels_parquet(
+        rebuilt, args.output, convention=label_contract.EXEC_DELAY1_SESSION
+    )
     manifest_path = args.output.with_suffix(".labels.json")
     manifest = {
         **schema,
+        "label_convention_id": label_contract.EXEC_DELAY1_SESSION,
         "input_path": str(args.input.resolve()),
         "input_sha256": _sha256(args.input),
         "output_path": str(args.output.resolve()),

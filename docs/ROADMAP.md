@@ -35,13 +35,21 @@
    通过：净超额 CAGR 的平稳自助法 95% CI 下界 > 0，DSR（累计 N ≥ 135）≥ 0.95，6 年中 ≥ 4 年为正。
    试验数 1（加 E1 设定 GBM 为 2）。不通过 ⇒ 日频量价 long-only 方向停止，转向数据（基本面/一致预期）。
 2. **统一标签口径为 delay-1。** `build-labels-v7` 的 delay-0 使短周期 IC 虚增最多 53%；
-   给标签产物加口径戳并拒绝混用。
+   给标签产物加口径戳并拒绝混用。**Cycle 32 工程部分已完成（待独立审计）**：所有标签产出者写口径戳
+   （parquet schema metadata / CSV sidecar，`data.label_contract`）；`build-labels-v7` 必须显式
+   `--label-convention delay1|delay0`（**不改默认值**：原隐式 delay-0 若静默改为 delay-1，会改变重跑旧命令
+   得到的数字，故改为拒绝猜测；工作台"重建 Labels"显式传 delay1）；数据集构建器、`synthesize-factors-v7`
+   及两个评估脚本拒绝无戳标签（`--allow-legacy-unstamped-labels` 显式放行并记为 legacy）并拒绝混用
+   （钉住 schema 的口径不同 / 行情面板自带标签列）。剩余：用 delay-1 重建尚在使用的 v7 delay-0 产物。
 3. **收敛重复实现并做一次预注册重基线。** 交易成本 5 份（佣金 3.0 vs 2.5 bps；冲击系数相差 100×）、
    绩效指标 8 份、rank-IC 约 10 份（最小截面数不一致）、做T 路径的 3 份涨跌停拷贝。
    以 `execution/cost_model`、`quant_math/performance`、`factors/evaluation`、`market_rules/ashare`
    为唯一实现。冲击定律改为波动率缩放会改变规范数字，需预注册并经用户批准。
 4. **持久化多重检验台账。** 接到 `audit-nonlinear-factors`、`search-factor-fusion`、RD-Agent；
-   DSR 一律用同族累计 N。
+   DSR 一律用同族累计 N。**Cycle 32 已完成（待独立审计）**：`research.trial_ledger`
+   （`$QUANTAGENT_HOME/state/trial_ledger.jsonl`，append-only、哈希链、跨进程锁、校验失败即拒绝计数）；
+   三条命令每次运行逐试验入账（含对照、失败与拒绝），DSR 用 `历史基线 + 已入账 + 本次`。
+   剩余：Stage-4 `ExperimentLedger`（无 CLI 调用方）与 legacy GA（`--legacy-ga`）尚未接入。
 5. **退役 v7 银层面板。** 约 89 处引用改为经 `quant_paths` 的单一常量指向 U0/r29，随后归档。
 6. **重叠标签 IC 的 t 值**改用非重叠 cohort（`factors/evaluation`）；筛选用 |t| ≥ 3。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控

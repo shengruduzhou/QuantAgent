@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-abs-rank-icir", type=float, default=0.10)
     parser.add_argument("--min-abs-monotonicity", type=float, default=0.15)
     parser.add_argument("--max-pairwise-correlation", type=float, default=0.85)
+    parser.add_argument("--allow-legacy-unstamped-labels", action="store_true",
+                        help="Accept a labels file without a label-convention stamp (recorded as legacy).")
     return parser.parse_args()
 
 
@@ -55,6 +57,7 @@ def main() -> None:
             min_rows=1,
             min_symbols=1,
             min_dates=1,
+            allow_legacy_unstamped_labels=args.allow_legacy_unstamped_labels,
         )
     )
     frame = read_frame(result.output_path)

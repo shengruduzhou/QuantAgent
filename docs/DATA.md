@@ -78,8 +78,13 @@ v7 银层面板 runtime/data/v7/silver/market_panel（qlib_rescaled + akshare qf
 - 训练数据集不变量（有测试覆盖）：特征无 `available_at > trade_date`；标签与 post-decision 列
   （`entry_*`、`forward_*`、`fwd_*`、`next_*`、`label_*` 等）不得成为特征（Round 31 起构建器拒绝并记录
   `refused_feature_columns`，钉住的 schema 若要求此类列直接失败）；推理 schema 无原始前向标签。
-- 标签口径：认证数据与 `_exec_` 数据集为 **delay-1**（`close(t+1+h)/close(t+1)−1`）；`build-labels-v7`
-  仍产出 delay-0，会使短周期 IC 虚增（ROADMAP P1-2），两种口径不得混用。
+- 标签口径：认证数据与 `_exec_` 数据集为 **delay-1**（`close(t+1+h)/close(t+1)−1`）；delay-0 会使短周期
+  IC 虚增（ROADMAP P1-2）。每个标签产物带口径戳（`data.label_contract`：parquet 元数据 `quantagent.label_convention`，
+  CSV 为绑定内容哈希的 `.label_convention.json` sidecar），id：`delay1_close_t1_to_close_t1_plus_h_v1`（gold /
+  `build-labels-v7 --label-convention delay1`）、`delay1_exact_global_session_t1_to_t1_plus_h_v1`（`_exec_`，全局交易日钟）、
+  `same_close_t_to_close_t_plus_h_v1`（delay0）。`build-labels-v7` 无默认值必须显式选择；数据集构建器等消费者拒绝无戳
+  （仅 `--allow-legacy-unstamped-labels` 放行并记 legacy）与混用。旧 `runtime/data/gold/full_universe/labels.parquet` 无戳
+  （列推断为 delay-0），默认会被拒绝；r29 认证标签已带戳。
 
 ## 2. 训练数据集 schema
 

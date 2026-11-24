@@ -150,7 +150,7 @@ def test_new_v7_cli_commands_smoke(tmp_path):
 
     runner = CliRunner()
     download = runner.invoke(app, ["download-qlib-v7"])
-    labels = runner.invoke(app, ["build-labels-v7", "--market-panel", str(market_path), "--output", str(labels_path), "--horizons", "1,5"])
+    labels = runner.invoke(app, ["build-labels-v7", "--market-panel", str(market_path), "--output", str(labels_path), "--horizons", "1,5", "--label-convention", "delay0"])
     readiness = runner.invoke(app, ["v7-live-readiness-report", "--metrics", str(metrics_path), "--paper-report", str(paper_path), "--output", str(tmp_path / "ready.json")])
 
     assert download.exit_code == 0, download.output

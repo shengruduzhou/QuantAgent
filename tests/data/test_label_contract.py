@@ -99,7 +99,7 @@ def test_build_labels_v7_refuses_a_certified_directory(tmp_path):
     before = lc.file_sha256(gold / "labels.parquet")
     result = CliRunner().invoke(app, ["build-labels-v7", "--market-panel", str(market),
                                       "--output", str(gold / "labels.parquet"),
-                                      "--horizons", "1"])
+                                      "--horizons", "1", "--label-convention", "delay0"])
     assert result.exit_code != 0
     assert isinstance(result.exception, lc.CertifiedArtifactError)
     assert lc.file_sha256(gold / "labels.parquet") == before
@@ -112,7 +112,8 @@ def test_build_labels_v7_stamps_its_own_convention(tmp_path):
     _panel().to_parquet(market, index=False)
     out = tmp_path / "v7" / "labels.parquet"
     result = CliRunner().invoke(app, ["build-labels-v7", "--market-panel", str(market),
-                                      "--output", str(out), "--horizons", "1"])
+                                      "--output", str(out), "--horizons", "1",
+                                      "--label-convention", "delay0"])
     assert result.exit_code == 0, result.output
     assert lc.read_label_convention(out) == (lc.V7_SAME_CLOSE, "metadata")
 

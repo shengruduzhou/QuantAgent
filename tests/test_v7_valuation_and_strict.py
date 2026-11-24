@@ -1,6 +1,7 @@
 """AKShare valuation provider normalisation, valuation bootstrap, strict-mode checks."""
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 from pathlib import Path
 import sys
@@ -240,7 +241,8 @@ def test_training_dataset_strict_mode_rejects_overlapping_splits(tmp_path):
     labels = build_forward_return_labels(market, horizons=(1, 5)).frame
     market_path = tmp_path / "market.parquet"
     labels_path = tmp_path / "labels.parquet"
-    for frame, target in ((market, market_path), (labels, labels_path)):
+    _lc.write_labels_parquet(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
+    for frame, target in ((market, market_path),):
         try:
             frame.to_parquet(target, index=False)
         except Exception:
@@ -270,7 +272,7 @@ def test_training_dataset_strict_mode_rejects_duplicate_rows(tmp_path):
     duplicated.to_csv(market_path, index=False)
     labels = build_forward_return_labels(duplicated, horizons=(1,)).frame
     labels_path = tmp_path / "labels.csv"
-    labels.to_csv(labels_path, index=False)
+    _lc.write_labels_file(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
     config = V7TrainingDatasetConfig(
         market_panel_path=str(market_path),
         labels_path=str(labels_path),
@@ -291,7 +293,7 @@ def test_training_dataset_strict_mode_blocks_synthetic_source(tmp_path):
     market.to_csv(market_path, index=False)
     labels = build_forward_return_labels(market, horizons=(1,)).frame
     labels_path = tmp_path / "labels.csv"
-    labels.to_csv(labels_path, index=False)
+    _lc.write_labels_file(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
     config = V7TrainingDatasetConfig(
         market_panel_path=str(market_path),
         labels_path=str(labels_path),

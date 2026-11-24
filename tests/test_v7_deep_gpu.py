@@ -6,6 +6,7 @@ suite still passes on CPU-only boxes.
 """
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 
 import numpy as np
@@ -107,7 +108,7 @@ def test_walk_forward_gpu_logs_peak_memory_per_fold(tmp_path):
     market = pd.DataFrame(rows)
     labels = build_forward_return_labels(market, horizons=(1, 5)).frame
     market.to_parquet(tmp_path / "m.parquet", index=False)
-    labels.to_parquet(tmp_path / "l.parquet", index=False)
+    _lc.write_labels_parquet(labels, tmp_path / "l.parquet", convention=_lc.V7_SAME_CLOSE)
     built = build_v7_training_dataset_artifact(
         V7TrainingDatasetConfig(
             market_panel_path=str(tmp_path / "m.parquet"), labels_path=str(tmp_path / "l.parquet"),

@@ -338,7 +338,8 @@ def test_strategy_defaults_prefer_certified_inputs_over_newer_files(quant_ui_set
 def test_label_rebuild_and_horizon_blend_are_allowlisted_without_free_shell() -> None:
     labels = COMMANDS["build-labels-v7"]
     assert labels["type"] == "data"
-    assert labels["required"] == {"market_panel_path", "output_path", "horizons"}
+    assert labels["required"] == {"market_panel_path", "output_path", "horizons", "label_convention"}
+    assert labels["choices"]["label_convention"] == {"delay1", "delay0"}
     assert labels["option_aliases"] == {
         "market_panel_path": "market-panel",
         "output_path": "output",

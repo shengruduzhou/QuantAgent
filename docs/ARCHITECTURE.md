@@ -44,6 +44,8 @@ crontab + CI 推导，而非沿用旧文档）。治理规则见 [GOVERNANCE.md]
 | 走式切分 | `training/splitters.py` + `quant_math/purged_cv` | 若干私有 `_walk_forward_splits` |
 | 风控 | `paper/risk.RiskEngine`（订单路径上的唯一一个） | `risk/kill_switch`、`risk/risk_gate` 只服务 `production-readiness` 报告 |
 | 存储路径 | `config/paths.quant_paths()`（`QUANTAGENT_HOME`） | — |
+| 多重检验试验数 N（DSR 输入） | `research/trial_ledger.TrialLedger.family_count` | Stage-4 `research/experiment_governance.ExperimentLedger`（仅 Stage-4 路径，无 CLI 调用方） |
+| 标签口径戳与混用拒绝 | `data/label_contract`（`write_labels_file` / `require_label_convention`） | `factors/executable_labels` 的 `forward_executable_return_*` 用 schema 字段而非文件戳 |
 
 ## 3. 安全边界 / Safety boundary
 

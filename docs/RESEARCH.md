@@ -31,13 +31,19 @@ Round 31 D-01）。它只能被视为**历史、未验证**的产物，在认证
 | PBO | 零假设均值 0.48；阈值 0.50 让一半噪声族通过，0.25 通过 12.5% | 默认收紧到 0.25，且不得单独作通过依据 |
 | HAC t（重叠标签 IC） | 持续性因子在名义 5% 下拒绝 9–11% | 用非重叠子样本 t；筛选 |t| ≥ 3 |
 | RD-Agent 接受门 | 默认参数接受 **48% 纯噪声因子** | 已收紧默认值（见 HISTORY Round 31）；ROADMAP P1-1 |
-| 标签口径 | delay-0（`close(t+h)/close(t)`）使短周期 IC 虚增最多 53% | 认证数据与 `_exec_` 数据集用 delay-1；ROADMAP P1-2 |
+| 标签口径 | delay-0（`close(t+h)/close(t)`）使短周期 IC 虚增最多 53% | 认证数据与 `_exec_` 数据集用 delay-1；标签产物带口径戳，消费者拒绝无戳/混用（ROADMAP P1-2） |
 
 ## 3. 多重检验台账 / Trial count
 
 同族累计试验数是 DSR 的输入。截至 Round 31 的估算：H-001~H-027 约 117 次 + R29 E1 +
 治理化非线性对比 12 次 + Round 31 描述性复现 X1 5 次 ⇒ **非线性/融合族 ≥ 134**。
-持久化台账尚未接到 CLI（ROADMAP P1-4）；在此之前，任何 DSR 必须按此累计数报告。
+**台账（Cycle 32 起）**：唯一来源是 `quantagent.research.trial_ledger`
+（`$QUANTAGENT_HOME/state/trial_ledger.jsonl`）。`family_count(family)` = 声明的历史基线（附出处）+ 已入账试验；
+基线：`nonlinear_fusion` = 134（即上述估算），`rdagent_factor_synthesis` = 153（runtime/ 下 7 份
+`rd_agent_task_feedback.json` 的候选数之和，下界）。`audit-nonlinear-factors`、`search-factor-fusion`、
+`synthesize-factors-v7`（RD-Agent）每次运行把每个试验（含对照/失败/拒绝）写入台账，DSR 的 N =
+累计数（只能比单次运行的 N 大）；产物 `promotion_gate.json` / `trial_ledger.json` 记录所用 N 与台账头哈希。
+RD-Agent 接受门本身是非重叠 IC t 值（不算 DSR），累计 N 供下游 DSR/选择使用。引用数字时 N 取台账值。
 
 ## 4. 预注册 / Pre-registrations
 

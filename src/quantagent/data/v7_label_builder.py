@@ -7,6 +7,16 @@ module's close(t)->close(t+h) convention. They are re-labelled by
 ``close(t+1+h)/close(t+1) - 1`` with entry-infeasible rows dropped, and that
 convention is regression-locked by tests/test_executable_label_convention.py.
 
+Label convention (ROADMAP P1-2): ``entry_delay_sessions`` selects the clock.
+``0`` (the historical default, kept so existing callers' numbers do not move)
+is ``close(t+h)/close(t) - 1`` -- id ``same_close_t_to_close_t_plus_h_v1``;
+``1`` is ``close(t+1+h)/close(t+1) - 1`` -- id
+``delay1_close_t1_to_close_t1_plus_h_v1``, the same formula as the certified
+gold labels. The id is written to ``label_schema['label_convention']`` and
+``frame.attrs['label_convention']``; persist with
+``label_contract.write_labels_file`` so the file carries it too.
+``build-labels-v7`` requires the choice explicitly.
+
 This module emits three families of labels:
 
 * ``forward_return_{h}d`` — raw close-to-close forward returns over a
@@ -57,10 +67,28 @@ def build_forward_return_labels(
     include_rank_label: bool = True,
     include_tradable_labels: bool = True,
     benchmark_column: str | None = None,
+    entry_delay_sessions: int = 0,
 ) -> V7LabelBuildResult:
+    from quantagent.data.label_contract import (
+        CONVENTION_TEXT,
+        GOLD_DELAY1,
+        LABEL_CONVENTION_ATTR,
+        V7_SAME_CLOSE,
+    )
+
     horizons = tuple(int(h) for h in horizons)
+    delay = int(entry_delay_sessions)
+    if delay not in (0, 1):
+        raise ValueError("entry_delay_sessions must be 0 (same close) or 1 (delay-1 executable)")
+    convention = GOLD_DELAY1 if delay == 1 else V7_SAME_CLOSE
     if market_panel is None or market_panel.empty:
-        return V7LabelBuildResult(pd.DataFrame(), {"horizons": list(horizons), "label_columns": []})
+        empty = pd.DataFrame()
+        empty.attrs[LABEL_CONVENTION_ATTR] = convention
+        return V7LabelBuildResult(
+            empty,
+            {"horizons": list(horizons), "label_columns": [], "label_convention": convention,
+             "entry_delay_sessions": delay},
+        )
     required = {"symbol", "trade_date", price_column}
     missing = sorted(required - set(market_panel.columns))
     if missing:
@@ -77,12 +105,13 @@ def build_forward_return_labels(
     end_columns: list[str] = []
 
     grouped = data.groupby("symbol", sort=False)
+    entry_price = grouped[price_column].shift(-delay) if delay else data[price_column]
     for horizon in horizons:
         label = f"forward_return_{horizon}d"
         end_col = f"label_end_{horizon}d"
-        future_price = grouped[price_column].shift(-horizon)
-        future_date = grouped["trade_date"].shift(-horizon)
-        data[label] = future_price / data[price_column] - 1.0
+        future_price = grouped[price_column].shift(-(delay + horizon))
+        future_date = grouped["trade_date"].shift(-(delay + horizon))
+        data[label] = future_price / entry_price - 1.0
         data[end_col] = future_date
         label_columns.append(label)
         end_columns.append(end_col)
@@ -90,8 +119,11 @@ def build_forward_return_labels(
         if include_excess_return:
             excess = f"forward_excess_return_{horizon}d"
             if benchmark_column and benchmark_column in data.columns:
-                future_benchmark = grouped[benchmark_column].shift(-horizon)
-                data[excess] = data[label] - (future_benchmark / data[benchmark_column] - 1.0)
+                future_benchmark = grouped[benchmark_column].shift(-(delay + horizon))
+                entry_benchmark = (
+                    grouped[benchmark_column].shift(-delay) if delay else data[benchmark_column]
+                )
+                data[excess] = data[label] - (future_benchmark / entry_benchmark - 1.0)
             else:
                 # Cross-sectional excess vs same-day mean keeps the label
                 # cross-sectionally neutral even when no benchmark series
@@ -107,8 +139,10 @@ def build_forward_return_labels(
 
         if include_tradable_labels and any(col in data.columns for col in TRADABILITY_BLOCK_COLUMNS):
             tradable = f"forward_tradable_return_{horizon}d"
-            untradable_at_exit = _untradable_at_exit(data, grouped, horizon)
-            data[tradable] = data[label].where(~untradable_at_exit, other=np.nan)
+            untradable = _untradable_at_exit(data, grouped, delay + horizon)
+            if delay:
+                untradable = untradable | _unbuyable_at_entry(data, delay)
+            data[tradable] = data[label].where(~untradable, other=np.nan)
             tradable_columns.append(tradable)
 
     drop_subset = label_columns
@@ -122,9 +156,29 @@ def build_forward_return_labels(
         "label_end_columns": end_columns,
         "price_column": price_column,
         "benchmark_column": benchmark_column,
+        "label_convention": convention,
+        "label_convention_text": CONVENTION_TEXT[convention],
+        "entry_delay_sessions": delay,
         "pit_note": "labels are future outcomes for training only and must not be joined into inference frames",
     }
+    data.attrs[LABEL_CONVENTION_ATTR] = convention
     return V7LabelBuildResult(data, schema)
+
+
+def _unbuyable_at_entry(frame: pd.DataFrame, delay: int) -> pd.Series:
+    """Entry at ``t+delay`` is impossible when suspended or sealed limit-up there."""
+    masks: list[pd.Series] = []
+    for column in ("is_suspended", "is_limit_up"):
+        if column not in frame.columns:
+            continue
+        shifted = frame[column].astype(bool).groupby(frame["symbol"]).shift(-delay)
+        masks.append(shifted.fillna(False).astype(bool))
+    if not masks:
+        return pd.Series(False, index=frame.index)
+    combined = masks[0]
+    for mask in masks[1:]:
+        combined = combined | mask
+    return combined
 
 
 def _untradable_at_exit(

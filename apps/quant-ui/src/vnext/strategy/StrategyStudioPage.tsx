@@ -478,6 +478,9 @@ export function StrategyStudioPage(): JSX.Element {
           market_panel_path: draft.marketPanelPath,
           output_path: draft.labelsPath,
           horizons: draft.horizons,
+          // Canonical delay-1 clock (same as the certified gold labels); the
+          // command refuses to guess a convention (ROADMAP P1-2).
+          label_convention: "delay1",
         },
       });
       setActiveJob(result.data);
