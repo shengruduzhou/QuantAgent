@@ -194,6 +194,105 @@ class TestDeclaredDependencies:
         assert "pyqlib" in declared
 
 
+CI_CONSTRAINTS = REPO / "requirements" / "ci-constraints.txt"
+
+#: Declared groups CI installs, so the constraints file must pin all of them.
+CI_GROUPS = ("core", "test", "optimization")
+
+
+def _declared_requirements() -> dict[str, list]:
+    """Requirement objects per group: "core" plus every optional extra."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    groups = {"core": project.get("dependencies", []), **(project.get("optional-dependencies") or {})}
+    return {name: [Requirement(spec) for spec in specs] for name, specs in groups.items()}
+
+
+def _canonical(name: str) -> str:
+    return name.lower().replace("_", "-").replace(".", "-")
+
+
+def _constraint_pins() -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for line in CI_CONSTRAINTS.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, sep, version = line.partition("==")
+        assert sep, f"constraints must be exact pins, got {line!r}"
+        pins[_canonical(name)] = version.strip()
+    return pins
+
+
+class TestDependencyPolicy:
+    """The environment that runs the code must be the range that was tested.
+
+    CI went red for seven weeks (2026-10-09 →) because ``polars>=1.0`` let a
+    clean install resolve to Polars 2.0, which removed an argument the factor
+    backend used, while the server venv stayed on 1.x where it only warned. The
+    same audit found the server on numpy 2.4.5 although pyproject said <2.3.
+    These checks make both kinds of drift fail loudly wherever the suite runs.
+    """
+
+    def test_installed_versions_satisfy_declared_ranges(self):
+        """Run in CI and in the server venv alike; core packages must exist."""
+        import importlib.metadata as metadata
+
+        outside: list[str] = []
+        missing_core: list[str] = []
+        for group, requirements in _declared_requirements().items():
+            for requirement in requirements:
+                if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
+                    continue
+                try:
+                    installed = metadata.version(requirement.name)
+                except metadata.PackageNotFoundError:
+                    if group == "core":
+                        missing_core.append(requirement.name)
+                    continue
+                if not requirement.specifier.contains(installed, prereleases=True):
+                    outside.append(f"{requirement.name}=={installed} not in '{requirement.specifier}' ({group})")
+        assert not missing_core, f"core dependencies not installed: {missing_core}"
+        assert not outside, (
+            "installed versions fall outside pyproject.toml's declared ranges; "
+            "either the environment drifted or the range is stale: " + "; ".join(sorted(set(outside)))
+        )
+
+    def test_ci_constraints_pin_every_ci_dependency_inside_its_range(self):
+        pins = _constraint_pins()
+        problems: list[str] = []
+        groups = _declared_requirements()
+        for group in CI_GROUPS:
+            for requirement in groups[group]:
+                pinned = pins.get(_canonical(requirement.name))
+                if pinned is None:
+                    problems.append(f"{requirement.name} ({group}) is not pinned")
+                elif not requirement.specifier.contains(pinned, prereleases=True):
+                    problems.append(f"{requirement.name}=={pinned} violates '{requirement.specifier}' ({group})")
+        assert not problems, "requirements/ci-constraints.txt is out of step with pyproject.toml: " + "; ".join(problems)
+
+    def test_every_ci_python_install_uses_the_constraints(self):
+        """An unconstrained install in a required job reintroduces drift."""
+        workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        installs = [line.strip() for line in workflow.splitlines() if "pip install" in line]
+        assert installs, "ci.yml has no pip install step to audit"
+        unconstrained = [line for line in installs if "-c requirements/ci-constraints.txt" not in line]
+        assert not unconstrained, f"ci.yml installs without the constraints file: {unconstrained}"
+
+    def test_polars_floor_has_the_api_the_factor_backend_uses(self):
+        """``min_samples`` exists from Polars 1.21; a lower floor is a lie."""
+        from packaging.version import Version
+
+        polars = next(r for r in _declared_requirements()["core"] if r.name == "polars")
+        floors = [Version(s.version) for s in polars.specifier if s.operator == ">="]
+        assert floors and min(floors) >= Version("1.21"), polars
+        ceilings = [s for s in polars.specifier if s.operator == "<"]
+        assert ceilings, "polars needs a next-major ceiling; 2.0 already broke the backend once"
+
+
 @pytest.mark.skipif(
     os.environ.get("QUANTAGENT_CLEAN_ENV_TEST") != "1",
     reason="clean-environment install is slow; set QUANTAGENT_CLEAN_ENV_TEST=1 to run",
@@ -211,13 +310,15 @@ class TestCleanEnvironmentInstall:
         bindir = "Scripts" if os.name == "nt" else "bin"
         python = env_dir / bindir / ("python.exe" if os.name == "nt" else "python")
 
+        # Same install as the CI test job, constraints included.
+        constraints = ["-c", str(CI_CONSTRAINTS)]
         subprocess.run(
             [str(python), "-m", "pip", "install", "-q", "--upgrade",
-             "pip", "wheel", "setuptools"],
+             "pip", "wheel", "setuptools", *constraints],
             check=True, cwd=REPO, timeout=900,
         )
         subprocess.run(
-            [str(python), "-m", "pip", "install", "-q", "-e", ".[test]"],
+            [str(python), "-m", "pip", "install", "-q", "-e", ".[test]", *constraints],
             check=True, cwd=REPO, timeout=3600,
         )
 

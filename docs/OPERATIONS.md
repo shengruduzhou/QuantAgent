@@ -6,6 +6,20 @@
 ## 0. 环境 / Environment
 
 - Python：`AI_quant_venv/bin/python3`（cron 与 CLAUDE.md 使用同一个）；`pip install -e ".[all]"`。
+- 依赖策略（2026-11-25 起）：
+  - `pyproject.toml` 的范围 = 代码支持的版本。numpy / pandas / polars / pydantic 带下一大版本上限，
+    所以全新安装不会解析到没测过的大版本。
+  - CI 用 `-c requirements/ci-constraints.txt` 安装精确版本，可复现。该文件只由
+    `scripts/refresh_ci_constraints.sh` 生成：在干净 venv 中解析出范围内最新版本，全量测试通过后才写入。
+  - 每周的 `Dependency Drift` workflow 不带 constraints，安装范围内最新版本并跑全量测试；
+    上游发布破坏代码时在这里变红，而不是在无关的 push 上。
+  - `tests/test_declared_dependencies.py` 在任何环境（CI 或本机 venv）里，已安装版本一旦超出声明范围就失败。
+  - 本机 venv 与 constraints 的已知偏差（2026-11-25 实测）：70 个 pin 中 57 个版本不同。
+    跨大版本的有 polars 1.40.1→2.1.0、starlette 0.52→1.10、python-dateutil 2.9→4.0、
+    pyarrow 23→26；两套环境全量测试均通过，且本机全部已装包都在声明范围内。
+    目标是本机也按同一个 constraints 安装，使 CI 与生产同版本。升级只在没有 cron 数据任务
+    运行时进行（时间表见 §1；06:00 的 catch-up 可能跑数小时），
+    用 `pip install -c requirements/ci-constraints.txt -e ".[all]"`，之后跑全量测试。
 - 全量测试：`AI_quant_venv/bin/python3 -m pytest tests/ -q`（约 8 分钟）。测试会把
   `QUANTAGENT_HOME` 指向临时目录；需要读真实 runtime 的手工检查设
   `QUANTAGENT_TEST_USE_REAL_RUNTIME=1`。

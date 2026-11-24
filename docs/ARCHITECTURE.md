@@ -12,7 +12,7 @@ crontab + CI 推导，而非沿用旧文档）。治理规则见 [GOVERNANCE.md]
 | Web API | `python -m services.quant_api` | FastAPI，同时托管 `apps/quant-ui/dist`（React VNext） |
 | JobRunner | `services/quant_api/services/jobs.py` `COMMANDS` | 48 个白名单命令（11 个 CLI + 37 个脚本），统一经 `scripts/job_supervisor.py` |
 | 定时任务 | 用户 crontab（8 条） | 见 OPERATIONS.md §定时任务；systemd 单元已删除 |
-| CI | `.github/workflows/*.yml` | 全量 pytest + 依赖审计 + 5 个 smoke 脚本 |
+| CI | `.github/workflows/*.yml` | 全量 pytest（按 `requirements/ci-constraints.txt` 精确安装）+ 依赖审计 + 5 个 smoke 脚本；每周 `Dependency Drift` 用范围内最新版本跑全量 |
 | 规范评估器 | `scripts/baseline_protocol.py` variant C | 唯一可信收益数字入口 |
 
 ## 2. 研究链路与权威模块 / Live flow and authoritative modules

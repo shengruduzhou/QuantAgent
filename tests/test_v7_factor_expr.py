@@ -145,3 +145,58 @@ def test_polars_backend_matches_pandas_for_core_operators():
         atol=1e-10,
         rtol=1e-10,
     )
+
+
+def _rolling_factors() -> dict:
+    return {
+        "mean": TsMean(Close, 3),
+        "std": TsStd(Close, 3),
+        "sum": TsSum(Close, 3),
+        "min": TsMin(Close, 3),
+        "max": TsMax(Close, 3),
+    }
+
+
+def test_polars_rolling_matches_pandas_when_windows_contain_missing_values():
+    """A window needs ``window`` observed values on both backends.
+
+    pandas spells this ``rolling(window, min_periods=window)``; Polars spells it
+    ``min_samples`` (the old ``min_periods`` was removed in Polars 2.0). Gaps in
+    the middle of a symbol's history are where the two rules could diverge, so
+    they are planted explicitly rather than relying on the warm-up rows alone.
+    """
+    pytest.importorskip("polars")
+    df = _toy_panel(num_days=15, symbols=("A", "B", "C"))
+    gaps = (df["symbol"] == "A") & df["trade_date"].isin(df["trade_date"].unique()[[4, 9]])
+    gaps |= (df["symbol"] == "C") & df["trade_date"].isin(df["trade_date"].unique()[[7]])
+    df.loc[gaps, "close"] = np.nan
+    pandas_result = build_factor_frame(df, _rolling_factors(), backend="pandas")
+    polars_result = build_factor_frame(df, _rolling_factors(), backend="polars")
+    pd.testing.assert_frame_equal(
+        pandas_result.drop(columns=["trade_date"]),
+        polars_result.drop(columns=["trade_date"]),
+        check_dtype=False,
+        atol=1e-10,
+        rtol=1e-10,
+    )
+    # The gap must actually blank the windows that include it; otherwise the
+    # parity above could hold vacuously.
+    a_rows = polars_result[polars_result["symbol"] == "A"].sort_values("trade_date").reset_index(drop=True)
+    assert a_rows.loc[[4, 5, 6, 9, 10, 11], "factor_mean"].isna().all()
+    assert a_rows.loc[[3, 7, 8, 12], "factor_mean"].notna().all()
+
+
+def test_polars_backend_uses_no_deprecated_polars_arguments():
+    """Polars 1.x only warns about an argument that 2.x removes.
+
+    The server and CI can run different Polars majors, so a deprecated spelling
+    that merely warns on one is a hard failure on the other. Promote the warning
+    here so the older runtime catches it too.
+    """
+    pytest.importorskip("polars")
+    import warnings
+
+    df = _toy_panel(num_days=12, symbols=("A", "B"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        build_factor_frame(df, _rolling_factors(), backend="polars")

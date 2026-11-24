@@ -5,6 +5,32 @@
 `main`，本地另有标签 `round31-pre-consolidation`）。Round 31 的完整审计证据（六岗报告、
 复现测试、基准日志）保存在 `runtime/archives/audits/round31/`。
 
+## Round 31 续 3（2026-11-25）— CI 自 2026-10-09 起持续失败：Polars 2.0 与依赖漂移
+
+GitHub CI 从 run #1793（main 2c4e296，2026-10-09）起每次都失败，没人注意到。Polars 2.0（2026-10-06）
+删掉了 `rolling_*(min_periods=)` 参数；`pyproject` 写的是 `polars>=1.0`，干净环境解析到 2.1.0，
+`factors/expr.py` 的 Polars 后端就报错。本机 venv 停在 1.40.1，只出 DeprecationWarning，所以本地全绿。
+在干净 venv（UTC、空环境）复现：未修改的 main 恰好 1 个失败，与 GitHub 一致。
+
+审计同时发现：本机 numpy 2.4.5 早已超出声明的 `<2.3`；CI 安装不锁版本，任何上游发布都能让无关的 push 变红。
+
+修复：
+- 改用 `min_samples`。语义不变：pandas 参考实现仍用 `rolling(window, min_periods=window)`。
+  新增窗口内含缺失值的对拍测试，以及把 Polars DeprecationWarning 升级为错误的测试，
+  使 1.x 运行时也能抓到将被删除的参数。两者在修复前的代码上都会失败。
+- 依赖范围：`polars>=1.21,<3`（1.21 实测通过），`numpy<2.5`，`pydantic<3`。
+- CI 改为按 `requirements/ci-constraints.txt` 精确安装；新增每周 `Dependency Drift` workflow。
+- 依赖测试在任何环境检查"已装版本在声明范围内"。
+
+验证：
+- 干净环境，范围内最新版本：3,597 passed / 0 failed。
+- Polars 1.21.0 下限：相关 389 个测试通过。
+- Polars 2.x 之外，仓库代码没有其他 Polars 不兼容用法（逐一对照 2.0 升级指南实测）。
+
+遗留：
+- pandas 3 的 FutureWarning（`groupby.apply` 含分组列、`fillna` 降型、不兼容 dtype 赋值），由 `pandas<3` 挡住。
+- 本机 venv 与 constraints 的偏差见 OPERATIONS.md §0。
+
 ## Round 31 续 2（2026-11-25）— ENG_ST31 前向锚定 ST 登记，FRESH 窗证据解除阻塞
 
 用户选择预注册 ENG_ST31。核实 A0 真实带日期：安全主表名称来自 TickFlow `get_instruments`，2026-07-26 11:39:51Z 全市场

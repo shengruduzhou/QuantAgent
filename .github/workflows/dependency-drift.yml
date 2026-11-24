@@ -1,0 +1,66 @@
+name: Dependency Drift
+
+# Required CI installs the exact versions in requirements/ci-constraints.txt, so
+# an upstream release cannot turn it red on an unrelated push. This workflow is
+# the other half: it installs the NEWEST versions pyproject.toml allows, without
+# the constraints, and runs the full suite. A failure here means a release
+# inside the declared ranges breaks the code (as Polars 2.0 did in 2026-10):
+# fix the code or tighten the range, then refresh the constraints with
+# scripts/refresh_ci_constraints.sh.
+on:
+  schedule:
+    - cron: "15 1 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "pyproject.toml"
+      - "requirements/**"
+      - ".github/workflows/dependency-drift.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "requirements/**"
+      - ".github/workflows/dependency-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  latest-in-range:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install newest allowed versions (no constraints)
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade -e ".[test,optimization]"
+      - name: Show drift from the CI constraints
+        shell: bash
+        run: |
+          python -m pip freeze --all --exclude-editable | LC_ALL=C sort -f > resolved.txt
+          grep -v '^#' requirements/ci-constraints.txt | diff - resolved.txt | tee drift.diff || true
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --junitxml=pytest-results.xml 2>&1 | tee pytest.log
+      - name: Upload drift diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dependency-drift
+          path: |
+            resolved.txt
+            drift.diff
+            pytest.log
+            pytest-results.xml
+          if-no-files-found: warn
+          retention-days: 30

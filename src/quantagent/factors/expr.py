@@ -619,7 +619,7 @@ def _evaluate_polars(expr: Expr, frame: pd.DataFrame) -> pd.Series:
     try:
         import polars as pl
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise ImportError("backend='polars' requires polars; install quantagent[research]") from exc
+        raise ImportError("backend='polars' requires polars, a core dependency; reinstall quantagent") from exc
     _ensure_sorted(frame)
     base = frame.reset_index(drop=True).copy()
     base["__row_id"] = np.arange(len(base))
@@ -662,12 +662,15 @@ def _polars_value_frame(expr: Expr, pl_frame, pl):
             ((pl.col("left") / pl.when(pl.col("right") == 0.0).then(None).otherwise(pl.col("right"))) - 1.0).alias("factor_value"),
         )
     if isinstance(expr, _RollingReduction):
+        # ``min_samples`` (Polars >= 1.21) is the renamed ``min_periods``; 2.0
+        # removed the old name. A window needs ``window`` non-null values, the
+        # same rule as the pandas reference's ``rolling(window, min_periods=window)``.
         rolling_expr = {
-            "mean": pl.col("factor_value").rolling_mean(window_size=expr.window, min_periods=expr.window),
-            "std": pl.col("factor_value").rolling_std(window_size=expr.window, min_periods=expr.window),
-            "sum": pl.col("factor_value").rolling_sum(window_size=expr.window, min_periods=expr.window),
-            "max": pl.col("factor_value").rolling_max(window_size=expr.window, min_periods=expr.window),
-            "min": pl.col("factor_value").rolling_min(window_size=expr.window, min_periods=expr.window),
+            "mean": pl.col("factor_value").rolling_mean(window_size=expr.window, min_samples=expr.window),
+            "std": pl.col("factor_value").rolling_std(window_size=expr.window, min_samples=expr.window),
+            "sum": pl.col("factor_value").rolling_sum(window_size=expr.window, min_samples=expr.window),
+            "max": pl.col("factor_value").rolling_max(window_size=expr.window, min_samples=expr.window),
+            "min": pl.col("factor_value").rolling_min(window_size=expr.window, min_samples=expr.window),
         }[expr.op]
         return _polars_grouped(expr.expr, pl_frame, pl, rolling_expr)
     if isinstance(expr, (TsRank, TsCorr, TsCov, DecayLinear, CsZscore)):
