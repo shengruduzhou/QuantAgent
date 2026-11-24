@@ -10,6 +10,7 @@ tradability flags for the catch-up window using the dated ST state.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -35,7 +36,86 @@ from quantagent.quant_math.ashare import board_price_limit_vector  # noqa: E402
 
 PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 STAGING = PANEL.parent / "_staging_catchup"
+CALENDAR = REPO / "runtime/data/u0/pit/trading_calendar.parquet"
 CHUNK = 250
+# Extra bars beyond the window's session count (vendor returns the latest N bars).
+FETCH_COUNT_MARGIN = 10
+# Every session in the window must carry at least this share of the seed symbols
+# (same threshold as scripts/coverage_guard.sh) before the panel is written.
+MIN_DATE_COVERAGE = 0.93
+
+
+class WindowCoverageError(RuntimeError):
+    """The staged catch-up rows do not cover the window; the panel must not be written."""
+
+
+def window_sessions(calendar: pd.DataFrame, win_start, win_end) -> list[pd.Timestamp]:
+    """Open sessions of the offline PIT trading calendar inside [win_start, win_end].
+
+    Refuses a window that extends beyond the calendar's last date (an expired
+    calendar must be refreshed, not silently treated as having no sessions)."""
+    dates = pd.to_datetime(calendar["trade_date"])
+    if "is_open" in calendar.columns:
+        dates = dates[calendar["is_open"].astype(bool).to_numpy()]
+    dates = dates.dt.normalize()
+    if pd.Timestamp(win_end) > dates.max():
+        raise WindowCoverageError(
+            f"trading calendar ends {dates.max().date()} before window end "
+            f"{pd.Timestamp(win_end).date()}; refresh runtime/data/u0/pit/trading_calendar.parquet"
+        )
+    mask = (dates >= pd.Timestamp(win_start)) & (dates <= pd.Timestamp(win_end))
+    return sorted(pd.Timestamp(d) for d in dates[mask].unique())
+
+
+def require_window_coverage(
+    new: pd.DataFrame,
+    sessions: list[pd.Timestamp],
+    n_seed: int,
+    min_ratio: float = MIN_DATE_COVERAGE,
+) -> dict[str, int]:
+    """Fail closed unless every calendar session in the window is present with at
+    least ``min_ratio`` of the seed symbols and no row falls on a non-session date.
+
+    Cycle 32: the catch-up fetched the latest 40 bars for a 73-session window, which
+    would have appended 2026-09-22.. while leaving 2026-08-06..2026-09-21 empty; the
+    supervisor's max(trade_date) check would still have reported CURRENT."""
+    if not sessions:
+        raise WindowCoverageError("window contains no calendar sessions")
+    trade_dates = pd.to_datetime(new["trade_date"]).dt.normalize()
+    per_date = new.assign(_d=trade_dates).groupby("_d")["symbol"].nunique()
+    session_set = set(sessions)
+    off_calendar = sorted(d for d in per_date.index if d not in session_set)
+    if off_calendar:
+        raise WindowCoverageError(
+            f"{len(off_calendar)} staged dates are not calendar sessions: "
+            f"{[str(d.date()) for d in off_calendar[:5]]}"
+        )
+    floor = int(np.ceil(min_ratio * n_seed))
+    short = {
+        str(d.date()): int(per_date.get(d, 0))
+        for d in sessions
+        if int(per_date.get(d, 0)) < floor
+    }
+    if short:
+        first = list(short.items())[:5]
+        raise WindowCoverageError(
+            f"{len(short)}/{len(sessions)} sessions below {floor} symbols "
+            f"({min_ratio:.0%} of {n_seed} seeds), e.g. {first}"
+        )
+    return {str(d.date()): int(per_date[d]) for d in sessions}
+
+
+def _acquire_staging_lock(staging: Path):
+    """Single writer for the staging directory (the 16:30 fresh_blind_daily top-up
+    and the 06:00 supervisor both run this script)."""
+    staging.mkdir(exist_ok=True)
+    handle = open(staging / ".catchup.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
 
 
 def _load_required_st_evidence(path: str | None):
@@ -71,7 +151,10 @@ def main() -> int:
     args = parser.parse_args()
     evidence = _load_required_st_evidence(args.historical_st_path)
     started = time.time()
-    STAGING.mkdir(exist_ok=True)
+    lock = _acquire_staging_lock(STAGING)
+    if lock is None:
+        print(json.dumps({"appended": 0, "note": "another catch-up holds the staging lock; skipped"}))
+        return 0
 
     panel = pd.read_parquet(PANEL)
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
@@ -107,12 +190,22 @@ def main() -> int:
         panel.loc[panel["trade_date"] == panel_max, "symbol"].astype(str).unique()
     )
     _require_st_coverage(evidence, seed_symbols, win_start, win_end)
+    try:
+        sessions = window_sessions(pd.read_parquet(CALENDAR), win_start, win_end)
+    except WindowCoverageError as exc:
+        raise SystemExit(f"refusing catch-up: {exc}") from exc
+    if not sessions:
+        print(json.dumps({"appended": 0, "note": "no calendar session in window"}))
+        return 0
+    fetch_count = len(sessions) + FETCH_COUNT_MARGIN
+    print(f"window has {len(sessions)} calendar sessions -> fetch count {fetch_count}", flush=True)
 
     manifest = STAGING / "window.json"
     window_tag = f"{win_start.date()}_{win_end.date()}"
     expected_manifest = {
         "window": window_tag,
         "historical_st_evidence_sha256": evidence.source_sha256,
+        "fetch_count": fetch_count,
     }
     existing_manifest = {}
     if manifest.exists():
@@ -154,7 +247,7 @@ def main() -> int:
         chunk_symbols = todo[chunk_start : chunk_start + CHUNK]
         rows: list[pd.DataFrame] = []
         for symbol in chunk_symbols:
-            kline = rep.fetch_with_retry(tf, symbol)
+            kline = rep.fetch_with_retry(tf, symbol, count=fetch_count)
             if kline is None:
                 failed.append(symbol)
                 continue
@@ -235,6 +328,12 @@ def main() -> int:
     for column in ("open", "high", "low", "close", "volume", "amount"):
         new[column] = pd.to_numeric(new[column], errors="coerce")
     new = new.dropna(subset=["trade_date", "symbol", "close"])
+    try:
+        require_window_coverage(new, sessions, len(seed_symbols))
+    except WindowCoverageError as exc:
+        raise SystemExit(
+            f"refusing catch-up merge (staging preserved for resume): {exc}"
+        ) from exc
     try:
         new = attach_historical_st(new, evidence)
     except HistoricalSTCoverageError as exc:

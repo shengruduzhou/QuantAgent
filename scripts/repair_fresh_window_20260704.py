@@ -61,13 +61,21 @@ def _board_cap(symbol: str, is_st: bool, trade_date: object | None = None) -> fl
     )
 
 
-def fetch_with_retry(tf, sym: str, attempts: int = 3):
+def fetch_with_retry(tf, sym: str, attempts: int = 3, count: int = 40):
+    """Latest ``count`` daily bars (TickFlow ``count`` = number of most recent K-lines).
+
+    Callers covering a window longer than ``count`` sessions MUST pass a larger
+    ``count``: the vendor silently returns only the latest N bars, so a short count
+    leaves an interior hole that a max(trade_date) freshness check cannot see.
+    """
+    if int(count) < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
     for index in range(attempts):
         try:
             return tf.klines.get(
                 sym,
                 period="1d",
-                count=40,
+                count=int(count),
                 adjust="none",
                 as_dataframe=True,
             )
