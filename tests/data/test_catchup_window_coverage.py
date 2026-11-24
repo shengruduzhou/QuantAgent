@@ -123,3 +123,108 @@ def test_staging_lock_is_exclusive(tmp_path):
     again = catchup._acquire_staging_lock(tmp_path)
     assert again is not None
     again.close()
+
+
+# --- main()-level wiring (review condition, Cycle 32) -----------------------
+
+SYMS = ["000001.SZ", "000002.SZ", "600000.SH"]
+
+
+def _seed_panel(path: Path) -> None:
+    dates = pd.bdate_range("2026-07-27", "2026-08-05")
+    rows = []
+    for d in dates:
+        for s in SYMS:
+            rows.append(
+                {
+                    "symbol": s, "trade_date": d, "open": 10.0, "high": 10.0, "low": 10.0,
+                    "close": 10.0, "volume": 1e6, "amount": 1e7, "is_limit_up": False,
+                    "is_limit_down": False, "is_suspended": False, "is_st": False,
+                    "available_at": d + pd.Timedelta(days=1), "source": "seed",
+                    "source_type": "test", "source_reliability": 1.0, "point_in_time_valid": True,
+                }
+            )
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+
+class _VendorKlines:
+    """Latest ``count`` sessions up to END, like TickFlow's ``count`` semantics."""
+
+    def __init__(self, sessions, fail=()):
+        self.sessions = sessions
+        self.fail = set(fail)
+
+    def get(self, sym, period, count, adjust, as_dataframe):
+        if sym in self.fail:
+            raise RuntimeError("throttled")
+        days = self.sessions[-int(count):]
+        return pd.DataFrame(
+            {"trade_date": days, "open": 10.0, "high": 10.2, "low": 9.9,
+             "close": 10.1, "volume": 1e4, "amount": 1.01e7}
+        )
+
+
+class _Vendor:
+    def __init__(self, sessions, fail=()):
+        self.klines = _VendorKlines(sessions, fail)
+
+
+def _wire(monkeypatch, tmp_path, vendor):
+    panel = tmp_path / "market_panel.parquet"
+    _seed_panel(panel)
+    cal = tmp_path / "trading_calendar.parquet"
+    _calendar("2026-07-01", "2026-12-31").to_parquet(cal, index=False)
+    monkeypatch.setattr(catchup, "PANEL", panel)
+    monkeypatch.setattr(catchup, "STAGING", tmp_path / "_staging_catchup")
+    monkeypatch.setattr(catchup, "CALENDAR", cal)
+    monkeypatch.setattr(catchup, "_load_required_st_evidence", lambda path: type("E", (), {"source_sha256": "x", "mode": "test"})())
+    monkeypatch.setattr(catchup, "_require_st_coverage", lambda *a, **k: None)
+
+    def _attach(frame, evidence):
+        frame = frame.copy()
+        frame["is_st"] = False
+        frame["is_st_provenance"] = "test_dated"
+        frame["st_evidence_sha256"] = "x"
+        return frame
+
+    monkeypatch.setattr(catchup, "attach_historical_st", _attach)
+    monkeypatch.setattr(catchup.rep, "_tf_client", lambda: vendor)
+    monkeypatch.setattr(sys, "argv", ["catchup", "--end", "2026-11-24", "--historical-st-path", "unused"])
+    return panel
+
+
+def _sessions():
+    return list(pd.bdate_range("2026-08-06", "2026-11-24"))
+
+
+def test_main_fills_every_session(monkeypatch, tmp_path):
+    panel = _wire(monkeypatch, tmp_path, _Vendor(_sessions()))
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    window = out[out["trade_date"] > "2026-08-05"]
+    assert window["trade_date"].nunique() == len(_sessions())
+    assert (window.groupby("trade_date")["symbol"].nunique() == len(SYMS)).all()
+    assert not list((tmp_path).glob(".market_panel.parquet.tmp-*"))
+
+
+def test_main_refuses_latest_40_bars_hole(monkeypatch, tmp_path):
+    panel = _wire(monkeypatch, tmp_path, _Vendor(_sessions()))
+    real_fetch = catchup.rep.fetch_with_retry
+    monkeypatch.setattr(catchup.rep, "fetch_with_retry", lambda tf, sym, attempts=3, count=40: real_fetch(tf, sym, attempts, 40))
+    before = panel.read_bytes()
+    with pytest.raises(SystemExit, match="sessions below"):
+        catchup.main()
+    assert panel.read_bytes() == before
+
+
+def test_main_fetch_failure_retries_instead_of_dropping_symbol(monkeypatch, tmp_path):
+    vendor = _Vendor(_sessions(), fail={"600000.SH"})
+    panel = _wire(monkeypatch, tmp_path, vendor)
+    monkeypatch.setattr(catchup.rep.time, "sleep", lambda s: None)
+    before = panel.read_bytes()
+    assert catchup.main() == catchup.EXIT_RETRY
+    assert panel.read_bytes() == before
+    vendor.klines.fail.clear()
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])

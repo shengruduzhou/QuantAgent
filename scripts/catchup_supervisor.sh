@@ -79,6 +79,13 @@ for i in $(seq 1 "$MAX_ITERS"); do
   timeout "$ITER_TIMEOUT" $PY scripts/catchup_panel_chunked.py
   rc=$?
   echo "iter $i catchup rc=$rc $(date -Is)"
+  # rc=75: fetch incomplete (some seed symbols failed); panel NOT written,
+  # staging kept -> next iteration retries only the failed symbols.
+  if [ $rc -eq 75 ]; then
+    echo "FETCH_INCOMPLETE rc=75 -- retrying failed symbols next iteration"
+    sleep 60
+    continue
+  fi
   if [ $rc -ne 0 ] && [ $rc -ne 124 ]; then
     echo "CATCHUP_HARD_ERROR rc=$rc (not a timeout) -- stopping, staging preserved"
     echo "=== catchup supervisor ABORT $(date -Is) ==="

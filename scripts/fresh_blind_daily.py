@@ -114,8 +114,14 @@ def step_update_data(dry: bool) -> dict:
         return {"status": "PARTIAL_STAGED",
                 "note": f"top-up exceeded {TOPUP_BUDGET_S}s; staging persists, "
                         "supervisor completes the window (not a run failure)"}
+    tail = r.stdout[-300:] + r.stderr[-200:]
+    if r.returncode == 75:  # fetch incomplete; panel not written, staging kept
+        return {"status": "PARTIAL_STAGED", "returncode": 75, "tail": tail}
+    if r.returncode == 0 and "holds the staging lock" in r.stdout:
+        return {"status": "SKIPPED_LOCKED", "returncode": 0,
+                "note": "catch-up supervisor owns the staging dir", "tail": tail}
     return {"status": "OK" if r.returncode == 0 else "FAILED",
-            "returncode": r.returncode, "tail": r.stdout[-300:] + r.stderr[-200:]}
+            "returncode": r.returncode, "tail": tail}
 
 
 def step_freshness() -> dict:

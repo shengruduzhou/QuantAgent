@@ -43,6 +43,8 @@ FETCH_COUNT_MARGIN = 10
 # Every session in the window must carry at least this share of the seed symbols
 # (same threshold as scripts/coverage_guard.sh) before the panel is written.
 MIN_DATE_COVERAGE = 0.93
+# Exit code for "fetch incomplete, retry": the supervisor re-enters instead of aborting.
+EXIT_RETRY = 75
 
 
 class WindowCoverageError(RuntimeError):
@@ -103,6 +105,25 @@ def require_window_coverage(
             f"({min_ratio:.0%} of {n_seed} seeds), e.g. {first}"
         )
     return {str(d.date()): int(per_date[d]) for d in sessions}
+
+
+def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
+    """Write to a sibling temp file, fsync, then rename over ``path``: a timeout
+    (SIGTERM/SIGKILL) during the write can no longer truncate the panel."""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        frame.to_parquet(tmp, index=False)
+        with open(tmp, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def _acquire_staging_lock(staging: Path):
@@ -295,11 +316,11 @@ def main() -> int:
             )
         )
         chunk_failed = set(failed) & set(chunk_symbols)
-        (STAGING / f"done_{chunk_start // CHUNK:04d}.json").write_text(
+        (STAGING / f"done_{chunk_start // CHUNK:04d}_{time.time_ns()}.json").write_text(
             json.dumps(sorted(set(chunk_symbols) - chunk_failed))
         )
         staged.to_parquet(
-            STAGING / f"chunk_{chunk_start // CHUNK:04d}_{int(time.time())}.parquet",
+            STAGING / f"chunk_{chunk_start // CHUNK:04d}_{time.time_ns()}.parquet",
             index=False,
         )
         print(
@@ -307,6 +328,30 @@ def main() -> int:
             f"(failed {len(failed)}) {time.time() - started:.0f}s",
             flush=True,
         )
+
+    # Seed ratchet guard (Cycle 32): a symbol whose fetch failed (vendor throttling)
+    # is not marked done; merging without it would drop it from the panel's last
+    # date and therefore from every later seed list, permanently. Refuse the merge
+    # until every seed symbol has been fetched (an empty in-window result is a
+    # legitimate fetch: suspended/delisted); failed symbols are retried next run.
+    fetched: set[str] = set()
+    for path in sorted(STAGING.glob("done_*.json")):
+        fetched |= set(json.loads(path.read_text()))
+    unfetched = sorted(set(seed_symbols) - fetched)
+    if unfetched:
+        print(
+            json.dumps(
+                {
+                    "appended": 0,
+                    "status": "FETCH_INCOMPLETE_RETRY",
+                    "n_unfetched": len(unfetched),
+                    "unfetched_sample": unfetched[:20],
+                    "note": "panel not written; staging kept, failed symbols are retried",
+                }
+            ),
+            flush=True,
+        )
+        return EXIT_RETRY
 
     chunks = [pd.read_parquet(path) for path in sorted(STAGING.glob("chunk_*.parquet"))]
     new = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
@@ -421,7 +466,7 @@ def main() -> int:
         merged.loc[window_mask, column] = flags[column].reindex(index).to_numpy()
 
     merged = merged.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
-    merged.to_parquet(PANEL, index=False)
+    _atomic_write_parquet(merged, PANEL)
     for path in list(STAGING.glob("chunk_*.parquet")) + list(
         STAGING.glob("done_*.json")
     ):
