@@ -163,6 +163,7 @@ def synthesize_factors_v7(
     train_end: str = typer.Option("", "--train-end", help="Trustworthy-OOS cutoff: the search (GA/LLM) only sees trade_date <= this; later dates stay clean for evaluate-discovered-factors. Empty = no cutoff."),
     exclude_st: bool = typer.Option(False, "--exclude-st", help="Tradability guard: also drop ST names from the validation/fitness IC (limit-up/down/suspended are always dropped when those flags are in the panel). Prevents accepting phantom edge over untradable names."),
     min_validation_icir: float = typer.Option(0.0, "--min-validation-icir", help="Stability floor: reject factors whose tradable validation ICIR is below this (rd-agent loop only). 0 disables."),
+    min_validation_tstat: float = typer.Option(3.0, "--min-validation-tstat", help="Significance floor (rd-agent loop): non-overlapping validation IC t-stat must reach this. 0 disables (accepts ~half of pure-noise factors)."),
 ) -> None:
     """Discover factors in the safe expression DSL.
 
@@ -215,6 +216,7 @@ def synthesize_factors_v7(
             max_sota_correlation=max_sota_correlation,
             exclude_st=exclude_st,
             min_validation_icir=min_validation_icir,
+            min_validation_tstat=min_validation_tstat,
             use_llm=use_llm,
             allow_network=allow_network,
             llm_model=(llm_model or None),
@@ -2549,7 +2551,9 @@ def run_full_ai_quant_v7(
     timing_gate: bool = typer.Option(True, "--timing-gate/--no-timing-gate"),
     holding_period_mode: str = typer.Option("soft", "--holding-period-mode"),
     capital_tier: str = typer.Option("1000000:0.10,10000000:0.05,100000000:0.02", "--capital-tier"),
-    run_autopilot_search: bool = typer.Option(True, "--run-autopilot-search/--skip-autopilot-search"),
+    # Off by default: autopilot runs Optuna + PPO, and the pre-registered RL test
+    # concluded DO NOT ENABLE (Round 29 R11; Round 31 Q-F13).
+    run_autopilot_search: bool = typer.Option(False, "--run-autopilot-search/--skip-autopilot-search"),
     n_trials: int = typer.Option(100, "--n-trials"),
     generations: int = typer.Option(30, "--generations"),
     rl_timesteps: int = typer.Option(5_000_000, "--rl-timesteps"),

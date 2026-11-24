@@ -142,7 +142,9 @@ class ComparisonConfig:
     #: Minimum fraction of selection folds in which the arm must beat the
     #: baseline. A single fold cannot establish stability.
     min_fold_win_rate: float = 0.60
-    max_pbo: float = 0.50
+    #: 0.50 let about half of pure-noise model families through (Round 31
+    #: Q-F11 calibration: null PBO mean 0.48); GOVERNANCE.md R2 sets 0.25.
+    max_pbo: float = 0.25
     min_symbols_per_date: int = 30
     gbm_estimators: int = 300
     gbm_leaves: int = 31

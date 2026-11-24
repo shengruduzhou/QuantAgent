@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
@@ -197,6 +198,13 @@ class RDAgentFactorLoopConfig:
     # Stability floor: reject factors whose tradable validation ICIR is below
     # this even if the mean rank-IC clears ``min_validation_rank_ic``.
     min_validation_icir: float = 0.0
+    # Significance floor (Round 31 Q-F01): the mean validation rank-IC must be
+    # at least this many standard errors above zero, measured on
+    # NON-OVERLAPPING label dates (averaged over the h offset cohorts). With the
+    # previous defaults (IC >= 0, ICIR >= 0) the gate accepted 48% of
+    # pure-noise candidates; overlapping-label t-stats are ~2x oversized.
+    # 0 disables (not recommended).
+    min_validation_tstat: float = 3.0
     # --- LLM proposal (the generative half of the closed loop) ------------- #
     # When ``use_llm`` is set, rounds at/after ``llm_start_round`` ask an LLM
     # to propose NEW DSL factor tasks conditioned on the accumulated trace and
@@ -923,6 +931,56 @@ def _evaluate_fitness(
     return score, ic_mean, finite_ratio
 
 
+def _nonoverlapping_ic_tstat(daily_ic: pd.Series, horizon: int) -> float:
+    """t-stat of the mean daily IC using non-overlapping label dates.
+
+    Consecutive h-day labels overlap, so a naive (or HAC-floored) t-stat on the
+    daily IC series is oversized. Each of the h offset cohorts (every h-th date)
+    is free of overlap; their t-stats are averaged.
+    """
+    values = pd.to_numeric(pd.Series(daily_ic), errors="coerce").dropna().to_numpy(dtype=float)
+    step = max(1, int(horizon))
+    stats: list[float] = []
+    for offset in range(step):
+        cohort = values[offset::step]
+        if cohort.size < 3:
+            continue
+        std = float(cohort.std(ddof=1))
+        if std <= 1e-12:
+            continue
+        stats.append(float(cohort.mean()) / std * float(np.sqrt(cohort.size)))
+    return float(np.mean(stats)) if stats else 0.0
+
+
+def _label_horizon_sessions(label_column: str) -> int:
+    match = re.search(r"(\d+)d$", str(label_column))
+    return int(match.group(1)) if match else 1
+
+
+def _drop_quarantined_label_rows(frame: pd.DataFrame, label_column: str) -> pd.DataFrame:
+    """Keep only rows whose (delay-1) label window avoids every quarantined window."""
+    from quantagent.backtest.quarantine import clean_label_mask
+
+    clean = clean_label_mask(
+        frame["trade_date"],
+        horizon_sessions=_label_horizon_sessions(label_column),
+        symbols=frame["symbol"],
+    )
+    dropped = int((~clean).sum())
+    if dropped:
+        logger.warning(
+            "[rd-agent-factor] dropped %d rows whose label window touches a quarantined window",
+            dropped,
+        )
+    out = frame.loc[clean.to_numpy()].reset_index(drop=True)
+    if out.empty:
+        raise ValueError(
+            "every panel row's label window touches a quarantined window "
+            "(configs/quarantined_windows.json); factor acceptance cannot be scored"
+        )
+    return out
+
+
 def _chronological_split(
     panel: pd.DataFrame,
     labels: pd.Series,
@@ -1231,6 +1289,11 @@ def synthesize_factors_rd_agent(
             f"{missing_market}; available: {sorted(merged.columns)[:40]}"
         )
 
+    # Factor acceptance is a selection decision: no row whose label window
+    # touches a quarantined window may score it (Round 31 Q-F02 — the
+    # validation segment used to be the last 25% of whatever the panel held,
+    # i.e. the burned holdout and the frozen fresh window).
+    merged = _drop_quarantined_label_rows(merged, cfg.label_column)
     valid_panel, label_series, date_series = _subsample_panel(merged, cfg.label_column, cfg, rng)
     train_panel, train_labels, train_dates, oos_panel, oos_labels, oos_dates = _chronological_split(
         valid_panel,
@@ -1485,6 +1548,30 @@ def synthesize_factors_rd_agent(
                 )
                 round_feedback.append(f"{task.factor_name}: validation ICIR gate failed")
                 continue
+            validation_tstat = _nonoverlapping_ic_tstat(
+                _daily_rank_ic(oos_values, oos_labels, oos_dates, oos_tradable_mask),
+                _label_horizon_sessions(cfg.label_column),
+            )
+            if cfg.min_validation_tstat > 0.0 and validation_tstat < cfg.min_validation_tstat:
+                feedback = (
+                    value_feedback
+                    + f"\nRejected because the non-overlapping validation IC t-stat "
+                    f"{validation_tstat:.2f} is below {cfg.min_validation_tstat:.2f} "
+                    "(indistinguishable from noise)."
+                )
+                task_feedback_rows.append(
+                    _rd_agent_feedback_row(
+                        hypothesis,
+                        task,
+                        False,
+                        feedback,
+                        train_ic,
+                        validation_ic,
+                        max_novelty_corr,
+                    )
+                )
+                round_feedback.append(f"{task.factor_name}: validation significance gate failed")
+                continue
             if max_sota_corr > cfg.max_sota_correlation:
                 feedback = (
                     value_feedback
@@ -1551,6 +1638,7 @@ def synthesize_factors_rd_agent(
                     "validation_rank_ic": float(validation_ic),
                     "validation_rank_ic_raw": float(validation_ic_raw),
                     "validation_rank_icir": float(validation_icir),
+                    "validation_ic_tstat_nonoverlapping": float(validation_tstat),
                     "fitness": float(fitness),
                     "complexity": int(_node_count(oriented_expr)),
                     "finite_ratio": float(min(finite_ratio, validation_finite)),

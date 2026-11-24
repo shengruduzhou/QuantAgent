@@ -441,7 +441,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
             "max_sota_correlation", "use_llm", "allow_network", "llm_model",
             "llm_start_round", "llm_candidates_per_round",
             "rag_escalation_round", "llm_timeout_seconds", "memory_path",
-            "train_end", "exclude_st", "min_validation_icir",
+            "train_end", "exclude_st", "min_validation_icir", "min_validation_tstat",
         },
         "path_inputs": {"market_panel_path", "labels_path", "memory_path"},
         "path_outputs": {"output_dir"},

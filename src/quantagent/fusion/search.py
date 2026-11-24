@@ -29,6 +29,8 @@ from typing import Callable, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.backtest.quarantine import clean_label_mask
+
 from quantagent.fusion.evaluation import SegmentEvaluation, evaluate_blend
 from quantagent.fusion.frontier import (
     ObjectivePreference,
@@ -285,6 +287,21 @@ def run_fusion_search(
     forwards = _normalise_panel(forward_panel, "forward_panel")
     if "forward_return" not in forwards.columns:
         raise KeyError("forward_panel must contain a forward_return column")
+    # Every fold here is a selection decision. Rows whose label window touches a
+    # quarantined window are removed before folds are formed (Round 31 Q-F02:
+    # test folds used to start inside the burned holdout).
+    clean = clean_label_mask(
+        forwards["trade_date"], horizon_sessions=config.horizon_days, symbols=forwards["symbol"]
+    )
+    forwards = forwards.loc[clean.to_numpy()].reset_index(drop=True)
+    clean_keys = pd.MultiIndex.from_frame(forwards[["trade_date", "symbol"]])
+    factor_keys = pd.MultiIndex.from_frame(factors[["trade_date", "symbol"]])
+    factors = factors.loc[factor_keys.isin(clean_keys)].reset_index(drop=True)
+    if factors.empty:
+        raise ValueError(
+            "no factor rows remain after removing label windows that touch a quarantined "
+            "window (configs/quarantined_windows.json)"
+        )
     missing = [name for name in config.factor_names if name not in factors.columns]
     if missing:
         raise KeyError(f"factor columns missing from factor_panel: {sorted(missing)}")
