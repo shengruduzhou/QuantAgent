@@ -37,6 +37,8 @@ from typing import Iterable, Mapping
 import numpy as np
 import pandas as pd
 
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+
 
 DEFAULT_HORIZON_WEIGHTS: tuple[tuple[int, float], ...] = (
     (1, 0.10),
@@ -202,6 +204,15 @@ def _preset_weights_for_available(
     return tuple((horizon, normalised[horizon]) for horizon in sorted(normalised))
 
 
+def _daily_rank_ic_values(subset: pd.DataFrame, target_column: str) -> list[float]:
+    """Defined per-date rank ICs of ``prediction`` (>= 3 names), date order."""
+    series = cross_sectional_rank_ic(
+        subset, "prediction", target_column, "trade_date",
+        min_names=3, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
+    return [float(value) for value in series]
+
+
 def _early_oos_rank_ic_scores(
     predictions: pd.DataFrame,
     *,
@@ -256,13 +267,7 @@ def _early_oos_rank_ic_scores(
         if target_column not in subset.columns:
             continue
         subset[target_column] = pd.to_numeric(subset[target_column], errors="coerce")
-        daily_ic: list[float] = []
-        for _, day in subset.dropna(subset=[target_column]).groupby("trade_date", sort=True):
-            if len(day) < 3:
-                continue
-            value = day["prediction"].corr(day[target_column], method="spearman")
-            if pd.notna(value):
-                daily_ic.append(float(value))
+        daily_ic = _daily_rank_ic_values(subset, target_column)
         if len(daily_ic) < 3:
             continue
         mean_ic = float(np.mean(daily_ic))

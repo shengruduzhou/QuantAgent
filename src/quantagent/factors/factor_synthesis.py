@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors import expr as E
+from quantagent.factors.evaluation import cross_sectional_rank_ic
 from quantagent.factors.expression_safety import post_decision_column_reasons
 from quantagent.factors.factor_loop_memory import (
     RAG_EASY,
@@ -774,21 +775,10 @@ def _daily_rank_ic(
     df = pd.DataFrame(data)
     if tradable_mask is not None:
         df = df[df["tradable"]].drop(columns="tradable")
-    df = df.dropna()
-    if df.empty:
-        return pd.Series(dtype=float)
-    grouped = df.groupby("trade_date")
-    rank_factor = grouped["factor"].rank(method="average")
-    rank_label = grouped["label"].rank(method="average")
-    df = df.assign(rank_factor=rank_factor.values, rank_label=rank_label.values)
-    daily = (
-        df.groupby("trade_date")[["rank_factor", "rank_label"]]
-        .corr()
-        .unstack()
-        .iloc[:, 1]
-        .dropna()
+    return cross_sectional_rank_ic(
+        df, "factor", "label", "trade_date",
+        min_names=1, inf_as_missing=False, drop_undefined=True, sort=True,
     )
-    return daily
 
 
 def _rank_ic(

@@ -24,6 +24,7 @@ import pandas as pd
 
 from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.factors.coverage import usable_factor_coverage
+from quantagent.factors.evaluation import cross_sectional_rank_ic
 from quantagent.quant_math.performance import newey_west_t_stat
 
 
@@ -135,21 +136,9 @@ def _rank_ic_by_date(frame: pd.DataFrame, factor_col: str, return_col: str) -> p
     """Return a stable 1-D date-indexed RankIC series, including empty input."""
     if frame.empty:
         return pd.Series(dtype=float)
-
-    values: dict[pd.Timestamp, float] = {}
-    for date, group in frame.groupby("trade_date", sort=True):
-        valid = group[[factor_col, return_col]].replace([np.inf, -np.inf], np.nan).dropna()
-        if (
-            len(valid) < 3
-            or valid[factor_col].nunique() < 2
-            or valid[return_col].nunique() < 2
-        ):
-            values[pd.Timestamp(date)] = float("nan")
-        else:
-            values[pd.Timestamp(date)] = float(
-                valid[factor_col].corr(valid[return_col], method="spearman")
-            )
-    return pd.Series(values, dtype=float).dropna().sort_index()
+    return cross_sectional_rank_ic(
+        frame, factor_col, return_col, "trade_date", min_names=3, drop_undefined=True, sort=True
+    )
 
 
 def _ic_ir(ic: pd.Series) -> float:

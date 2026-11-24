@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest.quarantine import clean_label_mask
+from quantagent.factors.evaluation import cross_sectional_rank_ic
 
 GOLD = Path("runtime/data/gold/full_universe")
 LABEL = "forward_return_5d"
@@ -38,14 +39,10 @@ LABEL = "forward_return_5d"
 
 def _rank_ic(frame: pd.DataFrame, factor: str, label: str) -> tuple[float, float, int]:
     """Mean and std of per-date Spearman correlation, plus the date count."""
-    work = frame[["trade_date", factor, label]].dropna()
-    if work.empty:
-        return float("nan"), float("nan"), 0
-    per_date = work.groupby("trade_date").apply(
-        lambda g: g[factor].corr(g[label], method="spearman") if len(g) >= 20 else np.nan,
-        include_groups=False,
+    per_date = cross_sectional_rank_ic(
+        frame, factor, label, "trade_date",
+        min_names=20, inf_as_missing=False, drop_undefined=True, sort=True,
     )
-    per_date = per_date.dropna()
     if per_date.empty:
         return float("nan"), float("nan"), 0
     return float(per_date.mean()), float(per_date.std(ddof=1)), int(len(per_date))

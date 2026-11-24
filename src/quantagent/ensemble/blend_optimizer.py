@@ -27,6 +27,8 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+
 
 HORIZONS = ("short_5d", "mid_5d_30d", "long_30d_120d")
 
@@ -83,20 +85,11 @@ def _per_date_rank_ic(
 ) -> float:
     if score_col not in merged.columns or label_col not in merged.columns:
         return float("nan")
-    sub = merged[["trade_date", score_col, label_col]].dropna()
-    if sub.empty:
-        return float("nan")
-    grouped = sub.groupby("trade_date", sort=False)
-    rows: list[float] = []
-    for _, g in grouped:
-        if len(g) < 5:
-            continue
-        s = g[score_col].rank(method="average")
-        r = g[label_col].rank(method="average")
-        c = s.corr(r, method="pearson")
-        if pd.notna(c):
-            rows.append(float(c))
-    return float(np.mean(rows)) if rows else float("nan")
+    rows = cross_sectional_rank_ic(
+        merged, score_col, label_col, "trade_date",
+        min_names=5, inf_as_missing=False, drop_undefined=True, sort=False,
+    ).to_numpy(dtype=float)
+    return float(np.mean(rows)) if rows.size else float("nan")
 
 
 def _per_date_topk_return(
