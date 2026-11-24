@@ -1,0 +1,352 @@
+"""Announcement-based ST register (ENG_ST30): classifier, episode folding,
+register evaluation and the strict PIT interval contract.
+
+Fixtures are hand-written event sequences, not market data; nothing here is
+used to make a research result look complete.
+"""
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from quantagent.data.ashare import st_announcements as sa
+from quantagent.data.providers.st_pit import (
+    HistoricalSTCoverageError,
+    attach_historical_st,
+    load_historical_st_evidence,
+)
+
+T = pd.Timestamp
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("关于公司股票被实施退市风险警示暨停牌的公告", sa.IMPLEMENT),
+        ("关于公司股票交易被实施其他风险警示的公告", sa.IMPLEMENT),
+        ("关于撤销公司股票退市风险警示的公告", sa.REVOKE),
+        ("关于撤销公司股票其他风险警示暨停牌的公告", sa.REVOKE),
+        ("关于撤销退市风险警示并实施其他风险警示的公告", sa.TRANSITION),
+        ("关于公司股票可能被实施退市风险警示的风险提示公告", sa.IGNORE),
+        ("关于公司股票被实施其他风险警示相关事项的进展公告", sa.IGNORE),
+        ("关于申请撤销公司股票其他风险警示的公告", sa.IGNORE),
+        ("关于公司股票进入退市整理期交易的公告", sa.DELIST_PERIOD),
+        ("2025年年度报告", sa.IGNORE),
+    ],
+)
+def test_classify_title(title, expected):
+    assert sa.classify_title(title) == expected
+
+
+def test_effective_date_is_read_from_body_and_bounded_to_announcement():
+    body = "本公司股票于2025年4月28日停牌1天，自2025年4月29日起实施退市风险警示。2019年1月1日曾发生"
+    when, basis = sa.extract_effective_date(body, T("2025-04-28"))
+    assert when == T("2025-04-29")
+    assert basis == "from_date"
+    # a date before the announcement (an old event quoted in the body) is never used
+    assert sa.extract_effective_date("自2019年1月2日起实施退市风险警示", T("2025-04-28")) == (
+        None, "not_found")
+
+
+def _cal():
+    return sa.Calendar.from_dates(pd.bdate_range("2020-01-01", "2026-12-31"))
+
+
+def _events(rows):
+    frame = pd.DataFrame(rows, columns=["symbol", "event", "announcement_date", "effective_date"])
+    frame["announcement_id"] = [f"a{i}" for i in range(len(frame))]
+    frame["title"] = frame["event"]
+    frame["sec_name"] = None
+    frame["effective_basis"] = "test"
+    for col in ("announcement_date", "effective_date"):
+        frame[col] = pd.to_datetime(frame[col])
+    return frame
+
+
+def test_implement_then_revoke_is_one_true_episode_end_exclusive():
+    ev = _events([
+        ("600001.SH", sa.IMPLEMENT, "2021-04-28", "2021-04-29"),
+        ("600001.SH", sa.TRANSITION, "2022-04-28", "2022-04-29"),
+        ("600001.SH", sa.REVOKE, "2023-05-10", "2023-05-11"),
+    ])
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert len(eps) == 1
+    ep = eps.iloc[0]
+    assert ep.st_state == sa.STATE_TRUE
+    assert (ep.effective_start, ep.effective_end) == (T("2021-04-29"), T("2023-05-11"))
+
+
+def test_revoke_without_observed_start_is_unknown_not_false():
+    ev = _events([("600002.SH", sa.REVOKE, "2018-05-10", "2018-05-11")])
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert list(eps.st_state) == [sa.STATE_UNKNOWN]
+    assert (eps.iloc[0].effective_start, eps.iloc[0].effective_end) == (
+        T("2016-01-04"), T("2018-05-11"))
+
+
+def test_pit_intervals_are_complete_and_round_trip_through_the_strict_loader(tmp_path):
+    episodes = pd.DataFrame([
+        {"symbol": "600001.SH", "effective_start": T("2021-04-29"),
+         "effective_end": T("2023-05-11"), "st_state": sa.STATE_TRUE,
+         "available_at": T("2021-04-28"), "end_available_at": T("2023-05-10"),
+         "source": "cninfo", "evidence_id": "a0"},
+    ])
+    life = pd.DataFrame([
+        {"symbol": "600001.SH", "first_day": T("2000-01-04"), "last_day": pd.NaT},
+        {"symbol": "600003.SH", "first_day": T("2022-01-04"), "last_day": T("2024-06-28")},
+    ])
+    pit = sa.pit_intervals(episodes, life, as_of=T("2026-11-24"),
+                           coverage_start=T("2016-01-04"))
+    one = pit[pit.symbol == "600001.SH"].reset_index(drop=True)
+    assert list(one.is_st) == [False, True, False]
+    assert one.loc[0, "end_date"] == T("2021-04-28")          # inclusive, day before start
+    assert one.loc[1, "end_date"] == T("2023-05-10")          # exclusive end - 1 day
+    assert one.loc[2, "start_date"] == T("2023-05-11")
+    assert one.loc[2, "end_date"] == T("2026-11-24")
+    assert pit[pit.symbol == "600003.SH"].end_date.max() == T("2024-06-28")
+
+    path = tmp_path / "st.parquet"
+    pit.to_parquet(path, index=False)
+    evidence = load_historical_st_evidence(path)
+    rows = pd.DataFrame({"symbol": ["600001.SH"] * 4,
+                         "trade_date": ["2021-04-28", "2021-04-29", "2023-05-10", "2023-05-11"]})
+    attached = attach_historical_st(rows, evidence)
+    assert list(attached.is_st) == [False, True, True, False]
+
+
+def test_unknown_span_has_no_row_so_the_loader_fails_closed(tmp_path):
+    episodes = pd.DataFrame([
+        {"symbol": "600002.SH", "effective_start": T("2016-01-04"),
+         "effective_end": T("2018-05-11"), "st_state": sa.STATE_UNKNOWN,
+         "available_at": pd.NaT, "end_available_at": T("2018-05-10"),
+         "source": "cninfo", "evidence_id": "a1"},
+    ])
+    life = pd.DataFrame([{"symbol": "600002.SH", "first_day": T("2000-01-04"), "last_day": pd.NaT}])
+    pit = sa.pit_intervals(episodes, life, as_of=T("2020-12-31"), coverage_start=T("2016-01-04"))
+    assert list(pit.is_st) == [False]
+    assert pit.iloc[0].start_date == T("2018-05-11")
+    path = tmp_path / "st.parquet"
+    pit.to_parquet(path, index=False)
+    evidence = load_historical_st_evidence(path)
+    ok = attach_historical_st(pd.DataFrame({"symbol": ["600002.SH"], "trade_date": ["2019-01-02"]}),
+                              evidence)
+    assert not ok.is_st.iloc[0]
+    with pytest.raises(HistoricalSTCoverageError):
+        attach_historical_st(pd.DataFrame({"symbol": ["600002.SH"], "trade_date": ["2017-06-01"]}),
+                             evidence)
+
+
+def test_evaluate_reconstruction_counts_unknown_as_a_miss_and_false_separately():
+    cal = _cal()
+    truth = pd.DataFrame([
+        {"symbol": "000002.SZ", "effective_start": T("2021-03-01"), "effective_end": T("2021-09-01")},
+        {"symbol": "000004.SZ", "effective_start": T("2022-03-01"), "effective_end": T("2022-09-01")},
+    ])
+    recon = pd.DataFrame([
+        {"symbol": "000002.SZ", "effective_start": T("2021-03-02"),
+         "effective_end": T("2021-09-01"), "st_state": sa.STATE_TRUE},
+        {"symbol": "000004.SZ", "effective_start": T("2022-03-01"),
+         "effective_end": T("2022-09-01"), "st_state": sa.STATE_UNKNOWN},
+    ])
+    days = pd.bdate_range("2021-01-01", "2022-12-30")
+    rows = pd.DataFrame({"symbol": ["000002.SZ"] * len(days) + ["000004.SZ"] * len(days),
+                         "trade_date": list(days) * 2})
+    m = sa.evaluate_reconstruction(recon, truth, rows, cal,
+                                   window=(T("2021-01-01"), T("2022-12-30")),
+                                   symbols=["000002.SZ", "000004.SZ"])
+    assert m["M1_episode_recall"] == 0.5            # the UNKNOWN span is not a recall
+    assert m["M2_episode_precision"] == 1.0
+    assert m["M3_start_within_1_session"] == 1.0    # one session late is within tolerance
+    # the session the reconstruction starts late is the only silent false negative
+    assert m["M5c_register_true_marked_false"] == pytest.approx(1 / m["M5_n_register_true"])
+    assert m["register_true_marked_unknown"] > 0.45
+    verdict = sa.acceptance(m)
+    assert not verdict["all_pass"] and not verdict["M1_episode_recall"]["pass"]
+
+
+def test_merge_contiguous_joins_a_rename_inside_one_warning():
+    rows = pd.DataFrame([
+        {"symbol": "000004.SZ", "effective_start": T("2022-05-06"), "effective_end": T("2023-06-28")},
+        {"symbol": "000004.SZ", "effective_start": T("2023-06-28"), "effective_end": pd.NaT},
+    ])
+    merged = sa.merge_contiguous(rows)
+    assert len(merged) == 1 and pd.isna(merged.iloc[0].effective_end)
+
+
+def test_default_st_path_is_env_then_published_table_then_none(tmp_path, monkeypatch):
+    from quantagent.data.providers import st_pit
+
+    monkeypatch.delenv("QUANTAGENT_HISTORICAL_ST_PATH", raising=False)
+    monkeypatch.delenv("QUANTAGENT_DATA_ROOT", raising=False)
+    monkeypatch.setenv("QUANTAGENT_HOME", str(tmp_path))
+    assert st_pit.default_historical_st_path() is None          # callers keep failing closed
+    published = tmp_path / "data/u0/pit/st_pit_evidence.parquet"
+    published.parent.mkdir(parents=True)
+    published.write_bytes(b"")
+    assert st_pit.default_historical_st_path() == str(published)
+    monkeypatch.setenv("QUANTAGENT_HISTORICAL_ST_PATH", "/explicit.parquet")
+    assert st_pit.default_historical_st_path() == "/explicit.parquet"
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("关于公司股票被实施其他风险警示暨公司股票停牌的提示性公告", sa.IMPLEMENT),
+        ("关于公司股票交易将被实施其他风险警示暨股票停复牌的提示性公告", sa.IMPLEMENT),
+        ("关于公司股票交易被实施其他风险警示、可能被实施退市风险警示暨股票停复牌的公告", sa.IMPLEMENT),
+        ("关于公司股票交易可能被实施退市风险警示的第三次提示性公告", sa.IGNORE),
+        ("关于公司股票交易可能被实施退市风险警示暨停牌的公告", sa.IGNORE),
+        ("关于公司股票交易被实施其他风险警示暨可能被实施退市风险警示相关事项的进展公告", sa.IGNORE),
+        ("关于公司股票进入退市整理期交易首日的风险提示公告", sa.DELIST_PERIOD),
+        ("关于公司股票进入退市整理期交易的第一次风险提示性公告", sa.DELIST_PERIOD),
+        ("关于公司股票进入退市整理期交易的第五次风险提示性公告", sa.IGNORE),
+    ],
+)
+def test_classify_title_dev_forms(title, expected):
+    # title forms found on the SZSE DEV half (ENG_ST30 §3); HOLDOUT never consulted
+    assert sa.classify_title(title) == expected
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("关于公司股票撤销退市风险警示及实施其他风险警示的公告", sa.TRANSITION),
+        ("关于2012年公司债券停牌暨实行风险警示的公告", sa.IGNORE),
+    ],
+)
+def test_classify_title_transition_and_bonds(title, expected):
+    assert sa.classify_title(title) == expected
+
+
+def test_delisting_period_notices_collapse_to_the_first_session_notice():
+    ev = _events([
+        ("000004.SZ", sa.IMPLEMENT, "2025-04-29", "2025-04-30"),
+        ("000004.SZ", sa.DELIST_PERIOD, "2026-06-13", "2026-06-15"),   # decision notice
+        ("000004.SZ", sa.DELIST_PERIOD, "2026-06-23", "2026-06-23"),   # first session notice
+    ])
+    ev.loc[ev.index[1], "title"] = "关于公司股票进入退市整理期交易的公告"
+    ev.loc[ev.index[2], "title"] = "关于公司股票进入退市整理期交易首日的风险提示公告"
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert eps.iloc[0].effective_end == T("2026-06-23")
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "2015年度业绩预告及存在被实施退市风险警示的提示性公告",
+        "关于主要银行账户被解除冻结暨相对应的其他风险警示情形消除的公告",
+    ],
+)
+def test_classify_title_commentary_forms(title):
+    assert sa.classify_title(title) == sa.IGNORE
+
+
+def test_revoking_one_warning_while_another_is_in_force_keeps_the_episode():
+    ev = _events([
+        ("002872.SZ", sa.IMPLEMENT, "2019-04-26", "2019-04-29"),
+        ("002872.SZ", sa.IMPLEMENT, "2019-06-05", "2019-06-06"),
+        ("002872.SZ", sa.REVOKE, "2020-07-10", "2020-07-13"),
+        ("002872.SZ", sa.REVOKE, "2021-05-10", "2021-05-11"),
+    ])
+    ev["title"] = ["关于公司股票被实行退市风险警示暨股票停牌的公告",
+                   "关于公司股票交易被实行其他风险警示的公告",
+                   "关于公司股票撤销退市风险警示的公告",
+                   "关于撤销其他风险警示暨股票停复牌的公告"]
+    ev["sec_name"] = ["天圣制药", "*ST天圣", "*ST天圣", "ST天圣"]
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert (eps.iloc[0].effective_start, eps.iloc[0].effective_end) == (
+        T("2019-04-29"), T("2021-05-11"))
+
+
+def test_short_name_on_the_revocation_date_decides_which_warning_remains():
+    ev = _events([
+        ("000036.SZ", sa.IMPLEMENT, "2009-04-28", "2009-04-29"),
+        ("000036.SZ", sa.REVOKE, "2010-06-03", "2010-06-04"),
+    ])
+    ev["title"] = ["关于股票实行退市风险警示的公告",
+                   "关于撤销对公司股票交易实施的其他特别处理的提示性公告"]
+    # the *ST -> ST step was never observed; the name "ST华联" says only 其他 is in force
+    ev["sec_name"] = ["*ST华联", "ST华联"]
+    eps = sa.build_episodes(ev, coverage_start=T("2001-01-01"))
+    assert list(eps.st_state) == [sa.STATE_TRUE]
+    assert eps.iloc[0].effective_end == T("2010-06-04")
+
+
+def test_old_board_titled_revocation_is_an_event():
+    assert sa.classify_title("董事会关于股票交易撤销其他特别处理和变更股票简称的公告") == sa.REVOKE
+    assert sa.classify_title("关于公司股票恢复上市和撤销股票交易退市风险警示及其他特别处理的公告") == sa.REVOKE
+
+
+def test_a_dated_plain_name_inside_an_episode_cuts_it_to_unknown():
+    episodes = pd.DataFrame([{
+        "symbol": "000716.SZ", "effective_start": T("2010-04-28"), "effective_end": pd.NaT,
+        "st_state": sa.STATE_TRUE, "note": None, "end_event_id": None,
+        "end_announcement_date": pd.NaT, "end_basis": None,
+    }])
+    names = pd.DataFrame({
+        "symbol": ["000716.SZ"] * 3,
+        "observed_on": [T("2010-04-27"), T("2011-10-26"), T("2012-04-20")],
+        "sec_name": ["ST 南 方", "*ST南方", "南方食品"],
+    })
+    out = sa.apply_name_observations(episodes, names)
+    assert list(out.st_state) == [sa.STATE_TRUE, sa.STATE_UNKNOWN]
+    assert out.iloc[0].effective_end == T("2011-10-27")      # last ST-marked day included
+    assert (out.iloc[1].effective_start, out.iloc[1].effective_end) == (
+        T("2011-10-27"), T("2012-04-20"))
+
+
+def test_reminders_are_not_events_and_advance_notices_yield_to_the_implementation():
+    assert sa.classify_title("关于公司股票被实施其他风险警示的第十次提示性公告") == sa.IGNORE
+    ev = _events([
+        ("000809.SZ", sa.IMPLEMENT, "2024-04-11", "2024-04-12"),
+        ("000809.SZ", sa.IMPLEMENT, "2024-04-26", "2024-04-29"),
+    ])
+    ev["title"] = ["关于公司股票交易将被实施退市风险警示的提示性公告",
+                   "关于公司股票交易被实施退市风险警示暨股票停牌的公告"]
+    eps = sa.build_episodes(ev, coverage_start=T("2016-01-04"))
+    assert eps.iloc[0].effective_start == T("2024-04-29")
+    alone = sa.build_episodes(ev.iloc[[0]], coverage_start=T("2016-01-04"))
+    assert alone.iloc[0].effective_start == T("2024-04-12")   # the only evidence is kept
+
+
+def test_an_isolated_plain_name_between_st_names_does_not_cut():
+    episodes = pd.DataFrame([{
+        "symbol": "002642.SZ", "effective_start": T("2019-04-26"), "effective_end": T("2020-06-09"),
+        "st_state": sa.STATE_TRUE, "note": None, "end_event_id": None,
+        "end_announcement_date": pd.NaT, "end_basis": None,
+    }])
+    names = pd.DataFrame({
+        "symbol": ["002642.SZ"] * 3,
+        "observed_on": [T("2019-05-22"), T("2019-08-27"), T("2020-04-22")],
+        "sec_name": ["荣联科技", "*ST荣联", "*ST荣联"],
+    })
+    out = sa.apply_name_observations(episodes, names)
+    assert list(out.st_state) == [sa.STATE_TRUE]
+    assert out.iloc[0].effective_end == T("2020-06-09")
+
+
+def test_catchup_refuses_before_fetching_when_evidence_misses_seed_symbols(tmp_path):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "catchup_panel_chunked", repo / "scripts/catchup_panel_chunked.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pit = pd.DataFrame([{
+        "symbol": "000001.SZ", "start_date": T("2016-01-04"), "end_date": T("2026-11-24"),
+        "is_st": False, "available_at": "2016-01-04T00:00:00+08:00",
+        "point_in_time_valid": True, "source": "test", "evidence_id": None}])
+    path = tmp_path / "st.parquet"
+    pit.to_parquet(path, index=False)
+    evidence = load_historical_st_evidence(path)
+    module._require_st_coverage(evidence, ["000001.SZ"], T("2026-08-06"), T("2026-11-24"))
+    with pytest.raises(SystemExit, match="1 of 2 symbols have no ST evidence"):
+        module._require_st_coverage(evidence, ["000001.SZ", "600000.SH"],
+                                    T("2026-08-06"), T("2026-11-24"))

@@ -21,7 +21,9 @@ import pandas as pd
 from quantagent.data.providers.st_pit import (
     HistoricalSTCoverageError,
     attach_historical_st,
+    default_historical_st_path,
     load_historical_st_evidence,
+    require_symbol_coverage,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector
 
@@ -51,7 +53,7 @@ def main() -> int:
     ap.add_argument("--end", default=None, help="last date to fetch (default today)")
     ap.add_argument(
         "--historical-st-path",
-        default=os.environ.get("QUANTAGENT_HISTORICAL_ST_PATH"),
+        default=default_historical_st_path(),
         help="dated PIT ST table (parquet/csv/jsonl); required",
     )
     args = ap.parse_args()
@@ -59,7 +61,7 @@ def main() -> int:
     if not args.historical_st_path:
         raise SystemExit(
             "historical ST PIT evidence is required; set --historical-st-path or "
-            "QUANTAGENT_HISTORICAL_ST_PATH. Current ST snapshots are not valid for historical append."
+            "QUANTAGENT_HISTORICAL_ST_PATH, or publish the ENG_ST30 register. Current ST snapshots are not valid for historical append."
         )
     try:
         st_evidence = load_historical_st_evidence(args.historical_st_path)
@@ -83,6 +85,11 @@ def main() -> int:
     if args.max_symbols:
         symbols = symbols[: args.max_symbols]
     prev_close = recent.sort_values("trade_date").groupby("symbol")["close"].last()
+
+    try:   # refuse before any vendor call if the window cannot be ST-attributed
+        require_symbol_coverage(st_evidence, symbols, last + pd.Timedelta(days=1), end)
+    except HistoricalSTCoverageError as exc:
+        raise SystemExit(f"historical ST evidence does not cover the append window: {exc}") from exc
 
     tf = _tf_client()
     start_fetch = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")

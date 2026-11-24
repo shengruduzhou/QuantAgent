@@ -32,6 +32,14 @@ fi
 
 echo "=== catchup supervisor start $(date -Is) (max_iters=$MAX_ITERS timeout=${ITER_TIMEOUT}s) ==="
 
+# Dated ST evidence (ENG_ST30). catchup_panel_chunked.py reads the published
+# table by default; a failed refresh keeps the previous one, whose as-of date
+# then makes the catch-up refuse sessions it does not cover.
+ST_LOG=runtime/data/u0/pit/_st_announcements/refresh.log
+if ! timeout 5400 bash scripts/u0_st_register_refresh.sh >> "$ST_LOG" 2>&1; then
+  echo "ST register refresh FAILED (see $ST_LOG) -- continuing with the last published table"
+fi
+
 target_and_state() {
   # prints: "<panel_max> <target> <state>"  state in {CURRENT, BEHIND}
   $PY - <<'EOF'

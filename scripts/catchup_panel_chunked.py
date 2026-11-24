@@ -26,7 +26,9 @@ import repair_fresh_window_20260704 as rep  # noqa: E402
 from quantagent.data.providers.st_pit import (  # noqa: E402
     HistoricalSTCoverageError,
     attach_historical_st,
+    default_historical_st_path,
     load_historical_st_evidence,
+    require_symbol_coverage,
 )
 from quantagent.quant_math.ashare import board_price_limit_vector  # noqa: E402
 
@@ -40,7 +42,7 @@ def _load_required_st_evidence(path: str | None):
     if not path:
         raise SystemExit(
             "historical ST PIT evidence is required; set --historical-st-path or "
-            "QUANTAGENT_HISTORICAL_ST_PATH. Current snapshot broadcast is forbidden."
+            "QUANTAGENT_HISTORICAL_ST_PATH, or publish the ENG_ST30 register. Current snapshot broadcast is forbidden."
         )
     try:
         return load_historical_st_evidence(path)
@@ -48,12 +50,22 @@ def _load_required_st_evidence(path: str | None):
         raise SystemExit(f"historical ST PIT evidence invalid: {exc}") from exc
 
 
+def _require_st_coverage(evidence, symbols, win_start, win_end) -> None:
+    """Refuse the catch-up before any vendor call when the dated ST evidence
+    cannot cover every seed symbol for the whole window (the merge step would
+    refuse those rows anyway, after hours of fetching)."""
+    try:
+        require_symbol_coverage(evidence, symbols, win_start, win_end)
+    except HistoricalSTCoverageError as exc:
+        raise SystemExit(f"historical ST evidence does not cover the catch-up window: {exc}") from exc
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--end", default=None, help="last date to fetch (default: today)")
     parser.add_argument(
         "--historical-st-path",
-        default=os.environ.get("QUANTAGENT_HISTORICAL_ST_PATH"),
+        default=default_historical_st_path(),
         help="dated PIT ST table (parquet/csv/jsonl); required",
     )
     args = parser.parse_args()
@@ -94,6 +106,7 @@ def main() -> int:
     seed_symbols = sorted(
         panel.loc[panel["trade_date"] == panel_max, "symbol"].astype(str).unique()
     )
+    _require_st_coverage(evidence, seed_symbols, win_start, win_end)
 
     manifest = STAGING / "window.json"
     window_tag = f"{win_start.date()}_{win_end.date()}"

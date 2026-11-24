@@ -27,12 +27,26 @@ v7 银层面板 runtime/data/v7/silver/market_panel（qlib_rescaled + akshare qf
 
 | 数据集 | 数据截至 | 状态 |
 |---|---|---|
-| U0 原始面板 | 2026-07-24 | 冻结；无定时生产者（夜间回填 cron 未带 `--allow-network` 而空转） |
+| U0 原始面板 | 2026-07-24 | 冻结；无定时生产者（22:00 的 `u0_full_universe_backfill.py` 是已被取代的缺失符号补抓器，不是日更，且未带 `--allow-network` 而空转） |
 | r29 认证 gold + 执行面板 | 2026-07-24 | 冻结；研究可用窗口 ≤ 2025-08-29（隔离窗见 GOVERNANCE.md） |
 | v7 银层面板 | 2026-08-05 | REFUTED 且停更 |
-| fresh_blind 前向面板 | 2026-08-05 | **停摆**：沪/北没有带日期的 ST 证据，catchup 每日 fail-closed |
+| fresh_blind 前向面板 | 2026-08-05 | **停摆**：深市种子 2,063 个已有带日期 ST 证据；沪市 1,210 个没有通过验收的证据，catchup 每日 fail-closed |
 | 行业图 sector_map | 2026-05-31 快照 | 缺 1,924 个认证符号；当期快照 = 前视，只可用于归因 |
-| ST 区间 | 2026-07-26 | 只有深市带日期登记；沪/北 ST 状态未知（已披露为 `research_certified_panel_st_incomplete`） |
+| ST 区间 | 深市 2026-11-24（每日刷新） | 深市：交易所简称变更登记（`pit/st_pit_evidence.parquet`，每日 06:00 刷新）；沪/北：**BLOCKED_BY_DATA**——ENG_ST30 公告重建未通过预注册 HOLDOUT（行精度 0.924 < 0.98），见下 |
+
+### ST / 风险警示证据（ENG_ST30，2026-11-24）
+
+- **契约**：`quantagent.data.providers.st_pit` 区间表（`symbol, start_date, end_date(含), is_st, available_at`），
+  ST 与非 ST 区间都必须显式给出；缺行即拒绝（不把"没有记录"读成"不是 ST"）。默认路径
+  `runtime/data/u0/pit/st_pit_evidence.parquet`（`QUANTAGENT_HISTORICAL_ST_PATH` 可覆盖）。
+- **深市**：交易所简称变更登记（`akshare.stock_info_sz_change_name`），`scripts/u0_st_announcements.py refresh-szse`
+  每日重取；认证用的 `pit/st_intervals.parquet`（2026-07-26）不改动。新登记与旧登记的 906 个历史区间完全一致。
+- **沪/北**：`scripts/u0_st_announcements.py` 从巨潮公告（类别"特别处理和退市" + 标题关键词）、公告正文生效日、
+  公告上的当日简称重建区间。预注册 `docs/research/preregistrations/ENG_ST30_preregistration.md`：DEV（深市偶数尾号）
+  7 项全过；HOLDOUT 一次评测 M5b 行精度 0.924 < 0.98 ⇒ **沪/北不写入**，保持 BLOCKED_BY_DATA。
+  原始缓存（16,766 条公告、3,973 份正文、名称探针）在 `runtime/data/u0/pit/_st_announcements/`，可供后继方法复用。
+- **刷新**：`scripts/u0_st_register_refresh.sh`（由 06:00 `catchup_supervisor.sh` 调用）只重取尚未收盘的月份窗口；
+  `publish` 只发布通过验收的交易所。
 
 ### r29 认证面板完整性（Round 31 复核，≤ 2025-08-29）
 
@@ -255,6 +269,6 @@ AI_quant_venv/bin/python3 scripts/u0_pit_readiness.py
 |---|---|---|
 | Level-2（逐笔 / 十档） | BLOCKED | TickFlow 未授权；公开源仅五档 L1；QMT 为 Windows 客户端 |
 | 深历史分钟线 | BLOCKED | TickFlow 日内未授权；公开源仅滚动窗口 |
-| 历史 ST 区间 | BLOCKED_BY_DATA | 无带日期的简称变更历史来源（cninfo 曾用简称无日期；baostock `isST` 需 10030 端口） |
+| 历史 ST 区间（沪/北） | BLOCKED_BY_DATA | 无带日期登记；cninfo 公告重建（ENG_ST30）未通过预注册 HOLDOUT；Fuyao/HiThink、Qlib 均无 ST 历史（2026-11-24 复核）；baostock `isST` 需 10030 端口 |
 | 财务报表 / 估值（TickFlow） | UNAUTHORIZED | 需另购权限；akshare/新浪为替代路径 |
 | baostock / mootdx | BLOCKED_BY_ENVIRONMENT | 运行环境只放行 80/443 |
