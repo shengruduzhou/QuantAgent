@@ -43,6 +43,15 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest tests/ -q --junitxml=pytest-results.xml 2>&1 | tee pytest.log
+      - name: Annotate failing tests
+        # Job logs and artifacts need authentication; check-run annotations are
+        # readable through the public API, so failures stay diagnosable without a token.
+        if: failure()
+        shell: bash
+        run: |
+          grep -E '^(FAILED|ERROR) ' pytest.log | head -20 | while IFS= read -r line; do
+            echo "::error title=pytest::${line:0:900}"
+          done || true
       - name: Upload pytest diagnostics
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
