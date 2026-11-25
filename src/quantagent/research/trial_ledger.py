@@ -139,11 +139,59 @@ class TrialLedgerWriteUnavailable(RuntimeError):
     """
 
 
-def default_trial_ledger_path() -> Path:
-    """``<QUANTAGENT_HOME>/state/trial_ledger.jsonl`` (tests point HOME at a tmp dir)."""
-    from quantagent.config.paths import quant_paths
+class TrialLedgerLocationUnknown(RuntimeError):
+    """No durable ledger location could be determined; refuse rather than guess."""
 
-    return quant_paths().home / "state" / LEDGER_FILENAME
+
+def _main_checkout_root(repo_root: Path) -> Path | None:
+    """Main checkout of the git repository containing ``repo_root`` (worktree-safe).
+
+    ``git rev-parse --git-common-dir`` names the shared ``.git`` of every linked
+    worktree; its parent is the main checkout. ``None`` when git cannot answer.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - git missing => location unknown
+        return None
+    common = result.stdout.strip()
+    if result.returncode != 0 or not common:
+        return None
+    common_dir = Path(common)
+    if not common_dir.is_absolute():
+        common_dir = (repo_root / common_dir).resolve()
+    if common_dir.name != ".git":
+        return None  # bare/unusual layout: no checkout to put runtime/ in
+    return common_dir.parent
+
+
+def default_trial_ledger_path() -> Path:
+    """``<QUANTAGENT_HOME>/state/trial_ledger.jsonl``, else the MAIN checkout's runtime.
+
+    With ``QUANTAGENT_HOME`` set (tests set it to a tmp dir) that home is used.
+    Otherwise ``quant_paths()`` would resolve to *this* checkout's ``runtime/``,
+    which for a linked git worktree is deleted with the worktree -- a silent
+    family-N undercount. The default therefore follows the shared git dir to the
+    main checkout, and refuses when that cannot be determined.
+    """
+    from quantagent.config.paths import DEFAULT_QUANT_HOME_ENV, quant_paths
+
+    if os.environ.get(DEFAULT_QUANT_HOME_ENV):
+        return quant_paths().home / "state" / LEDGER_FILENAME
+    main = _main_checkout_root(_REPO_ROOT)
+    if main is None:
+        raise TrialLedgerLocationUnknown(
+            "cannot locate a durable trial ledger: QUANTAGENT_HOME is unset and the main git "
+            f"checkout of {_REPO_ROOT} could not be determined; set QUANTAGENT_HOME or pass an "
+            "explicit TrialLedger(path)"
+        )
+    return main / "runtime" / "state" / LEDGER_FILENAME
 
 
 def current_git_hash() -> str:
@@ -556,6 +604,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "TrialLedger",
     "TrialLedgerCorruption",
+    "TrialLedgerLocationUnknown",
     "TrialLedgerWriteUnavailable",
     "TrialRecord",
     "config_hash",

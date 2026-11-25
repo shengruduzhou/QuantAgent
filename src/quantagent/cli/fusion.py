@@ -319,10 +319,13 @@ def search_factor_fusion(
             prior_family_trials=prior_family_trials,
         )
     except BaseException as exc:
-        ledger.record_trial(
-            FAMILY_NONLINEAR_FUSION, f"{run_id}:failed", COMMAND_ID, git_hash, run_config_hash,
-            {}, {"error": f"{type(exc).__name__}: {exc}"}, "failed", trials=0,
-        )
+        try:
+            ledger.record_trial(
+                FAMILY_NONLINEAR_FUSION, f"{run_id}:failed", COMMAND_ID, git_hash, run_config_hash,
+                {}, {"error": f"{type(exc).__name__}: {exc}"}, "failed", trials=0,
+            )
+        except Exception as ledger_exc:  # keep the original failure primary
+            exc.add_note(f"trial ledger failure record not written: {ledger_exc!r}")
         raise
     outcomes = _fusion_trials(result, run_id=run_id, run_config_hash=run_config_hash, git_hash=git_hash)
     ledger.record_trials(outcome_records(outcomes, planned_trials=planned, run_id=run_id))

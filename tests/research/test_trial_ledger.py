@@ -536,3 +536,40 @@ def test_a_fusion_search_that_raises_mid_run_still_counts(tmp_path, monkeypatch)
     assert rows[0]["trials"] > 0
     base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
     assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base + rows[0]["trials"]
+
+
+def test_default_ledger_from_a_linked_worktree_points_at_the_main_checkout(tmp_path, monkeypatch) -> None:
+    """A worktree's own runtime/ disappears with the worktree; the ledger must not live there."""
+    import subprocess
+
+    import quantagent.research.trial_ledger as trial_ledger
+
+    main = tmp_path / "main"
+    main.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    def git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env={**__import__("os").environ, **env})
+    git("init", "-q", cwd=main)
+    (main / "README").write_text("x")
+    git("add", "README", cwd=main)
+    git("commit", "-q", "-m", "init", cwd=main)
+    worktree = tmp_path / "wt"
+    git("worktree", "add", "-q", "-b", "side", str(worktree), cwd=main)
+
+    monkeypatch.delenv("QUANTAGENT_HOME", raising=False)
+    monkeypatch.setattr(trial_ledger, "_REPO_ROOT", worktree)
+    assert trial_ledger.default_trial_ledger_path() == main.resolve() / "runtime" / "state" / "trial_ledger.jsonl"
+    monkeypatch.setattr(trial_ledger, "_REPO_ROOT", main)
+    assert trial_ledger.default_trial_ledger_path() == main.resolve() / "runtime" / "state" / "trial_ledger.jsonl"
+
+    not_git = tmp_path / "plain"
+    not_git.mkdir()
+    monkeypatch.setattr(trial_ledger, "_REPO_ROOT", not_git)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(trial_ledger.TrialLedgerLocationUnknown):
+        trial_ledger.default_trial_ledger_path()
+    with pytest.raises(trial_ledger.TrialLedgerLocationUnknown):
+        trial_ledger.TrialLedger()
+    monkeypatch.setenv("QUANTAGENT_HOME", str(tmp_path / "home"))
+    assert trial_ledger.default_trial_ledger_path() == tmp_path / "home" / "state" / "trial_ledger.jsonl"

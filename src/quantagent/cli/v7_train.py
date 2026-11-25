@@ -393,12 +393,15 @@ def synthesize_factors_v7(
         try:
             result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
         except BaseException as exc:
-            trial_ledger.record_trial(
-                FAMILY_RDAGENT_FACTOR, f"{identity['run_id']}:failed", str(identity["command"]),
-                str(identity["git_hash"]), str(identity["config_hash"]), dict(identity["window"]),
-                {"error": f"{type(exc).__name__}: {exc}"}, "failed",
-                trials=_rd_agent_candidate_upper_bound(config),
-            )
+            try:
+                trial_ledger.record_trial(
+                    FAMILY_RDAGENT_FACTOR, f"{identity['run_id']}:failed", str(identity["command"]),
+                    str(identity["git_hash"]), str(identity["config_hash"]), dict(identity["window"]),
+                    {"error": f"{type(exc).__name__}: {exc}"}, "failed",
+                    trials=_rd_agent_candidate_upper_bound(config),
+                )
+            except Exception as ledger_exc:  # keep the original failure primary
+                exc.add_note(f"trial ledger failure record not written: {ledger_exc!r}")
             raise
         trial_ledger_summary = _record_rd_agent_trials(
             trial_ledger, trial_ledger_summary, result, identity=identity
