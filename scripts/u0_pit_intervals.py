@@ -43,8 +43,8 @@ sys.path.insert(0, str(REPO / "src"))
 
 from quantagent.data.ashare.env import load_repo_env  # noqa: E402
 from quantagent.data.ashare.http import HttpClient  # noqa: E402
+from quantagent.data.ashare.session_gaps import fold_suspension_snapshots  # noqa: E402
 from quantagent.data.ashare.sources import SinaSource  # noqa: E402
-from quantagent.data.ashare.symbols import SymbolError, identify  # noqa: E402
 
 OUT = REPO / "runtime/data/u0/pit"
 MASTER = REPO / "runtime/data/u0/security_master.parquet"
@@ -154,7 +154,8 @@ def cmd_suspension(args: argparse.Namespace) -> int:
     """Per-trading-date halt snapshots folded into intervals."""
     import akshare as ak
 
-    calendar_path = OUT / "trading_calendar.parquet"
+    calendar_path = (Path(args.calendar) if getattr(args, "calendar", None)
+                     else OUT / "trading_calendar.parquet")
     if not calendar_path.exists():
         raise SystemExit("run `u0_pit_intervals.py calendar --allow-network` first")
     calendar = pd.read_parquet(calendar_path)
@@ -163,7 +164,13 @@ def cmd_suspension(args: argparse.Namespace) -> int:
                          (calendar["trade_date"] <= today), "trade_date"]
     dates = sorted(dates, reverse=True)          # newest first: most useful data lands early
 
-    staging = OUT / "_suspension"
+    # --out-dir writes a NEW versioned artifact (staging + intervals + manifest)
+    # instead of the live U0 tables; the calendar is still read from OUT.
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    end = pd.Timestamp(args.end) if getattr(args, "end", None) else today
+    dates = [d for d in dates if d <= end]
+    staging = out_dir / "_suspension"
     staging.mkdir(parents=True, exist_ok=True)
     done = {p.stem for p in staging.glob("*.parquet")}
     started = time.monotonic()
@@ -207,44 +214,16 @@ def cmd_suspension(args: argparse.Namespace) -> int:
     frames = [f for f in frames if len(f) and "suspend_start" in f.columns]
     intervals = pd.DataFrame()
     if frames:
-        snapshots = pd.concat(frames, ignore_index=True)
-        symbols, keep = [], []
-        for code in snapshots["code"]:
-            try:
-                symbols.append(identify(code).symbol)
-                keep.append(True)
-            except SymbolError:
-                keep.append(False)
-        snapshots = snapshots[keep].copy()
-        snapshots["symbol"] = symbols
-        snapshots["effective_start"] = snapshots["suspend_start"].fillna(snapshots["snapshot_date"])
-        grouped = snapshots.groupby(["symbol", "effective_start"], as_index=False).agg(
-            effective_end=("suspend_end", "max"),
-            last_seen=("snapshot_date", "max"),
-            suspension_reason=("suspension_reason", "first"))
-        # a halt with no published resume date is closed at the last date it was
-        # still observed, never left open-ended into the future
-        grouped["effective_end"] = grouped["effective_end"].fillna(grouped["last_seen"])
-        intervals = pd.DataFrame({
-            "symbol": grouped["symbol"],
-            "effective_start": grouped["effective_start"],
-            "effective_end": grouped["effective_end"],
-            "suspension_reason": grouped["suspension_reason"],
-            "evidence": "eastmoney_suspension_snapshot",
-            "source": "akshare.stock_tfp_em",
-            "source_endpoint": "eastmoney RPT_CUSTOM_SUSPEND_DATA_INTERFACE",
-            "retrieved_at": _now(),
-            "available_at": grouped["effective_start"].dt.strftime("%Y-%m-%d"),
-            "quality_status": "OK",
-        }).sort_values(["symbol", "effective_start"])
-        intervals.to_parquet(OUT / "suspension_intervals.parquet", index=False)
+        intervals = fold_suspension_snapshots(pd.concat(frames, ignore_index=True),
+                                              retrieved_at=_now())
+        intervals.to_parquet(out_dir / "suspension_intervals.parquet", index=False)
 
     covered = sorted({p.stem for p in files})
     payload = {
         "dataset": "suspension_intervals",
         "snapshot_dates_on_disk": len(covered),
         "snapshot_date_range": [covered[0], covered[-1]] if covered else None,
-        "requested_range": [args.start, str(today.date())],
+        "requested_range": [args.start, str(end.date())],
         "trading_dates_in_range": int(len(dates)),
         "intervals": int(len(intervals)),
         "symbols_with_halts": int(intervals["symbol"].nunique()) if len(intervals) else 0,
@@ -254,7 +233,7 @@ def cmd_suspension(args: argparse.Namespace) -> int:
                           "dates outside snapshot_date_range are NOT claimed as halt-free."),
         "generated": _now(),
     }
-    (OUT / "suspension_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    (out_dir / "suspension_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
@@ -439,6 +418,12 @@ def main() -> int:
     parser.add_argument("--max-minutes", type=float, default=60.0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--start", default="2010-01-01")
+    parser.add_argument("--end", default=None, help="suspension: last snapshot date (default today)")
+    parser.add_argument("--calendar", default=None,
+                        help="suspension: trading calendar parquet (default runtime/data/u0/pit)")
+    parser.add_argument("--out-dir", default=None,
+                        help="suspension: write a new versioned artifact here instead of "
+                             "runtime/data/u0/pit (staging, intervals, manifest)")
     args = parser.parse_args()
     if not args.allow_network:
         print("refusing to run: --allow-network was not confirmed")
