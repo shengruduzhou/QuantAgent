@@ -5,6 +5,42 @@
 `main`，本地另有标签 `round31-pre-consolidation`）。Round 31 的完整审计证据（六岗报告、
 复现测试、基准日志）保存在 `runtime/archives/audits/round31/`。
 
+## Cycle 32（2026-11-25）— 多 agent 组织落地；FRESH 补数修复；"数据当前"≠"管道恢复"
+
+组织：`.claude/agents/`（7 岗，两名只读审计员有否决权；只读靠行为约束，Bash 仍在）、
+`.claude/skills/quantagent-{cycle,release-gate}`、`.claude/rules/`、`.claude/settings.json`
+（拒读 `.env`、拒 force-push 各变体与 `git stash`）。每个分支都经两名独立审计员
+（math-stat / code-security）审查，作者按条件修复后复核，再整体回归后合并。
+
+决定与依据：
+- **补数缺陷（ef0f152 / 0715ed1 / f6464cf）**：`fetch_with_retry` 写死 `count=40`，而窗口有 73 个交易日
+  ⇒ 会留下 33 天的内部空洞却报告 CURRENT。改为日历交易日数 + 10；逐日覆盖率 ≥ 93% 种子才合并；
+  种子棘轮、原子写、rc=75 表示"已部分暂存、下轮重试"。06:00 运行第 5 轮收敛：73 天、每日 3,264–3,273/3,273，
+  0 重复键，全部行带日期 PIT ST 出处，amount/(vol×close) 中位 1.001（主管独立复核，不信任作业自报）。
+- **同日 orders=FAILED**：`fresh_blind_daily.py` 仍调用 #119（2026-08-11）已删除的
+  `baseline_protocol._apply_delay`。因数据停摆，权重步骤一直是 BLOCKED_UPSTREAM，故 3.5 个月未暴露；
+  08-11 起不存在盲测下单记录。修复（c4517df / b902d07）传未平移的 book：候选冻结时（07-13）
+  模拟器在索引日按 close 成交、旧 runner 先平移 1 天 ⇒ T 信号 T+1 close 成交；现模拟器自己做 T→T+1，
+  语义相同。`holdings_in_effect` 与旧记录 3,000 例模糊测试 0 差异。注意：07-13 之后加入的公司行动、
+  退市核销、红利税与敞口选项使 FRESH NAV 与冻结时运行不逐位相同（权重与 weights_hash 不受影响）。
+- **剩余阻塞**：v7 silver 面板用"缺行"表示停牌（`is_suspended` 全 0；2026-05-09 起 433 个内部空洞 / 140 只），
+  08-09 起的严格模拟器对缺 bar 失败关闭（`missing_execution_bar`）。交数据工程 wave 2。
+- **P1-3 合并重复实现**：13 处 rank-IC 迁到 `factors.evaluation.cross_sectional_rank_ic`，6 处 Sharpe/回撤迁到
+  `quant_math.performance`；与冻结旧代码对拍 1e-12。改变数字的差异只登记不修（见 ROADMAP P1-3）。
+- **P1-6**：非重叠 cohort t 统计量；筛选与 lifecycle `validated` 需 t ≥ 3（单侧、先定向）。重叠零假设下
+  尺寸正确（审计复现 5.05% @1.96）；持续性零假设下任何非重叠 t 都偏大，不得当 N(0,1) 用。
+- **P1-4 试验台账**：哈希链 JSONL，默认落主检出（worktree 内运行不再丢失）；运行前预留试验数、失败也计入；
+  nonlinear_fusion 基线 146（逐项出处见 RESEARCH §3；原 134 把 R29 E1 只算了一次）。
+- **P1-2 标签口径戳**：`build-labels-v7` 必须显式 `--label-convention`；delay1 走全局交易日历；消费者拒绝无戳标签；
+  关闭 CSV 旁路与 parquet→csv 回退两条绕过路径；UI 默认 r29，且不能覆盖哈希钉住的认证标签。
+
+被否决的方案：在 FRESH runner 里重新实现一次本地平移（会复活 #119 删除的重复时钟）；
+放松模拟器的缺 bar 检查（把缺失测量当默认值）；delay1 默认值静默从 delay-0 改为 delay-1（会改变已有命令的数字）。
+
+验证：集成树 3,985 passed / 0 failed，compile 与前端（tsc、vitest 149/1 skip、build）通过；main bd92b52 已推送。
+遗留：`test_folds_never_reach_a_quarantined_label_window` 单测耗时 60 分钟（待剖析）；台账截断仍可验证通过
+（需外部高水位）；RD-Agent 非重叠门的对齐问题需预注册后重基线。
+
 ## Round 31 续 3（2026-11-25）— CI 自 2026-10-09 起持续失败：Polars 2.0 与依赖漂移
 
 GitHub CI 从 run #1793（main 2c4e296，2026-10-09）起每次都失败，没人注意到。Polars 2.0（2026-10-06）
