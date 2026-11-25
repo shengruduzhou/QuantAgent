@@ -37,6 +37,13 @@ from quantagent.quant_math.ashare import board_price_limit_vector  # noqa: E402
 PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 STAGING = PANEL.parent / "_staging_catchup"
 CALENDAR = REPO / "runtime/data/u0/pit/trading_calendar.parquet"
+MASTER = REPO / "runtime/data/u0/security_master.parquet"
+DELISTINGS = REPO / "runtime/data/u0/pit/delisting_intervals.parquet"
+SUSPENSION_DIRS = [REPO / "runtime/data/u0/pit", REPO / "runtime/data/u0/pit/suspension_fresh"]
+# Frozen FRESH cohort: names printing in the 30 days before the freeze (3,653 =
+# the freeze manifest's seed). Immutable pre-window rows, so it cannot ratchet.
+COHORT_START = pd.Timestamp("2026-05-19")
+COHORT_LOOKBACK_DAYS = 30
 CHUNK = 250
 # Extra bars beyond the window's session count (vendor returns the latest N bars).
 FETCH_COUNT_MARGIN = 10
@@ -107,6 +114,77 @@ def require_window_coverage(
     return {str(d.date()): int(per_date[d]) for d in sessions}
 
 
+def dated_delistings(master: pd.DataFrame, delistings: pd.DataFrame | None) -> pd.Series:
+    """symbol -> latest dated delisting (master column + U0 delisting table)."""
+    parts = [pd.to_datetime(master.set_index(master["symbol"].astype(str))["delisting_date"],
+                            errors="coerce")]
+    if delistings is not None and len(delistings):
+        parts.append(pd.to_datetime(
+            delistings.set_index(delistings["symbol"].astype(str))["effective_start"],
+            errors="coerce"))
+    dated = pd.concat(parts).dropna()
+    return dated.groupby(level=0).max()
+
+
+def seed_universe(
+    panel: pd.DataFrame,
+    master: pd.DataFrame,
+    delistings: pd.DataFrame | None,
+    win_start,
+    win_end,
+    *,
+    mode: str = "cohort",
+) -> tuple[list[str], dict]:
+    """Symbols the window must cover, from the security master -- never from the
+    names that happened to print on the panel's last date (Cycle 32, audit F2:
+    that seed ratcheted 3,584 -> 3,447 and dropped every name halted on a seed
+    date for good).
+
+    ``mode="cohort"``: master-listed names of the frozen FRESH cohort.
+    ``mode="master"``: every master-listed SH/SZ name (adds names never in the
+    FRESH universe -- a protocol change, opt-in only).
+    Both exclude names whose dated delisting precedes the window.
+    """
+    win_start, win_end = pd.Timestamp(win_start), pd.Timestamp(win_end)
+    uni = master[["symbol", "listing_date"]].copy()
+    uni["symbol"] = uni["symbol"].astype(str)
+    uni = uni[uni["symbol"].str[-2:].isin(["SH", "SZ"])]
+    listing = pd.to_datetime(uni["listing_date"], errors="coerce")
+    report: dict = {"mode": mode, "master_rows": int(len(uni))}
+    listed = uni[listing.notna() & (listing <= win_end)]
+    report["master_without_listing_date"] = int(listing.isna().sum())
+    if mode == "cohort":
+        dates = pd.to_datetime(panel["trade_date"])
+        cohort = set(panel.loc[(dates < COHORT_START)
+                               & (dates >= COHORT_START - pd.Timedelta(days=COHORT_LOOKBACK_DAYS)),
+                               "symbol"].astype(str))
+        if not cohort:
+            raise SystemExit("refusing catch-up: FRESH cohort is empty (panel lacks pre-freeze rows)")
+        report["cohort"] = len(cohort)
+        report["cohort_not_in_master"] = sorted(cohort - set(uni["symbol"]))
+        listed = listed[listed["symbol"].isin(cohort)]
+    elif mode != "master":
+        raise ValueError(f"unknown seed mode {mode!r}")
+    dated = dated_delistings(master, delistings)
+    gone = listed["symbol"].map(dated) < win_start
+    report["excluded_dated_delisting"] = int(gone.sum())
+    seed = sorted(listed.loc[~gone, "symbol"])
+    report["seed"] = len(seed)
+    return seed, report
+
+
+def window_halt_covered(symbol: str, sessions, intervals: pd.DataFrame) -> bool:
+    """True when dated halt intervals cover every window session for ``symbol``."""
+    if intervals is None or not len(intervals) or not len(sessions):
+        return False
+    own = intervals[intervals["symbol"].astype(str) == symbol]
+    if own.empty:
+        return False
+    starts = pd.to_datetime(own["effective_start"]).dt.normalize()
+    ends = pd.to_datetime(own["effective_end"]).dt.normalize()
+    return all(bool(((starts <= d) & (ends >= d)).any()) for d in sessions)
+
+
 def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
     """Write to a sibling temp file, fsync, then rename over ``path``: a timeout
     (SIGTERM/SIGKILL) during the write can no longer truncate the panel."""
@@ -169,6 +247,11 @@ def main() -> int:
         default=default_historical_st_path(),
         help="dated PIT ST table (parquet/csv/jsonl); required",
     )
+    parser.add_argument(
+        "--seed-universe", choices=["cohort", "master"], default="cohort",
+        help="cohort = master-listed names of the frozen FRESH cohort (default); "
+             "master = every master-listed SH/SZ name (protocol change, opt-in)",
+    )
     args = parser.parse_args()
     evidence = _load_required_st_evidence(args.historical_st_path)
     started = time.time()
@@ -209,9 +292,20 @@ def main() -> int:
         print(json.dumps({"appended": 0, "note": "no business day in window"}))
         return 0
 
-    seed_symbols = sorted(
-        panel.loc[panel["trade_date"] == panel_max, "symbol"].astype(str).unique()
-    )
+    if not MASTER.exists():
+        raise SystemExit(f"refusing catch-up: security master {MASTER} missing (seed source)")
+    master = pd.read_parquet(MASTER)
+    delistings = pd.read_parquet(DELISTINGS) if DELISTINGS.exists() else None
+    seed_symbols, seed_report = seed_universe(panel, master, delistings, win_start, win_end,
+                                              mode=args.seed_universe)
+    # Names the dated ST evidence cannot attribute are not fetched (appending them
+    # would broadcast ST state); they are named here and stay visible as gaps in
+    # the FRESH integrity report -- never silently dropped.
+    st_covered = set(evidence.frame["symbol"].astype(str))
+    no_st = sorted(set(seed_symbols) - st_covered)
+    seed_symbols = sorted(set(seed_symbols) & st_covered)
+    seed_report["excluded_no_dated_st_evidence"] = no_st
+    print(json.dumps({"seed": seed_report}, default=str), flush=True)
     _require_st_coverage(evidence, seed_symbols, win_start, win_end)
     try:
         sessions = window_sessions(pd.read_parquet(CALENDAR), win_start, win_end)
@@ -264,8 +358,12 @@ def main() -> int:
         flush=True,
     )
 
+    from quantagent.data.ashare.session_gaps import load_suspension_evidence
+
+    halt_intervals, _ = load_suspension_evidence(SUSPENSION_DIRS)
     tf = rep._tf_client()
     failed: list[str] = []
+    empty_unexplained: list[str] = []
     for chunk_start in range(0, len(todo), CHUNK):
         chunk_symbols = todo[chunk_start : chunk_start + CHUNK]
         rows: list[pd.DataFrame] = []
@@ -274,7 +372,15 @@ def main() -> int:
             if kline is None:
                 failed.append(symbol)
                 continue
-            if not len(kline):
+            in_window = (len(kline) > 0) and bool(
+                ((pd.to_datetime(kline["trade_date"]) >= win_start)
+                 & (pd.to_datetime(kline["trade_date"]) <= win_end)).any())
+            if not in_window:
+                # Empty for a listed, non-delisted seed name: only a dated halt
+                # covering every window session makes that a legitimate answer.
+                if not window_halt_covered(symbol, sessions, halt_intervals):
+                    failed.append(symbol)
+                    empty_unexplained.append(symbol)
                 continue
             kline = kline.copy()
             kline["symbol"] = symbol
@@ -334,8 +440,9 @@ def main() -> int:
     # Seed ratchet guard (Cycle 32): a symbol whose fetch failed (vendor throttling)
     # is not marked done; merging without it would drop it from the panel's last
     # date and therefore from every later seed list, permanently. Refuse the merge
-    # until every seed symbol has been fetched (an empty in-window result is a
-    # legitimate fetch: suspended/delisted); failed symbols are retried next run.
+    # until every seed symbol has been fetched. An empty in-window result counts
+    # as fetched only when a dated halt covers the whole window (Cycle 32);
+    # failed symbols are retried next run.
     fetched: set[str] = set()
     for path in sorted(STAGING.glob("done_*.json")):
         fetched |= set(json.loads(path.read_text()))
@@ -348,6 +455,7 @@ def main() -> int:
                     "status": "FETCH_INCOMPLETE_RETRY",
                     "n_unfetched": len(unfetched),
                     "unfetched_sample": unfetched[:20],
+                    "empty_without_halt_evidence_this_run": empty_unexplained[:50],
                     "note": "panel not written; staging kept, failed symbols are retried",
                 }
             ),
@@ -376,7 +484,9 @@ def main() -> int:
         new[column] = pd.to_numeric(new[column], errors="coerce")
     new = new.dropna(subset=["trade_date", "symbol", "close"])
     try:
-        require_window_coverage(new, sessions, len(seed_symbols))
+        # names halted for the whole window legitimately add no rows
+        halted = [x for x in seed_symbols if window_halt_covered(x, sessions, halt_intervals)]
+        require_window_coverage(new, sessions, len(seed_symbols) - len(halted))
     except WindowCoverageError as exc:
         raise SystemExit(
             f"refusing catch-up merge (staging preserved for resume): {exc}"

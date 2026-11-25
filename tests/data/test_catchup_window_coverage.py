@@ -177,7 +177,16 @@ def _wire(monkeypatch, tmp_path, vendor):
     monkeypatch.setattr(catchup, "PANEL", panel)
     monkeypatch.setattr(catchup, "STAGING", tmp_path / "_staging_catchup")
     monkeypatch.setattr(catchup, "CALENDAR", cal)
-    monkeypatch.setattr(catchup, "_load_required_st_evidence", lambda path: type("E", (), {"source_sha256": "x", "mode": "test"})())
+    master = tmp_path / "security_master.parquet"
+    pd.DataFrame({"symbol": SYMS, "listing_date": pd.Timestamp("2000-01-04"),
+                  "delisting_date": pd.NaT}).to_parquet(master, index=False)
+    monkeypatch.setattr(catchup, "MASTER", master)
+    monkeypatch.setattr(catchup, "DELISTINGS", tmp_path / "absent_delistings.parquet")
+    monkeypatch.setattr(catchup, "SUSPENSION_DIRS", [])
+    monkeypatch.setattr(catchup, "COHORT_START", pd.Timestamp("2026-08-01"))
+    evidence = type("E", (), {"source_sha256": "x", "mode": "test",
+                              "frame": pd.DataFrame({"symbol": SYMS})})()
+    monkeypatch.setattr(catchup, "_load_required_st_evidence", lambda path: evidence)
     monkeypatch.setattr(catchup, "_require_st_coverage", lambda *a, **k: None)
 
     def _attach(frame, evidence):
@@ -228,3 +237,51 @@ def test_main_fetch_failure_retries_instead_of_dropping_symbol(monkeypatch, tmp_
     assert catchup.main() == 0
     out = pd.read_parquet(panel)
     assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])
+
+
+def test_seed_is_not_the_names_printed_on_the_last_date(monkeypatch, tmp_path):
+    """Audit F2: a cohort name halted on panel_max used to drop out of every later seed."""
+    panel = _wire(monkeypatch, tmp_path, _Vendor(_sessions()))
+    frame = pd.read_parquet(panel)
+    frame = frame[~((frame["symbol"] == "600000.SH") & (frame["trade_date"] == "2026-08-05"))]
+    frame.to_parquet(panel, index=False)
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])
+
+
+def test_empty_fetch_is_done_only_under_a_dated_halt(monkeypatch, tmp_path):
+    class _Empty(_VendorKlines):
+        def get(self, sym, period, count, adjust, as_dataframe):
+            if sym == "600000.SH":
+                return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close",
+                                             "volume", "amount"])
+            return super().get(sym, period, count, adjust, as_dataframe)
+
+    vendor = _Vendor(_sessions())
+    vendor.klines = _Empty(_sessions())
+    panel = _wire(monkeypatch, tmp_path, vendor)
+    before = panel.read_bytes()
+    assert catchup.main() == catchup.EXIT_RETRY          # listed, not delisted, no halt
+    assert panel.read_bytes() == before
+    pit = tmp_path / "halts"
+    (pit / "_suspension").mkdir(parents=True)
+    pd.DataFrame({"symbol": ["600000.SH"], "effective_start": [pd.Timestamp("2026-08-01")],
+                  "effective_end": [pd.Timestamp("2026-12-31")],
+                  "suspension_reason": ["r"]}).to_parquet(pit / "suspension_intervals.parquet")
+    monkeypatch.setattr(catchup, "SUSPENSION_DIRS", [pit])
+    assert catchup.main() == 0
+
+
+def test_seed_universe_modes_and_dated_delistings():
+    panel = pd.DataFrame({"symbol": ["000001.SZ", "600000.SH"],
+                          "trade_date": pd.to_datetime(["2026-05-01", "2026-05-01"])})
+    master = pd.DataFrame({
+        "symbol": ["000001.SZ", "600000.SH", "600001.SH", "688001.SH", "920001.BJ"],
+        "listing_date": pd.to_datetime(["2000-01-04"] * 3 + ["2027-03-01", "2020-01-02"]),
+        "delisting_date": pd.to_datetime([pd.NaT, pd.NaT, pd.NaT, pd.NaT, pd.NaT])})
+    delist = pd.DataFrame({"symbol": ["600000.SH"], "effective_start": ["2026-06-01"]})
+    seed, rep = catchup.seed_universe(panel, master, delist, "2026-11-25", "2026-11-25")
+    assert seed == ["000001.SZ"] and rep["excluded_dated_delisting"] == 1
+    seed, _ = catchup.seed_universe(panel, master, None, "2026-11-25", "2026-11-25", mode="master")
+    assert seed == ["000001.SZ", "600000.SH", "600001.SH"]      # not yet listed / BSE excluded
