@@ -270,3 +270,15 @@ def test_carried_mark_never_crosses_an_unexplained_session() -> None:
         panel, sessions=SESSIONS, suspension_intervals=_halt(HELD, SESSIONS[2], SESSIONS[5]),
         snapshot_dates=SESSIONS)
     assert len(out2) == len(panel) + 4
+
+
+def test_integrity_names_vendor_empty_symbols() -> None:
+    from quantagent.data.ashare.session_gaps import panel_integrity
+
+    panel = _panel(hole_days=())
+    panel["is_st_provenance"] = "dated_pit_st_evidence"
+    report = panel_integrity(panel, sessions=SESSIONS, suspension_intervals=None,
+                             snapshot_dates=SESSIONS, delisting_dates=None, start=SESSIONS[0],
+                             expected_universe=_master(), vendor_empty=["600001.SH"])
+    assert report["status"] == "INCOMPLETE"
+    assert "VENDOR_EMPTY_NO_EVIDENCE 1 (MISSING_UNEXPLAINED)" in report["problems"]

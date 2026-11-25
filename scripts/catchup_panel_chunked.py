@@ -50,6 +50,10 @@ FETCH_COUNT_MARGIN = 10
 # Every session in the window must carry at least this share of the seed symbols
 # (same threshold as scripts/coverage_guard.sh) before the panel is written.
 MIN_DATE_COVERAGE = 0.93
+# Seed names the vendor answered with no in-window bar and no dated halt covers
+# (Cycle 32 review): recorded here at merge time and read by the FRESH integrity
+# report; they do not block the merge and are re-asked every run (master seed).
+VENDOR_EMPTY_NAME = "vendor_empty_no_evidence.json"
 # Exit code for "fetch incomplete, retry": the supervisor re-enters instead of aborting.
 EXIT_RETRY = 75
 
@@ -358,7 +362,7 @@ def main() -> int:
     if existing_manifest != expected_manifest:
         for path in list(STAGING.glob("chunk_*.parquet")) + list(
             STAGING.glob("done_*.json")
-        ):
+        ) + list(STAGING.glob("empty_*.json")):
             path.unlink()
         manifest.write_text(json.dumps(expected_manifest, sort_keys=True))
 
@@ -401,10 +405,11 @@ def main() -> int:
                 ((pd.to_datetime(kline["trade_date"]) >= win_start)
                  & (pd.to_datetime(kline["trade_date"]) <= win_end)).any())
             if not in_window:
-                # Empty for a listed, non-delisted seed name: only a dated halt
-                # covering every window session makes that a legitimate answer.
+                # A SUCCESSFUL empty answer (not a failure: those are None above
+                # and retried). Without a dated halt it is unexplained: recorded
+                # explicitly, never silently "done", and it does not block the
+                # merge -- the master seed asks again next run, so no ratchet.
                 if not window_halt_covered(symbol, sessions, halt_intervals):
-                    failed.append(symbol)
                     empty_unexplained.append(symbol)
                 continue
             kline = kline.copy()
@@ -449,6 +454,10 @@ def main() -> int:
             )
         )
         chunk_failed = set(failed) & set(chunk_symbols)
+        chunk_empty = sorted(set(empty_unexplained) & set(chunk_symbols))
+        if chunk_empty:
+            (STAGING / f"empty_{chunk_start // CHUNK:04d}_{time.time_ns()}.json").write_text(
+                json.dumps(chunk_empty))
         (STAGING / f"done_{chunk_start // CHUNK:04d}_{time.time_ns()}.json").write_text(
             json.dumps(sorted(set(chunk_symbols) - chunk_failed))
         )
@@ -465,12 +474,15 @@ def main() -> int:
     # Seed ratchet guard (Cycle 32): a symbol whose fetch failed (vendor throttling)
     # is not marked done; merging without it would drop it from the panel's last
     # date and therefore from every later seed list, permanently. Refuse the merge
-    # until every seed symbol has been fetched. An empty in-window result counts
-    # as fetched only when a dated halt covers the whole window (Cycle 32);
-    # failed symbols are retried next run.
+    # until every seed symbol has been answered. A failed request is retried
+    # (exit 75); a successful empty answer without a dated halt is recorded as
+    # vendor_empty_no_evidence and does not block (Cycle 32 review).
     fetched: set[str] = set()
     for path in sorted(STAGING.glob("done_*.json")):
         fetched |= set(json.loads(path.read_text()))
+    vendor_empty: set[str] = set()
+    for path in sorted(STAGING.glob("empty_*.json")):
+        vendor_empty |= set(json.loads(path.read_text()))
     unfetched = sorted(set(seed_symbols) - fetched)
     if unfetched:
         print(
@@ -480,7 +492,7 @@ def main() -> int:
                     "status": "FETCH_INCOMPLETE_RETRY",
                     "n_unfetched": len(unfetched),
                     "unfetched_sample": unfetched[:20],
-                    "empty_without_halt_evidence_this_run": empty_unexplained[:50],
+                    "vendor_empty_no_evidence": sorted(vendor_empty)[:50],
                     "note": "panel not written; staging kept, failed symbols are retried",
                 }
             ),
@@ -495,12 +507,13 @@ def main() -> int:
     if not len(new):
         for path in list(STAGING.glob("chunk_*.parquet")) + list(
             STAGING.glob("done_*.json")
-        ):
+        ) + list(STAGING.glob("empty_*.json")):
             path.unlink()
         manifest.unlink(missing_ok=True)
         print(
             json.dumps(
-                {"appended": 0, "n_failed": len(failed), "note": "no new rows fetched"}
+                {"appended": 0, "n_failed": len(failed), "note": "no new rows fetched",
+                 "vendor_empty_no_evidence": sorted(vendor_empty)}
             )
         )
         return 0
@@ -509,9 +522,10 @@ def main() -> int:
         new[column] = pd.to_numeric(new[column], errors="coerce")
     new = new.dropna(subset=["trade_date", "symbol", "close"])
     try:
-        # names halted for the whole window legitimately add no rows
-        halted = [x for x in seed_symbols if window_halt_covered(x, sessions, halt_intervals)]
-        require_window_coverage(new, sessions, len(seed_symbols) - len(halted))
+        # Denominator = seed names that returned data: the 93% guard still
+        # catches a latest-N hole, while dark / halted names cannot fail it.
+        returned = int(new["symbol"].nunique())
+        require_window_coverage(new, sessions, returned)
     except WindowCoverageError as exc:
         raise SystemExit(
             f"refusing catch-up merge (staging preserved for resume): {exc}"
@@ -589,9 +603,15 @@ def main() -> int:
 
     merged = merged.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
     _atomic_write_parquet(merged, PANEL)
+    empty_record = PANEL.parent / VENDOR_EMPTY_NAME
+    tmp = empty_record.with_name(f".{empty_record.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps({"window": window_tag, "classification": "MISSING_UNEXPLAINED",
+                               "evidence": "vendor_empty_no_evidence",
+                               "symbols": sorted(vendor_empty)}, indent=1))
+    os.replace(tmp, empty_record)
     for path in list(STAGING.glob("chunk_*.parquet")) + list(
         STAGING.glob("done_*.json")
-    ):
+    ) + list(STAGING.glob("empty_*.json")):
         path.unlink()
     manifest.unlink(missing_ok=True)
 
@@ -608,6 +628,12 @@ def main() -> int:
             str(date.date()): int(value)
             for date, value in window.groupby("trade_date")["symbol"].nunique().items()
         },
+        "seed": len(seed_symbols),
+        "seed_returned_data": returned,
+        "min_coverage_vs_full_seed": round(
+            float(window.groupby("trade_date")["symbol"].nunique().min()) / len(seed_symbols), 6)
+        if len(window) and seed_symbols else None,
+        "vendor_empty_no_evidence": sorted(vendor_empty),
         "historical_st_evidence_sha256": evidence.source_sha256,
         "historical_st_evidence_mode": evidence.mode,
         "runtime_s": round(time.time() - started, 1),

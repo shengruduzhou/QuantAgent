@@ -376,6 +376,7 @@ def panel_integrity(
     delisting_dates: Mapping[str, Any] | pd.Series | None,
     start: Any,
     expected_universe: pd.DataFrame | None,
+    vendor_empty: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Whether a traded-sessions-only panel is complete on ``[start, max]``.
 
@@ -448,6 +449,10 @@ def panel_integrity(
         problems.append("EMPTY_EXPECTED_UNIVERSE_ON_SOME_SESSIONS")
     if never_in_window:
         problems.append(f"EXPECTED_SYMBOLS_NEVER_IN_WINDOW {len(never_in_window)}")
+    empty = sorted(set(map(str, vendor_empty or [])))
+    report["vendor_empty_no_evidence"] = empty
+    if empty:
+        problems.append(f"VENDOR_EMPTY_NO_EVIDENCE {len(empty)} (MISSING_UNEXPLAINED)")
     if report["dates_below_coverage"]:
         problems.append(f"DATE_COVERAGE_BELOW_{MIN_DATE_COVERAGE} on "
                         f"{len(report['dates_below_coverage'])} sessions "

@@ -250,20 +250,68 @@ def test_seed_is_not_the_names_printed_on_the_last_date(monkeypatch, tmp_path):
     assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])
 
 
-def test_empty_fetch_is_done_only_under_a_dated_halt(monkeypatch, tmp_path):
-    class _Empty(_VendorKlines):
-        def get(self, sym, period, count, adjust, as_dataframe):
-            if sym == "600000.SH":
-                return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close",
-                                             "volume", "amount"])
-            return super().get(sym, period, count, adjust, as_dataframe)
+class _EmptyFor(_VendorKlines):
+    """Successful empty answers for ``empty`` names (not exceptions)."""
+
+    def __init__(self, sessions, empty=(), fail=()):
+        super().__init__(sessions, fail)
+        self.empty = set(empty)
+
+    def get(self, sym, period, count, adjust, as_dataframe):
+        if sym in self.empty and sym not in self.fail:
+            return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close",
+                                         "volume", "amount"])
+        return super().get(sym, period, count, adjust, as_dataframe)
+
+
+def test_failure_retries_but_vendor_empty_does_not_block(monkeypatch, tmp_path):
+    """Review blocker: a dark (listed, empty, no halt) name must not stall the merge;
+    a failed request still must."""
+    import json
 
     vendor = _Vendor(_sessions())
-    vendor.klines = _Empty(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"}, fail={"000002.SZ"})
     panel = _wire(monkeypatch, tmp_path, vendor)
+    monkeypatch.setattr(catchup.rep.time, "sleep", lambda s: None)
     before = panel.read_bytes()
-    assert catchup.main() == catchup.EXIT_RETRY          # listed, not delisted, no halt
+    assert catchup.main() == catchup.EXIT_RETRY          # 000002.SZ raised
     assert panel.read_bytes() == before
+    vendor.klines.fail.clear()                            # only the empty name left
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    window = out[out["trade_date"] > "2026-08-05"]
+    assert set(window["symbol"]) == {"000001.SZ", "000002.SZ"}
+    record = json.loads((panel.parent / catchup.VENDOR_EMPTY_NAME).read_text())
+    assert record["symbols"] == ["600000.SH"]
+    assert record["classification"] == "MISSING_UNEXPLAINED"
+
+
+def test_coverage_guard_denominator_is_names_that_returned_data(monkeypatch, tmp_path):
+    # 2 of 3 seeds return a full window, 1 is dark: 2/2 = 100% passes (vs 2/3 < 93%)
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    _wire(monkeypatch, tmp_path, vendor)
+    assert catchup.main() == 0
+    # ...but a latest-N hole among names that DID return data is still refused
+    vendor2 = _Vendor(_sessions())
+    vendor2.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    (tmp_path / "b").mkdir()
+    panel = _wire(monkeypatch, tmp_path / "b", vendor2)
+    real_fetch = catchup.rep.fetch_with_retry
+    monkeypatch.setattr(catchup.rep, "fetch_with_retry",
+                        lambda tf, sym, attempts=3, count=40: real_fetch(tf, sym, attempts, 40))
+    before = panel.read_bytes()
+    with pytest.raises(SystemExit, match="sessions below"):
+        catchup.main()
+    assert panel.read_bytes() == before
+
+
+def test_empty_name_under_a_dated_halt_is_not_flagged(monkeypatch, tmp_path):
+    import json
+
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    panel = _wire(monkeypatch, tmp_path, vendor)
     pit = tmp_path / "halts"
     (pit / "_suspension").mkdir(parents=True)
     pd.DataFrame({"symbol": ["600000.SH"], "effective_start": [pd.Timestamp("2026-08-01")],
@@ -271,6 +319,7 @@ def test_empty_fetch_is_done_only_under_a_dated_halt(monkeypatch, tmp_path):
                   "suspension_reason": ["r"]}).to_parquet(pit / "suspension_intervals.parquet")
     monkeypatch.setattr(catchup, "SUSPENSION_DIRS", [pit])
     assert catchup.main() == 0
+    assert json.loads((panel.parent / catchup.VENDOR_EMPTY_NAME).read_text())["symbols"] == []
 
 
 def test_seed_universe_modes_and_dated_delistings():

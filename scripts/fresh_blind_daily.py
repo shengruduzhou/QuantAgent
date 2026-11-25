@@ -145,7 +145,16 @@ def integrity_report(start: pd.Timestamp = FRESH_START) -> dict:
              if len(delist) else None)
     return panel_integrity(panel, sessions=sessions, suspension_intervals=intervals,
                            snapshot_dates=covered, delisting_dates=dated, start=start,
-                           expected_universe=fresh_expected_universe(panel, dated, start))
+                           expected_universe=fresh_expected_universe(panel, dated, start),
+                           vendor_empty=_vendor_empty_names())
+
+
+def _vendor_empty_names() -> list[str]:
+    """Names the last catch-up merge recorded as vendor-empty without evidence."""
+    path = PANEL.parent / "vendor_empty_no_evidence.json"
+    if not path.exists():
+        return []
+    return list(json.loads(path.read_text()).get("symbols", []))
 
 
 def fresh_expected_universe(panel: pd.DataFrame, dated, start: pd.Timestamp) -> pd.DataFrame | None:
