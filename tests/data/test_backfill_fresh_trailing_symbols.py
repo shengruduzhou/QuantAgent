@@ -40,7 +40,9 @@ def _fixture(monkeypatch):
     master = pd.DataFrame({"symbol": ["000001.SZ", "600000.SH"],
                            "listing_date": pd.Timestamp("2000-01-04"), "delisting_date": pd.NaT})
     cal = pd.DataFrame({"trade_date": SESS, "is_open": True})
-    ev = pd.DataFrame({"symbol": ["000001.SZ", "600000.SH"]})
+    ev = pd.DataFrame({"symbol": ["000001.SZ", "600000.SH"],
+                       "start_date": pd.to_datetime(["2016-01-04", "2016-01-04"]),
+                       "end_date": pd.to_datetime(["2026-12-31", "2026-12-31"])})
     return mod, panel, master, cal, ev
 
 
@@ -83,10 +85,47 @@ def test_build_panel_merges_with_dated_st_and_flags(monkeypatch) -> None:
         return frame.assign(is_st=False, is_st_provenance="dated_pit_st_evidence",
                             st_evidence_sha256="x")
     monkeypatch.setattr(mod, "attach_historical_st", attach)
-    merged = mod.build_panel(panel, new, evidence=None)
+    evidence = type("E", (), {"frame": ev})()
+    merged = mod.build_panel(panel, new, evidence=evidence)
     added = merged[merged["source"] == "tickflow_backfill_trailing"]
     assert len(added) == len(need)
     assert not merged.duplicated(["symbol", "trade_date"]).any()
     first = added.sort_values("trade_date").iloc[0]
     assert bool(first["is_limit_up"])          # 10.0 -> 11.0 is a +10% main-board limit
     assert set(added["is_st_provenance"]) == {"dated_pit_st_evidence"}
+
+
+def test_sh_rows_before_dated_evidence_are_labelled_unknown_not_aborted(monkeypatch, tmp_path) -> None:
+    """601088.SH on 2026-07-20: SH dated ST starts 2026-07-27. The build used to
+    abort with HistoricalSTCoverageError; it must label the row unknown instead."""
+    from quantagent.data.providers.st_pit import load_historical_st_evidence
+
+    mod = _load()
+    sym = "601088.SH"
+    old_days = list(pd.bdate_range("2026-07-01", "2026-07-02"))
+    panel = pd.DataFrame([_row(sym, d) for d in old_days])
+    panel["is_st"] = True                                   # the period's broadcast value
+    panel["is_st_provenance"] = "current_snapshot_broadcast"
+    panel["st_evidence_sha256"] = None
+    new_days = [pd.Timestamp("2026-07-20"), pd.Timestamp("2026-07-27")]
+    new = pd.DataFrame([_row(sym, d, 10.1) for d in new_days])[
+        ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]]
+    path = tmp_path / "ev.parquet"
+    pd.DataFrame({"symbol": [sym], "start_date": ["2026-07-27"], "end_date": ["2026-11-24"],
+                  "is_st": [False], "available_at": ["2026-07-27T00:00:00+08:00"]}).to_parquet(path)
+    evidence = load_historical_st_evidence(path)
+    merged = mod.build_panel(panel, new, evidence)
+    added = merged[merged["source"] == "tickflow_backfill_trailing"].set_index("trade_date")
+    assert added.loc[new_days[0], "is_st_provenance"] == mod.ST_UNKNOWN
+    assert bool(added.loc[new_days[0], "is_st"]) is True      # carried, not invented
+    assert pd.isna(added.loc[new_days[0], "st_evidence_sha256"])
+    assert added.loc[new_days[1], "is_st_provenance"] == "dated_pit_st_evidence"
+    assert bool(added.loc[new_days[1], "is_st"]) is False
+    assert "current_snapshot" in mod.ST_UNKNOWN and "broadcast" in mod.ST_UNKNOWN
+    summary = mod.st_coverage_summary(new, evidence.frame)
+    assert summary["rows_dated_st"] == 1 and summary["rows_unknown_st"] == 1
+    assert summary["per_date_unknown"] == {"2026-07-20": 1}
+    # a symbol with no existing broadcast row has nothing to carry: refused
+    import pytest
+    with pytest.raises(SystemExit, match="no existing unknown-ST row"):
+        mod.build_panel(panel.assign(is_st_provenance="dated_pit_st_evidence"), new, evidence)

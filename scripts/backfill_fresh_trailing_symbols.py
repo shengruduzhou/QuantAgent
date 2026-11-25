@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "src"))
 
 import catchup_panel_chunked as cu  # noqa: E402
+from reflag_fresh_st_provenance import UNKNOWN as ST_UNKNOWN, coverage_mask  # noqa: E402
 from quantagent.data.ashare.session_gaps import load_suspension_evidence  # noqa: E402
 from quantagent.data.providers.st_pit import attach_historical_st  # noqa: E402
 
@@ -66,6 +67,10 @@ def plan_backfill(panel, master, delistings, calendar, evidence_frame) -> tuple[
     plan = pd.DataFrame(rows, columns=["symbol", "last_bar", "sessions_to_fill",
                                        "fetch_count", "st_evidence"])
     fetchable = plan[plan["st_evidence"]]
+    to_fill = [(r.symbol, d) for r in fetchable.itertuples()
+               for d in sessions[(sessions > r.last_bar) & (sessions <= panel_max)]]
+    st_plan = st_coverage_summary(pd.DataFrame(to_fill, columns=["symbol", "trade_date"]),
+                                  evidence_frame)
     report = {
         "panel_max": str(panel_max.date()),
         "seed": seed_report,
@@ -73,6 +78,7 @@ def plan_backfill(panel, master, delistings, calendar, evidence_frame) -> tuple[
         "blocked_no_dated_st_evidence": sorted(plan.loc[~plan["st_evidence"], "symbol"]),
         "fetchable_symbols": int(len(fetchable)),
         "session_rows_to_fill": int(fetchable["sessions_to_fill"].sum()),
+        "st_coverage_of_rows_to_fill": st_plan,
         "requests": int(len(fetchable)),
         "eta_minutes_at_10_per_min": round(len(fetchable) / REQUESTS_PER_MINUTE, 1),
         "last_bar_distribution": {str(k.date()): int(v) for k, v in
@@ -160,13 +166,65 @@ def verify(plan: pd.DataFrame, staging: Path, calendar, halts: pd.DataFrame,
                    "verified_rows": int(len(frame))}
 
 
+def attach_st_or_unknown(panel: pd.DataFrame, new: pd.DataFrame, evidence) -> pd.DataFrame:
+    """Dated ST where the evidence covers the row; elsewhere the panel's own
+    explicit-unknown convention.
+
+    Dated SH/BSE ST evidence starts 2026-07-27, so SH rows before it cannot be
+    attributed (attach_historical_st would abort the whole build). Those rows get
+    exactly what the existing SH rows of that period carry after the reflag:
+    ``is_st`` = the symbol's value on its existing broadcast/unknown rows (the
+    same current snapshot -- nothing new is invented), provenance
+    ``current_snapshot_broadcast_unverified_no_dated_evidence`` (keeps the
+    builder's broadcast refusal), no evidence sha. A symbol with no such
+    existing row has no value to carry and is refused.
+    """
+    covered = coverage_mask(new, evidence.frame).to_numpy(dtype=bool)
+    dated = attach_historical_st(new.loc[covered], evidence) if covered.any() else new.iloc[:0]
+    unknown = new.loc[~covered].copy()
+    if len(unknown):
+        prov = panel["is_st_provenance"].astype("string").fillna("")
+        carried_rows = panel[prov.str.contains("broadcast")].sort_values("trade_date")
+        carried = carried_rows.groupby(carried_rows["symbol"].astype(str))["is_st"].last()
+        value = unknown["symbol"].astype(str).map(carried)
+        if value.isna().any():
+            bad = sorted(unknown.loc[value.isna(), "symbol"].unique())
+            raise SystemExit(f"no dated ST evidence and no existing unknown-ST row to carry for {bad[:10]}")
+        unknown["is_st"] = value.astype(bool).to_numpy()
+        unknown["is_st_provenance"] = ST_UNKNOWN
+        unknown["st_evidence_sha256"] = None
+    return pd.concat([dated, unknown], ignore_index=True)
+
+
+def st_coverage_summary(rows: pd.DataFrame, evidence_frame: pd.DataFrame) -> dict:
+    """Rows with dated ST evidence vs explicit unknown, overall and per date."""
+    if rows is None or not len(rows):
+        return {"rows": 0}
+    frame = rows[["symbol", "trade_date"]].reset_index(drop=True).copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
+    covered = coverage_mask(frame, evidence_frame).to_numpy(dtype=bool)
+    frame["dated"] = covered
+    per_date = frame.groupby("trade_date")["dated"].agg(["sum", "size"])
+    unknown_dates = per_date[per_date["sum"] < per_date["size"]]
+    return {
+        "rows": int(len(frame)), "rows_dated_st": int(covered.sum()),
+        "rows_unknown_st": int((~covered).sum()),
+        "unknown_by_exchange": {str(k): int(v) for k, v in
+                                frame.loc[~frame["dated"], "symbol"].str[-2:].value_counts().items()},
+        "unknown_date_range": [str(unknown_dates.index.min().date()),
+                               str(unknown_dates.index.max().date())] if len(unknown_dates) else None,
+        "per_date_unknown": {str(d.date()): int(r["size"] - r["sum"])
+                             for d, r in unknown_dates.iterrows()},
+    }
+
+
 def build_panel(panel: pd.DataFrame, new: pd.DataFrame, evidence) -> pd.DataFrame:
     """Merge verified rows with catch-up semantics (ST attach + shared flags)."""
     new = new.copy()
     for column in ("open", "high", "low", "close", "volume", "amount"):
         new[column] = pd.to_numeric(new[column], errors="coerce")
-    new = new.dropna(subset=["trade_date", "symbol", "close"])
-    new = attach_historical_st(new, evidence)
+    new = new.dropna(subset=["trade_date", "symbol", "close"]).reset_index(drop=True)
+    new = attach_st_or_unknown(panel, new, evidence)
     new["available_at"] = new["trade_date"] + pd.Timedelta(days=1)
     new["source"] = "tickflow_backfill_trailing"
     new["source_type"] = "vendor_api"
@@ -252,6 +310,7 @@ def main() -> int:
         report["mode"] = "fetch"
         report["fetch"] = fetch(plan, staging, panel_max, args.limit)
     new, verdict = verify(plan, staging, calendar, halts, panel_max)
+    verdict["st_coverage_of_verified_rows"] = st_coverage_summary(new, evidence.frame)
     report["verify"] = verdict
     if (args.output or args.apply) and len(new):
         merged = build_panel(panel, new, evidence)
