@@ -114,6 +114,31 @@ def require_window_coverage(
     return {str(d.date()): int(per_date[d]) for d in sessions}
 
 
+def tradability_flags(target: pd.DataFrame) -> pd.DataFrame:
+    """Limit/suspension flags from raw close, prev_close and dated is_st.
+
+    Shared by the catch-up merge and the trailing-symbol backfill so both write
+    identical flag semantics."""
+    target = target.copy()
+    ratios = board_price_limit_vector(
+        target["symbol"].astype(str),
+        target["is_st"].astype(bool),
+        trade_dates=target["trade_date"],
+    )
+    up_price = (target["prev_close"] * (1.0 + ratios)).round(2)
+    down_price = (target["prev_close"] * (1.0 - ratios)).round(2)
+    target["is_limit_up"] = (
+        (target["close"].round(2) >= up_price - 0.005)
+        & target["prev_close"].notna()
+    )
+    target["is_limit_down"] = (
+        (target["close"].round(2) <= down_price + 0.005)
+        & target["prev_close"].notna()
+    )
+    target["is_suspended"] = target["volume"].fillna(0) <= 0
+    return target
+
+
 def dated_delistings(master: pd.DataFrame, delistings: pd.DataFrame | None) -> pd.Series:
     """symbol -> latest dated delisting (master column + U0 delisting table)."""
     parts = [pd.to_datetime(master.set_index(master["symbol"].astype(str))["delisting_date"],
@@ -535,22 +560,7 @@ def main() -> int:
             "refusing flag rebuild because historical ST coverage is incomplete: "
             f"{exc}"
         ) from exc
-    ratios = board_price_limit_vector(
-        target["symbol"].astype(str),
-        target["is_st"].astype(bool),
-        trade_dates=target["trade_date"],
-    )
-    up_price = (target["prev_close"] * (1.0 + ratios)).round(2)
-    down_price = (target["prev_close"] * (1.0 - ratios)).round(2)
-    target["is_limit_up"] = (
-        (target["close"].round(2) >= up_price - 0.005)
-        & target["prev_close"].notna()
-    )
-    target["is_limit_down"] = (
-        (target["close"].round(2) <= down_price + 0.005)
-        & target["prev_close"].notna()
-    )
-    target["is_suspended"] = target["volume"].fillna(0) <= 0
+    target = tradability_flags(target)
     flags = target.set_index(["symbol", "trade_date"])[
         [
             "is_limit_up",
