@@ -49,8 +49,10 @@ export const DEFAULT_DRAFT: StrategyDraft = {
   name: "A股多因子 · 滚动 OOS 策略",
   hypothesis: "经人工审核的价量与质量因子在滚动样本外窗口中提供稳定横截面超额，且在A股交易约束和成本后仍然成立。",
   invalidationCriteria: "任一 OOS Gate 失败、最大回撤超过 15%、Sharpe 低于 1.0，或因子相关性/漂移证据失效时，停止晋级并重新研究。",
-  marketPanelPath: "runtime/data/gold/full_universe/adjusted_market_panel.parquet",
-  labelsPath: "runtime/data/gold/full_universe/labels.parquet",
+  // r29 pair: its labels carry a label-convention stamp; the older
+  // full_universe labels are unstamped and refused by the dataset builder.
+  marketPanelPath: "runtime/data/gold/full_universe_r29/adjusted_market_panel.parquet",
+  labelsPath: "runtime/data/gold/full_universe_r29/labels.parquet",
   fundamentalsRoot: "",
   valuationPath: "",
   disclosuresPath: "",
@@ -478,6 +480,11 @@ export function StrategyStudioPage(): JSX.Element {
           market_panel_path: draft.marketPanelPath,
           output_path: draft.labelsPath,
           horizons: draft.horizons,
+          // Canonical delay-1 on the exact global session clock (same as the
+          // _exec_ datasets); the command refuses to guess a convention or to
+          // infer the clock from per-symbol bars (ROADMAP P1-2).
+          label_convention: "delay1",
+          market_calendar_path: "runtime/data/u0/pit/trading_calendar.parquet",
         },
       });
       setActiveJob(result.data);

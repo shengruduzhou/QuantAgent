@@ -8,6 +8,7 @@ today's ST list broadcast to every date leaked straight into training.
 """
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 
 import numpy as np
@@ -43,7 +44,7 @@ def _build(tmp_path, panel: pd.DataFrame, **overrides):
     base = panel[["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount", "available_at"]]
     labels = build_forward_return_labels(base, (1, 5)).frame
     labels_path = tmp_path / "labels.parquet"
-    labels.to_parquet(labels_path, index=False)
+    _lc.write_labels_parquet(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
     config = dict(
         market_panel_path=str(market_path), labels_path=str(labels_path),
         output_path=str(tmp_path / "ds.parquet"), horizons=(1, 5),

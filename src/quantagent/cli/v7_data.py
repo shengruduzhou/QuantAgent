@@ -376,11 +376,38 @@ def build_labels_v7(
     horizons: str = typer.Option("1,5,20,60,120,126", "--horizons"),
     symbols: str = typer.Option("", "--symbols"),
     symbols_file: Path | None = typer.Option(None, "--symbols-file", help="Optional one-symbol-per-line universe file."),
+    label_convention: str = typer.Option(
+        ...,
+        "--label-convention",
+        help=(
+            "Required, no default. 'delay1' = close(S[t+1+h])/close(S[t+1])-1 on the exact global "
+            "session clock of --market-calendar (same clock as the _exec_ datasets; NaN when a "
+            "suspension moves entry or exit off-session); 'delay0' = close(t+h)/close(t)-1 "
+            "(legacy v7; inflates short-horizon IC by up to 53%). The id is stamped into the file."
+        ),
+    ),
+    market_calendar: Path | None = typer.Option(
+        None,
+        "--market-calendar",
+        help="Exchange-session calendar (e.g. runtime/data/u0/pit/trading_calendar.parquet). Required for delay1.",
+    ),
 ) -> None:
-    """Build future-return labels for training; labels must never be used for inference."""
+    """Build future-return labels for training; labels must never be used for inference.
+
+    The label clock must be chosen explicitly (``--label-convention``). The
+    historical implicit default was delay-0; silently switching it to delay-1
+    would change every number produced by re-running an existing command line,
+    so the command now refuses to guess instead (ROADMAP P1-2).
+    """
     from quantagent.data import label_contract
     from quantagent.data.v7_label_builder import build_forward_return_labels
 
+    choice = label_convention.strip().lower()
+    if choice not in label_contract.BUILDER_CONVENTIONS:
+        raise typer.BadParameter(
+            f"--label-convention must be one of {sorted(label_contract.BUILDER_CONVENTIONS)}; got {label_convention!r}"
+        )
+    convention = label_contract.BUILDER_CONVENTIONS[choice]
     resolved_output = Path(output_path) if output_path is not None else default_v7_lake_root() / "labels.parquet"
     # A certified gold directory is immutable: this command once replaced the
     # certified delay-1 labels with same-close v7 labels in place (R3-F11).
@@ -389,14 +416,26 @@ def build_labels_v7(
     symbol_tuple = merge_symbols(symbols, symbols_file)
     if symbol_tuple:
         frame = frame[frame["symbol"].astype(str).isin(set(symbol_tuple))].reset_index(drop=True)
-    result = build_forward_return_labels(frame, tuple(int(item) for item in parse_csv_tuple(horizons)))
-    if resolved_output.suffix == ".parquet":
-        label_contract.write_labels_parquet(
-            result.frame, resolved_output, convention=label_contract.V7_SAME_CLOSE)
-        actual = resolved_output
-    else:
-        actual = write_frame(result.frame, resolved_output)
-    typer.echo(json_dump({"status": "passed", "output": str(actual), "rows": len(result.frame), "label_schema": result.label_schema}))
+    sessions = None
+    if label_contract.ENTRY_DELAY_SESSIONS[convention]:
+        if market_calendar is None:
+            raise typer.BadParameter(
+                "--label-convention delay1 needs --market-calendar (an exchange-session calendar, "
+                "e.g. runtime/data/u0/pit/trading_calendar.parquet); the session clock is never "
+                "inferred from per-symbol bars"
+            )
+        from quantagent.factors.executable_labels import load_market_session_calendar
+
+        sessions, _ = load_market_session_calendar(market_calendar)
+    result = build_forward_return_labels(
+        frame,
+        tuple(int(item) for item in parse_csv_tuple(horizons)),
+        entry_delay_sessions=label_contract.ENTRY_DELAY_SESSIONS[convention],
+        market_sessions=sessions,
+    )
+    actual, _ = label_contract.write_labels_file(result.frame, resolved_output, convention=convention)
+    typer.echo(json_dump({"status": "passed", "output": str(actual), "rows": len(result.frame),
+                          "label_convention": convention, "label_schema": result.label_schema}))
 
 
 @app.command("build-training-dataset-v7")
@@ -436,6 +475,11 @@ def build_training_dataset_v7(
     expected_feature_schema: Path | None = typer.Option(None, "--expected-feature-schema",
         help="Pin the feature column set to a previously written feature_schema.json so rebuilds / "
              "walk-forward folds share one stable contract (missing columns NaN-filled, drift recorded)."),
+    allow_legacy_unstamped_labels: bool = typer.Option(
+        False,
+        "--allow-legacy-unstamped-labels",
+        help="Accept a labels file without a label-convention stamp (recorded as legacy). Default refuses it.",
+    ),
 ) -> None:
     """Build the V7 gold-tier training dataset via PIT as-of joins and forward labels."""
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
@@ -474,6 +518,7 @@ def build_training_dataset_v7(
         cached_factors_path=str(cached_factors_path) if cached_factors_path else None,
         feature_version=feature_version,
         expected_feature_schema_path=str(expected_feature_schema) if expected_feature_schema else None,
+        allow_legacy_unstamped_labels=allow_legacy_unstamped_labels is True,
     )
     result = build_v7_training_dataset_artifact(config)
     typer.echo(json_dump(result.summary))
@@ -797,6 +842,11 @@ def stream_build_training_dataset_v7(
              "and appended to the output parquet, so peak RAM stays bounded "
              "by ~batch_symbols / total_symbols × full-dataset peak."),
     factor_min_finite_ratio: float = typer.Option(0.30, "--factor-min-finite-ratio"),
+    allow_legacy_unstamped_labels: bool = typer.Option(
+        False,
+        "--allow-legacy-unstamped-labels",
+        help="Accept a labels file without a label-convention stamp (recorded as legacy). Default refuses it.",
+    ),
 ) -> None:
     """OOM-free chunked dataset build for the full A-share universe.
 
@@ -813,7 +863,16 @@ def stream_build_training_dataset_v7(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    from quantagent.data import label_contract
     from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
+
+    # Per-batch failures are logged and skipped below, so check the label clock
+    # once up front: an unstamped file must stop the build, not skip every batch.
+    label_contract.require_label_convention(
+        labels_path,
+        allow_legacy_unstamped=allow_legacy_unstamped_labels is True,
+        consumer="stream-build-training-dataset-v7",
+    )
 
     # Discover symbol universe from market_panel (cheap scan)
     universe_df = pd.read_parquet(market_panel_path, columns=["symbol"])
@@ -864,6 +923,7 @@ def stream_build_training_dataset_v7(
                 # Loosen gates per-batch; final aggregate is validated separately.
                 min_rows=100, min_symbols=2, min_dates=10,
                 enforce_quality_gates=False,
+                allow_legacy_unstamped_labels=allow_legacy_unstamped_labels is True,
             )
             try:
                 result = build_v7_training_dataset_artifact(config)

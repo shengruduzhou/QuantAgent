@@ -1,6 +1,7 @@
 """Tests for the V7 gold-tier training-dataset builder and the CLI smoke path."""
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 from pathlib import Path
 
@@ -59,7 +60,8 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     market_path = tmp_path / "market.parquet"
     labels_path = tmp_path / "labels.parquet"
     fundamentals_path = tmp_path / "fundamentals.parquet"
-    for frame, target in ((market, market_path), (labels, labels_path), (fundamentals, fundamentals_path)):
+    _lc.write_labels_parquet(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
+    for frame, target in ((market, market_path), (fundamentals, fundamentals_path)):
         try:
             frame.to_parquet(target, index=False)
         except Exception:

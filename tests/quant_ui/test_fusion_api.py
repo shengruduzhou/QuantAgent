@@ -197,7 +197,7 @@ def test_a_real_search_round_trips_through_the_adapter(quant_ui_settings) -> Non
             horizon_days=5, top_k=5, n_folds=2, embargo_days=5,
             min_train_days=100, min_test_days=40,
             include_genetic=False, random_controls=2, single_factor_baselines=2,
-        ),
+        ), prior_family_trials=0
     )
     output = quant_ui_settings.runtime_root / "reports" / "fusion" / "round_trip"
     save_fusion_artifacts(result, output_dir=output)

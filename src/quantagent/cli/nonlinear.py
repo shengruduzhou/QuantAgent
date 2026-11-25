@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -10,6 +11,52 @@ from quantagent.cli._utils import app, default_reports_root
 from quantagent.research.governed_model_comparison import run_governed_model_comparison
 from quantagent.research.model_comparison import ComparisonConfig, save_comparison_report
 from quantagent.research.nonlinear_promotion import NonlinearPromotionConfig
+from quantagent.research.model_comparison import planned_trial_count
+from quantagent.research.trial_ledger import (
+    FAMILY_NONLINEAR_FUSION,
+    TrialLedger,
+    TrialRecord,
+    config_hash,
+    current_git_hash,
+    outcome_records,
+)
+
+COMMAND_ID = "audit-nonlinear-factors"
+
+
+def _comparison_trials(
+    comparison, *, run_id: str, run_config_hash: str, git_hash: str
+) -> list[TrialRecord]:
+    """One ledger entry per evaluated arm, failed arms included."""
+    windows = comparison.fold_windows
+    window = {
+        "start": min((str(w["trainStart"]) for w in windows), default=""),
+        "end": max((str(w["validEnd"]) for w in windows), default=""),
+        "selectionEnd": max(
+            (str(w["validEnd"]) for w in windows if w.get("role") == "selection"), default=""
+        ),
+    }
+    records: list[TrialRecord] = []
+    for arm in comparison.arms:
+        verdict = "champion" if arm.name == comparison.champion else str(arm.status)
+        records.append(
+            TrialRecord(
+                family=FAMILY_NONLINEAR_FUSION,
+                trial_id=f"{run_id}:{arm.name}",
+                command=COMMAND_ID,
+                git_hash=git_hash,
+                config_hash=run_config_hash,
+                window=window,
+                metrics={
+                    **dict(arm.selection_metrics),
+                    "status": arm.status,
+                    "reportVerdict": comparison.verdict,
+                    "error": arm.error or None,
+                },
+                verdict=verdict,
+            )
+        )
+    return records
 
 
 def _read_panel(path: Path) -> pd.DataFrame:
@@ -42,7 +89,10 @@ def audit_nonlinear_factors(
 ) -> Path:
     """Research-only nonlinear-vs-linear diagnostic.
 
-    This legacy-compatible command intentionally does not own the Stage-4
+    Every evaluated arm is appended to the persistent trial ledger
+    (``quantagent.research.trial_ledger``, family ``nonlinear_fusion``) and the
+    DSR uses the cumulative family N, not this run's arm count. This
+    legacy-compatible command intentionally does not own the Stage-4
     ExperimentLedger or one-shot FinalHoldoutLedger. It can tell researchers
     whether a frozen nonlinear arm clears the PBO/DSR/SPA *statistical* gate,
     but it cannot issue a production/live eligibility verdict. The generated
@@ -84,18 +134,70 @@ def audit_nonlinear_factors(
     def _progress(stage: str, completed: int, total: int) -> None:
         typer.echo(f"[{completed}/{total}] {stage}")
 
-    governed = run_governed_model_comparison(
-        panel,
-        names,
-        comparison_config=comparison_config,
-        promotion_config=promotion_config,
-        progress=_progress,
+    run_config_hash = config_hash(
+        {
+            "command": COMMAND_ID,
+            "panel": str(panel_path.resolve()),
+            "factors": list(names),
+            "comparison": dataclasses.asdict(comparison_config),
+            "promotion": dataclasses.asdict(promotion_config),
+        }
+    )
+    git_hash = current_git_hash()
+    run_id = f"{run_config_hash[:12]}@{pd.Timestamp.now(tz='UTC').isoformat()}"
+    dates = pd.to_datetime(panel["trade_date"], errors="coerce")
+    planned = planned_trial_count()
+    # Reserve this run's arms and read the prior family N under one lock, before
+    # any compute: a crashed run still counts (GOVERNANCE R6), concurrent runs
+    # cannot miss each other's reservation, and a damaged ledger fails closed.
+    ledger = TrialLedger()
+    ledger_summary = ledger.begin_run(
+        FAMILY_NONLINEAR_FUSION,
+        run_id=run_id,
+        command=COMMAND_ID,
+        git_hash=git_hash,
+        config_hash=run_config_hash,
+        window={"panelStart": str(dates.min())[:10], "panelEnd": str(dates.max())[:10]},
+        planned_trials=planned,
+    )
+    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
+    try:
+        governed = run_governed_model_comparison(
+            panel,
+            names,
+            comparison_config=comparison_config,
+            promotion_config=promotion_config,
+            progress=_progress,
+            prior_family_trials=prior_family_trials,
+        )
+    except BaseException as exc:
+        try:
+            ledger.record_trial(
+                FAMILY_NONLINEAR_FUSION, f"{run_id}:failed", COMMAND_ID, git_hash, run_config_hash,
+                {}, {"error": f"{type(exc).__name__}: {exc}"}, "failed", trials=0,
+            )
+        except Exception as ledger_exc:  # keep the original failure primary
+            exc.add_note(f"trial ledger failure record not written: {ledger_exc!r}")
+        raise
+    outcomes = _comparison_trials(
+        governed.comparison, run_id=run_id, run_config_hash=run_config_hash, git_hash=git_hash
+    )
+    ledger.record_trials(outcome_records(outcomes, planned_trials=planned, run_id=run_id))
+    run_trials = max(planned, len(outcomes))
+    ledger_summary.update(
+        {
+            "runTrials": run_trials,
+            "cumulativeTrials": prior_family_trials + run_trials,
+            "dsrTrials": int(governed.comparison.dsr_trials),
+        }
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     save_comparison_report(governed.comparison, output_dir)
     gate_path = output_dir / "promotion_gate.json"
+    gate_payload = governed.to_dict()
+    gate_payload["trialLedger"] = ledger_summary
     gate_path.write_text(
-        json.dumps(governed.to_dict(), ensure_ascii=False, indent=2),
+        json.dumps(gate_payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
 
@@ -106,6 +208,7 @@ def audit_nonlinear_factors(
         + f" champion={promotion.champion or 'none'}"
         + f" pbo={promotion.pbo}"
         + f" dsr={promotion.dsr_probability}"
+        + f" dsr_trials={governed.comparison.dsr_trials}"
         + f" spa={promotion.spa_pvalue}"
     )
     for reason in promotion.rejection_reasons:

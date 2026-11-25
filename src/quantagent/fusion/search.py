@@ -152,6 +152,15 @@ class FusionSearchResult:
     benchmark_mode: str
     fold_windows: list[dict[str, str]]
     generated_at: str
+    #: Cumulative family trial count: trial-ledger history before this run plus
+    #: ``n_trials``. ``n_trials`` stays the enumerated search space of *this*
+    #: run; the family history can only add to it (never set or lower it).
+    family_trials: int = 0
+
+    @property
+    def dsr_trials(self) -> int:
+        """The N every deflated Sharpe ratio of this search must use."""
+        return max(int(self.n_trials), int(self.family_trials))
 
     @property
     def preferred(self) -> FusionCandidate | None:
@@ -174,6 +183,8 @@ class FusionSearchResult:
             "modelClass": "rank_weighted_additive",
             "representsInteraction": False,
             "nTrials": self.n_trials,
+            "familyTrials": int(self.family_trials),
+            "dsrTrials": int(self.dsr_trials),
             "pbo": None if not np.isfinite(self.pbo) else round(float(self.pbo), 6),
             "benchmarkMode": self.benchmark_mode,
             "horizonDays": self.config.horizon_days,
@@ -551,6 +562,8 @@ def save_fusion_artifacts(
                 "generatedAt": result.generated_at,
                 "contentHash": content_hash,
                 "nTrials": result.n_trials,
+                "familyTrials": int(result.family_trials),
+                "dsrTrials": int(result.dsr_trials),
                 "benchmarkMode": result.benchmark_mode,
                 "factorNames": list(result.config.factor_names),
                 "horizonDays": result.config.horizon_days,

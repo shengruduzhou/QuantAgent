@@ -187,9 +187,13 @@ test("shows auto-learning budget and compacts FastAPI validation errors", async 
   expect(screen.queryByText(/marketPanelPath/)).not.toBeInTheDocument();
 });
 
-test("turns a missing horizon block into executable repair choices", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+function missingHorizonFetch(onJob?: (body: unknown) => void) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.includes("/jobs/data") && init?.method === "POST") {
+      onJob?.(JSON.parse(String(init.body)));
+      return new Response("{}", { status: 500 });
+    }
     if (url.includes("/strategies/validate") && init?.method === "POST") {
       return new Response(JSON.stringify({
         status: "ready",
@@ -256,7 +260,11 @@ test("turns a missing horizon block into executable repair choices", async () =>
         selectionRule: "fixture",
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
-  }));
+  });
+}
+
+test("turns a missing horizon block into executable repair choices", async () => {
+  vi.stubGlobal("fetch", missingHorizonFetch());
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={queryClient}><StrategyStudioPage /></QueryClientProvider>);
 
@@ -295,4 +303,24 @@ test("the shipped default draft is a configuration that can actually finish", ()
       || DEFAULT_DRAFT.universeScope === "pilot",
     ).toBe(true);
   }
+});
+
+test("the labels rebuild names its label convention and session clock", async () => {
+  const bodies: unknown[] = [];
+  vi.stubGlobal("fetch", missingHorizonFetch((body) => bodies.push(body)));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={queryClient}><StrategyStudioPage /></QueryClientProvider>);
+
+  await screen.findByText(/1 个可用 \/ 1 个 canonical 候选/);
+  fireEvent.click(screen.getByRole("button", { name: "校验" }));
+  fireEvent.click(await screen.findByRole("button", { name: "补齐 Labels" }));
+  await vi.waitFor(() => expect(bodies.length).toBe(1));
+  const job = bodies[0] as { commandId: string; parameters: Record<string, unknown> };
+  expect(job.commandId).toBe("build-labels-v7");
+  expect(job.parameters.label_convention).toBe("delay1");
+  expect(job.parameters.market_calendar_path).toBe("runtime/data/u0/pit/trading_calendar.parquet");
+});
+
+test("default labels are the stamped r29 build", () => {
+  expect(DEFAULT_DRAFT.labelsPath).toBe("runtime/data/gold/full_universe_r29/labels.parquet");
 });

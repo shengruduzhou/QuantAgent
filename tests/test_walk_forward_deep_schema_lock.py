@@ -6,6 +6,7 @@ and a stable walk-forward OOS feature space.
 """
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def _build_dataset(tmp_path: Path):
     market = _market_panel()
     labels = build_forward_return_labels(market, horizons=(1, 5)).frame
     market.to_parquet(tmp_path / "m.parquet", index=False)
-    labels.to_parquet(tmp_path / "l.parquet", index=False)
+    _lc.write_labels_parquet(labels, tmp_path / "l.parquet", convention=_lc.V7_SAME_CLOSE)
     return build_v7_training_dataset_artifact(
         V7TrainingDatasetConfig(
             market_panel_path=str(tmp_path / "m.parquet"),

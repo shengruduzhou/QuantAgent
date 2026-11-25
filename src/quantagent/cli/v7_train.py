@@ -129,6 +129,137 @@ def evaluate_alpha_v7(
     typer.echo(json_dump(payload))
 
 
+def _require_synthesis_label_source(
+    panel,
+    labels,
+    *,
+    market_panel_path: Path,
+    labels_path: Path | None,
+    label_column: str,
+    allow_legacy_unstamped: bool,
+) -> dict[str, object]:
+    """Factor acceptance scores IC against exactly one stamped label source.
+
+    The label comes from ``--labels`` when given, else from the market panel
+    itself. Both carrying the label column would be two sources of one target
+    (the merge would suffix or silently pick one), so it is refused.
+    """
+    from quantagent.data import label_contract
+
+    in_panel = label_column in panel.columns
+    in_labels = labels is not None and label_column in labels.columns
+    if in_panel and in_labels:
+        raise label_contract.LabelConventionError(
+            f"synthesize-factors-v7 refuses to mix label sources: {label_column!r} is in both "
+            f"the market panel ({market_panel_path}) and --labels ({labels_path}). Drop it from one."
+        )
+    if in_labels or (labels_path is not None and not in_panel):
+        source = Path(labels_path)
+    elif in_panel:
+        source = Path(market_panel_path)
+    else:
+        raise label_contract.LabelConventionError(
+            f"synthesize-factors-v7: label column {label_column!r} is in neither the market panel "
+            "nor --labels"
+        )
+    return label_contract.require_label_convention(
+        source, allow_legacy_unstamped=allow_legacy_unstamped, consumer="synthesize-factors-v7"
+    )
+
+
+def _rd_agent_run_identity(
+    *, config, panel, market_panel_path: Path, labels_path: Path | None
+) -> dict[str, object]:
+    """Run identity for the trial ledger (config hash, scored window, git hash, run id)."""
+    import pandas as _pd
+
+    from quantagent.research.trial_ledger import config_hash, current_git_hash
+
+    command_id = "synthesize-factors-v7"
+    run_config_hash = config_hash(
+        {
+            "command": command_id,
+            "marketPanel": str(Path(market_panel_path).resolve()),
+            "labels": str(Path(labels_path).resolve()) if labels_path else None,
+            "config": asdict(config),
+        }
+    )
+    dates = _pd.to_datetime(panel["trade_date"], errors="coerce") if "trade_date" in panel.columns else None
+    has_dates = dates is not None and bool(dates.notna().any())
+    return {
+        "command": command_id,
+        "config_hash": run_config_hash,
+        "git_hash": current_git_hash(),
+        "run_id": f"{run_config_hash[:12]}@{_pd.Timestamp.now(tz='UTC').isoformat()}",
+        "window": {
+            "start": str(dates.min().date()) if has_dates else "",
+            "end": str(dates.max().date()) if has_dates else "",
+            "validationFraction": float(config.validation_fraction),
+        },
+    }
+
+
+def _rd_agent_candidate_upper_bound(config) -> int:
+    """Most candidates the loop can evaluate; charged when a run dies mid-loop."""
+    per_round = int(config.factors_per_round)
+    if config.use_llm:
+        per_round = max(per_round, int(config.llm_candidates_per_round))
+    return max(1, int(config.rounds) * per_round)
+
+
+def _record_rd_agent_trials(
+    ledger,
+    summary: dict[str, object],
+    result,
+    *,
+    identity: dict[str, object],
+) -> dict[str, object]:
+    """Append every evaluated RD-Agent candidate (accepted or rejected) to the trial ledger.
+
+    The loop's acceptance gate is a non-overlapping validation IC t-stat, not a
+    DSR; the cumulative family N is recorded so any later DSR/selection on these
+    factors deflates by the whole discovery history, not by one run. The run was
+    opened with ``begin_run(planned_trials=0)`` (the candidate count is only
+    known afterwards), so each candidate carries ``trials=1`` here.
+    """
+    import pandas as _pd
+
+    from quantagent.research.trial_ledger import FAMILY_RDAGENT_FACTOR, TrialRecord
+
+    run_id = str(identity["run_id"])
+    feedback = result.task_feedback if result.task_feedback is not None else _pd.DataFrame()
+    records = []
+    for position, row in enumerate(feedback.to_dict("records")):
+        records.append(
+            TrialRecord(
+                family=FAMILY_RDAGENT_FACTOR,
+                trial_id=f"{run_id}:{position}:{row.get('factor_name', '')}",
+                command=str(identity["command"]),
+                git_hash=str(identity["git_hash"]),
+                config_hash=str(identity["config_hash"]),
+                window=dict(identity["window"]),
+                metrics={
+                    "train_rank_ic": row.get("train_rank_ic"),
+                    "validation_rank_ic": row.get("validation_rank_ic"),
+                    "max_sota_corr": row.get("max_sota_corr"),
+                    "feedback": row.get("feedback"),
+                },
+                verdict="accepted" if bool(row.get("decision")) else "rejected",
+            )
+        )
+    ledger.record_trials(records)
+    prior = int(summary["priorFamilyTrials"])
+    return {
+        **summary,
+        "runTrials": len(records),
+        "cumulativeTrials": prior + len(records),
+        "acceptanceGate": (
+            "non-overlapping validation rank-IC t-stat (no DSR in the loop); cumulativeTrials "
+            "is the N any downstream DSR/selection over these factors must use"
+        ),
+    }
+
+
 @app.command("synthesize-factors-v7")
 def synthesize_factors_v7(
     market_panel_path: Path = typer.Option(..., "--market-panel"),
@@ -164,6 +295,11 @@ def synthesize_factors_v7(
     exclude_st: bool = typer.Option(False, "--exclude-st", help="Tradability guard: also drop ST names from the validation/fitness IC (limit-up/down/suspended are always dropped when those flags are in the panel). Prevents accepting phantom edge over untradable names."),
     min_validation_icir: float = typer.Option(0.0, "--min-validation-icir", help="Stability floor: reject factors whose tradable validation ICIR is below this (rd-agent loop only). 0 disables."),
     min_validation_tstat: float = typer.Option(3.0, "--min-validation-tstat", help="Significance floor (rd-agent loop): non-overlapping validation IC t-stat must reach this. 0 disables (accepts ~half of pure-noise factors)."),
+    allow_legacy_unstamped_labels: bool = typer.Option(
+        False,
+        "--allow-legacy-unstamped-labels",
+        help="Accept a label source without a label-convention stamp (recorded as legacy). Default refuses it.",
+    ),
 ) -> None:
     """Discover factors in the safe expression DSL.
 
@@ -185,6 +321,15 @@ def synthesize_factors_v7(
     resolved_output = Path(output_dir) if output_dir is not None else default_reports_root() / "v7" / "factor_synthesis"
     panel = read_frame(market_panel_path)
     labels = read_frame(labels_path) if labels_path else None
+    label_check = _require_synthesis_label_source(
+        panel,
+        labels,
+        market_panel_path=market_panel_path,
+        labels_path=labels_path,
+        label_column=label_column,
+        allow_legacy_unstamped=allow_legacy_unstamped_labels is True,
+    )
+    typer.echo(json_dump({"event": "label_convention", **label_check}))
     if train_end.strip():
         import pandas as _pd
 
@@ -198,6 +343,7 @@ def synthesize_factors_v7(
                        "panel_rows_before": int(before), "panel_rows_after": int(len(panel))})
         )
     refs = tuple(c.strip() for c in reference_columns.split(",") if c.strip())
+    trial_ledger_summary: dict[str, object] | None = None
     if rd_agent:
         config = RDAgentFactorLoopConfig(
             rounds=rounds,
@@ -226,7 +372,40 @@ def synthesize_factors_v7(
             llm_timeout_seconds=llm_timeout_seconds,
             memory_path=(str(memory_path) if memory_path is not None else None),
         )
-        result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
+        # Open the run (prior N read under the ledger lock) before any compute;
+        # a damaged ledger fails closed. A run that dies mid-loop is charged the
+        # loop's candidate upper bound, since outcomes may already have been seen.
+        from quantagent.research.trial_ledger import FAMILY_RDAGENT_FACTOR, TrialLedger
+
+        identity = _rd_agent_run_identity(
+            config=config, panel=panel, market_panel_path=market_panel_path, labels_path=labels_path
+        )
+        trial_ledger = TrialLedger()
+        trial_ledger_summary = trial_ledger.begin_run(
+            FAMILY_RDAGENT_FACTOR,
+            run_id=str(identity["run_id"]),
+            command=str(identity["command"]),
+            git_hash=str(identity["git_hash"]),
+            config_hash=str(identity["config_hash"]),
+            window=dict(identity["window"]),
+            planned_trials=0,
+        )
+        try:
+            result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
+        except BaseException as exc:
+            try:
+                trial_ledger.record_trial(
+                    FAMILY_RDAGENT_FACTOR, f"{identity['run_id']}:failed", str(identity["command"]),
+                    str(identity["git_hash"]), str(identity["config_hash"]), dict(identity["window"]),
+                    {"error": f"{type(exc).__name__}: {exc}"}, "failed",
+                    trials=_rd_agent_candidate_upper_bound(config),
+                )
+            except Exception as ledger_exc:  # keep the original failure primary
+                exc.add_note(f"trial ledger failure record not written: {ledger_exc!r}")
+            raise
+        trial_ledger_summary = _record_rd_agent_trials(
+            trial_ledger, trial_ledger_summary, result, identity=identity
+        )
     else:
         config = SymbolicGAConfig(
             population=population,
@@ -247,10 +426,15 @@ def synthesize_factors_v7(
         )
         result = synthesize_factors(panel, labels=labels, config=config)
     paths = save_result(result, resolved_output)
+    if trial_ledger_summary is not None:
+        ledger_path = Path(resolved_output) / "trial_ledger.json"
+        ledger_path.write_text(json_dump(trial_ledger_summary), encoding="utf-8")
+        paths["trial_ledger"] = str(ledger_path)
     typer.echo(
         json_dump(
             {
                 "status": "passed",
+                "trial_ledger": trial_ledger_summary,
                 "mode": "rd-agent" if rd_agent else "legacy-ga",
                 "definitions": paths["definitions"],
                 "leaderboard": paths["leaderboard"],
@@ -398,7 +582,14 @@ def auto_train_v7(
 
     labels_path = lake.root / "labels.parquet"
     label_result = build_forward_return_labels(read_frame(resolved_market_panel), tuple(int(item) for item in parse_csv_tuple(horizons)))
-    written_labels = write_frame(label_result.frame, labels_path)
+    # Stamped with the builder's (unchanged, delay-0) convention so the dataset
+    # builder can refuse to mix it with delay-1 labels (ROADMAP P1-2).
+    from quantagent.data.label_contract import refuse_certified_overwrite, write_labels_file
+
+    refuse_certified_overwrite(labels_path)
+    written_labels, _ = write_labels_file(
+        label_result.frame, labels_path, convention=label_result.label_schema["label_convention"]
+    )
     stages["labels"] = {
         "status": "passed",
         "output": str(written_labels),
@@ -557,6 +748,11 @@ def run_real_training_v7(
     enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
     enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
     enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
+    allow_legacy_unstamped_labels: bool = typer.Option(
+        False,
+        "--allow-legacy-unstamped-labels",
+        help="Accept a labels file without a label-convention stamp (recorded as legacy). Default refuses it.",
+    ),
 ) -> None:
     """Compose build-training-dataset-v7 + train-alpha-v7 into one auditable real-data run."""
     from quantagent.cli._utils import parse_csv_tuple
@@ -591,6 +787,9 @@ def run_real_training_v7(
             enable_macro=enable_macro,
             enable_flow=enable_flow,
             enable_index=enable_index,
+            # `is True`: a direct Python call that omits the option receives a
+            # truthy typer OptionInfo; that must stay fail-closed.
+            allow_legacy_unstamped_labels=allow_legacy_unstamped_labels is True,
         )
     )
     training_result = run_v7_training_experiment(
@@ -1144,6 +1343,11 @@ def run_full_real_training_v7(
     enable_macro: bool = typer.Option(True, "--enable-macro/--no-enable-macro"),
     enable_flow: bool = typer.Option(True, "--enable-flow/--no-enable-flow"),
     enable_index: bool = typer.Option(True, "--enable-index/--no-enable-index"),
+    allow_legacy_unstamped_labels: bool = typer.Option(
+        False,
+        "--allow-legacy-unstamped-labels",
+        help="Accept a labels file without a label-convention stamp (recorded as legacy). Default refuses it.",
+    ),
 ) -> None:
     """End-to-end real-data pipeline: dataset -> train -> predict -> target weights -> paper report.
 
@@ -1310,6 +1514,9 @@ def run_full_real_training_v7(
             enable_macro=enable_macro,
             enable_flow=enable_flow,
             enable_index=enable_index,
+            # `is True`: a direct Python call that omits the option receives a
+            # truthy typer OptionInfo; that must stay fail-closed.
+            allow_legacy_unstamped_labels=allow_legacy_unstamped_labels is True,
         )
     )
     typer.echo(json_dump({"progress": 0.18, "stage": "dataset", "message": "PIT dataset persisted"}))
@@ -2973,7 +3180,15 @@ def _prepare_full_ai_quant_inputs(
         stages["sector_map_refresh"] = {"status": "passed", "output": str(sector_map_path)}
 
     label_result = build_forward_return_labels(read_frame(resolved_market_panel), tuple(int(item) for item in parse_csv_tuple(horizons)))
-    labels_path = write_frame(label_result.frame, lake.root / "labels.parquet")
+    # Stamped with the builder's (unchanged, delay-0) convention (ROADMAP P1-2).
+    from quantagent.data.label_contract import refuse_certified_overwrite, write_labels_file
+
+    refuse_certified_overwrite(lake.root / "labels.parquet")
+    labels_path, _ = write_labels_file(
+        label_result.frame,
+        lake.root / "labels.parquet",
+        convention=label_result.label_schema["label_convention"],
+    )
     training_dataset_path = lake.gold_training_dataset / "training_dataset.parquet"
     stages.update(
         {

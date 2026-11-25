@@ -174,8 +174,12 @@ def fusion_statistical_evidence(
     preferred_id: str | None,
     benchmark_returns: pd.Series | None,
     periods_per_year: int = 252,
+    n_trials: int | None = None,
 ) -> dict[str, float | str | int | None]:
     """Derive DSR and SPA from already-OOS candidate NAVs.
+
+    ``n_trials`` is the cumulative family trial count (``FusionSearchResult.
+    dsr_trials``). It can only raise the DSR's N above the candidate count.
 
     ``candidate_navs`` are the stitched business-daily staggered NAVs emitted
     by :mod:`quantagent.fusion.search_corrected`. ``periods_per_year`` retains
@@ -200,6 +204,7 @@ def fusion_statistical_evidence(
             "spaPValue": None,
             "statisticalPeriodsPerYear": statistical_periods,
             "benchmarkHorizonDays": horizon_days,
+            "dsrTrials": None,
         }
 
     preferred = returns[preferred_id]
@@ -214,7 +219,7 @@ def fusion_statistical_evidence(
             preferred,
             per_period_sharpes,
             periods_per_year=statistical_periods,
-            n_trials=max(len(candidate_navs), len(per_period_sharpes)),
+            n_trials=max(int(n_trials or 0), len(candidate_navs), len(per_period_sharpes)),
         )
         if len(per_period_sharpes) >= 2
         else float("nan")
@@ -233,6 +238,7 @@ def fusion_statistical_evidence(
     return {
         "preferred": preferred_id,
         "dsrProbability": None if not np.isfinite(dsr) else float(dsr),
+        "dsrTrials": max(int(n_trials or 0), len(candidate_navs), len(per_period_sharpes)),
         "spaPValue": None if not np.isfinite(spa_p) else float(spa_p),
         "statisticalPeriodsPerYear": statistical_periods,
         "benchmarkHorizonDays": horizon_days,

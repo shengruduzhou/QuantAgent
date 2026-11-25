@@ -12,6 +12,7 @@ Proves the dataset → trainer contract holds end-to-end:
 """
 from __future__ import annotations
 
+from quantagent.data import label_contract as _lc  # labels must carry their convention stamp
 import json
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
     market_path = tmp_path / "market.parquet"
     labels_path = tmp_path / "labels.parquet"
     market.to_parquet(market_path, index=False)
-    labels.to_parquet(labels_path, index=False)
+    _lc.write_labels_parquet(labels, labels_path, convention=_lc.V7_SAME_CLOSE)
     return market_path, labels_path
 
 

@@ -555,12 +555,17 @@ COMMANDS: dict[str, dict[str, Any]] = {
     },
     "build-labels-v7": {
         "type": "data",
-        "required": {"market_panel_path", "output_path", "horizons"},
-        "allowed": {"market_panel_path", "output_path", "horizons"},
-        "path_inputs": {"market_panel_path"},
+        # The label clock is an explicit, required choice (ROADMAP P1-2):
+        # delay1 is canonical; delay0 is the legacy v7 same-close clock.
+        "required": {"market_panel_path", "output_path", "horizons", "label_convention"},
+        "allowed": {"market_panel_path", "output_path", "horizons", "label_convention",
+                    "market_calendar_path"},
+        "choices": {"label_convention": {"delay1", "delay0"}},
+        "path_inputs": {"market_panel_path", "market_calendar_path"},
         "path_outputs": {"output_path"},
         "option_aliases": {
             "market_panel_path": "market-panel",
+            "market_calendar_path": "market-calendar",
             "output_path": "output",
         },
     },

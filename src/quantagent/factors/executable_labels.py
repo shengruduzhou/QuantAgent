@@ -15,6 +15,8 @@ can bind to the same clock used to construct its outcomes.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Iterable
@@ -287,10 +289,46 @@ def executable_factor_decay_curve(
     )
 
 
+def load_market_session_calendar(path: str | Path) -> tuple[pd.DatetimeIndex, dict[str, object]]:
+    """Read an exchange-session calendar artifact into canonical sessions.
+
+    Accepts ``trade_date`` / ``calendar_date`` / ``date`` (or a single column);
+    honours ``is_open`` / ``is_trading_day`` flags when present and collapses
+    multi-exchange rows to one session per date.
+    """
+    target = Path(path)
+    if not target.is_file():
+        raise FileNotFoundError(
+            f"market calendar does not exist: {target}; delay-1 labels require an explicit "
+            "global session clock (e.g. runtime/data/u0/pit/trading_calendar.parquet)"
+        )
+    frame = pd.read_parquet(target) if target.suffix == ".parquet" else pd.read_csv(target)
+    if frame.empty:
+        raise ValueError(f"market calendar is empty: {target}")
+    date_column = next((c for c in ("trade_date", "calendar_date", "date") if c in frame.columns), None)
+    if date_column is None:
+        if len(frame.columns) != 1:
+            raise ValueError("market calendar needs trade_date/calendar_date/date or exactly one column")
+        date_column = str(frame.columns[0])
+    work = frame
+    for flag in ("is_open", "is_trading_day"):
+        if flag in work.columns:
+            work = work[work[flag].astype(str).str.strip().str.lower().isin({"1", "true", "yes"})]
+    dates = pd.to_datetime(work[date_column], errors="coerce").dt.normalize().dropna().drop_duplicates()
+    sessions = canonical_market_sessions(sorted(dates.tolist()))
+    return sessions, {
+        "path": str(target),
+        "date_column": date_column,
+        "session_count": int(len(sessions)),
+        "market_session_schedule_sha256": market_session_schedule_sha256(sessions),
+    }
+
+
 __all__ = [
     "FACTOR_LABEL_SEMANTICS",
     "FACTOR_LABEL_SCHEMA_VERSION",
     "ExecutableLabelBuildResult",
+    "load_market_session_calendar",
     "canonical_market_sessions",
     "market_session_schedule_sha256",
     "build_executable_forward_returns",

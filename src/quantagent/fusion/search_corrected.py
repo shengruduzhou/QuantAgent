@@ -115,9 +115,20 @@ def _corrected_robustness(
     return float(np.clip(score, 0.0, 1.0)), breakdown
 
 
-def run_fusion_search(*args: Any, **kwargs: Any) -> FusionSearchResult:
-    """Run the existing governed search and correct its OOS statistical record."""
+def run_fusion_search(
+    *args: Any, prior_family_trials: int, **kwargs: Any
+) -> FusionSearchResult:
+    """Run the existing governed search and correct its OOS statistical record.
+
+    ``prior_family_trials`` is the family's trial count before this run, read
+    from the persistent trial ledger (``TrialLedger.family_count``). The DSR
+    uses ``prior + n_trials``; ``n_trials`` itself stays the size of the
+    enumerated search space and is still not settable by any caller.
+    """
+    if int(prior_family_trials) < 0:
+        raise ValueError("prior_family_trials must be non-negative")
     raw = _legacy_run_fusion_search(*args, **kwargs)
+    raw = replace(raw, family_trials=int(raw.n_trials) + int(prior_family_trials))
 
     returns_by_candidate = {
         candidate.candidate_id: _within_fold_returns(candidate.nav, raw.fold_windows)
@@ -143,7 +154,7 @@ def run_fusion_search(*args: Any, **kwargs: Any) -> FusionSearchResult:
             candidate,
             daily_returns=returns,
             measured_annual_sharpes=measured,
-            n_trials=raw.n_trials,
+            n_trials=raw.dsr_trials,
             pbo=pbo,
             config=raw.config,
         )

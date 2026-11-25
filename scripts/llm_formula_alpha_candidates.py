@@ -172,6 +172,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--market-panel", required=True)
     ap.add_argument("--labels", required=True)
+    ap.add_argument("--allow-legacy-unstamped-labels", action="store_true",
+                    help="Accept a labels file without a label-convention stamp (recorded as legacy).")
     ap.add_argument("--output-dir", default="runtime/reports/v8/llm_formula_alpha")
     ap.add_argument("--label-column", default="forward_return_5d")
     ap.add_argument("--train-end", default="2024-07-31", help="Candidates only ever see dates <= this.")
@@ -199,6 +201,14 @@ def main() -> int:
         args.market_panel,
         columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"],
     )
+    from quantagent.data.label_contract import require_label_convention
+
+    label_check = require_label_convention(
+        args.labels,
+        allow_legacy_unstamped=args.allow_legacy_unstamped_labels,
+        consumer="llm_formula_alpha_candidates",
+    )
+    print(f"label convention: {label_check['label_convention']} ({label_check['label_convention_basis']})")
     labels = pd.read_parquet(
         args.labels,
         columns=["symbol", "trade_date", args.label_column, *references],
