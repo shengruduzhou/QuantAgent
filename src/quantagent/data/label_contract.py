@@ -181,7 +181,8 @@ def read_label_convention(path: str | Path) -> tuple[str | None, str]:
             try:
                 payload = json.loads(sidecar.read_text(encoding="utf-8"))
                 declared_sha = payload.get("labels_file_sha256")
-                if declared_sha and declared_sha != file_sha256(target):
+                # A sidecar is only a stamp when it is bound to this exact file.
+                if not declared_sha or declared_sha != file_sha256(target):
                     return None, "unknown"
                 return str(payload["id"]), "sidecar"
             except (ValueError, KeyError):

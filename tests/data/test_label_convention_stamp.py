@@ -344,3 +344,34 @@ def test_delay0_is_byte_identical_with_or_without_a_calendar() -> None:
     plain = build_forward_return_labels(market, horizons=(1, 5)).frame
     with_cal = build_forward_return_labels(market, horizons=(1, 5), market_sessions=sessions).frame
     pd.testing.assert_frame_equal(plain, with_cal)
+
+
+def test_csv_sidecar_without_a_content_hash_is_not_a_stamp(tmp_path: Path) -> None:
+    out = _build_labels(tmp_path, "delay0", "labels.csv")
+    sidecar = out.with_name(out.name + lc.SIDECAR_SUFFIX)
+    payload = json.loads(sidecar.read_text())
+    payload.pop("labels_file_sha256")
+    sidecar.write_text(json.dumps(payload))
+    assert lc.read_label_convention(out)[1] != "sidecar"
+    with pytest.raises(lc.LabelConventionError):
+        lc.require_label_convention(out)
+
+
+def test_dataset_builder_never_reads_labels_from_a_sibling_file(tmp_path: Path, monkeypatch) -> None:
+    """The stamp is verified on labels.parquet; data must not come from labels.csv."""
+    import quantagent.data.dataset_builder.v7_training_dataset as builder
+
+    labels = _build_labels(tmp_path, "delay0")
+    other = build_forward_return_labels(_market_panel(), horizons=(1, 5)).frame
+    other["forward_return_5d"] = 9.99  # a different, unstamped label source
+    other.to_csv(labels.with_suffix(".csv"), index=False)
+    real_read = pd.read_parquet
+
+    def flaky(path, *args, **kwargs):
+        if Path(path) == labels:
+            raise OSError("simulated unreadable parquet")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(builder.pd, "read_parquet", flaky)
+    with pytest.raises(RuntimeError, match="refusing a sibling-file fallback"):
+        build_v7_training_dataset_artifact(_config(tmp_path, labels))

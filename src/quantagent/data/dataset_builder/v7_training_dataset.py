@@ -116,7 +116,9 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     market = load_table(config.market_panel_path)
     if market is None or market.empty:
         raise ValueError(f"market panel is empty: {config.market_panel_path}")
-    labels = load_table(config.labels_path)
+    # No sibling-CSV fallback for labels: the stamp was checked on labels_path,
+    # so the data must come from that same file.
+    labels = load_table(config.labels_path, allow_fallback=False)
     if labels is None or labels.empty:
         raise ValueError(f"labels frame is empty: {config.labels_path}")
 
@@ -360,19 +362,26 @@ def build_v7_training_dataset_artifact(config: V7TrainingDatasetConfig) -> V7Tra
     )
 
 
-def load_table(path: str | Path | None) -> pd.DataFrame:
+def load_table(path: str | Path | None, *, allow_fallback: bool = True) -> pd.DataFrame:
+    """Read a table. ``allow_fallback=False`` never substitutes a sibling ``.csv``
+    (used for labels, whose convention stamp was verified on ``path`` itself)."""
     if path is None:
         return pd.DataFrame()
     file_path = Path(path)
     if not file_path.exists():
         fallback = file_path.with_suffix(".csv")
-        if fallback.exists():
+        if allow_fallback and fallback.exists():
             return pd.read_csv(fallback)
         return pd.DataFrame()
     if file_path.suffix == ".parquet":
         try:
             return pd.read_parquet(file_path)
         except Exception as exc:
+            if not allow_fallback:
+                raise RuntimeError(
+                    f"failed to read {file_path}; refusing a sibling-file fallback because the "
+                    "label-convention stamp was verified on this file"
+                ) from exc
             csv = file_path.with_suffix(".csv")
             if csv.exists():
                 return pd.read_csv(csv)
