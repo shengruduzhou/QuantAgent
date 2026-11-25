@@ -42,6 +42,16 @@ sys.path.insert(0, str(REPO / "scripts"))
 from fresh_blind_status import verify_chain  # noqa: E402
 
 
+def run_remediation(cmd: list[str], timeout_s: int, problems: list[str]) -> int | None:
+    """Run one remediation call; a timeout is recorded as a problem, never raised."""
+    try:
+        return subprocess.run([sys.executable, *cmd], capture_output=True, text=True,
+                              timeout=timeout_s).returncode
+    except subprocess.TimeoutExpired:
+        problems.append(f"AUTO_REMEDIATION_TIMEOUT {cmd[0]} after {timeout_s}s")
+        return None
+
+
 def panel_integrity_problems() -> tuple[list[str], dict]:
     try:
         from fresh_blind_daily import integrity_report
@@ -99,12 +109,10 @@ def main() -> int:
     if problems and data_timeout and lag <= 6 and cert_ok and ok:
         log(f"AUTO_REMEDIATION: standalone catch-up (lag {lag}d) + runner retry")
         # the guarded writer: calendar expiry + per-session window coverage
-        r1 = subprocess.run([sys.executable, "scripts/catchup_panel_chunked.py"],
-                            capture_output=True, text=True, timeout=7200)
-        r2 = subprocess.run([sys.executable, "scripts/fresh_blind_daily.py"],
-                            capture_output=True, text=True, timeout=10800)
-        log(f"AUTO_REMEDIATION result: update rc={r1.returncode} runner rc={r2.returncode}")
-        if r2.returncode == 0:
+        rc1 = run_remediation(["scripts/catchup_panel_chunked.py"], 7200, problems)
+        rc2 = run_remediation(["scripts/fresh_blind_daily.py"], 10800, problems)
+        log(f"AUTO_REMEDIATION result: catch-up rc={rc1} runner rc={rc2}")
+        if rc2 == 0:
             problems = [p for p in problems if not p.startswith(("LAST_RUN_HAD_FAILURES", "PANEL_STALE"))]
 
     if problems:

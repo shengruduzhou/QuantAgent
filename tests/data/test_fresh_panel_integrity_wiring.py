@@ -167,3 +167,17 @@ def test_ledger_record_carries_freshness_and_integrity(tmp_path, monkeypatch) ->
     assert record["panel_integrity_status"] == "INCOMPLETE"
     assert record["panel_integrity_problems"] == ["INTERIOR_HOLES_UNEXPLAINED 41"]
     assert record["order_generation_status"] == "OK"     # orders exist, flagged by the above
+
+
+def test_remediation_timeout_is_recorded_not_raised(monkeypatch) -> None:
+    import subprocess
+
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    health = _load("fresh_blind_healthcheck")
+
+    def slow(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0], timeout=k.get("timeout"))
+    monkeypatch.setattr(health.subprocess, "run", slow)
+    problems: list[str] = []
+    assert health.run_remediation(["scripts/catchup_panel_chunked.py"], 7200, problems) is None
+    assert problems == ["AUTO_REMEDIATION_TIMEOUT scripts/catchup_panel_chunked.py after 7200s"]
