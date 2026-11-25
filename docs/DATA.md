@@ -212,6 +212,28 @@ coverage summary 与就绪证书里统一声明 `adjustment_method = "none"`。
 停复牌快照的覆盖窗口在 `pit/suspension_manifest.json` 里显式给出；窗口之外的
 交易日**不会**被当作"无停牌"。
 
+**Cycle 32 实测更正（2026-11-25）**：`stock_tfp_em(date=D)` **不是**"D 日停牌快照"，
+而是**取数时刻每只证券最新的一条停牌记录**中起始日不早于 D 的那些（148 个快照里
+372 个代码各恰好 1 条；U0 的 2,157 区间 = 2,157 只证券同理）。记录本身是真实的带日期
+停牌（对面板对账：891 个区间内交易日中 4 个有 bar，精度 99.55%），但同一证券**更早的
+停牌会被后来的覆盖**，召回不完整；只能靠每天取数把每次停牌在它还是"最新"时记下
+（`fresh_blind_daily.step_suspension_refresh`）。
+
+v7 silver 面板同样只保留成交日。FRESH 账簿用 `quantagent.data.ashare.session_gaps`
+把开市日缺 bar 分为 `SUSPENDED`（命中带日期停牌区间）/`DELISTED`（带日期退市之后）/
+`MISSING_UNEXPLAINED`；**只有** SUSPENDED 补成显式行（`is_suspended=1`、量额 0、
+OHLC = 上一成交日原始收盘价，仅作估值标记、不可成交），其余保持缺失，严格模拟器照旧
+以 `missing_execution_bar` 拒绝。与认证 r29 执行面板不同：后者把 MISSING_UNEXPLAINED
+也补成不可交易行；FRESH 路径更严格。"面板最新"≠"面板完整"：`step_freshness` 与健康
+检查按 `panel_integrity` 报告逐日覆盖、未解释内部缺口、无证据停更的证券和非带日期证据
+的 ST 来源行。
+
+交易日历 `trading_calendar.parquet` 止于 2026-12-31。国务院 2027 年节假日安排已于
+2026-11-05 发布（国办发明电〔2026〕10号）；新浪日历（akshare）2026-11-25 实测仍无
+2027 行。**必须在 2027-01-04 16:00 CST 之前**用 `u0_pit_intervals.py calendar` 刷新
+（刷新只能延长，不能缩短或改写历史）。在此之前，所有写面板的路径（catch-up 与
+`update_market_panel_daily.py`）对超出日历的窗口一律拒绝。
+
 ## 6. 操作命令 / Operator commands
 
 ```bash
