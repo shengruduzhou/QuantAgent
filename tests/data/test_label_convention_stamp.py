@@ -375,3 +375,22 @@ def test_dataset_builder_never_reads_labels_from_a_sibling_file(tmp_path: Path, 
     monkeypatch.setattr(builder.pd, "read_parquet", flaky)
     with pytest.raises(RuntimeError, match="refusing a sibling-file fallback"):
         build_v7_training_dataset_artifact(_config(tmp_path, labels))
+
+
+def test_build_labels_refuses_a_build_whose_manifest_pins_the_labels(tmp_path: Path) -> None:
+    """The r29 gold dir has no quality_certificate.json but pins labels by hash."""
+    build = tmp_path / "full_universe_r29"
+    build.mkdir()
+    labels = build / "labels.parquet"
+    sha = lc.write_labels_parquet(
+        build_forward_return_labels(_market_panel(), horizons=(1,)).frame, labels, convention=lc.V7_SAME_CLOSE
+    )
+    (build / "manifest.json").write_text(json.dumps({"labels_file_sha256": sha}))
+    market = tmp_path / "market.parquet"
+    _market_panel().to_parquet(market, index=False)
+    result = CliRunner().invoke(
+        app, ["build-labels-v7", "--market-panel", str(market), "--output", str(labels),
+              "--horizons", "1", "--label-convention", "delay0"],
+    )
+    assert isinstance(result.exception, lc.CertifiedArtifactError)
+    assert lc.file_sha256(labels) == sha

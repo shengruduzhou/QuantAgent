@@ -105,7 +105,13 @@ def file_sha256(path: str | Path, *, length: int = 16) -> str:
 
 
 def refuse_certified_overwrite(path: str | Path) -> None:
-    """Refuse to write into a directory that holds a certified build."""
+    """Refuse to write into a directory that holds a certified build.
+
+    A build is certified when its directory holds ``quality_certificate.json``,
+    or when its ``manifest.json`` pins the labels file by content hash
+    (``labels_file_sha256``) -- the r29 gold build has the latter only, and the
+    workstation's "补齐 Labels" action targets the selected labels path.
+    """
     target = Path(path)
     marker = target.parent / CERTIFIED_MARKER
     if marker.exists():
@@ -113,6 +119,17 @@ def refuse_certified_overwrite(path: str | Path) -> None:
             f"{target} is inside a certified build directory ({marker}); certified "
             "artifacts are immutable -- write to a new versioned directory instead"
         )
+    manifest = target.parent / "manifest.json"
+    if target.name == "labels.parquet" and manifest.is_file():
+        try:
+            pinned = json.loads(manifest.read_text(encoding="utf-8")).get("labels_file_sha256")
+        except (OSError, ValueError, AttributeError):
+            pinned = None
+        if pinned:
+            raise CertifiedArtifactError(
+                f"{target} is pinned by content hash in {manifest} (labels_file_sha256); "
+                "certified labels are immutable -- write to a new versioned directory instead"
+            )
 
 
 def write_labels_parquet(

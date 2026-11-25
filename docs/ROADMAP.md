@@ -51,7 +51,8 @@
    三条命令在计算**之前**于同一把锁内读取前序 N 并预留本次试验（崩溃的运行照样计数，并发运行不会互相漏计），
    逐试验结果入账（含对照、失败与拒绝），DSR 用 `历史基线 + 已入账 + 本次`；`prior_family_trials` 为必填参数。
    **仍未完成（open）**：GP 符号回归 / LLM 公式脚本 / 非 RD 的 `synthesize_factors`（`--legacy-ga`）各族尚未入账；
-   Stage-4 `ExperimentLedger`（无 CLI 调用方）与 `TrialLedger` 待统一为一个台账。
+   Stage-4 `ExperimentLedger`（无 CLI 调用方）与 `TrialLedger` 待统一为一个台账；台账被截断/整体删除后仍能校验通过
+   （计数可下降）——需要外部高水位标记；RD-Agent `begin_run(planned_trials=0)` 在并发时不预留，存在竞态。
 5. **退役 v7 银层面板。** 约 89 处引用改为经 `quant_paths` 的单一常量指向 U0/r29，随后归档。
 6. **重叠标签 IC 的 t 值**改用非重叠 cohort（`factors/evaluation`）；筛选用 |t| ≥ 3。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控

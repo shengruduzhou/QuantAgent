@@ -35,8 +35,9 @@ export const DEFAULT_SEARCH_DRAFT: FusionSearchDraft = {
   // statistics, which bounds what any resulting "best blend" can mean. See
   // the note in src/domain/jobTemplates.ts for why the certified panel is
   // narrow and what the 348-column alternative costs.
-  factorPanelPath: "runtime/data/gold/full_universe/dataset.parquet",
-  forwardReturnsPath: "runtime/data/gold/full_universe/labels.parquet",
+  factorPanelPath: "runtime/data/gold/full_universe_r29/dataset.parquet",
+  // Stamped r29 labels (same certified build as the factor panel above).
+  forwardReturnsPath: "runtime/data/gold/full_universe_r29/labels.parquet",
   forwardColumn: "forward_return_5d",
   factorNames: "",
   outputDir: "runtime/reports/fusion/search_01",
