@@ -52,3 +52,21 @@ def test_reflag_uses_dated_evidence_and_marks_the_rest_unknown(tmp_path) -> None
     assert report["by_exchange"]["SZ"]["flipped_true_to_false"] == 3
     # the unknown label must still trip the dataset builder's broadcast refusal
     assert "current_snapshot" in mod.UNKNOWN and "broadcast" in mod.UNKNOWN
+
+
+def test_reflag_refuses_live_and_existing_targets(tmp_path) -> None:
+    import pytest
+
+    mod = _module()
+    panel = tmp_path / "in.parquet"
+    with pytest.raises(SystemExit, match="live"):
+        mod.check_output_path(mod.DEFAULT_PANEL, panel)
+    with pytest.raises(SystemExit, match="live panel directory"):
+        mod.check_output_path(mod.DEFAULT_PANEL.parent / "market_panel.v2.parquet", panel)
+    with pytest.raises(SystemExit, match="input"):
+        mod.check_output_path(panel, panel)
+    existing = tmp_path / "out.parquet"
+    existing.write_bytes(b"x")
+    with pytest.raises(SystemExit, match="existing"):
+        mod.check_output_path(existing, panel)
+    mod.check_output_path(tmp_path / "new.parquet", panel)   # fresh path is fine

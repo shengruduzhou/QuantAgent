@@ -47,6 +47,18 @@ DATED = "dated_pit_st_evidence"
 UNKNOWN = "current_snapshot_broadcast_unverified_no_dated_evidence"
 
 
+def check_output_path(output: Path, panel_path: Path) -> None:
+    """Refuse any target that could overwrite live or existing data."""
+    target = Path(output).resolve()
+    live_dir = DEFAULT_PANEL.parent.resolve()
+    if target in (DEFAULT_PANEL.resolve(), Path(panel_path).resolve()):
+        raise SystemExit("refusing to overwrite the input/live panel; write a new version")
+    if target == live_dir or live_dir in target.parents:
+        raise SystemExit(f"refusing to write inside the live panel directory {live_dir}")
+    if target.exists():
+        raise SystemExit(f"refusing to overwrite existing {target}; choose a new path")
+
+
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -134,8 +146,8 @@ def main() -> int:
     ap.add_argument("--report", default=None, help="write the JSON report here")
     args = ap.parse_args()
     panel_path = Path(args.panel)
-    if args.output and Path(args.output).resolve() == panel_path.resolve():
-        raise SystemExit("refusing to overwrite the input panel; write a new version")
+    if args.output:
+        check_output_path(Path(args.output), panel_path)
     evidence = load_historical_st_evidence(args.evidence)
     panel = pd.read_parquet(panel_path)
     original_dtypes = panel.dtypes.to_dict()
