@@ -225,3 +225,29 @@ def test_rd_agent_gate_statistic_unchanged_by_delegation(seed: int) -> None:
         values[:] = 0.05  # zero spread -> skipped cohorts -> 0.0 fallback
     for horizon in (0, 1, 5, 20):
         assert _nonoverlapping_ic_tstat(values, horizon) == _frozen_rd_agent_nonoverlapping_ic_tstat(values, horizon)
+
+
+def test_lifecycle_nonoverlap_t_keeps_ineligible_sessions_as_gaps() -> None:
+    """Review item: dropping ineligible sessions shifted later ones across cohorts."""
+    from quantagent.factors.lifecycle import build_factor_lifecycle_report
+
+    rng = np.random.default_rng(5)
+    dates = pd.bdate_range("2024-01-02", periods=150)
+    frame = pd.DataFrame(
+        {
+            "trade_date": np.repeat(dates, 30),
+            "symbol": np.tile([f"S{i:03d}" for i in range(30)], len(dates)),
+            "f": rng.normal(size=len(dates) * 30),
+        }
+    )
+    frame["forward_return_5d"] = 0.15 * frame["f"] + rng.normal(size=len(frame))
+    dropped = set(rng.choice(dates, size=45, replace=False))  # 30% ineligible
+    frame.loc[frame["trade_date"].isin(dropped), "f"] = np.nan
+    report = build_factor_lifecycle_report(frame, "f", "forward_return_5d")
+
+    ic = cross_sectional_rank_ic(frame, "f", "forward_return_5d", sort=True)
+    ic.index = pd.DatetimeIndex(ic.index)
+    aligned = nonoverlapping_cohort_t_stat(ic.reindex(dates), 5)
+    shifted = nonoverlapping_cohort_t_stat(ic.dropna().reset_index(drop=True), 5)
+    assert aligned != pytest.approx(shifted)  # cohort membership matters here
+    assert report.nonoverlap_t_stat == pytest.approx(aligned)

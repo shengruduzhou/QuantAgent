@@ -7,9 +7,11 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors.coverage import usable_factor_coverage
+from quantagent.quant_math.performance import nonoverlapping_cohort_t_stat
 from quantagent.factors.evaluation import (
     capacity_proxy,
     factor_correlation_matrix,
+    infer_horizon_days,
     information_coefficient,
     quantile_group_backtest,
 )
@@ -131,6 +133,16 @@ def build_factor_lifecycle_report(
     validity_data = data[data["trade_date"].isin(coverage.eligible_dates)].copy()
 
     ic = information_coefficient(validity_data, directed_column, return_column)
+    # Non-overlap cohorts are formed on the full session grid of the input:
+    # ineligible sessions stay as NaN placeholders so they cannot shift later
+    # sessions into a neighbouring (overlapping) cohort.
+    horizon = infer_horizon_days(return_column)
+    sessions = pd.DatetimeIndex(sorted(data["trade_date"].unique()))
+    nonoverlap_t = (
+        float(nonoverlapping_cohort_t_stat(ic.rank_ic_by_date.reindex(sessions), horizon))
+        if horizon is not None and not ic.rank_ic_by_date.empty
+        else float("nan")
+    )
     groups = quantile_group_backtest(validity_data, directed_column, return_column)
 
     decay = None
@@ -171,7 +183,7 @@ def build_factor_lifecycle_report(
         effective_dates=effective_dates,
         median_symbols_per_date=median_symbols,
         newey_west_rank_t_stat=ic.summary.rank_t_stat,
-        nonoverlap_rank_t_stat=ic.summary.rank_nonoverlap_t_stat,
+        nonoverlap_rank_t_stat=nonoverlap_t,
         thresholds=thresholds,
     )
     return FactorLifecycleReport(
@@ -183,7 +195,7 @@ def build_factor_lifecycle_report(
         rank_icir=ic.summary.rank_icir,
         positive_ic_ratio=ic.summary.positive_ratio,
         newey_west_t_stat=ic.summary.rank_t_stat,
-        nonoverlap_t_stat=ic.summary.rank_nonoverlap_t_stat,
+        nonoverlap_t_stat=nonoverlap_t,
         decay_1d=(
             float(decay.rank_ic.loc[1])
             if decay is not None and 1 in decay.rank_ic.index
