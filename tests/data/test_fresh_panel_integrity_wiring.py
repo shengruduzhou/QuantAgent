@@ -139,3 +139,31 @@ def test_partial_halt_refresh_counts_as_a_failed_job(monkeypatch) -> None:
     assert daily.step_suspension_refresh(False)["status"] == "PARTIAL"
     R.returncode = 3
     assert daily.step_suspension_refresh(False)["status"] == "FAILED"
+
+
+def test_ledger_record_carries_freshness_and_integrity(tmp_path, monkeypatch) -> None:
+    import json
+
+    daily = _load("fresh_blind_daily")
+    root = tmp_path / "root"
+    panel = tmp_path / "panel.parquet"
+    pd.DataFrame({"symbol": ["600000.SH"], "trade_date": [pd.Timestamp("2026-11-24")]}).to_parquet(panel)
+    monkeypatch.setattr(daily, "REPO", tmp_path)
+    monkeypatch.setattr(daily, "ROOT", root)
+    monkeypatch.setattr(daily, "LEDGER", root / "ledger.jsonl")
+    monkeypatch.setattr(daily, "KEY_PATH", root / ".key")
+    monkeypatch.setattr(daily, "PANEL", panel)
+    monkeypatch.setattr(daily, "step_update_data", lambda dry: {"status": "OK"})
+    monkeypatch.setattr(daily, "step_suspension_refresh", lambda dry: {"status": "OK"})
+    monkeypatch.setattr(daily, "step_freshness", lambda: {
+        "status": "INCOMPLETE",
+        "integrity": {"status": "INCOMPLETE", "problems": ["INTERIOR_HOLES_UNEXPLAINED 41"]}})
+    monkeypatch.setattr(daily, "step_score", lambda: {"status": "OK"})
+    monkeypatch.setattr(daily, "step_books_and_fills", lambda today: {"status": "OK", "books": {}})
+    monkeypatch.setattr(sys, "argv", ["fresh_blind_daily.py"])
+    assert daily.main() == 1
+    record = json.loads((root / "ledger.jsonl").read_text().strip().splitlines()[-1])
+    assert record["freshness_status"] == "INCOMPLETE"
+    assert record["panel_integrity_status"] == "INCOMPLETE"
+    assert record["panel_integrity_problems"] == ["INTERIOR_HOLES_UNEXPLAINED 41"]
+    assert record["order_generation_status"] == "OK"     # orders exist, flagged by the above

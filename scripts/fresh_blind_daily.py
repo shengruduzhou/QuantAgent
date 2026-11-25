@@ -389,6 +389,13 @@ def main() -> int:
         "prediction_status": steps["scoring"]["status"],
         "order_generation_status": steps["weights"]["status"],
         "fill_status": steps["fills"]["status"],
+        # hashed into the ledger: orders produced on INCOMPLETE data stay visible as such
+        "freshness_status": steps["freshness"]["status"],
+        "panel_integrity_status": (steps["freshness"].get("integrity") or {}).get("status",
+                                                                                "NOT_MEASURED"),
+        "panel_integrity_problems": list(
+            (steps["freshness"].get("integrity") or {}).get("problems") or []),
+        "suspension_evidence_status": steps.get("suspension_evidence", {}).get("status"),
         "risk_event_count": 0,
         "failed_job_count": sum(1 for s in steps.values() if s["status"] in FAILED_STATUSES),
         "schema_hash": sha(PANEL.read_bytes()[:1 << 20])[:16],  # header slice fingerprint
