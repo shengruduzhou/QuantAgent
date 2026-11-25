@@ -23,9 +23,14 @@ Standard verification (from the repo root or the worktree under test, with
    passed/failed/skipped counts and every failure's nodeid.
 3. If `apps/quant-ui` changed: `npx tsc --noEmit && npx vitest run && npx vite build`.
 4. `git diff --check main...HEAD`
-5. Clean-env check when dependencies changed: fresh venv in scratch,
-   `pip install -c requirements/ci-constraints.txt -e ".[test]"`, run
-   `tests/test_declared_dependencies.py` and a smoke subset.
+5. Clean-env check before every push to main (not only when dependencies
+   change): fresh venv in scratch, `pip install -c requirements/ci-constraints.txt
+   -e ".[test]"`, then the FULL suite in a clean git worktree with
+   `TZ=UTC` and `QUANTAGENT_HOME` unset. CI installs only `[test]`; tests that
+   import an optional extra (`[data]`: cryptography, tickflow, akshare;
+   `[training]`: lightgbm, torch, ...) pass locally and fail on CI
+   (Cycle 32: five red pushes before this was caught). Stub the extra or
+   `pytest.importorskip` it.
 6. After a push: GitHub Actions status via the public API
    `curl -s https://api.github.com/repos/shengruduzhou/QuantAgent/actions/runs?per_page=10`
    (no `gh` on this host). A release is accepted only when the pushed SHA's CI is green.

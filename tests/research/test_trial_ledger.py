@@ -225,6 +225,9 @@ def _cheap_gbm(monkeypatch) -> None:
 
 def test_audit_nonlinear_factors_feeds_cumulative_family_n_to_dsr(tmp_path, monkeypatch) -> None:
     """Fails on pre-ledger code: DSR used ``n_trials = len(arms)`` (~5), not 146 + arms."""
+    # Without the optional [training] extra the tiny fixture yields < 2 return series and
+    # the comparison legitimately skips DSR; CI installs only [test].
+    pytest.importorskip("lightgbm")
     import quantagent.research.model_comparison as model_comparison
     import quantagent.research.nonlinear_promotion as nonlinear_promotion
     from quantagent.cli import app

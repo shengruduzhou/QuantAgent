@@ -152,6 +152,7 @@ def test_ledger_record_carries_freshness_and_integrity(tmp_path, monkeypatch) ->
     monkeypatch.setattr(daily, "ROOT", root)
     monkeypatch.setattr(daily, "LEDGER", root / "ledger.jsonl")
     monkeypatch.setattr(daily, "KEY_PATH", root / ".key")
+    monkeypatch.setattr(daily, "get_key", lambda: b"k")  # cryptography is the optional [data] extra
     monkeypatch.setattr(daily, "PANEL", panel)
     monkeypatch.setattr(daily, "step_update_data", lambda dry: {"status": "OK"})
     monkeypatch.setattr(daily, "step_suspension_refresh", lambda dry: {"status": "OK"})
@@ -194,6 +195,7 @@ def test_ledger_counts_a_locked_halt_refresh_explicitly(tmp_path, monkeypatch) -
     for name, value in (("REPO", tmp_path), ("ROOT", root), ("LEDGER", root / "l.jsonl"),
                         ("KEY_PATH", root / ".key"), ("PANEL", panel)):
         monkeypatch.setattr(daily, name, value)
+    monkeypatch.setattr(daily, "get_key", lambda: b"k")  # cryptography is the optional [data] extra
 
     class R:
         returncode = 73
