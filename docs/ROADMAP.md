@@ -60,8 +60,11 @@
    占位保持对齐；Richardson & Smith 1991）；`ICSummary.(rank_)nonoverlap_t_stat`；`governance_metrics` 新闸门
    `min_nonoverlap_rank_t_stat=3.0`、`lifecycle` 的 validated 需 ≥3（NaN 不通过）；RD-Agent 门委托且数值不变。
    零假设校准（AR(1) φ=0.98 因子、600 面板×750 日×50 名，固定种子）：|t|>1.96 拒绝率 h=5 HAC 7.7% vs 非重叠 3.2%，
-   h=20 HAC 11.8% vs 3.3%；非重叠 |t|≥3 为 0.17%。遗留：RD-Agent 门的 IC 序列先删未定义日再分 cohort（缺日会串组），
-   改正会改门的数字，未改。
+   h=20 HAC 11.8% vs 3.3%；非重叠 |t|≥3 为 0.17%。**未决（需预注册 + 重基线后才能改）**：RD-Agent 门
+   （`factor_synthesis._nonoverlapping_ic_tstat`）的 IC 序列先删未定义日再分 cohort（缺日使后续日串入相邻 cohort），
+   且无合格 cohort 时以 0.0 代替 NaN；改正会改变门的数字，本分支未改。
+   注意：非重叠 t 只在"仅重叠"零假设下方差 ≤1；因子/收益本身有持续性时任何非重叠 t 都会过大，不得当作 N(0,1)
+   喂给 p 值或 DSR。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控
    对可成交限价的名义金额留容差（直接改限价会让恰好 10% 权重的订单被单票上限拒绝）。
 8. **E2（非线性设定消融）**在 P1-1 之后、按修订后的预注册（加入 rank 目标线性对照、选择折延长到 2019）。
