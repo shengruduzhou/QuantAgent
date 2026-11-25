@@ -244,11 +244,14 @@ def nonoverlapping_cohort_t_stat(series: pd.Series, horizon_days: int) -> float:
     Why the average: the overlapping-sample mean is (up to the edges) the mean
     of the ``h`` non-overlapping subsample means (Richardson & Smith 1991,
     RFS 4(2)), so every cohort t-stat has the same location under the
-    alternative while the average has variance <= 1 under the null (mean of
-    unit-variance statistics).  It is therefore never oversized, unlike
-    Bartlett-kernel HAC at lag h-1, which is known to over-reject with
-    overlapping long-horizon labels and persistent regressors (Ang & Bekaert
-    2007, RFS 20(3)).  Measured in
+    alternative while, under a null whose only dependence is the label
+    overlap, the average has variance <= 1 (mean of unit-variance
+    statistics) and so is not oversized -- unlike Bartlett-kernel HAC at lag
+    h-1, which over-rejects with overlapping long-horizon labels (Ang &
+    Bekaert 2007, RFS 20(3)).  Under a null with its own persistence (e.g.
+    autocorrelated IC from slow-moving factor *and* return structure) any
+    non-overlapping t is oversized too.  Do NOT treat it as N(0, 1) for
+    p-values or DSR; it is a screening statistic.  Measured in
     ``tests/factors/test_nonoverlap_ic_tstat_calibration.py``.
     """
     h = int(horizon_days)
