@@ -370,15 +370,19 @@ def panel_integrity(
     snapshot_dates: Iterable[Any] | None,
     delisting_dates: Mapping[str, Any] | pd.Series | None,
     start: Any,
+    expected_universe: pd.DataFrame | None,
 ) -> dict[str, Any]:
     """Whether a traded-sessions-only panel is complete on ``[start, max]``.
 
-    "Current" (max date) is not "complete": this reports, from the panel itself,
-    per-date coverage (bars + evidenced halts over bars + all non-delisted
-    gaps), unexplained
-    interior holes, trailing gaps of names that stopped printing without a dated
-    delisting, and ST rows whose provenance is not dated PIT evidence. Any of
-    them makes ``status = "INCOMPLETE"`` with a named problem list.
+    "Current" (max date) is not "complete". The expected set per calendar
+    session comes from ``expected_universe`` (``symbol, listing_date,
+    delisting_date`` -- the security master, never the panel itself): a name is
+    expected from its listing date through its dated delisting. Coverage =
+    expected names with a bar or an evidenced halt / expected names. Also
+    reported: unexplained interior holes, names that stopped printing without
+    evidence, expected names absent from the window, and ST rows whose
+    provenance is not dated PIT evidence. Any of them -- or no calendar session
+    in the window, or no expected universe -- makes ``status = "INCOMPLETE"``.
     """
     frame = panel.copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
@@ -386,20 +390,44 @@ def panel_integrity(
     classified = _classified_gaps(frame, sessions, suspension_intervals, snapshot_dates,
                                   delisting_dates, start)
     window = frame[frame["trade_date"] >= start]
-    bars = window.groupby("trade_date").size()
-    live_gaps = classified[classified["classification"] != GAP_DELISTED]
-    expected = bars.add(live_gaps.groupby("trade_date").size(), fill_value=0)
-    # a halted name legitimately has no bar: it counts as accounted for
-    suspended = classified[classified["classification"] == GAP_SUSPENDED].groupby("trade_date").size()
-    accounted = bars.reindex(expected.index).fillna(0).add(suspended, fill_value=0)
-    coverage = (accounted.reindex(expected.index) / expected).sort_index()
+    panel_max = frame["trade_date"].max() if len(frame) else start
+    cal = pd.DatetimeIndex(sorted(pd.to_datetime(pd.Index(list(sessions))).normalize().unique()))
+    window_sessions = cal[(cal >= start) & (cal <= panel_max)]
+    present = pd.concat([
+        window[["symbol", "trade_date"]],
+        classified.loc[classified["classification"] == GAP_SUSPENDED, ["symbol", "trade_date"]],
+    ])
+    present_keys = set(zip(present["symbol"].astype(str), present["trade_date"]))
+    coverage = pd.Series(dtype=float)
+    never_in_window: list[str] = []
+    if expected_universe is not None and len(window_sessions):
+        uni = expected_universe[["symbol", "listing_date", "delisting_date"]].copy()
+        uni["symbol"] = uni["symbol"].astype(str)
+        uni["listing_date"] = pd.to_datetime(uni["listing_date"], errors="coerce")
+        uni["delisting_date"] = pd.to_datetime(uni["delisting_date"], errors="coerce")
+        values = {}
+        expected_any: set[str] = set()
+        for day in window_sessions:
+            live = uni[(uni["listing_date"].isna() | (uni["listing_date"] <= day))
+                       & (uni["delisting_date"].isna() | (uni["delisting_date"] >= day))]
+            n = len(live)
+            expected_any |= set(live["symbol"])
+            values[day] = (sum((sym, day) in present_keys for sym in live["symbol"]) / n
+                           if n else float("nan"))
+        coverage = pd.Series(values).sort_index()
+        seen = set(present["symbol"].astype(str))
+        never_in_window = sorted(expected_any - seen)
     unexplained = classified[classified["classification"] == GAP_UNEXPLAINED]
     interior_unexplained = unexplained[unexplained["gap_kind"] == GAP_KIND_INTERIOR]
     trailing_unexplained = unexplained[unexplained["gap_kind"] == GAP_KIND_TRAILING]
     report: dict[str, Any] = {
-        "window": [str(start.date()), str(frame["trade_date"].max().date())],
-        "sessions": int(len(bars)),
-        "min_date_coverage": round(float(coverage.min()), 6) if len(coverage) else None,
+        "window": [str(start.date()), str(panel_max.date())],
+        "sessions": int(len(window_sessions)),
+        "expected_universe_symbols": int(len(expected_universe)) if expected_universe is not None
+        else None,
+        "expected_symbols_never_in_window": len(never_in_window),
+        "expected_symbols_never_in_window_sample": never_in_window[:20],
+        "min_date_coverage": round(float(coverage.min()), 6) if coverage.notna().any() else None,
         "dates_below_coverage": [str(d.date()) for d in coverage[coverage < MIN_DATE_COVERAGE].index],
         "gaps": gap_summary(classified),
         "interior_unexplained": int(len(interior_unexplained)),
@@ -407,6 +435,14 @@ def panel_integrity(
         "trailing_unexplained_symbols": int(trailing_unexplained["symbol"].nunique()),
     }
     problems: list[str] = []
+    if not len(window_sessions):
+        problems.append("NO_SESSIONS_IN_WINDOW")
+    if expected_universe is None:
+        problems.append("EXPECTED_UNIVERSE_UNAVAILABLE")
+    if coverage.isna().any():
+        problems.append("EMPTY_EXPECTED_UNIVERSE_ON_SOME_SESSIONS")
+    if never_in_window:
+        problems.append(f"EXPECTED_SYMBOLS_NEVER_IN_WINDOW {len(never_in_window)}")
     if report["dates_below_coverage"]:
         problems.append(f"DATE_COVERAGE_BELOW_{MIN_DATE_COVERAGE} on "
                         f"{len(report['dates_below_coverage'])} sessions "

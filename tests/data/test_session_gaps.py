@@ -191,7 +191,7 @@ def test_integrity_is_not_current_when_holes_or_unverified_st_exist() -> None:
     panel = _panel()
     panel["is_st_provenance"] = "dated_pit_st_evidence"
     kwargs = dict(sessions=SESSIONS, snapshot_dates=SESSIONS, delisting_dates=None,
-                  start=SESSIONS[0])
+                  start=SESSIONS[0], expected_universe=_master())
     holed = panel_integrity(panel, suspension_intervals=None, **kwargs)
     assert holed["status"] == "INCOMPLETE"
     assert holed["interior_unexplained"] == 2
@@ -204,6 +204,50 @@ def test_integrity_is_not_current_when_holes_or_unverified_st_exist() -> None:
         panel, suspension_intervals=_halt(HELD, SESSIONS[3], SESSIONS[4]), **kwargs)
     assert broadcast["status"] == "INCOMPLETE"
     assert broadcast["problems"][0].startswith("ST_PROVENANCE_UNVERIFIED 1 rows")
+
+
+def _master(*extra: str) -> pd.DataFrame:
+    symbols = [HELD, OTHER, *extra]
+    return pd.DataFrame({"symbol": symbols, "listing_date": pd.Timestamp("2000-01-04"),
+                         "delisting_date": pd.NaT})
+
+
+def test_integrity_with_no_session_in_window_is_incomplete() -> None:
+    """Auditor F4: an empty window must never be reported COMPLETE."""
+    from quantagent.data.ashare.session_gaps import panel_integrity
+
+    panel = _panel(hole_days=())
+    panel["is_st_provenance"] = "dated_pit_st_evidence"
+    report = panel_integrity(panel, sessions=SESSIONS, suspension_intervals=None,
+                             snapshot_dates=SESSIONS, delisting_dates=None,
+                             start=SESSIONS[-1] + pd.Timedelta(days=7),
+                             expected_universe=_master())
+    assert report["status"] == "INCOMPLETE"
+    assert "NO_SESSIONS_IN_WINDOW" in report["problems"]
+
+
+def test_integrity_expected_set_comes_from_the_master_not_the_panel() -> None:
+    """Auditor F4: a listed name that never prints is invisible to a panel-derived
+    expected set; against the master it is a coverage failure."""
+    from quantagent.data.ashare.session_gaps import panel_integrity
+
+    panel = _panel(hole_days=())                      # complete for the names it has
+    panel["is_st_provenance"] = "dated_pit_st_evidence"
+    kwargs = dict(sessions=SESSIONS, suspension_intervals=None, snapshot_dates=SESSIONS,
+                  delisting_dates=None, start=SESSIONS[0])
+    full = panel_integrity(panel, expected_universe=_master(), **kwargs)
+    assert full["status"] == "COMPLETE", full["problems"]
+    dropped = panel_integrity(panel, expected_universe=_master("600001.SH"), **kwargs)
+    assert dropped["status"] == "INCOMPLETE"
+    assert round(dropped["min_date_coverage"], 4) == round(2 / 3, 4)
+    assert "EXPECTED_SYMBOLS_NEVER_IN_WINDOW 1" in dropped["problems"]
+    # a dated delisting before the window removes it from the expected set
+    gone = _master("600001.SH")
+    gone.loc[gone["symbol"] == "600001.SH", "delisting_date"] = pd.Timestamp("2020-01-02")
+    assert panel_integrity(panel, expected_universe=gone, **kwargs)["status"] == "COMPLETE"
+    # no master at all fails closed
+    missing = panel_integrity(panel, expected_universe=None, **kwargs)
+    assert "EXPECTED_UNIVERSE_UNAVAILABLE" in missing["problems"]
 
 
 def test_carried_mark_never_crosses_an_unexplained_session() -> None:

@@ -49,6 +49,11 @@ PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 ELIG = REPO / "runtime/reports/h028/fresh_first_read_eligibility.json"
 CALENDAR = REPO / "runtime/data/u0/pit/trading_calendar.parquet"
 DELISTINGS = REPO / "runtime/data/u0/pit/delisting_intervals.parquet"
+MASTER = REPO / "runtime/data/u0/security_master.parquet"
+# FRESH cohort = names that printed in the 30 sessions-ish before the freeze
+# (immutable pre-window rows, so it cannot ratchet); the expected set per day is
+# that cohort restricted by the security master's listing and dated delisting.
+COHORT_LOOKBACK_DAYS = 30
 # Dated halt evidence: the U0 snapshot set (2019-09..2026-07) plus the FRESH
 # refresh written by step_suspension_refresh (u0_pit_intervals --out-dir).
 SUSPENSION_FRESH = REPO / "runtime/data/u0/pit/suspension_fresh"
@@ -139,7 +144,24 @@ def integrity_report(start: pd.Timestamp = FRESH_START) -> dict:
     dated = (delist.dropna(subset=["effective_start"]).set_index("symbol")["effective_start"]
              if len(delist) else None)
     return panel_integrity(panel, sessions=sessions, suspension_intervals=intervals,
-                           snapshot_dates=covered, delisting_dates=dated, start=start)
+                           snapshot_dates=covered, delisting_dates=dated, start=start,
+                           expected_universe=fresh_expected_universe(panel, dated, start))
+
+
+def fresh_expected_universe(panel: pd.DataFrame, dated, start: pd.Timestamp) -> pd.DataFrame | None:
+    """Security-master rows for the frozen FRESH cohort (None if no master)."""
+    if not MASTER.exists():
+        return None
+    master = pd.read_parquet(MASTER, columns=["symbol", "listing_date", "delisting_date"])
+    dates = pd.to_datetime(panel["trade_date"])
+    pre = panel[(dates < start) & (dates >= start - pd.Timedelta(days=COHORT_LOOKBACK_DAYS))]
+    cohort = set(pre["symbol"].astype(str))
+    uni = master[master["symbol"].astype(str).isin(cohort)].copy()
+    if dated is not None and len(dated):
+        latest = pd.to_datetime(pd.Series(dated)).groupby(level=0).max()
+        extra = uni["symbol"].map(latest)
+        uni["delisting_date"] = pd.to_datetime(uni["delisting_date"]).fillna(extra)
+    return uni
 
 
 def step_suspension_refresh(dry: bool) -> dict:
