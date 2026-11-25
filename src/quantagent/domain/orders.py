@@ -649,19 +649,27 @@ class OrderBook:
     def __init__(self) -> None:
         self._orders: dict[str, Order] = {}
         self._events: list[OrderEvent] = []
+        # Per-order index over the same append-only list: ``history_of`` was a
+        # full scan, so a simulator calling it once per order went O(events^2)
+        # (cycle 32: a ~4k-name book stalled for 12 h). Same events, same order.
+        self._events_by_order: dict[str, list[OrderEvent]] = {}
 
     def open(self, intent: OrderIntent, *, parent_order_id: str | None = None) -> Order:
         order = Order.from_intent(intent, parent_order_id=parent_order_id)
         if order.order_id in self._orders:
             return self._orders[order.order_id]
         self._orders[order.order_id] = order
-        self._events.append(
+        self._record(
             OrderEvent(
                 event_type=OrderEventType.CREATED, order_id=order.order_id,
                 sequence=len(self._events), event_time=_now(), lineage=order.lineage,
             )
         )
         return order
+
+    def _record(self, event: OrderEvent) -> None:
+        self._events.append(event)
+        self._events_by_order.setdefault(event.order_id, []).append(event)
 
     def apply(
         self,
@@ -684,7 +692,7 @@ class OrderBook:
             # claim two executions happened, and every projection built from it
             # would double-count — so the duplicate leaves no trace in history.
             return order
-        self._events.append(event)
+        self._record(event)
         self._orders[order_id] = updated
         return updated
 
@@ -692,7 +700,7 @@ class OrderBook:
         return self._orders[order_id]
 
     def history_of(self, order_id: str) -> tuple[OrderEvent, ...]:
-        return tuple(event for event in self._events if event.order_id == order_id)
+        return tuple(self._events_by_order.get(order_id, ()))
 
     def events(self) -> tuple[OrderEvent, ...]:
         return tuple(self._events)
