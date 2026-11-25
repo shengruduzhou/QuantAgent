@@ -108,6 +108,11 @@
 
 ## P2 — 工程 / Engineering
 
+0. **测试卫生（Cycle 32）**：全量测试会按 cwd 创建 `runtime/paper/fresh_blind/SHADOW_TEST_PROTOCOL.md`（与真文件逐字节相同）
+   和 `runtime/reports/v8/llm_hybrid_stock_pool/`；在主检出跑即写真 `runtime/`。定位写入者并改到 tmp。
+   另：`test_folds_never_reach_a_quarantined_label_window` 单测 60 分钟待剖析；OMS `history_of` 索引（4e51a78）
+   缺防退化测试（计数全量扫描或大账本计时）。
+
 1. **62 个无引用的 CLI 命令**及只由它们到达的 51 个模块（themes/*、fundamental/*、models/v7_*、
    services/v7_pipeline_service、backtest/engine.py，约 13K 行）：先隐藏 + 弃用警告，确认无人手工使用后删除。
 2. v7/v8 后缀的 CLI 模块改为领域名并保留别名（JobRunner 命令 ID 不变）。
