@@ -66,7 +66,7 @@
    注意：非重叠 t 只在"仅重叠"零假设下方差 ≤1；因子/收益本身有持续性时任何非重叠 t 都会过大，不得当作 N(0,1)
    喂给 p 值或 DSR。
    - `information_coefficient` 的 `_nonoverlap_t` 按输入中出现的日期分 cohort：某交易日整日无行仍会串组；有交易所日历时应先 reindex 到日历。
-   - `multi_horizon_blender` 现要求 ≥3 个完整配对（旧代码按含 NaN 的行数计 ≥3；非逐位一致，但更正确）。
+   - `multi_horizon_blender` 现要求 ≥3 个完整配对（代码审查指出与旧实现非逐位一致，但更正确）。
    - 标签期限无法推断时 `information_coefficient` 的非重叠 t 为 NaN，`lifecycle` 的 validated 不可达（设计上 fail-closed）。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控
    对可成交限价的名义金额留容差（直接改限价会让恰好 10% 权重的订单被单票上限拒绝）。
