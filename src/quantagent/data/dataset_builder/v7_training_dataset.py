@@ -578,7 +578,7 @@ TRADABILITY_MASK_COLUMNS: tuple[str, ...] = ("is_st", "is_suspended", "is_limit_
 
 #: Provenance markers that make a tradability flag a look-ahead: the value is
 #: today's list broadcast to every historical date (Round 29 R4-F01; Round 31 D-02).
-_SNAPSHOT_PROVENANCE_MARKERS = ("current_snapshot", "broadcast")
+_SNAPSHOT_PROVENANCE_MARKERS = ("current_snapshot", "broadcast", "exchanges.get_instruments")
 
 
 def _refused_feature_columns(frame: pd.DataFrame, columns: Iterable[str]) -> dict[str, str]:

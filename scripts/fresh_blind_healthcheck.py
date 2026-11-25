@@ -6,7 +6,10 @@ Runs after the daily blind run (cron 17:30 weekdays). Checks, in order:
   1. ledger hash chain VALID;
   2. a daily_run record exists for the last expected trading day;
   3. that record has failed_job_count == 0 and all step statuses OK;
-  4. panel freshness (lag <= 4 calendar days);
+  4. panel freshness (lag <= 4 calendar days) AND completeness of the FRESH
+     window: per-date coverage, unexplained interior holes, names that stopped
+     printing without a dated delisting, ST rows without dated provenance
+     (fresh_blind_daily.integrity_report) -- "current" is not "complete";
   5. fidelity certificate still passes=true (never relaxed silently).
 
 Bounded auto-remediation (recorded, never silent):
@@ -37,6 +40,25 @@ CERT = REPO / "runtime/reports/h028/forward_fidelity_certificate.json"
 
 sys.path.insert(0, str(REPO / "scripts"))
 from fresh_blind_status import verify_chain  # noqa: E402
+
+
+def run_remediation(cmd: list[str], timeout_s: int, problems: list[str]) -> int | None:
+    """Run one remediation call; a timeout is recorded as a problem, never raised."""
+    try:
+        return subprocess.run([sys.executable, *cmd], capture_output=True, text=True,
+                              timeout=timeout_s).returncode
+    except subprocess.TimeoutExpired:
+        problems.append(f"AUTO_REMEDIATION_TIMEOUT {cmd[0]} after {timeout_s}s")
+        return None
+
+
+def panel_integrity_problems() -> tuple[list[str], dict]:
+    try:
+        from fresh_blind_daily import integrity_report
+        report = integrity_report()
+    except Exception as e:  # noqa: BLE001 - an unmeasurable panel is unhealthy
+        return [f"PANEL_INTEGRITY_UNMEASURED {type(e).__name__}: {str(e)[:160]}"], {}
+    return [f"PANEL_{p}" for p in report.get("problems", [])], report
 
 
 def log(msg: str) -> None:
@@ -75,6 +97,8 @@ def main() -> int:
     lag = (pd.Timestamp(today) - pmax).days
     if lag > 4:
         problems.append(f"PANEL_STALE max={pmax.date()} lag={lag}d")
+    integrity_problems, integrity = panel_integrity_problems()
+    problems.extend(integrity_problems)
     cert_ok = CERT.exists() and json.loads(CERT.read_text()).get("passes") is True
     if not cert_ok:
         problems.append("FIDELITY_CERT_MISSING_OR_FAILING")
@@ -84,12 +108,11 @@ def main() -> int:
         and "TIMEOUT" in json.dumps(rec)
     if problems and data_timeout and lag <= 6 and cert_ok and ok:
         log(f"AUTO_REMEDIATION: standalone catch-up (lag {lag}d) + runner retry")
-        r1 = subprocess.run([sys.executable, "scripts/update_market_panel_daily.py"],
-                            capture_output=True, text=True, timeout=7200)
-        r2 = subprocess.run([sys.executable, "scripts/fresh_blind_daily.py"],
-                            capture_output=True, text=True, timeout=10800)
-        log(f"AUTO_REMEDIATION result: update rc={r1.returncode} runner rc={r2.returncode}")
-        if r2.returncode == 0:
+        # the guarded writer: calendar expiry + per-session window coverage
+        rc1 = run_remediation(["scripts/catchup_panel_chunked.py"], 7200, problems)
+        rc2 = run_remediation(["scripts/fresh_blind_daily.py"], 10800, problems)
+        log(f"AUTO_REMEDIATION result: catch-up rc={rc1} runner rc={rc2}")
+        if rc2 == 0:
             problems = [p for p in problems if not p.startswith(("LAST_RUN_HAD_FAILURES", "PANEL_STALE"))]
 
     if problems:
@@ -98,7 +121,9 @@ def main() -> int:
         return 1
     if ALERT.exists():
         ALERT.unlink()
-    log(f"HEALTHY (chain {n} records, panel max {pmax.date()}, cert passes)")
+    log(f"HEALTHY (chain {n} records, panel max {pmax.date()}, window "
+        f"{integrity.get('window')} complete: min coverage {integrity.get('min_date_coverage')}, "
+        "0 unexplained holes, ST provenance dated; cert passes)")
     return 0
 
 

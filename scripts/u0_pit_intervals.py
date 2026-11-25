@@ -10,7 +10,7 @@ Sub-commands (all resumable, all writing provenance with every row):
                 machine-readable corporate-action identity.
 ``dividends``   dividend / bonus / rights records with announce, record and
                 ex-dates (Sina F10).
-``suspension``  per-trading-date halt snapshots from the Eastmoney suspension
+``suspension``  Eastmoney halt records (Cycle 32: each query returns the LATEST halt per symbol as of retrieval, not a per-date snapshot, so per-date files barely gate anything and recall is unmeasured; see docs/DATA.md §5) from the Eastmoney suspension
                 report, folded into ``(symbol, start, end)`` intervals. Each
                 snapshot carries the halt's own start date, so intervals are
                 vendor-dated rather than inferred from bar gaps.
@@ -30,7 +30,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,8 +45,8 @@ sys.path.insert(0, str(REPO / "src"))
 
 from quantagent.data.ashare.env import load_repo_env  # noqa: E402
 from quantagent.data.ashare.http import HttpClient  # noqa: E402
+from quantagent.data.ashare.session_gaps import fold_suspension_snapshots  # noqa: E402
 from quantagent.data.ashare.sources import SinaSource  # noqa: E402
-from quantagent.data.ashare.symbols import SymbolError, identify  # noqa: E402
 
 OUT = REPO / "runtime/data/u0/pit"
 MASTER = REPO / "runtime/data/u0/security_master.parquet"
@@ -62,6 +64,23 @@ def _load_master() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+def calendar_regression(existing: pd.DataFrame, new: pd.DataFrame) -> str | None:
+    """A refresh may extend the calendar, never shrink or rewrite its past."""
+    old = set(pd.to_datetime(existing["trade_date"]).dt.normalize())
+    fresh = set(pd.to_datetime(new["trade_date"]).dt.normalize())
+    if not fresh:
+        return "vendor returned no dates"
+    if max(fresh) < max(old):
+        return f"new last date {max(fresh).date()} < existing {max(old).date()}"
+    dropped = sorted(old - fresh)
+    if dropped:
+        return f"{len(dropped)} existing sessions would disappear, e.g. {dropped[0].date()}"
+    added_past = sorted(d for d in fresh - old if d <= max(old))
+    if added_past:
+        return f"{len(added_past)} sessions inserted into the existing range, e.g. {added_past[0].date()}"
+    return None
+
+
 def cmd_calendar(args: argparse.Namespace) -> int:
     import akshare as ak
 
@@ -74,6 +93,11 @@ def cmd_calendar(args: argparse.Namespace) -> int:
         "quality_status": "OK",
     }).sort_values("trade_date").reset_index(drop=True)
     OUT.mkdir(parents=True, exist_ok=True)
+    existing_path = OUT / "trading_calendar.parquet"
+    if existing_path.exists():
+        problem = calendar_regression(pd.read_parquet(existing_path), frame)
+        if problem:
+            raise SystemExit(f"refusing to overwrite the trading calendar: {problem}")
     frame.to_parquet(OUT / "trading_calendar.parquet", index=False)
     payload = {"rows": int(len(frame)), "first": str(frame["trade_date"].min().date()),
                "last": str(frame["trade_date"].max().date()),
@@ -150,11 +174,54 @@ def cmd_dividends(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#: cmd_suspension exit codes (Cycle 32 review E)
+EXIT_SUSPENSION_NOTHING_FETCHED = 3   # requested dates missing and no query succeeded
+EXIT_SUSPENSION_PARTIAL = 75          # some requested dates still missing
+EXIT_SUSPENSION_LOCKED = 73           # another refresh holds the out-dir lock
+
+
+def _atomic_parquet(frame: pd.DataFrame, path: Path) -> None:
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        frame.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _atomic_text(text: str, path: Path) -> None:
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def cmd_suspension(args: argparse.Namespace) -> int:
-    """Per-trading-date halt snapshots folded into intervals."""
+    """Eastmoney halt records folded into intervals (single writer per out-dir)."""
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lock = open(out_dir / ".suspension.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        print(f"another suspension refresh holds {out_dir}/.suspension.lock; skipped")
+        return EXIT_SUSPENSION_LOCKED
+    try:
+        return _cmd_suspension_locked(args, out_dir)
+    finally:
+        lock.close()
+
+
+def _cmd_suspension_locked(args: argparse.Namespace, out_dir: Path) -> int:
     import akshare as ak
 
-    calendar_path = OUT / "trading_calendar.parquet"
+    calendar_path = (Path(args.calendar) if getattr(args, "calendar", None)
+                     else OUT / "trading_calendar.parquet")
     if not calendar_path.exists():
         raise SystemExit("run `u0_pit_intervals.py calendar --allow-network` first")
     calendar = pd.read_parquet(calendar_path)
@@ -163,7 +230,11 @@ def cmd_suspension(args: argparse.Namespace) -> int:
                          (calendar["trade_date"] <= today), "trade_date"]
     dates = sorted(dates, reverse=True)          # newest first: most useful data lands early
 
-    staging = OUT / "_suspension"
+    # --out-dir writes a NEW versioned artifact (staging + intervals + manifest)
+    # instead of the live U0 tables; the calendar is still read from OUT.
+    end = pd.Timestamp(args.end) if getattr(args, "end", None) else today
+    dates = [d for d in dates if d <= end]
+    staging = out_dir / "_suspension"
     staging.mkdir(parents=True, exist_ok=True)
     done = {p.stem for p in staging.glob("*.parquet")}
     started = time.monotonic()
@@ -185,7 +256,8 @@ def cmd_suspension(args: argparse.Namespace) -> int:
             time.sleep(2.0)
             continue
         if raw is None or not len(raw):
-            pd.DataFrame(columns=["code", "snapshot_date"]).to_parquet(staging / f"{stamp}.parquet")
+            _atomic_parquet(pd.DataFrame(columns=["code", "snapshot_date"]),
+                            staging / f"{stamp}.parquet")
             empty += 1
             continue
         frame = pd.DataFrame({
@@ -196,7 +268,7 @@ def cmd_suspension(args: argparse.Namespace) -> int:
             "suspension_reason": raw.get("停牌原因", pd.Series([""] * len(raw))).astype(str),
             "snapshot_date": date,
         })
-        frame.to_parquet(staging / f"{stamp}.parquet", index=False)
+        _atomic_parquet(frame, staging / f"{stamp}.parquet")
         fetched += 1
         if fetched % 25 == 0:
             print(f"  {fetched} snapshots · {stamp} · {time.monotonic() - started:.0f}s", flush=True)
@@ -207,44 +279,16 @@ def cmd_suspension(args: argparse.Namespace) -> int:
     frames = [f for f in frames if len(f) and "suspend_start" in f.columns]
     intervals = pd.DataFrame()
     if frames:
-        snapshots = pd.concat(frames, ignore_index=True)
-        symbols, keep = [], []
-        for code in snapshots["code"]:
-            try:
-                symbols.append(identify(code).symbol)
-                keep.append(True)
-            except SymbolError:
-                keep.append(False)
-        snapshots = snapshots[keep].copy()
-        snapshots["symbol"] = symbols
-        snapshots["effective_start"] = snapshots["suspend_start"].fillna(snapshots["snapshot_date"])
-        grouped = snapshots.groupby(["symbol", "effective_start"], as_index=False).agg(
-            effective_end=("suspend_end", "max"),
-            last_seen=("snapshot_date", "max"),
-            suspension_reason=("suspension_reason", "first"))
-        # a halt with no published resume date is closed at the last date it was
-        # still observed, never left open-ended into the future
-        grouped["effective_end"] = grouped["effective_end"].fillna(grouped["last_seen"])
-        intervals = pd.DataFrame({
-            "symbol": grouped["symbol"],
-            "effective_start": grouped["effective_start"],
-            "effective_end": grouped["effective_end"],
-            "suspension_reason": grouped["suspension_reason"],
-            "evidence": "eastmoney_suspension_snapshot",
-            "source": "akshare.stock_tfp_em",
-            "source_endpoint": "eastmoney RPT_CUSTOM_SUSPEND_DATA_INTERFACE",
-            "retrieved_at": _now(),
-            "available_at": grouped["effective_start"].dt.strftime("%Y-%m-%d"),
-            "quality_status": "OK",
-        }).sort_values(["symbol", "effective_start"])
-        intervals.to_parquet(OUT / "suspension_intervals.parquet", index=False)
+        intervals = fold_suspension_snapshots(pd.concat(frames, ignore_index=True),
+                                              retrieved_at=_now())
+        _atomic_parquet(intervals, out_dir / "suspension_intervals.parquet")
 
     covered = sorted({p.stem for p in files})
     payload = {
         "dataset": "suspension_intervals",
         "snapshot_dates_on_disk": len(covered),
         "snapshot_date_range": [covered[0], covered[-1]] if covered else None,
-        "requested_range": [args.start, str(today.date())],
+        "requested_range": [args.start, str(end.date())],
         "trading_dates_in_range": int(len(dates)),
         "intervals": int(len(intervals)),
         "symbols_with_halts": int(intervals["symbol"].nunique()) if len(intervals) else 0,
@@ -254,8 +298,17 @@ def cmd_suspension(args: argparse.Namespace) -> int:
                           "dates outside snapshot_date_range are NOT claimed as halt-free."),
         "generated": _now(),
     }
-    (OUT / "suspension_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    on_disk = {p.stem for p in staging.glob("*.parquet")}
+    missing = sorted(d.strftime("%Y%m%d") for d in dates if d.strftime("%Y%m%d") not in on_disk)
+    payload["requested_dates_missing"] = len(missing)
+    payload["requested_dates_missing_sample"] = missing[:10]
+    _atomic_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                 out_dir / "suspension_manifest.json")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if missing and fetched + empty == 0:
+        return EXIT_SUSPENSION_NOTHING_FETCHED
+    if missing:
+        return EXIT_SUSPENSION_PARTIAL
     return 0
 
 
@@ -439,6 +492,12 @@ def main() -> int:
     parser.add_argument("--max-minutes", type=float, default=60.0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--start", default="2010-01-01")
+    parser.add_argument("--end", default=None, help="suspension: last snapshot date (default today)")
+    parser.add_argument("--calendar", default=None,
+                        help="suspension: trading calendar parquet (default runtime/data/u0/pit)")
+    parser.add_argument("--out-dir", default=None,
+                        help="suspension: write a new versioned artifact here instead of "
+                             "runtime/data/u0/pit (staging, intervals, manifest)")
     args = parser.parse_args()
     if not args.allow_network:
         print("refusing to run: --allow-network was not confirmed")

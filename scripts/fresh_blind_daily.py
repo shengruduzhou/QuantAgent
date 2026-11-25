@@ -47,6 +47,18 @@ KEY_PATH = ROOT / ".unblind_key"
 CERT = REPO / "runtime/reports/h028/forward_fidelity_certificate.json"
 PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 ELIG = REPO / "runtime/reports/h028/fresh_first_read_eligibility.json"
+CALENDAR = REPO / "runtime/data/u0/pit/trading_calendar.parquet"
+DELISTINGS = REPO / "runtime/data/u0/pit/delisting_intervals.parquet"
+MASTER = REPO / "runtime/data/u0/security_master.parquet"
+# FRESH cohort = names that printed in the 30 sessions-ish before the freeze
+# (immutable pre-window rows, so it cannot ratchet); the expected set per day is
+# that cohort restricted by the security master's listing and dated delisting.
+COHORT_LOOKBACK_DAYS = 30
+# Dated halt evidence: the U0 snapshot set (2019-09..2026-07) plus the FRESH
+# refresh written by step_suspension_refresh (u0_pit_intervals --out-dir).
+SUSPENSION_FRESH = REPO / "runtime/data/u0/pit/suspension_fresh"
+SUSPENSION_DIRS = [REPO / "runtime/data/u0/pit", SUSPENSION_FRESH]
+SUSPENSION_REFRESH_BUDGET_S = 900
 CANDIDATES = ["S1_production_2sleeve_rank_k10", "S2_L1_c3ema07_minhold10",
               "S3_L1_D1_regime_w05", "S4_RW1_4state"]
 
@@ -82,7 +94,106 @@ def ledger_append(record: dict) -> str:
     return record["record_hash"]
 
 
+def with_suspension_rows(bt_panel: pd.DataFrame, start: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
+    """Add explicit SUSPENDED rows for evidenced halts; report every other gap.
+
+    The silver panel omits halted sessions, and the strict simulator fails
+    closed on a held or targeted name without a bar. Only gaps inside a dated
+    halt snapshot become (untradeable, carried-close) rows; unexplained and
+    delisted gaps stay missing so the simulator still refuses them.
+    """
+    from quantagent.data.ashare.session_gaps import (
+        augment_with_suspended_rows, gap_summary, load_suspension_evidence)
+
+    cal = pd.read_parquet(CALENDAR)
+    sessions = pd.to_datetime(cal.loc[cal["is_open"].astype(bool), "trade_date"])
+    intervals, covered = load_suspension_evidence(SUSPENSION_DIRS)
+    delist = pd.read_parquet(DELISTINGS) if DELISTINGS.exists() else pd.DataFrame()
+    dated = (delist.dropna(subset=["effective_start"]).set_index("symbol")["effective_start"]
+             if len(delist) else None)
+    out, classified = augment_with_suspended_rows(
+        bt_panel, sessions=sessions, suspension_intervals=intervals,
+        snapshot_dates=covered, delisting_dates=dated, start=start)
+    report = gap_summary(classified)
+    report["halt_snapshot_sessions"] = [str(covered[0].date()), str(covered[-1].date())] \
+        if covered else None
+    report["unexplained"] = [
+        f"{r.symbol}@{r.trade_date.date()}" for r in
+        classified[classified["classification"] != "SUSPENDED"].itertuples()][:200]
+    return out, report
+
+
+FRESH_START = pd.Timestamp("2026-05-19")
+
+
+def integrity_report(start: pd.Timestamp = FRESH_START) -> dict:
+    """Completeness of the FRESH window (holes, coverage, ST provenance).
+
+    A panel whose max date is current can still have interior holes or rows
+    with unverified ST provenance; "current" is never reported without this.
+    """
+    from quantagent.data.ashare.session_gaps import load_suspension_evidence, panel_integrity
+
+    cols = ["symbol", "trade_date", "is_st_provenance"]
+    panel = pd.read_parquet(PANEL, columns=cols,
+                            filters=[("trade_date", ">=", start - pd.Timedelta(days=60))])
+    cal = pd.read_parquet(CALENDAR)
+    sessions = pd.to_datetime(cal.loc[cal["is_open"].astype(bool), "trade_date"])
+    intervals, covered = load_suspension_evidence(SUSPENSION_DIRS)
+    delist = pd.read_parquet(DELISTINGS) if DELISTINGS.exists() else pd.DataFrame()
+    dated = (delist.dropna(subset=["effective_start"]).set_index("symbol")["effective_start"]
+             if len(delist) else None)
+    return panel_integrity(panel, sessions=sessions, suspension_intervals=intervals,
+                           snapshot_dates=covered, delisting_dates=dated, start=start,
+                           expected_universe=fresh_expected_universe(panel, dated, start),
+                           vendor_empty=_vendor_empty_names())
+
+
+def _vendor_empty_names() -> list[str]:
+    """Names the last catch-up merge recorded as vendor-empty without evidence."""
+    path = PANEL.parent / "vendor_empty_no_evidence.json"
+    if not path.exists():
+        return []
+    return list(json.loads(path.read_text()).get("symbols", []))
+
+
+def fresh_expected_universe(panel: pd.DataFrame, dated, start: pd.Timestamp) -> pd.DataFrame | None:
+    """Security-master rows for the frozen FRESH cohort (None if no master)."""
+    if not MASTER.exists():
+        return None
+    master = pd.read_parquet(MASTER, columns=["symbol", "listing_date", "delisting_date"])
+    dates = pd.to_datetime(panel["trade_date"])
+    pre = panel[(dates < start) & (dates >= start - pd.Timedelta(days=COHORT_LOOKBACK_DAYS))]
+    cohort = set(pre["symbol"].astype(str))
+    uni = master[master["symbol"].astype(str).isin(cohort)].copy()
+    if dated is not None and len(dated):
+        latest = pd.to_datetime(pd.Series(dated)).groupby(level=0).max()
+        extra = uni["symbol"].map(latest)
+        uni["delisting_date"] = pd.to_datetime(uni["delisting_date"]).fillna(extra)
+    return uni
+
+
+def step_suspension_refresh(dry: bool) -> dict:
+    """Fetch recent dated halt snapshots into SUSPENSION_FRESH (resumable)."""
+    if dry:
+        return {"status": "SKIPPED_DRY_RUN"}
+    start = (pd.Timestamp(date.today()) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+    cmd = [sys.executable, str(REPO / "scripts/u0_pit_intervals.py"), "suspension",
+           "--allow-network", "--start", start, "--out-dir", str(SUSPENSION_FRESH),
+           "--max-minutes", str(SUSPENSION_REFRESH_BUDGET_S / 60)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=SUSPENSION_REFRESH_BUDGET_S + 120, cwd=REPO)
+    except subprocess.TimeoutExpired:
+        return {"status": "PARTIAL", "note": "halt snapshot refresh timed out; gaps stay unexplained"}
+    status = {0: "OK", 73: "SKIPPED_LOCKED", 75: "PARTIAL"}.get(r.returncode, "FAILED")
+    return {"status": status, "returncode": r.returncode,
+            "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
+
+
 TOPUP_BUDGET_S = 1800
+#: Step statuses that make a daily run unhealthy (PARTIAL = incomplete evidence).
+FAILED_STATUSES = ("FAILED", "STALE", "INCOMPLETE", "PARTIAL")
 
 
 def step_update_data(dry: bool) -> dict:
@@ -104,7 +215,9 @@ def step_update_data(dry: bool) -> dict:
         last_avail = cst.normalize() if cst.hour * 60 + cst.minute >= 16 * 60 \
             else cst.normalize() - pd.Timedelta(days=1)
         if panel_max >= last_avail:
-            return {"status": "OK", "note": "panel already current (no fetch needed)"}
+            # max date only: completeness is judged by step_freshness/integrity
+            return {"status": "OK", "note": "panel max date current (no fetch needed); "
+                                            "completeness reported by freshness.integrity"}
     except Exception as e:
         return {"status": "FAILED", "error": f"panel read failed: {str(e)[:120]}"}
     try:
@@ -128,8 +241,18 @@ def step_freshness() -> dict:
     dates = pd.read_parquet(PANEL, columns=["trade_date"])["trade_date"]
     pmax = pd.to_datetime(dates).max()
     lag_days = (pd.Timestamp(date.today()) - pmax).days
-    return {"status": "OK" if lag_days <= 4 else "STALE",
-            "panel_max": str(pmax.date()), "lag_calendar_days": int(lag_days)}
+    out = {"status": "OK" if lag_days <= 4 else "STALE",
+           "panel_max": str(pmax.date()), "lag_calendar_days": int(lag_days)}
+    try:
+        integrity = integrity_report()
+    except Exception as e:  # an unmeasurable panel is not a complete one
+        integrity = {"status": "INCOMPLETE", "problems": [f"INTEGRITY_CHECK_FAILED {str(e)[:160]}"]}
+    out["integrity"] = {k: integrity.get(k) for k in (
+        "status", "problems", "window", "min_date_coverage", "interior_unexplained",
+        "trailing_unexplained_symbols", "st_provenance_unverified_by_exchange")}
+    if out["status"] == "OK" and integrity.get("status") != "COMPLETE":
+        out["status"] = "INCOMPLETE"
+    return out
 
 
 def step_score() -> dict:
@@ -209,6 +332,8 @@ def step_books_and_fills(today: str) -> dict:
                             filters=[("trade_date", ">=", fresh_start - pd.Timedelta(days=210))])
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     bt_panel = panel[panel["trade_date"] >= fresh_start - pd.Timedelta(days=10)].copy()
+    bt_panel, gap_report = with_suspension_rows(bt_panel, fresh_start - pd.Timedelta(days=10))
+    (ROOT / "risk_logs" / f"{today}_session_gaps.json").write_text(json.dumps(gap_report, indent=1))
     flags = bt_panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
     trade_dates = sorted(bt_panel["trade_date"].unique())
 
@@ -233,7 +358,8 @@ def step_books_and_fills(today: str) -> dict:
 
     key = get_key()
     fern = Fernet(key)
-    out = {"status": "OK", "books": {}, "s4": "PENDING_S4_LEARNER_PORT (regime_weight_meta daily port spec'd)"}
+    out = {"status": "OK", "books": {}, "s4": "PENDING_S4_LEARNER_PORT (regime_weight_meta daily port spec'd)",
+           "session_gaps": {k: v for k, v in gap_report.items() if k != "unexplained"}}
     sector = pd.read_parquet(REPO / bp.SECTOR)
     for cand, col, style in (("S1", "s1", "plain"), ("S2", "c3_ema", "minhold"), ("S3", "s3", "minhold")):
         score = m[["trade_date", "symbol"]].copy()
@@ -276,9 +402,13 @@ def main() -> int:
     today = datetime.now().strftime("%Y-%m-%d")
 
     steps = {"data": step_update_data(args.dry_run)}
+    steps["suspension_evidence"] = step_suspension_refresh(args.dry_run)
     steps["freshness"] = step_freshness()
     steps["scoring"] = step_score()
-    ok_so_far = steps["freshness"]["status"] == "OK" and steps["scoring"]["status"].startswith(("OK", "READY"))
+    # INCOMPLETE (holes / unverified ST) still lets the books run: the strict
+    # simulator refuses exactly the held/targeted names without a bar, and the
+    # run is counted as failed below so it is never reported healthy.
+    ok_so_far = steps["freshness"]["status"] in ("OK", "INCOMPLETE") and steps["scoring"]["status"].startswith(("OK", "READY"))
     if ok_so_far:
         try:
             steps["weights"] = step_books_and_fills(today)
@@ -296,8 +426,20 @@ def main() -> int:
         "prediction_status": steps["scoring"]["status"],
         "order_generation_status": steps["weights"]["status"],
         "fill_status": steps["fills"]["status"],
+        # hashed into the ledger: orders produced on INCOMPLETE data stay visible as such
+        "freshness_status": steps["freshness"]["status"],
+        "panel_integrity_status": (steps["freshness"].get("integrity") or {}).get("status",
+                                                                                "NOT_MEASURED"),
+        "panel_integrity_problems": list(
+            (steps["freshness"].get("integrity") or {}).get("problems") or []),
+        "suspension_evidence_status": steps.get("suspension_evidence", {}).get("status"),
+        # exit 73: another refresh held the lock, so today's halts were NOT refreshed
+        "skipped_job_count": sum(1 for s in steps.values()
+                                 if str(s.get("status", "")).startswith("SKIPPED")),
+        "skipped_jobs": sorted(k for k, s in steps.items()
+                               if str(s.get("status", "")).startswith("SKIPPED")),
         "risk_event_count": 0,
-        "failed_job_count": sum(1 for s in steps.values() if s["status"] in ("FAILED", "STALE")),
+        "failed_job_count": sum(1 for s in steps.values() if s["status"] in FAILED_STATUSES),
         "schema_hash": sha(PANEL.read_bytes()[:1 << 20])[:16],  # header slice fingerprint
         "runtime_s": round(time.time() - t0, 1),
         "ram_gib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2, 2),

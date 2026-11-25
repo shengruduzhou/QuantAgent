@@ -130,11 +130,12 @@ def test_staging_lock_is_exclusive(tmp_path):
 SYMS = ["000001.SZ", "000002.SZ", "600000.SH"]
 
 
-def _seed_panel(path: Path) -> None:
+def _seed_panel(path: Path, syms=None) -> None:
+    syms = SYMS if syms is None else syms
     dates = pd.bdate_range("2026-07-27", "2026-08-05")
     rows = []
     for d in dates:
-        for s in SYMS:
+        for s in syms:
             rows.append(
                 {
                     "symbol": s, "trade_date": d, "open": 10.0, "high": 10.0, "low": 10.0,
@@ -169,15 +170,25 @@ class _Vendor:
         self.klines = _VendorKlines(sessions, fail)
 
 
-def _wire(monkeypatch, tmp_path, vendor):
+def _wire(monkeypatch, tmp_path, vendor, syms=None):
+    syms = SYMS if syms is None else syms
     panel = tmp_path / "market_panel.parquet"
-    _seed_panel(panel)
+    _seed_panel(panel, syms)
     cal = tmp_path / "trading_calendar.parquet"
     _calendar("2026-07-01", "2026-12-31").to_parquet(cal, index=False)
     monkeypatch.setattr(catchup, "PANEL", panel)
     monkeypatch.setattr(catchup, "STAGING", tmp_path / "_staging_catchup")
     monkeypatch.setattr(catchup, "CALENDAR", cal)
-    monkeypatch.setattr(catchup, "_load_required_st_evidence", lambda path: type("E", (), {"source_sha256": "x", "mode": "test"})())
+    master = tmp_path / "security_master.parquet"
+    pd.DataFrame({"symbol": syms, "listing_date": pd.Timestamp("2000-01-04"),
+                  "delisting_date": pd.NaT}).to_parquet(master, index=False)
+    monkeypatch.setattr(catchup, "MASTER", master)
+    monkeypatch.setattr(catchup, "DELISTINGS", tmp_path / "absent_delistings.parquet")
+    monkeypatch.setattr(catchup, "SUSPENSION_DIRS", [])
+    monkeypatch.setattr(catchup, "COHORT_START", pd.Timestamp("2026-08-01"))
+    evidence = type("E", (), {"source_sha256": "x", "mode": "test",
+                              "frame": pd.DataFrame({"symbol": syms})})()
+    monkeypatch.setattr(catchup, "_load_required_st_evidence", lambda path: evidence)
     monkeypatch.setattr(catchup, "_require_st_coverage", lambda *a, **k: None)
 
     def _attach(frame, evidence):
@@ -228,3 +239,133 @@ def test_main_fetch_failure_retries_instead_of_dropping_symbol(monkeypatch, tmp_
     assert catchup.main() == 0
     out = pd.read_parquet(panel)
     assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])
+
+
+def test_seed_is_not_the_names_printed_on_the_last_date(monkeypatch, tmp_path):
+    """Audit F2: a cohort name halted on panel_max used to drop out of every later seed."""
+    panel = _wire(monkeypatch, tmp_path, _Vendor(_sessions()))
+    frame = pd.read_parquet(panel)
+    frame = frame[~((frame["symbol"] == "600000.SH") & (frame["trade_date"] == "2026-08-05"))]
+    frame.to_parquet(panel, index=False)
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    assert "600000.SH" in set(out.loc[out["trade_date"] == "2026-11-24", "symbol"])
+
+
+class _EmptyFor(_VendorKlines):
+    """Successful empty answers for ``empty`` names (not exceptions)."""
+
+    def __init__(self, sessions, empty=(), fail=()):
+        super().__init__(sessions, fail)
+        self.empty = set(empty)
+
+    def get(self, sym, period, count, adjust, as_dataframe):
+        if sym in self.empty and sym not in self.fail:
+            return pd.DataFrame(columns=["trade_date", "open", "high", "low", "close",
+                                         "volume", "amount"])
+        return super().get(sym, period, count, adjust, as_dataframe)
+
+
+BIG = [f"{i:06d}.SZ" for i in range(1, 30)] + ["600000.SH"]   # 30 seeds
+
+
+def test_failure_retries_but_vendor_empty_does_not_block(monkeypatch, tmp_path):
+    """Review blocker: a dark (listed, empty, no halt) name must not stall the merge;
+    a failed request still must."""
+    import json
+
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"}, fail={"000002.SZ"})
+    panel = _wire(monkeypatch, tmp_path, vendor, BIG)
+    monkeypatch.setattr(catchup.rep.time, "sleep", lambda s: None)
+    before = panel.read_bytes()
+    assert catchup.main() == catchup.EXIT_RETRY          # 000002.SZ raised
+    assert panel.read_bytes() == before
+    vendor.klines.fail.clear()                            # only the empty name left
+    assert catchup.main() == 0
+    out = pd.read_parquet(panel)
+    window = out[out["trade_date"] > "2026-08-05"]
+    assert set(window["symbol"]) == set(BIG) - {"600000.SH"}
+    record = json.loads((panel.parent / catchup.VENDOR_EMPTY_NAME).read_text())
+    assert record["symbols"] == ["600000.SH"]
+    assert record["classification"] == "MISSING_UNEXPLAINED"
+
+
+def test_coverage_guard_denominator_is_names_that_returned_data(monkeypatch, tmp_path):
+    # 29 of 30 seeds return a full window, 1 is dark: merges (29/30 >= 93%)
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    _wire(monkeypatch, tmp_path, vendor, BIG)
+    assert catchup.main() == 0
+    # ...but a latest-N hole among names that DID return data is still refused
+    vendor2 = _Vendor(_sessions())
+    vendor2.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    (tmp_path / "b").mkdir()
+    panel = _wire(monkeypatch, tmp_path / "b", vendor2, BIG)
+    real_fetch = catchup.rep.fetch_with_retry
+    monkeypatch.setattr(catchup.rep, "fetch_with_retry",
+                        lambda tf, sym, attempts=3, count=40: real_fetch(tf, sym, attempts, 40))
+    before = panel.read_bytes()
+    with pytest.raises(SystemExit, match="sessions below"):
+        catchup.main()
+    assert panel.read_bytes() == before
+
+
+def test_empty_name_under_a_dated_halt_is_not_flagged(monkeypatch, tmp_path):
+    import json
+
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty={"600000.SH"})
+    panel = _wire(monkeypatch, tmp_path, vendor, BIG)
+    pit = tmp_path / "halts"
+    (pit / "_suspension").mkdir(parents=True)
+    pd.DataFrame({"symbol": ["600000.SH"], "effective_start": [pd.Timestamp("2026-08-01")],
+                  "effective_end": [pd.Timestamp("2026-12-31")],
+                  "suspension_reason": ["r"]}).to_parquet(pit / "suspension_intervals.parquet")
+    monkeypatch.setattr(catchup, "SUSPENSION_DIRS", [pit])
+    assert catchup.main() == 0
+    assert json.loads((panel.parent / catchup.VENDOR_EMPTY_NAME).read_text())["symbols"] == []
+
+
+def test_seed_universe_modes_and_dated_delistings():
+    panel = pd.DataFrame({"symbol": ["000001.SZ", "600000.SH"],
+                          "trade_date": pd.to_datetime(["2026-05-01", "2026-05-01"])})
+    master = pd.DataFrame({
+        "symbol": ["000001.SZ", "600000.SH", "600001.SH", "688001.SH", "920001.BJ"],
+        "listing_date": pd.to_datetime(["2000-01-04"] * 3 + ["2027-03-01", "2020-01-02"]),
+        "delisting_date": pd.to_datetime([pd.NaT, pd.NaT, pd.NaT, pd.NaT, pd.NaT])})
+    delist = pd.DataFrame({"symbol": ["600000.SH"], "effective_start": ["2026-06-01"]})
+    seed, rep = catchup.seed_universe(panel, master, delist, "2026-11-25", "2026-11-25")
+    assert seed == ["000001.SZ"] and rep["excluded_dated_delisting"] == 1
+    seed, _ = catchup.seed_universe(panel, master, None, "2026-11-25", "2026-11-25", mode="master")
+    assert seed == ["000001.SZ", "600000.SH", "600001.SH"]      # not yet listed / BSE excluded
+
+
+def test_partial_publish_of_the_last_session_is_retried_not_merged(monkeypatch, tmp_path):
+    """Review repro: only some seed names return the last session (INC-P1).
+    Against names that returned data it looks complete; against the seed it is not."""
+    class _Partial(_EmptyFor):
+        def get(self, sym, period, count, adjust, as_dataframe):
+            frame = super().get(sym, period, count, adjust, as_dataframe)
+            if sym != "000001.SZ":                       # 1 of 3 names has the last bar
+                frame = frame[frame["trade_date"] < self.sessions[-1]]
+            return frame
+
+    vendor = _Vendor(_sessions())
+    vendor.klines = _Partial(_sessions())
+    panel = _wire(monkeypatch, tmp_path, vendor)
+    before = panel.read_bytes()
+    with pytest.raises(SystemExit, match="sessions below"):   # returned-data guard
+        catchup.main()
+    assert panel.read_bytes() == before
+
+
+def test_many_empty_answers_are_retried_not_merged(monkeypatch, tmp_path):
+    """Review repro: 2 of the seed return the full window (incl. the last session),
+    the rest answer empty. 2/2 passes the returned-data guard; the seed guard refuses."""
+    vendor = _Vendor(_sessions())
+    vendor.klines = _EmptyFor(_sessions(), empty=set(BIG[2:]))
+    panel = _wire(monkeypatch, tmp_path, vendor, BIG)
+    before = panel.read_bytes()
+    assert catchup.main() == catchup.EXIT_RETRY
+    assert panel.read_bytes() == before
