@@ -152,6 +152,32 @@ def step_score() -> dict:
             "returncode": r.returncode, "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
 
 
+def holdings_in_effect(book: pd.DataFrame, trade_dates: list) -> pd.Series:
+    """Target weights in effect on the last panel session.
+
+    A signal at session T executes on the next session T+1, so the book in
+    effect on the last session ``D`` is the latest signal whose execution
+    session is ``<= D``; a signal on ``D`` itself is not yet in effect. This
+    reproduces the record the frozen FRESH runner wrote before #119
+    (``_apply_delay(book, trade_dates, 1).iloc[-1]``), so the blinded
+    ``weights_hash`` keeps its pre-registered meaning.
+    """
+    if book is None or book.empty:
+        raise ValueError("empty book: no signal sessions to place in effect")
+    sessions = pd.DatetimeIndex(sorted(pd.to_datetime(list(trade_dates))))
+    if sessions.empty:
+        raise ValueError("no trade sessions")
+    signal = pd.DatetimeIndex(pd.to_datetime(book.index))
+    exec_pos = sessions.searchsorted(signal) + 1
+    live = exec_pos < len(sessions)
+    if not live.any():
+        raise ValueError("no signal has reached its execution session yet")
+    rows = pd.Series(range(len(book)), dtype="int64")[live]
+    effective = pd.Series(rows.to_numpy(), index=sessions[exec_pos[live]])
+    effective = effective[~effective.index.duplicated(keep="last")].sort_index()
+    return book.iloc[int(effective.iloc[-1])]
+
+
 def step_books_and_fills(today: str) -> dict:
     """S1/S2/S3 decisions + strict-sim fills on the FRESH window; performance
     is encrypted, never printed. S4 learner port = recorded PENDING item.
@@ -216,8 +242,10 @@ def step_books_and_fills(today: str) -> dict:
         book = build_book(eligible_rank_lists(p),
                           "minhold" if style == "minhold" else "plain",
                           {"n": 10})
-        tw = bp._apply_delay(book, trade_dates, 1)
-        last_w = tw.iloc[-1]
+        # Targets stay on their signal sessions: the strict simulator is the
+        # sole owner of the T-close -> next-session clock (#119, 2026-08-11).
+        tw = book.sort_index()
+        last_w = holdings_in_effect(book, trade_dates)
         holdings = {s: round(float(v), 4) for s, v in last_w[last_w > 0].items()}
         (ROOT / "order_logs" / f"{today}_{cand}_weights.json").write_text(
             json.dumps({"date": today, "candidate": cand, "target_weights": holdings}, indent=1))
