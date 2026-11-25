@@ -131,6 +131,38 @@ def test_sh_rows_before_dated_evidence_are_labelled_unknown_not_aborted(monkeypa
         mod.build_panel(panel.assign(is_st_provenance="dated_pit_st_evidence"), new, evidence)
 
 
+def test_symbol_without_st_value_is_excluded_whole_not_aborting_the_run(tmp_path) -> None:
+    """Five SH names last printed 2026-05-18: no FRESH broadcast row to carry and no
+    dated SH evidence before 07-27. They must be excluded whole (no interior hole,
+    no invented ST state) while the other names still backfill."""
+    from quantagent.data.providers.st_pit import load_historical_st_evidence
+
+    mod = _load()
+    carried, dark = "601088.SH", "600037.SH"
+    panel = pd.DataFrame([_row(s, pd.Timestamp("2026-07-01")) for s in (carried, dark)])
+    panel["is_st"] = False
+    panel["is_st_provenance"] = ["current_snapshot_broadcast", "tickflow:exchanges.get_instruments"]
+    panel["st_evidence_sha256"] = None
+    days = [pd.Timestamp("2026-07-20"), pd.Timestamp("2026-07-27")]
+    new = pd.DataFrame([_row(s, d, 10.1) for s in (carried, dark) for d in days])[
+        ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]]
+    path = tmp_path / "ev.parquet"
+    pd.DataFrame({"symbol": [carried, dark], "start_date": ["2026-07-27"] * 2,
+                  "end_date": ["2026-11-24"] * 2, "is_st": [False, False],
+                  "available_at": ["2026-07-27T00:00:00+08:00"] * 2}).to_parquet(path)
+    evidence = load_historical_st_evidence(path)
+
+    kept, excluded = mod.split_symbols_without_st_value(panel, new, evidence)
+    assert excluded == [dark]
+    assert set(kept["symbol"]) == {carried}                  # excluded whole, both days
+    merged = mod.build_panel(panel, kept, evidence)           # no SystemExit
+    added = merged[merged["source"] == "tickflow_backfill_trailing"]
+    assert set(added["symbol"]) == {carried} and len(added) == 2
+    # nothing to exclude when every uncovered symbol has a carriable row
+    _, none = mod.split_symbols_without_st_value(panel, new[new["symbol"] == carried], evidence)
+    assert none == []
+
+
 def test_output_refuses_live_panel_dir_and_existing(tmp_path) -> None:
     import pytest
 

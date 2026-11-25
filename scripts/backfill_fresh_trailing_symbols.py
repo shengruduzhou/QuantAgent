@@ -219,6 +219,31 @@ def st_coverage_summary(rows: pd.DataFrame, evidence_frame: pd.DataFrame) -> dic
     }
 
 
+def split_symbols_without_st_value(panel: pd.DataFrame, new: pd.DataFrame,
+                                   evidence) -> tuple[pd.DataFrame, list[str]]:
+    """Drop, whole, every symbol that has rows dated evidence cannot cover and no
+    existing broadcast/unknown row to carry an ``is_st`` value from.
+
+    Such a symbol cannot be attributed without inventing ST state. Dropping only its
+    uncovered rows would leave an interior hole, so the whole symbol stays out and
+    remains MISSING_UNEXPLAINED in the integrity report; the rest of the backfill
+    proceeds instead of the entire run being refused.
+    """
+    if new is None or not len(new):
+        return new, []
+    frame = new.copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    covered = coverage_mask(frame, evidence.frame).to_numpy(dtype=bool)
+    uncovered_symbols = set(frame.loc[~covered, "symbol"].astype(str))
+    prov = panel["is_st_provenance"].astype("string").fillna("")
+    carriable = set(panel.loc[prov.str.contains("broadcast"), "symbol"].astype(str))
+    excluded = sorted(uncovered_symbols - carriable)
+    if not excluded:
+        return new, []
+    keep = ~new["symbol"].astype(str).isin(excluded)
+    return new.loc[keep].reset_index(drop=True), excluded
+
+
 def build_panel(panel: pd.DataFrame, new: pd.DataFrame, evidence) -> pd.DataFrame:
     """Merge verified rows with catch-up semantics (ST attach + shared flags)."""
     new = new.copy()
@@ -322,6 +347,9 @@ def main() -> int:
         report["mode"] = "fetch"
         report["fetch"] = fetch(plan, staging, panel_max, args.limit)
     new, verdict = verify(plan, staging, calendar, halts, panel_max)
+    new, excluded = split_symbols_without_st_value(panel, new, evidence)
+    verdict["excluded_no_st_value_to_carry"] = excluded
+    verdict["verified_rows_after_exclusion"] = int(len(new)) if new is not None else 0
     verdict["st_coverage_of_verified_rows"] = st_coverage_summary(new, evidence.frame)
     report["verify"] = verdict
     if (args.output or args.apply) and len(new):
