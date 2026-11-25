@@ -396,6 +396,11 @@ def main() -> int:
         "panel_integrity_problems": list(
             (steps["freshness"].get("integrity") or {}).get("problems") or []),
         "suspension_evidence_status": steps.get("suspension_evidence", {}).get("status"),
+        # exit 73: another refresh held the lock, so today's halts were NOT refreshed
+        "skipped_job_count": sum(1 for s in steps.values()
+                                 if str(s.get("status", "")).startswith("SKIPPED")),
+        "skipped_jobs": sorted(k for k, s in steps.items()
+                               if str(s.get("status", "")).startswith("SKIPPED")),
         "risk_event_count": 0,
         "failed_job_count": sum(1 for s in steps.values() if s["status"] in FAILED_STATUSES),
         "schema_hash": sha(PANEL.read_bytes()[:1 << 20])[:16],  # header slice fingerprint

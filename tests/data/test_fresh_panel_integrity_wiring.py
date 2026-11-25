@@ -181,3 +181,31 @@ def test_remediation_timeout_is_recorded_not_raised(monkeypatch) -> None:
     problems: list[str] = []
     assert health.run_remediation(["scripts/catchup_panel_chunked.py"], 7200, problems) is None
     assert problems == ["AUTO_REMEDIATION_TIMEOUT scripts/catchup_panel_chunked.py after 7200s"]
+
+
+def test_ledger_counts_a_locked_halt_refresh_explicitly(tmp_path, monkeypatch) -> None:
+    import json
+
+    daily = _load("fresh_blind_daily")
+    root = tmp_path / "root"
+    panel = tmp_path / "panel.parquet"
+    pd.DataFrame({"symbol": ["600000.SH"], "trade_date": [pd.Timestamp("2026-11-24")]}).to_parquet(panel)
+    for name, value in (("REPO", tmp_path), ("ROOT", root), ("LEDGER", root / "l.jsonl"),
+                        ("KEY_PATH", root / ".key"), ("PANEL", panel)):
+        monkeypatch.setattr(daily, name, value)
+
+    class R:
+        returncode = 73
+        stdout = stderr = ""
+    monkeypatch.setattr(daily.subprocess, "run", lambda *a, **k: R())
+    monkeypatch.setattr(daily, "step_update_data", lambda dry: {"status": "OK"})
+    monkeypatch.setattr(daily, "step_freshness", lambda: {
+        "status": "OK", "integrity": {"status": "COMPLETE", "problems": []}})
+    monkeypatch.setattr(daily, "step_score", lambda: {"status": "OK"})
+    monkeypatch.setattr(daily, "step_books_and_fills", lambda today: {"status": "OK", "books": {}})
+    monkeypatch.setattr(sys, "argv", ["fresh_blind_daily.py"])
+    daily.main()
+    record = json.loads((root / "l.jsonl").read_text().strip().splitlines()[-1])
+    assert record["suspension_evidence_status"] == "SKIPPED_LOCKED"
+    assert record["skipped_job_count"] == 1
+    assert record["skipped_jobs"] == ["suspension_evidence"]
