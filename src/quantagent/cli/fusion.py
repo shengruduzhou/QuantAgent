@@ -40,6 +40,7 @@ from quantagent.research.trial_ledger import (
     TrialRecord,
     config_hash,
     current_git_hash,
+    outcome_records,
 )
 
 COMMAND_ID = "search-factor-fusion"
@@ -84,7 +85,9 @@ def _validate_factor_names_for_leakage(names: tuple[str, ...]) -> None:
         )
 
 
-def _fusion_trials(result: Any, *, run_config_hash: str, git_hash: str) -> list[TrialRecord]:
+def _fusion_trials(
+    result: Any, *, run_id: str, run_config_hash: str, git_hash: str
+) -> list[TrialRecord]:
     """One ledger entry per enumerated candidate -- controls included, as they count into N."""
     windows = result.fold_windows
     window = {
@@ -93,7 +96,6 @@ def _fusion_trials(result: Any, *, run_config_hash: str, git_hash: str) -> list[
     }
     preferred = result.preferred.candidate_id if result.preferred is not None else None
     frontier = set(result.frontier)
-    run_id = f"{run_config_hash[:12]}@{result.generated_at}"
     records: list[TrialRecord] = []
     for candidate in result.candidates:
         if candidate.candidate_id == preferred:
@@ -269,18 +271,8 @@ def search_factor_fusion(
     def _progress(stage: str, completed: int, total: int) -> None:
         typer.echo(f"[{completed} / {total}] {stage}")
 
-    # Family history first; a damaged ledger fails closed before any compute.
-    ledger = TrialLedger()
-    ledger_summary = ledger.family_summary(FAMILY_NONLINEAR_FUSION)
-    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
-    result = run_fusion_search(
-        factor_panel=factor_panel,
-        forward_panel=forward_panel,
-        config=config,
-        benchmark_returns=benchmark_returns,
-        progress=_progress,
-        prior_family_trials=prior_family_trials,
-    )
+    from quantagent.fusion import build_scheme_specs
+
     run_config_hash = config_hash(
         {
             "command": COMMAND_ID,
@@ -290,12 +282,55 @@ def search_factor_fusion(
             "config": dataclasses.asdict(config),
         }
     )
-    trials = _fusion_trials(result, run_config_hash=run_config_hash, git_hash=current_git_hash())
-    ledger.record_trials(trials)
+    git_hash = current_git_hash()
+    run_id = f"{run_config_hash[:12]}@{pd.Timestamp.now(tz='UTC').isoformat()}"
+    # The enumerated search space is fixed before evaluation, so it is reserved here.
+    planned = len(
+        build_scheme_specs(
+            list(names),
+            top_k=config.top_k,
+            include_genetic=config.include_genetic,
+            random_controls=config.random_controls,
+            single_factor_baselines=config.single_factor_baselines,
+            seed=config.seed,
+        )
+    )
+    dates = pd.to_datetime(factor_panel["trade_date"], errors="coerce")
+    # Reserve the run and read prior N under one lock, before compute: crashed
+    # runs still count (GOVERNANCE R6); a damaged ledger fails closed.
+    ledger = TrialLedger()
+    ledger_summary = ledger.begin_run(
+        FAMILY_NONLINEAR_FUSION,
+        run_id=run_id,
+        command=COMMAND_ID,
+        git_hash=git_hash,
+        config_hash=run_config_hash,
+        window={"panelStart": str(dates.min())[:10], "panelEnd": str(dates.max())[:10]},
+        planned_trials=planned,
+    )
+    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
+    try:
+        result = run_fusion_search(
+            factor_panel=factor_panel,
+            forward_panel=forward_panel,
+            config=config,
+            benchmark_returns=benchmark_returns,
+            progress=_progress,
+            prior_family_trials=prior_family_trials,
+        )
+    except BaseException as exc:
+        ledger.record_trial(
+            FAMILY_NONLINEAR_FUSION, f"{run_id}:failed", COMMAND_ID, git_hash, run_config_hash,
+            {}, {"error": f"{type(exc).__name__}: {exc}"}, "failed", trials=0,
+        )
+        raise
+    outcomes = _fusion_trials(result, run_id=run_id, run_config_hash=run_config_hash, git_hash=git_hash)
+    ledger.record_trials(outcome_records(outcomes, planned_trials=planned, run_id=run_id))
+    run_trials = max(planned, len(outcomes))
     ledger_summary.update(
         {
-            "runTrials": len(trials),
-            "cumulativeTrials": prior_family_trials + len(trials),
+            "runTrials": run_trials,
+            "cumulativeTrials": prior_family_trials + run_trials,
             "dsrTrials": int(result.dsr_trials),
         }
     )

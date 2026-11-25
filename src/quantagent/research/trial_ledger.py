@@ -8,12 +8,16 @@ times was deflated as if it were the first search ever made (ROADMAP P1-4).
 
 This module is the single source for that count:
 
-* ``record_trial`` / ``record_trials`` append one JSONL entry per evaluated
-  trial (an arm, a fusion blend, a factor candidate) -- including controls,
-  failures and rejections. Nothing is ever rewritten or deleted.
+* ``begin_run`` reserves a run's planned trials *before* any compute, and
+  reads the prior family N under the same lock, so a run that later crashes
+  still counts (GOVERNANCE R6) and two concurrent runs cannot both miss each
+  other's reservation. Outcome entries (one per arm / blend / candidate,
+  controls, failures and rejections included) then carry ``trials=0`` unless
+  they exceed the reservation. Nothing is ever rewritten or deleted.
 * ``family_count(family)`` is the cumulative N: a *declared historical
-  baseline* (the pre-ledger count, with its source) plus every recorded entry.
-  Callers add their own run's trials on top; they can never lower N.
+  baseline* (the pre-ledger count, with its source) plus the sum of every
+  entry's ``trials``. Callers add their own run's trials on top; they can
+  never lower N.
 * Entries are hash-chained (``previous_hash`` -> ``record_hash``) so an edited,
   reordered or removed line breaks verification at exactly that point, and
   ``family_count`` refuses to count a chain that does not verify.
@@ -194,6 +198,7 @@ _BODY_KEYS = (
     "sequence",
     "family",
     "trial_id",
+    "trials",
     "command",
     "git_hash",
     "config_hash",
@@ -216,8 +221,13 @@ class TrialRecord:
     window: Mapping[str, Any]
     metrics: Mapping[str, Any] = field(default_factory=dict)
     verdict: str = ""
+    #: Multiple-testing trials this entry adds to the family N. ``1`` for a
+    #: plain trial; ``0`` for an outcome whose trial was reserved by ``begin_run``.
+    trials: int = 1
 
     def __post_init__(self) -> None:
+        if isinstance(self.trials, bool) or int(self.trials) != self.trials or int(self.trials) < 0:
+            raise ValueError("trials must be a non-negative integer")
         missing = [
             name
             for name in ("family", "trial_id", "command", "git_hash", "config_hash")
@@ -273,6 +283,8 @@ class TrialLedger:
         window: Mapping[str, Any],
         metrics: Mapping[str, Any] | None = None,
         verdict: str = "",
+        *,
+        trials: int = 1,
     ) -> dict[str, Any]:
         return self.record_trials(
             [
@@ -285,6 +297,7 @@ class TrialLedger:
                     window=dict(window),
                     metrics=dict(metrics or {}),
                     verdict=verdict,
+                    trials=trials,
                 )
             ]
         )[0]
@@ -301,46 +314,109 @@ class TrialLedger:
         if not trials:
             return []
         with self._exclusive_lock():
+            return self._append_locked(trials)
+
+    def begin_run(
+        self,
+        family: str,
+        *,
+        run_id: str,
+        command: str,
+        git_hash: str,
+        config_hash: str,
+        window: Mapping[str, Any],
+        planned_trials: int,
+    ) -> dict[str, Any]:
+        """Atomically read the prior family N and reserve this run's trials.
+
+        Under one lock: verify the chain, compute ``prior`` (baseline + every
+        entry's trials), append a ``started`` entry carrying ``planned_trials``.
+        The returned ``priorFamilyTrials`` is what the run adds its own trials
+        to for DSR; the reservation is already durable if the run then dies.
+        """
+        if self._write_failure is not None:
+            raise TrialLedgerWriteUnavailable(self._write_failure)
+        baseline = HISTORICAL_BASELINES.get(family)
+        base = baseline.count if baseline is not None else 0
+        with self._exclusive_lock():
             report = self.verify()
             if not report["valid"]:
                 raise TrialLedgerCorruption(
-                    f"refusing to append to {self.path}: {report.get('reason')} at line "
-                    f"{report.get('brokenAt')}; inspect the file before recording more trials"
+                    f"refusing to start a run on {self.path}: {report.get('reason')} at line "
+                    f"{report.get('brokenAt')}"
                 )
-            previous = str(report["headHash"])
-            sequence = int(report["records"])
-            recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            entries: list[dict[str, Any]] = []
-            for trial in trials:
-                body = {
-                    "schema": SCHEMA_VERSION,
-                    "sequence": sequence,
-                    "family": trial.family,
-                    "trial_id": trial.trial_id,
-                    "command": trial.command,
-                    "git_hash": trial.git_hash,
-                    "config_hash": trial.config_hash,
-                    "window": _clean(dict(trial.window)),
-                    "metrics": _clean(dict(trial.metrics)),
-                    "verdict": str(trial.verdict),
-                    "recorded_at": recorded_at,
-                }
-                record_hash = _record_hash(previous, body)
-                entries.append({**body, "previous_hash": previous, "record_hash": record_hash})
-                previous = record_hash
-                sequence += 1
-            blob = "".join(_canonical_json(entry) + "\n" for entry in entries).encode("utf-8")
-            fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
-            try:
-                written = os.write(fd, blob)
-                if written != len(blob):
-                    raise OSError(f"short write: {written} of {len(blob)} bytes")
-                os.fsync(fd)
-            except OSError as exc:
-                self._write_failure = f"trial ledger write failed ({exc}); restart to re-read {self.path}"
-                raise TrialLedgerWriteUnavailable(self._write_failure) from exc
-            finally:
-                os.close(fd)
+            recorded = self._sum_trials(family)
+            head = report["headHash"]
+            self._append_locked(
+                [
+                    TrialRecord(
+                        family=family,
+                        trial_id=f"{run_id}:start",
+                        command=command,
+                        git_hash=git_hash,
+                        config_hash=config_hash,
+                        window=dict(window),
+                        metrics={"plannedTrials": int(planned_trials)},
+                        verdict="started",
+                        trials=int(planned_trials),
+                    )
+                ]
+            )
+        return {
+            "ledgerPath": str(self.path),
+            "family": family,
+            "runId": run_id,
+            "historicalBaseline": base,
+            "historicalBaselineSource": baseline.source if baseline is not None else "none declared",
+            "recordedBeforeRun": recorded,
+            "priorFamilyTrials": base + recorded,
+            "plannedTrials": int(planned_trials),
+            "headHashBeforeRun": head,
+        }
+
+    def _append_locked(self, trials: list[TrialRecord]) -> list[dict[str, Any]]:
+        """Chain ``trials`` onto the verified tail. Caller holds the lock."""
+        report = self.verify()
+        if not report["valid"]:
+            raise TrialLedgerCorruption(
+                f"refusing to append to {self.path}: {report.get('reason')} at line "
+                f"{report.get('brokenAt')}; inspect the file before recording more trials"
+            )
+        previous = str(report["headHash"])
+        sequence = int(report["records"])
+        recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        entries: list[dict[str, Any]] = []
+        for trial in trials:
+            body = {
+                "schema": SCHEMA_VERSION,
+                "sequence": sequence,
+                "family": trial.family,
+                "trial_id": trial.trial_id,
+                "trials": int(trial.trials),
+                "command": trial.command,
+                "git_hash": trial.git_hash,
+                "config_hash": trial.config_hash,
+                "window": _clean(dict(trial.window)),
+                "metrics": _clean(dict(trial.metrics)),
+                "verdict": str(trial.verdict),
+                "recorded_at": recorded_at,
+            }
+            record_hash = _record_hash(previous, body)
+            entries.append({**body, "previous_hash": previous, "record_hash": record_hash})
+            previous = record_hash
+            sequence += 1
+        blob = "".join(_canonical_json(entry) + "\n" for entry in entries).encode("utf-8")
+        fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            written = os.write(fd, blob)
+            if written != len(blob):
+                raise OSError(f"short write: {written} of {len(blob)} bytes")
+            os.fsync(fd)
+        except OSError as exc:
+            self._write_failure = f"trial ledger write failed ({exc}); restart to re-read {self.path}"
+            raise TrialLedgerWriteUnavailable(self._write_failure) from exc
+        finally:
+            os.close(fd)
         return entries
 
     # -- reading --------------------------------------------------------------
@@ -393,8 +469,12 @@ class TrialLedger:
         rows = [json.loads(line) for line in self._lines() if line]
         return [row for row in rows if family is None or row.get("family") == family]
 
+    def _sum_trials(self, family: str) -> int:
+        return sum(int(row.get("trials", 0)) for row in self.read(family))
+
     def recorded_count(self, family: str) -> int:
-        return len(self.read(family))
+        """Trials recorded for ``family`` (sum of entry weights, not line count)."""
+        return self._sum_trials(family)
 
     def family_count(self, family: str) -> int:
         """Cumulative N for ``family``: declared historical baseline + recorded trials.
@@ -425,6 +505,48 @@ class TrialLedger:
         }
 
 
+def outcome_records(
+    outcomes: Sequence[TrialRecord], *, planned_trials: int, run_id: str
+) -> list[TrialRecord]:
+    """Outcome entries for a run whose trials ``begin_run`` already reserved.
+
+    Each outcome is re-weighted to ``trials=0`` (it was counted by the
+    reservation); if the run evaluated more than it reserved, one ``overflow``
+    entry adds the difference, so N can only go up.
+    """
+    records = [
+        TrialRecord(
+            family=item.family,
+            trial_id=item.trial_id,
+            command=item.command,
+            git_hash=item.git_hash,
+            config_hash=item.config_hash,
+            window=item.window,
+            metrics=item.metrics,
+            verdict=item.verdict,
+            trials=0,
+        )
+        for item in outcomes
+    ]
+    extra = len(outcomes) - int(planned_trials)
+    if extra > 0 and outcomes:
+        first = outcomes[0]
+        records.append(
+            TrialRecord(
+                family=first.family,
+                trial_id=f"{run_id}:overflow",
+                command=first.command,
+                git_hash=first.git_hash,
+                config_hash=first.config_hash,
+                window=first.window,
+                metrics={"plannedTrials": int(planned_trials), "evaluatedTrials": len(outcomes)},
+                verdict="overflow",
+                trials=extra,
+            )
+        )
+    return records
+
+
 __all__ = [
     "FAMILY_NONLINEAR_FUSION",
     "FAMILY_RDAGENT_FACTOR",
@@ -439,4 +561,5 @@ __all__ = [
     "config_hash",
     "current_git_hash",
     "default_trial_ledger_path",
+    "outcome_records",
 ]

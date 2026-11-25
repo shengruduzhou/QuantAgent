@@ -23,7 +23,7 @@ def test_legacy_helper_is_explicitly_research_only(monkeypatch) -> None:
 
     result = governed_module.run_governed_model_comparison(
         pd.DataFrame(),
-        ("factor_a", "factor_b"),
+        ("factor_a", "factor_b"), prior_family_trials=0
     )
 
     assert result.governance["stage4Governed"] is False

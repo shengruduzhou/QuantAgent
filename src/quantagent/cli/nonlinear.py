@@ -11,18 +11,22 @@ from quantagent.cli._utils import app, default_reports_root
 from quantagent.research.governed_model_comparison import run_governed_model_comparison
 from quantagent.research.model_comparison import ComparisonConfig, save_comparison_report
 from quantagent.research.nonlinear_promotion import NonlinearPromotionConfig
+from quantagent.research.model_comparison import planned_trial_count
 from quantagent.research.trial_ledger import (
     FAMILY_NONLINEAR_FUSION,
     TrialLedger,
     TrialRecord,
     config_hash,
     current_git_hash,
+    outcome_records,
 )
 
 COMMAND_ID = "audit-nonlinear-factors"
 
 
-def _comparison_trials(comparison, *, run_config_hash: str, git_hash: str) -> list[TrialRecord]:
+def _comparison_trials(
+    comparison, *, run_id: str, run_config_hash: str, git_hash: str
+) -> list[TrialRecord]:
     """One ledger entry per evaluated arm, failed arms included."""
     windows = comparison.fold_windows
     window = {
@@ -32,7 +36,6 @@ def _comparison_trials(comparison, *, run_config_hash: str, git_hash: str) -> li
             (str(w["validEnd"]) for w in windows if w.get("role") == "selection"), default=""
         ),
     }
-    run_id = f"{run_config_hash[:12]}@{comparison.generated_at}"
     records: list[TrialRecord] = []
     for arm in comparison.arms:
         verdict = "champion" if arm.name == comparison.champion else str(arm.status)
@@ -131,19 +134,6 @@ def audit_nonlinear_factors(
     def _progress(stage: str, completed: int, total: int) -> None:
         typer.echo(f"[{completed}/{total}] {stage}")
 
-    # Family history first: a damaged ledger fails closed before any compute,
-    # because an undercounted N is exactly what the ledger exists to prevent.
-    ledger = TrialLedger()
-    ledger_summary = ledger.family_summary(FAMILY_NONLINEAR_FUSION)
-    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
-    governed = run_governed_model_comparison(
-        panel,
-        names,
-        comparison_config=comparison_config,
-        promotion_config=promotion_config,
-        progress=_progress,
-        prior_family_trials=prior_family_trials,
-    )
     run_config_hash = config_hash(
         {
             "command": COMMAND_ID,
@@ -153,14 +143,48 @@ def audit_nonlinear_factors(
             "promotion": dataclasses.asdict(promotion_config),
         }
     )
-    trials = _comparison_trials(
-        governed.comparison, run_config_hash=run_config_hash, git_hash=current_git_hash()
+    git_hash = current_git_hash()
+    run_id = f"{run_config_hash[:12]}@{pd.Timestamp.now(tz='UTC').isoformat()}"
+    dates = pd.to_datetime(panel["trade_date"], errors="coerce")
+    planned = planned_trial_count()
+    # Reserve this run's arms and read the prior family N under one lock, before
+    # any compute: a crashed run still counts (GOVERNANCE R6), concurrent runs
+    # cannot miss each other's reservation, and a damaged ledger fails closed.
+    ledger = TrialLedger()
+    ledger_summary = ledger.begin_run(
+        FAMILY_NONLINEAR_FUSION,
+        run_id=run_id,
+        command=COMMAND_ID,
+        git_hash=git_hash,
+        config_hash=run_config_hash,
+        window={"panelStart": str(dates.min())[:10], "panelEnd": str(dates.max())[:10]},
+        planned_trials=planned,
     )
-    ledger.record_trials(trials)
+    prior_family_trials = int(ledger_summary["priorFamilyTrials"])
+    try:
+        governed = run_governed_model_comparison(
+            panel,
+            names,
+            comparison_config=comparison_config,
+            promotion_config=promotion_config,
+            progress=_progress,
+            prior_family_trials=prior_family_trials,
+        )
+    except BaseException as exc:
+        ledger.record_trial(
+            FAMILY_NONLINEAR_FUSION, f"{run_id}:failed", COMMAND_ID, git_hash, run_config_hash,
+            {}, {"error": f"{type(exc).__name__}: {exc}"}, "failed", trials=0,
+        )
+        raise
+    outcomes = _comparison_trials(
+        governed.comparison, run_id=run_id, run_config_hash=run_config_hash, git_hash=git_hash
+    )
+    ledger.record_trials(outcome_records(outcomes, planned_trials=planned, run_id=run_id))
+    run_trials = max(planned, len(outcomes))
     ledger_summary.update(
         {
-            "runTrials": len(trials),
-            "cumulativeTrials": prior_family_trials + len(trials),
+            "runTrials": run_trials,
+            "cumulativeTrials": prior_family_trials + run_trials,
             "dsrTrials": int(governed.comparison.dsr_trials),
         }
     )

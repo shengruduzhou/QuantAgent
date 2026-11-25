@@ -100,7 +100,7 @@ def run_governed_model_comparison(
     promotion_config: NonlinearPromotionConfig | None = None,
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
-    prior_family_trials: int = 0,
+    prior_family_trials: int,
 ) -> GovernedModelComparison:
     """Legacy-compatible research path; never grants production eligibility.
 
@@ -193,6 +193,9 @@ def run_stage4_governed_model_comparison(
         config=cfg,
         regime_by_date=regime_by_date,
         progress=progress,
+        # Stage-4 multiplicity comes from its own ExperimentLedger, applied below
+        # via with_cumulative_trial_count (ROADMAP P1-4: to be unified).
+        prior_family_trials=0,
     )
     if experiment.declared_trial_count < comparison.n_trials:
         raise RuntimeError(

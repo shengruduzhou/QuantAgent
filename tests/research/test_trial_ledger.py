@@ -331,9 +331,15 @@ def test_search_factor_fusion_feeds_cumulative_family_n_to_dsr(tmp_path, monkeyp
     assert gate["statisticalEvidence"]["dsrTrials"] == expected
     ledger = TrialLedger(tmp_path / "state" / "trial_ledger.jsonl")
     assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == expected
-    fusion_rows = [row for row in ledger.read() if row["command"] == "search-factor-fusion"]
+    fusion_rows = [
+        row for row in ledger.read()
+        if row["command"] == "search-factor-fusion" and row["verdict"] != "started"
+    ]
     assert len(fusion_rows) == n_trials  # controls are trials too
     assert any(row["metrics"]["isControl"] for row in fusion_rows)
+    # The run reserved its whole enumerated space before compute.
+    start = [row for row in ledger.read() if row["trial_id"].endswith(":start")]
+    assert len(start) == 1 and start[0]["trials"] == n_trials
 
 
 def test_family_history_can_only_raise_fusion_n(tmp_path) -> None:
@@ -350,7 +356,7 @@ def test_family_history_can_only_raise_fusion_n(tmp_path) -> None:
             random_controls=2, single_factor_baselines=2,
         ),
     )
-    plain = run_fusion_search(**kwargs)
+    plain = run_fusion_search(**kwargs, prior_family_trials=0)
     with_history = run_fusion_search(**kwargs, prior_family_trials=134)
     assert plain.n_trials == with_history.n_trials
     assert plain.dsr_trials == plain.n_trials
@@ -409,8 +415,124 @@ def test_rd_agent_loop_records_every_candidate_into_its_family(tmp_path, monkeyp
     assert summary["cumulativeTrials"] == base + len(feedback)
     ledger = TrialLedger(tmp_path / "state" / "trial_ledger.jsonl")
     rows = ledger.read(FAMILY_RDAGENT_FACTOR)
+    rows = [row for row in rows if row["verdict"] != "started"]
     assert len(rows) == len(feedback)
     # Rejections are trials too.
     assert {row["verdict"] for row in rows} <= {"accepted", "rejected"}
     assert sum(row["verdict"] == "accepted" for row in rows) == sum(bool(r["decision"]) for r in feedback)
     assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
+
+
+def test_family_history_is_a_required_argument() -> None:
+    """New callers fail closed: they must state where family N comes from."""
+    from quantagent.fusion import run_fusion_search
+    from quantagent.research.governed_model_comparison import run_governed_model_comparison
+    from quantagent.research.model_comparison import run_model_comparison
+
+    panel = pd.DataFrame({"trade_date": [], "symbol": [], "f1": [], "f2": [], "forward_return_5d": []})
+    for call in (
+        lambda: run_model_comparison(panel, ["f1", "f2"]),
+        lambda: run_governed_model_comparison(panel, ["f1", "f2"]),
+        lambda: run_fusion_search(factor_panel=panel, forward_panel=panel, config=None),
+    ):
+        with pytest.raises(TypeError, match="prior_family_trials"):
+            call()
+
+
+def _begin_worker(path: str, worker: int, out: "mp.Queue") -> None:
+    ledger = TrialLedger(path)
+    summary = ledger.begin_run(
+        FAMILY_NONLINEAR_FUSION, run_id=f"w{worker}", command="concurrency-test",
+        git_hash="deadbeef", config_hash="c" * 64, window={}, planned_trials=5,
+    )
+    out.put(summary["priorFamilyTrials"])
+
+
+def test_concurrent_begin_run_reservations_cannot_undercount(tmp_path: Path) -> None:
+    """Prior N is read and the reservation written under one lock."""
+    path = tmp_path / "ledger.jsonl"
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=_begin_worker, args=(str(path), w, queue)) for w in range(6)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    priors = sorted(queue.get(timeout=5) for _ in procs)
+    base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
+    assert priors == [base + 5 * k for k in range(6)]  # every run saw every earlier reservation
+    assert TrialLedger(path).family_count(FAMILY_NONLINEAR_FUSION) == base + 30
+
+
+def test_outcome_records_never_double_count_and_overflow_only_adds(tmp_path: Path) -> None:
+    from quantagent.research.trial_ledger import outcome_records
+
+    ledger = TrialLedger(tmp_path / "ledger.jsonl")
+    base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
+    ledger.begin_run(FAMILY_NONLINEAR_FUSION, run_id="r", command="t", git_hash="g",
+                     config_hash="c", window={}, planned_trials=3)
+    ledger.record_trials(outcome_records([_trial(i) for i in range(3)], planned_trials=3, run_id="r"))
+    assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base + 3
+    ledger.begin_run(FAMILY_NONLINEAR_FUSION, run_id="s", command="t", git_hash="g",
+                     config_hash="c", window={}, planned_trials=2)
+    ledger.record_trials(outcome_records([_trial(i) for i in range(4)], planned_trials=2, run_id="s"))
+    assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base + 3 + 4
+
+
+def test_a_comparison_that_raises_mid_run_still_counts(tmp_path, monkeypatch) -> None:
+    """GOVERNANCE R6: failures are recorded. Fails on the record-after-success design."""
+    import quantagent.research.model_comparison as model_comparison
+    from quantagent.cli import app
+
+    _cheap_gbm(monkeypatch)
+    monkeypatch.setenv("QUANTAGENT_HOME", str(tmp_path))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash after arms were scored")
+
+    monkeypatch.setattr(model_comparison, "_decide", boom)
+    panel = tmp_path / "panel.parquet"
+    _comparison_panel(panel)
+    result = CliRunner().invoke(
+        app,
+        ["audit-nonlinear-factors", "--panel-path", str(panel), "--factor-names", "f1,f2",
+         "--n-folds", "4", "--holdout-folds", "1", "--valid-size-days", "15",
+         "--min-train-days", "60", "--output-dir", str(tmp_path / "out")],
+    )
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    ledger = TrialLedger(tmp_path / "state" / "trial_ledger.jsonl")
+    planned = model_comparison.planned_trial_count()
+    base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
+    assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base + planned
+    verdicts = [row["verdict"] for row in ledger.read()]
+    assert verdicts == ["started", "failed"]
+
+
+def test_a_fusion_search_that_raises_mid_run_still_counts(tmp_path, monkeypatch) -> None:
+    import quantagent.fusion.search as fusion_search
+    from quantagent.cli import app
+
+    monkeypatch.setenv("QUANTAGENT_HOME", str(tmp_path))
+    factors, forwards = _fusion_inputs(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash during blend evaluation")
+
+    monkeypatch.setattr(fusion_search, "evaluate_blend", boom)
+    result = CliRunner().invoke(
+        app,
+        ["search-factor-fusion", "--factor-panel-path", str(factors),
+         "--forward-returns-path", str(forwards), "--factor-names", "alpha_a,alpha_b",
+         "--output-dir", str(tmp_path / "fusion"), "--n-folds", "2", "--top-k", "5",
+         "--min-train-days", "100", "--min-test-days", "40", "--no-include-genetic",
+         "--random-controls", "2", "--single-factor-baselines", "2"],
+    )
+    assert result.exit_code != 0
+    ledger = TrialLedger(tmp_path / "state" / "trial_ledger.jsonl")
+    rows = ledger.read()
+    assert [row["verdict"] for row in rows] == ["started", "failed"]
+    assert rows[0]["trials"] > 0
+    base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
+    assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base + rows[0]["trials"]

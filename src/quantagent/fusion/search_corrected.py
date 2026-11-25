@@ -116,7 +116,7 @@ def _corrected_robustness(
 
 
 def run_fusion_search(
-    *args: Any, prior_family_trials: int = 0, **kwargs: Any
+    *args: Any, prior_family_trials: int, **kwargs: Any
 ) -> FusionSearchResult:
     """Run the existing governed search and correct its OOS statistical record.
 

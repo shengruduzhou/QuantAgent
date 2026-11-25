@@ -90,7 +90,7 @@ def _config(**overrides) -> FusionSearchConfig:
 def test_search_recovers_the_only_predictive_factor():
     factor_panel, forward_panel = _build_panel()
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     preferred = result.preferred
     assert preferred is not None
@@ -102,7 +102,7 @@ def test_search_recovers_the_only_predictive_factor():
 def test_single_factor_baselines_rank_by_true_predictive_power():
     factor_panel, forward_panel = _build_panel()
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     by_id = {item.candidate_id: item for item in result.candidates}
     assert (
@@ -124,7 +124,7 @@ def test_pure_noise_panel_does_not_produce_a_robust_winner():
     """With no predictive factor, no candidate may claim strong robustness."""
     factor_panel, forward_panel = _build_panel(signal_strength=0.0, seed=99)
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     preferred = result.preferred
     assert preferred is not None
@@ -142,7 +142,7 @@ def test_noise_panel_cannot_manufacture_excess_return_after_costs():
     """
     factor_panel, forward_panel = _build_panel(signal_strength=0.0, seed=123)
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     excess = [
         float(item.metrics["excessReturn"])
@@ -161,7 +161,7 @@ def test_noise_panel_excess_straddles_zero_without_costs():
     result = run_fusion_search(
         factor_panel=factor_panel,
         forward_panel=forward_panel,
-        config=_config(transaction_cost_bps=0.0),
+        config=_config(transaction_cost_bps=0.0), prior_family_trials=0
     )
     excess = [
         float(item.metrics["excessReturn"])
@@ -180,7 +180,7 @@ def test_n_trials_equals_the_number_of_enumerated_candidates():
     factor_panel, forward_panel = _build_panel()
     config = _config(random_controls=6, single_factor_baselines=3)
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=config
+        factor_panel=factor_panel, forward_panel=forward_panel, config=config, prior_family_trials=0
     )
     assert result.n_trials == len(result.candidates)
     # 4 fitted schemes + 6 random controls + 3 single-factor baselines.
@@ -193,12 +193,12 @@ def test_more_controls_deflate_the_robustness_of_the_same_winner():
     lean = run_fusion_search(
         factor_panel=factor_panel,
         forward_panel=forward_panel,
-        config=_config(random_controls=0, single_factor_baselines=0),
+        config=_config(random_controls=0, single_factor_baselines=0), prior_family_trials=0
     )
     wide = run_fusion_search(
         factor_panel=factor_panel,
         forward_panel=forward_panel,
-        config=_config(random_controls=12, single_factor_baselines=3),
+        config=_config(random_controls=12, single_factor_baselines=3), prior_family_trials=0
     )
     lean_dsr = {
         item.candidate_id: item.robustness_breakdown["deflatedSharpeProbability"]
@@ -423,7 +423,7 @@ def test_search_fails_loudly_on_a_panel_that_is_too_short():
     factor_panel, forward_panel = _build_panel(n_dates=40, n_symbols=10)
     with pytest.raises(ValueError, match="too short"):
         run_fusion_search(
-            factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+            factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
         )
 
 
@@ -432,14 +432,14 @@ def test_search_rejects_duplicate_panel_keys():
     duplicated = pd.concat([factor_panel, factor_panel.head(1)], ignore_index=True)
     with pytest.raises(ValueError, match="duplicate"):
         run_fusion_search(
-            factor_panel=duplicated, forward_panel=forward_panel, config=_config()
+            factor_panel=duplicated, forward_panel=forward_panel, config=_config(), prior_family_trials=0
         )
 
 
 def test_search_reports_the_benchmark_it_actually_used():
     factor_panel, forward_panel = _build_panel()
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     assert result.benchmark_mode == "universe_equal_weight"
 
@@ -462,7 +462,7 @@ def test_build_scheme_specs_counts_every_control():
 def test_save_fusion_artifacts_writes_a_hashed_manifest(tmp_path):
     factor_panel, forward_panel = _build_panel()
     result = run_fusion_search(
-        factor_panel=factor_panel, forward_panel=forward_panel, config=_config()
+        factor_panel=factor_panel, forward_panel=forward_panel, config=_config(), prior_family_trials=0
     )
     paths = save_fusion_artifacts(result, output_dir=tmp_path / "run")
     manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))

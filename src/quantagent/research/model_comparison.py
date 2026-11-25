@@ -531,6 +531,11 @@ def _default_arms(include_gbm: bool) -> list[_ArmSpec]:
     return arms
 
 
+def planned_trial_count() -> int:
+    """Arms ``run_model_comparison`` will evaluate on this host (reserved before compute)."""
+    return len(_default_arms(include_gbm=_lightgbm_available()))
+
+
 def _lightgbm_available() -> bool:
     try:
         import lightgbm  # noqa: F401
@@ -571,13 +576,15 @@ def run_model_comparison(
     config: ComparisonConfig | None = None,
     regime_by_date: pd.Series | None = None,
     progress: Callable[[str, int, int], None] | None = None,
-    prior_family_trials: int = 0,
+    prior_family_trials: int,
 ) -> ComparisonReport:
     """Fit every arm on identical folds and return one verdict.
 
     ``prior_family_trials`` is the family's cumulative trial count *before* this
     run (``TrialLedger.family_count``). It can only raise the N fed to the
-    deflated Sharpe ratio, never lower it below this run's arm count.
+    deflated Sharpe ratio, never lower it below this run's arm count. It is
+    required (no default): a new caller must say where its family history comes
+    from, and ``0`` is an explicit, reviewable statement that it has none.
 
     ``panel`` must carry ``trade_date``, ``symbol``, ``config.label_column`` and
     the ``factor_columns``. Outcome labels may be missing on inference dates;

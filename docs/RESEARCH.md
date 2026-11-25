@@ -44,7 +44,7 @@ X1 **5**（`runtime/archives/audits/round31/audit/quant/notes.md`）⇒ **非线
 （`$QUANTAGENT_HOME/state/trial_ledger.jsonl`）。`family_count(family)` = 声明的历史基线（附出处）+ 已入账试验；
 基线：`nonlinear_fusion` = 146（即上述逐项计数），`rdagent_factor_synthesis` = 153（runtime/ 下 7 份
 `rd_agent_task_feedback.json` 的候选数之和，下界）。`audit-nonlinear-factors`、`search-factor-fusion`、
-`synthesize-factors-v7`（RD-Agent）每次运行把每个试验（含对照/失败/拒绝）写入台账，DSR 的 N =
+`synthesize-factors-v7`（RD-Agent）在计算前锁内预留本次试验（失败的运行也计数），再把每个试验（含对照/失败/拒绝）写入台账，DSR 的 N =
 累计数（只能比单次运行的 N 大）；产物 `promotion_gate.json` / `trial_ledger.json` 记录所用 N 与台账头哈希。
 RD-Agent 接受门本身是非重叠 IC t 值（不算 DSR），累计 N 供下游 DSR/选择使用。引用数字时 N 取台账值。
 

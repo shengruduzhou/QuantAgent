@@ -48,8 +48,10 @@
 4. **持久化多重检验台账。** 接到 `audit-nonlinear-factors`、`search-factor-fusion`、RD-Agent；
    DSR 一律用同族累计 N。**Cycle 32 已完成（待独立审计）**：`research.trial_ledger`
    （`$QUANTAGENT_HOME/state/trial_ledger.jsonl`，append-only、哈希链、跨进程锁、校验失败即拒绝计数）；
-   三条命令每次运行逐试验入账（含对照、失败与拒绝），DSR 用 `历史基线 + 已入账 + 本次`。
-   剩余：Stage-4 `ExperimentLedger`（无 CLI 调用方）与 legacy GA（`--legacy-ga`）尚未接入。
+   三条命令在计算**之前**于同一把锁内读取前序 N 并预留本次试验（崩溃的运行照样计数，并发运行不会互相漏计），
+   逐试验结果入账（含对照、失败与拒绝），DSR 用 `历史基线 + 已入账 + 本次`；`prior_family_trials` 为必填参数。
+   **仍未完成（open）**：GP 符号回归 / LLM 公式脚本 / 非 RD 的 `synthesize_factors`（`--legacy-ga`）各族尚未入账；
+   Stage-4 `ExperimentLedger`（无 CLI 调用方）与 `TrialLedger` 待统一为一个台账。
 5. **退役 v7 银层面板。** 约 89 处引用改为经 `quant_paths` 的单一常量指向 U0/r29，随后归档。
 6. **重叠标签 IC 的 t 值**改用非重叠 cohort（`factors/evaluation`）；筛选用 |t| ≥ 3。
 7. **纸面 ↔ 回测摩擦一致。** 纸面目前按收盘价零滑点成交；需要统一成本/冲击模型，并让纸面风控

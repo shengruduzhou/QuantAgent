@@ -95,7 +95,7 @@ class TestVerdicts:
         panel, regime = _panel("interaction", seed=7)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         assert report.champion != LINEAR_BASELINE
@@ -115,7 +115,7 @@ class TestVerdicts:
         panel, regime = _panel("additive", seed=11)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         assert report.verdict == "hypothesis_rejected"
@@ -126,7 +126,7 @@ class TestVerdicts:
         panel, regime = _panel("noise", seed=23)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         assert report.verdict == "hypothesis_rejected"
@@ -182,7 +182,7 @@ class TestGates:
         panel, regime = _panel("noise", seed=23)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         for test in report.incremental:
@@ -195,7 +195,7 @@ class TestHoldoutDiscipline:
         config = _config(holdout_folds=1)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=config, regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=config, regime_by_date=regime, prior_family_trials=0
         )
 
         roles = [window["role"] for window in report.fold_windows]
@@ -218,7 +218,7 @@ class TestHoldoutDiscipline:
     def test_selection_ic_ignores_holdout_dates(self):
         panel, regime = _panel("interaction", seed=7)
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
         holdout_start = pd.Timestamp(
             next(w["validStart"] for w in report.fold_windows if w["role"] == "holdout")
@@ -233,7 +233,7 @@ class TestDataValidity:
         panel, _ = _panel("additive")
         panel = panel.drop(columns=["forward_return_5d"])
 
-        report = run_model_comparison(panel, ["f1", "f2"], config=_config())
+        report = run_model_comparison(panel, ["f1", "f2"], config=_config(), prior_family_trials=0)
 
         assert report.verdict == "data_invalid"
         assert "forward_return_5d" in report.verdict_reasons[0]
@@ -241,7 +241,7 @@ class TestDataValidity:
     def test_too_few_folds_is_data_invalid(self):
         panel, _ = _panel("additive", n_days=120)
 
-        report = run_model_comparison(panel, ["f1", "f2"], config=_config())
+        report = run_model_comparison(panel, ["f1", "f2"], config=_config(), prior_family_trials=0)
 
         assert report.verdict == "data_invalid"
         assert "fold" in report.verdict_reasons[0]
@@ -249,7 +249,7 @@ class TestDataValidity:
     def test_single_factor_is_data_invalid(self):
         panel, _ = _panel("additive")
 
-        report = run_model_comparison(panel, ["f1"], config=_config())
+        report = run_model_comparison(panel, ["f1"], config=_config(), prior_family_trials=0)
 
         assert report.verdict == "data_invalid"
 
@@ -272,7 +272,7 @@ class TestFailureClassification:
         monkeypatch.setattr(mc, "_gbm_fit_predict", constant_gbm)
 
         report = mc.run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         # The baseline itself returns a constant, so there is nothing to compare
@@ -292,7 +292,7 @@ class TestFailureClassification:
         monkeypatch.setattr(mc, "_gbm_fit_predict", boom)
 
         report = mc.run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         assert report.verdict == "pipeline_failed"
@@ -304,7 +304,7 @@ class TestReporting:
         panel, regime = _panel("interaction", seed=7)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         by_name = {arm.name: arm for arm in report.arms}
@@ -317,7 +317,7 @@ class TestReporting:
         panel, regime = _panel("interaction", seed=7)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
         metrics = next(a for a in report.arms if a.status == "measured").selection_metrics
 
@@ -333,7 +333,7 @@ class TestReporting:
         panel, regime = _panel("interaction", seed=7)
 
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         assert report.n_trials == len(report.arms)
@@ -341,7 +341,7 @@ class TestReporting:
     def test_save_writes_a_readable_artifact(self, tmp_path):
         panel, regime = _panel("additive", seed=11)
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
 
         path = save_comparison_report(report, tmp_path)
@@ -373,7 +373,7 @@ class TestArmsCannotImpersonateTheBaseline:
 
     def test_regime_arm_fails_when_no_regime_series_is_supplied(self):
         panel, _ = _panel("interaction", seed=1)
-        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config())
+        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config(), prior_family_trials=0)
 
         regime_arms = [a for a in report.arms if "regime" in a.name]
         assert regime_arms, "expected a regime arm in the roster"
@@ -387,14 +387,14 @@ class TestArmsCannotImpersonateTheBaseline:
         """Guard against over-reach: the arm must still work when it can."""
         panel, regime = _panel("interaction", seed=1)
         report = run_model_comparison(
-            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime
+            panel, ["f1", "f2", "f3"], config=_config(), regime_by_date=regime, prior_family_trials=0
         )
         regime_arms = [a for a in report.arms if "regime" in a.name]
         assert any(a.status == "measured" for a in regime_arms)
 
     def test_a_failed_arm_never_becomes_the_champion(self):
         panel, _ = _panel("interaction", seed=1)
-        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config())
+        report = run_model_comparison(panel, ["f1", "f2", "f3"], config=_config(), prior_family_trials=0)
         failed = {a.name for a in report.arms if a.status == "failed"}
         assert report.champion not in failed
 
@@ -412,7 +412,7 @@ def test_folds_never_reach_a_quarantined_label_window():
         rows.append(pd.DataFrame({"trade_date": date, "symbol": symbols,
                                   "f1": x1, "f2": x2, "forward_return_5d": label}))
     panel = pd.concat(rows, ignore_index=True)
-    report = run_model_comparison(panel, ["f1", "f2"], config=ComparisonConfig(n_folds=3, holdout_folds=1))
+    report = run_model_comparison(panel, ["f1", "f2"], config=ComparisonConfig(n_folds=3, holdout_folds=1), prior_family_trials=0)
     assert report.quarantine_rows_dropped > 0
     import re
 

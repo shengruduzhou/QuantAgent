@@ -167,30 +167,13 @@ def _require_synthesis_label_source(
     )
 
 
-def _record_rd_agent_trials(
-    ledger,
-    summary: dict[str, object],
-    result,
-    *,
-    config,
-    panel,
-    market_panel_path: Path,
-    labels_path: Path | None,
+def _rd_agent_run_identity(
+    *, config, panel, market_panel_path: Path, labels_path: Path | None
 ) -> dict[str, object]:
-    """Append every evaluated RD-Agent candidate (accepted or rejected) to the trial ledger.
-
-    The loop's acceptance gate is a non-overlapping validation IC t-stat, not a
-    DSR; the cumulative family N is recorded so any later DSR/selection on these
-    factors deflates by the whole discovery history, not by one run.
-    """
+    """Run identity for the trial ledger (config hash, scored window, git hash, run id)."""
     import pandas as _pd
 
-    from quantagent.research.trial_ledger import (
-        FAMILY_RDAGENT_FACTOR,
-        TrialRecord,
-        config_hash,
-        current_git_hash,
-    )
+    from quantagent.research.trial_ledger import config_hash, current_git_hash
 
     command_id = "synthesize-factors-v7"
     run_config_hash = config_hash(
@@ -202,13 +185,48 @@ def _record_rd_agent_trials(
         }
     )
     dates = _pd.to_datetime(panel["trade_date"], errors="coerce") if "trade_date" in panel.columns else None
-    window = {
-        "start": str(dates.min().date()) if dates is not None and dates.notna().any() else "",
-        "end": str(dates.max().date()) if dates is not None and dates.notna().any() else "",
-        "validationFraction": float(config.validation_fraction),
+    has_dates = dates is not None and bool(dates.notna().any())
+    return {
+        "command": command_id,
+        "config_hash": run_config_hash,
+        "git_hash": current_git_hash(),
+        "run_id": f"{run_config_hash[:12]}@{_pd.Timestamp.now(tz='UTC').isoformat()}",
+        "window": {
+            "start": str(dates.min().date()) if has_dates else "",
+            "end": str(dates.max().date()) if has_dates else "",
+            "validationFraction": float(config.validation_fraction),
+        },
     }
-    git_hash = current_git_hash()
-    run_id = f"{run_config_hash[:12]}@{_pd.Timestamp.now(tz='UTC').isoformat(timespec='seconds')}"
+
+
+def _rd_agent_candidate_upper_bound(config) -> int:
+    """Most candidates the loop can evaluate; charged when a run dies mid-loop."""
+    per_round = int(config.factors_per_round)
+    if config.use_llm:
+        per_round = max(per_round, int(config.llm_candidates_per_round))
+    return max(1, int(config.rounds) * per_round)
+
+
+def _record_rd_agent_trials(
+    ledger,
+    summary: dict[str, object],
+    result,
+    *,
+    identity: dict[str, object],
+) -> dict[str, object]:
+    """Append every evaluated RD-Agent candidate (accepted or rejected) to the trial ledger.
+
+    The loop's acceptance gate is a non-overlapping validation IC t-stat, not a
+    DSR; the cumulative family N is recorded so any later DSR/selection on these
+    factors deflates by the whole discovery history, not by one run. The run was
+    opened with ``begin_run(planned_trials=0)`` (the candidate count is only
+    known afterwards), so each candidate carries ``trials=1`` here.
+    """
+    import pandas as _pd
+
+    from quantagent.research.trial_ledger import FAMILY_RDAGENT_FACTOR, TrialRecord
+
+    run_id = str(identity["run_id"])
     feedback = result.task_feedback if result.task_feedback is not None else _pd.DataFrame()
     records = []
     for position, row in enumerate(feedback.to_dict("records")):
@@ -216,10 +234,10 @@ def _record_rd_agent_trials(
             TrialRecord(
                 family=FAMILY_RDAGENT_FACTOR,
                 trial_id=f"{run_id}:{position}:{row.get('factor_name', '')}",
-                command=command_id,
-                git_hash=git_hash,
-                config_hash=run_config_hash,
-                window=window,
+                command=str(identity["command"]),
+                git_hash=str(identity["git_hash"]),
+                config_hash=str(identity["config_hash"]),
+                window=dict(identity["window"]),
                 metrics={
                     "train_rank_ic": row.get("train_rank_ic"),
                     "validation_rank_ic": row.get("validation_rank_ic"),
@@ -354,20 +372,36 @@ def synthesize_factors_v7(
             llm_timeout_seconds=llm_timeout_seconds,
             memory_path=(str(memory_path) if memory_path is not None else None),
         )
-        # Family history first; a damaged ledger fails closed before any compute.
+        # Open the run (prior N read under the ledger lock) before any compute;
+        # a damaged ledger fails closed. A run that dies mid-loop is charged the
+        # loop's candidate upper bound, since outcomes may already have been seen.
         from quantagent.research.trial_ledger import FAMILY_RDAGENT_FACTOR, TrialLedger
 
+        identity = _rd_agent_run_identity(
+            config=config, panel=panel, market_panel_path=market_panel_path, labels_path=labels_path
+        )
         trial_ledger = TrialLedger()
-        trial_ledger_summary = trial_ledger.family_summary(FAMILY_RDAGENT_FACTOR)
-        result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
+        trial_ledger_summary = trial_ledger.begin_run(
+            FAMILY_RDAGENT_FACTOR,
+            run_id=str(identity["run_id"]),
+            command=str(identity["command"]),
+            git_hash=str(identity["git_hash"]),
+            config_hash=str(identity["config_hash"]),
+            window=dict(identity["window"]),
+            planned_trials=0,
+        )
+        try:
+            result = synthesize_factors_rd_agent(panel, labels=labels, config=config)
+        except BaseException as exc:
+            trial_ledger.record_trial(
+                FAMILY_RDAGENT_FACTOR, f"{identity['run_id']}:failed", str(identity["command"]),
+                str(identity["git_hash"]), str(identity["config_hash"]), dict(identity["window"]),
+                {"error": f"{type(exc).__name__}: {exc}"}, "failed",
+                trials=_rd_agent_candidate_upper_bound(config),
+            )
+            raise
         trial_ledger_summary = _record_rd_agent_trials(
-            trial_ledger,
-            trial_ledger_summary,
-            result,
-            config=config,
-            panel=panel,
-            market_panel_path=market_panel_path,
-            labels_path=labels_path,
+            trial_ledger, trial_ledger_summary, result, identity=identity
         )
     else:
         config = SymbolicGAConfig(
