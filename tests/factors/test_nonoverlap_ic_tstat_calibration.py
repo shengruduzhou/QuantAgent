@@ -251,3 +251,34 @@ def test_lifecycle_nonoverlap_t_keeps_ineligible_sessions_as_gaps() -> None:
     shifted = nonoverlapping_cohort_t_stat(ic.dropna().reset_index(drop=True), 5)
     assert aligned != pytest.approx(shifted)  # cohort membership matters here
     assert report.nonoverlap_t_stat == pytest.approx(aligned)
+
+
+def test_governance_gate_is_signed_and_rejects_unoriented_negative_factor() -> None:
+    """The gate expects pre-oriented factors: a strong negative factor is rejected."""
+    rng = np.random.default_rng(9)
+    dates = pd.bdate_range("2024-01-02", periods=160)
+    rows = len(dates) * 40
+    frame = pd.DataFrame(
+        {
+            "trade_date": np.repeat(dates, 40),
+            "symbol": np.tile([f"S{i:03d}" for i in range(40)], len(dates)),
+            "factor": rng.normal(size=rows),
+            "adv20_cny": 1e9,
+        }
+    )
+    frame["fwd_5d"] = -0.5 * frame["factor"] + rng.normal(size=rows)
+    loose = dict(
+        min_dates=30, min_symbols_per_date=10, min_mean_rank_ic=-1.0,
+        min_ic_information_ratio=-10.0, min_newey_west_rank_t_stat=-10.0,
+        min_positive_ic_ratio=0.0, max_losing_period_rate=1.0,
+        max_recent_predictive_drift_z=1e9, min_decay_retention=-1e9,
+        max_decay_reversal=-1e9, min_capacity_multiple=0.0,
+    )
+    kwargs = dict(target_return_col="fwd_5d", target_horizon_days=5,
+                  decay_return_columns={5: "fwd_5d"}, config=FactorGateConfig(**loose))
+    negative = evaluate_factor_candidate(frame, factor_name="factor", **kwargs)
+    assert negative.nonoverlap_rank_t_stat < -3.0
+    assert any(r.startswith("nonoverlap_rank_t_stat=") for r in negative.rejection_reasons)
+    oriented = evaluate_factor_candidate(frame.assign(factor=-frame["factor"]), factor_name="factor", **kwargs)
+    assert oriented.nonoverlap_rank_t_stat > 3.0
+    assert not any(r.startswith("nonoverlap_rank_t_stat=") for r in oriented.rejection_reasons)

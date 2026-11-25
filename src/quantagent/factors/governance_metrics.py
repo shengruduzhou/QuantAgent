@@ -290,6 +290,14 @@ def evaluate_factor_candidate(
     promotion_context: FactorPromotionContext | None = None,
     config: FactorGateConfig | None = None,
 ) -> FactorGovernanceReport:
+    """Evaluate one candidate against the pre-promotion gates.
+
+    The factor must be **pre-oriented** (higher value = expected higher
+    return). Like the mean-rank-IC gate, the HAC and non-overlap t gates are
+    one-sided on the signed statistic (``t >= min``); GOVERNANCE R2's
+    ``|t| >= 3`` is applied after orientation, so a strongly negative
+    un-oriented factor is rejected here rather than flipped.
+    """
     cfg = config or FactorGateConfig()
     required = {"trade_date", "symbol", factor_name, target_return_col}
     missing = required - set(frame.columns)
