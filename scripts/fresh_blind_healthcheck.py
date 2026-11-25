@@ -6,7 +6,10 @@ Runs after the daily blind run (cron 17:30 weekdays). Checks, in order:
   1. ledger hash chain VALID;
   2. a daily_run record exists for the last expected trading day;
   3. that record has failed_job_count == 0 and all step statuses OK;
-  4. panel freshness (lag <= 4 calendar days);
+  4. panel freshness (lag <= 4 calendar days) AND completeness of the FRESH
+     window: per-date coverage, unexplained interior holes, names that stopped
+     printing without a dated delisting, ST rows without dated provenance
+     (fresh_blind_daily.integrity_report) -- "current" is not "complete";
   5. fidelity certificate still passes=true (never relaxed silently).
 
 Bounded auto-remediation (recorded, never silent):
@@ -37,6 +40,15 @@ CERT = REPO / "runtime/reports/h028/forward_fidelity_certificate.json"
 
 sys.path.insert(0, str(REPO / "scripts"))
 from fresh_blind_status import verify_chain  # noqa: E402
+
+
+def panel_integrity_problems() -> tuple[list[str], dict]:
+    try:
+        from fresh_blind_daily import integrity_report
+        report = integrity_report()
+    except Exception as e:  # noqa: BLE001 - an unmeasurable panel is unhealthy
+        return [f"PANEL_INTEGRITY_UNMEASURED {type(e).__name__}: {str(e)[:160]}"], {}
+    return [f"PANEL_{p}" for p in report.get("problems", [])], report
 
 
 def log(msg: str) -> None:
@@ -75,6 +87,8 @@ def main() -> int:
     lag = (pd.Timestamp(today) - pmax).days
     if lag > 4:
         problems.append(f"PANEL_STALE max={pmax.date()} lag={lag}d")
+    integrity_problems, integrity = panel_integrity_problems()
+    problems.extend(integrity_problems)
     cert_ok = CERT.exists() and json.loads(CERT.read_text()).get("passes") is True
     if not cert_ok:
         problems.append("FIDELITY_CERT_MISSING_OR_FAILING")
@@ -98,7 +112,9 @@ def main() -> int:
         return 1
     if ALERT.exists():
         ALERT.unlink()
-    log(f"HEALTHY (chain {n} records, panel max {pmax.date()}, cert passes)")
+    log(f"HEALTHY (chain {n} records, panel max {pmax.date()}, window "
+        f"{integrity.get('window')} complete: min coverage {integrity.get('min_date_coverage')}, "
+        "0 unexplained holes, ST provenance dated; cert passes)")
     return 0
 
 

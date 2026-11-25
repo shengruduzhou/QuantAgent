@@ -178,3 +178,24 @@ def test_fresh_books_panel_gets_evidenced_suspension_rows(tmp_path, monkeypatch)
     assert len(out) == len(_panel()) + 1
     assert report["by_classification"] == {"SUSPENDED": 1, "MISSING_UNEXPLAINED": 1}
     assert report["unexplained"] == [f"{HELD}@{SESSIONS[4].date()}"]
+
+
+def test_integrity_is_not_current_when_holes_or_unverified_st_exist() -> None:
+    from quantagent.data.ashare.session_gaps import panel_integrity
+
+    panel = _panel()
+    panel["is_st_provenance"] = "dated_pit_st_evidence"
+    kwargs = dict(sessions=SESSIONS, snapshot_dates=SESSIONS, delisting_dates=None,
+                  start=SESSIONS[0])
+    holed = panel_integrity(panel, suspension_intervals=None, **kwargs)
+    assert holed["status"] == "INCOMPLETE"
+    assert holed["interior_unexplained"] == 2
+    assert holed["min_date_coverage"] == 0.5
+    explained = panel_integrity(
+        panel, suspension_intervals=_halt(HELD, SESSIONS[3], SESSIONS[4]), **kwargs)
+    assert explained["status"] == "COMPLETE", explained["problems"]
+    panel.loc[0, "is_st_provenance"] = "current_snapshot_broadcast"
+    broadcast = panel_integrity(
+        panel, suspension_intervals=_halt(HELD, SESSIONS[3], SESSIONS[4]), **kwargs)
+    assert broadcast["status"] == "INCOMPLETE"
+    assert broadcast["problems"][0].startswith("ST_PROVENANCE_UNVERIFIED 1 rows")

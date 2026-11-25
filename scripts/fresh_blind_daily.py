@@ -118,6 +118,30 @@ def with_suspension_rows(bt_panel: pd.DataFrame, start: pd.Timestamp) -> tuple[p
     return out, report
 
 
+FRESH_START = pd.Timestamp("2026-05-19")
+
+
+def integrity_report(start: pd.Timestamp = FRESH_START) -> dict:
+    """Completeness of the FRESH window (holes, coverage, ST provenance).
+
+    A panel whose max date is current can still have interior holes or rows
+    with unverified ST provenance; "current" is never reported without this.
+    """
+    from quantagent.data.ashare.session_gaps import load_suspension_evidence, panel_integrity
+
+    cols = ["symbol", "trade_date", "is_st_provenance"]
+    panel = pd.read_parquet(PANEL, columns=cols,
+                            filters=[("trade_date", ">=", start - pd.Timedelta(days=60))])
+    cal = pd.read_parquet(CALENDAR)
+    sessions = pd.to_datetime(cal.loc[cal["is_open"].astype(bool), "trade_date"])
+    intervals, covered = load_suspension_evidence(SUSPENSION_DIRS)
+    delist = pd.read_parquet(DELISTINGS) if DELISTINGS.exists() else pd.DataFrame()
+    dated = (delist.dropna(subset=["effective_start"]).set_index("symbol")["effective_start"]
+             if len(delist) else None)
+    return panel_integrity(panel, sessions=sessions, suspension_intervals=intervals,
+                           snapshot_dates=covered, delisting_dates=dated, start=start)
+
+
 def step_suspension_refresh(dry: bool) -> dict:
     """Fetch recent dated halt snapshots into SUSPENSION_FRESH (resumable)."""
     if dry:
@@ -157,7 +181,9 @@ def step_update_data(dry: bool) -> dict:
         last_avail = cst.normalize() if cst.hour * 60 + cst.minute >= 16 * 60 \
             else cst.normalize() - pd.Timedelta(days=1)
         if panel_max >= last_avail:
-            return {"status": "OK", "note": "panel already current (no fetch needed)"}
+            # max date only: completeness is judged by step_freshness/integrity
+            return {"status": "OK", "note": "panel max date current (no fetch needed); "
+                                            "completeness reported by freshness.integrity"}
     except Exception as e:
         return {"status": "FAILED", "error": f"panel read failed: {str(e)[:120]}"}
     try:
@@ -181,8 +207,18 @@ def step_freshness() -> dict:
     dates = pd.read_parquet(PANEL, columns=["trade_date"])["trade_date"]
     pmax = pd.to_datetime(dates).max()
     lag_days = (pd.Timestamp(date.today()) - pmax).days
-    return {"status": "OK" if lag_days <= 4 else "STALE",
-            "panel_max": str(pmax.date()), "lag_calendar_days": int(lag_days)}
+    out = {"status": "OK" if lag_days <= 4 else "STALE",
+           "panel_max": str(pmax.date()), "lag_calendar_days": int(lag_days)}
+    try:
+        integrity = integrity_report()
+    except Exception as e:  # an unmeasurable panel is not a complete one
+        integrity = {"status": "INCOMPLETE", "problems": [f"INTEGRITY_CHECK_FAILED {str(e)[:160]}"]}
+    out["integrity"] = {k: integrity.get(k) for k in (
+        "status", "problems", "window", "min_date_coverage", "interior_unexplained",
+        "trailing_unexplained_symbols", "st_provenance_unverified_by_exchange")}
+    if out["status"] == "OK" and integrity.get("status") != "COMPLETE":
+        out["status"] = "INCOMPLETE"
+    return out
 
 
 def step_score() -> dict:
@@ -307,7 +343,10 @@ def main() -> int:
     steps["suspension_evidence"] = step_suspension_refresh(args.dry_run)
     steps["freshness"] = step_freshness()
     steps["scoring"] = step_score()
-    ok_so_far = steps["freshness"]["status"] == "OK" and steps["scoring"]["status"].startswith(("OK", "READY"))
+    # INCOMPLETE (holes / unverified ST) still lets the books run: the strict
+    # simulator refuses exactly the held/targeted names without a bar, and the
+    # run is counted as failed below so it is never reported healthy.
+    ok_so_far = steps["freshness"]["status"] in ("OK", "INCOMPLETE") and steps["scoring"]["status"].startswith(("OK", "READY"))
     if ok_so_far:
         try:
             steps["weights"] = step_books_and_fills(today)
@@ -326,7 +365,8 @@ def main() -> int:
         "order_generation_status": steps["weights"]["status"],
         "fill_status": steps["fills"]["status"],
         "risk_event_count": 0,
-        "failed_job_count": sum(1 for s in steps.values() if s["status"] in ("FAILED", "STALE")),
+        "failed_job_count": sum(1 for s in steps.values()
+                                if s["status"] in ("FAILED", "STALE", "INCOMPLETE")),
         "schema_hash": sha(PANEL.read_bytes()[:1 << 20])[:16],  # header slice fingerprint
         "runtime_s": round(time.time() - t0, 1),
         "ram_gib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2, 2),

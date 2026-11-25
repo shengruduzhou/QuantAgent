@@ -308,3 +308,83 @@ def augment_with_suspended_rows(
     if out.duplicated(["symbol", "trade_date"]).any():
         raise SessionGapError("suspended rows collide with traded bars")
     return out, classified
+
+
+#: Per-date bar coverage below this fraction of the expected in-life set fails.
+MIN_DATE_COVERAGE = 0.995
+DATED_ST_PROVENANCE = "dated_pit_st_evidence"
+
+
+def panel_integrity(
+    panel: pd.DataFrame,
+    *,
+    sessions: Iterable[Any],
+    suspension_intervals: pd.DataFrame | None,
+    snapshot_dates: Iterable[Any] | None,
+    delisting_dates: Mapping[str, Any] | pd.Series | None,
+    start: Any,
+) -> dict[str, Any]:
+    """Whether a traded-sessions-only panel is complete on ``[start, max]``.
+
+    "Current" (max date) is not "complete": this reports, from the panel itself,
+    per-date coverage (bars + evidenced halts over bars + all non-delisted
+    gaps), unexplained
+    interior holes, trailing gaps of names that stopped printing without a dated
+    delisting, and ST rows whose provenance is not dated PIT evidence. Any of
+    them makes ``status = "INCOMPLETE"`` with a named problem list.
+    """
+    frame = panel.copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
+    start = pd.Timestamp(start).normalize()
+    gaps = find_session_gaps(frame, sessions, start=start)
+    classified = classify_session_gaps(
+        gaps, suspension_intervals=suspension_intervals,
+        snapshot_dates=snapshot_dates, delisting_dates=delisting_dates)
+    window = frame[frame["trade_date"] >= start]
+    bars = window.groupby("trade_date").size()
+    live_gaps = classified[classified["classification"] != GAP_DELISTED]
+    expected = bars.add(live_gaps.groupby("trade_date").size(), fill_value=0)
+    # a halted name legitimately has no bar: it counts as accounted for
+    suspended = classified[classified["classification"] == GAP_SUSPENDED].groupby("trade_date").size()
+    accounted = bars.reindex(expected.index).fillna(0).add(suspended, fill_value=0)
+    coverage = (accounted.reindex(expected.index) / expected).sort_index()
+    unexplained = classified[classified["classification"] == GAP_UNEXPLAINED]
+    interior_unexplained = unexplained[unexplained["gap_kind"] == GAP_KIND_INTERIOR]
+    trailing_unexplained = unexplained[unexplained["gap_kind"] == GAP_KIND_TRAILING]
+    report: dict[str, Any] = {
+        "window": [str(start.date()), str(frame["trade_date"].max().date())],
+        "sessions": int(len(bars)),
+        "min_date_coverage": round(float(coverage.min()), 6) if len(coverage) else None,
+        "dates_below_coverage": [str(d.date()) for d in coverage[coverage < MIN_DATE_COVERAGE].index],
+        "gaps": gap_summary(classified),
+        "interior_unexplained": int(len(interior_unexplained)),
+        "interior_unexplained_symbols": int(interior_unexplained["symbol"].nunique()),
+        "trailing_unexplained_symbols": int(trailing_unexplained["symbol"].nunique()),
+    }
+    problems: list[str] = []
+    if report["dates_below_coverage"]:
+        problems.append(f"DATE_COVERAGE_BELOW_{MIN_DATE_COVERAGE} on "
+                        f"{len(report['dates_below_coverage'])} sessions "
+                        f"(min {report['min_date_coverage']})")
+    if len(interior_unexplained):
+        problems.append(f"INTERIOR_HOLES_UNEXPLAINED {len(interior_unexplained)} "
+                        f"({report['interior_unexplained_symbols']} symbols)")
+    if len(trailing_unexplained):
+        problems.append(f"SYMBOLS_STOPPED_WITHOUT_EVIDENCE {report['trailing_unexplained_symbols']}")
+    if "is_st_provenance" in window.columns:
+        provenance = window["is_st_provenance"].astype("string").fillna("<NA>")
+        bad = window[provenance != DATED_ST_PROVENANCE]
+        report["st_provenance"] = {str(k): int(v) for k, v in provenance.value_counts().items()}
+        if len(bad):
+            report["st_provenance_unverified_by_exchange"] = {
+                str(k): int(v) for k, v in
+                bad["symbol"].astype(str).str[-2:].value_counts().items()}
+            report["st_provenance_unverified_range"] = [
+                str(bad["trade_date"].min().date()), str(bad["trade_date"].max().date())]
+            problems.append(f"ST_PROVENANCE_UNVERIFIED {len(bad)} rows "
+                            f"{report['st_provenance_unverified_range']}")
+    else:
+        problems.append("ST_PROVENANCE_COLUMN_MISSING")
+    report["problems"] = problems
+    report["status"] = "COMPLETE" if not problems else "INCOMPLETE"
+    return report
