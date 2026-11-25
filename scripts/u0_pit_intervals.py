@@ -30,7 +30,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -172,8 +174,50 @@ def cmd_dividends(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+#: cmd_suspension exit codes (Cycle 32 review E)
+EXIT_SUSPENSION_NOTHING_FETCHED = 3   # requested dates missing and no query succeeded
+EXIT_SUSPENSION_PARTIAL = 75          # some requested dates still missing
+EXIT_SUSPENSION_LOCKED = 73           # another refresh holds the out-dir lock
+
+
+def _atomic_parquet(frame: pd.DataFrame, path: Path) -> None:
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        frame.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _atomic_text(text: str, path: Path) -> None:
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def cmd_suspension(args: argparse.Namespace) -> int:
-    """Per-trading-date halt snapshots folded into intervals."""
+    """Eastmoney halt records folded into intervals (single writer per out-dir)."""
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lock = open(out_dir / ".suspension.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        print(f"another suspension refresh holds {out_dir}/.suspension.lock; skipped")
+        return EXIT_SUSPENSION_LOCKED
+    try:
+        return _cmd_suspension_locked(args, out_dir)
+    finally:
+        lock.close()
+
+
+def _cmd_suspension_locked(args: argparse.Namespace, out_dir: Path) -> int:
     import akshare as ak
 
     calendar_path = (Path(args.calendar) if getattr(args, "calendar", None)
@@ -188,8 +232,6 @@ def cmd_suspension(args: argparse.Namespace) -> int:
 
     # --out-dir writes a NEW versioned artifact (staging + intervals + manifest)
     # instead of the live U0 tables; the calendar is still read from OUT.
-    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else OUT
-    out_dir.mkdir(parents=True, exist_ok=True)
     end = pd.Timestamp(args.end) if getattr(args, "end", None) else today
     dates = [d for d in dates if d <= end]
     staging = out_dir / "_suspension"
@@ -214,7 +256,8 @@ def cmd_suspension(args: argparse.Namespace) -> int:
             time.sleep(2.0)
             continue
         if raw is None or not len(raw):
-            pd.DataFrame(columns=["code", "snapshot_date"]).to_parquet(staging / f"{stamp}.parquet")
+            _atomic_parquet(pd.DataFrame(columns=["code", "snapshot_date"]),
+                            staging / f"{stamp}.parquet")
             empty += 1
             continue
         frame = pd.DataFrame({
@@ -225,7 +268,7 @@ def cmd_suspension(args: argparse.Namespace) -> int:
             "suspension_reason": raw.get("停牌原因", pd.Series([""] * len(raw))).astype(str),
             "snapshot_date": date,
         })
-        frame.to_parquet(staging / f"{stamp}.parquet", index=False)
+        _atomic_parquet(frame, staging / f"{stamp}.parquet")
         fetched += 1
         if fetched % 25 == 0:
             print(f"  {fetched} snapshots · {stamp} · {time.monotonic() - started:.0f}s", flush=True)
@@ -238,7 +281,7 @@ def cmd_suspension(args: argparse.Namespace) -> int:
     if frames:
         intervals = fold_suspension_snapshots(pd.concat(frames, ignore_index=True),
                                               retrieved_at=_now())
-        intervals.to_parquet(out_dir / "suspension_intervals.parquet", index=False)
+        _atomic_parquet(intervals, out_dir / "suspension_intervals.parquet")
 
     covered = sorted({p.stem for p in files})
     payload = {
@@ -255,8 +298,17 @@ def cmd_suspension(args: argparse.Namespace) -> int:
                           "dates outside snapshot_date_range are NOT claimed as halt-free."),
         "generated": _now(),
     }
-    (out_dir / "suspension_manifest.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    on_disk = {p.stem for p in staging.glob("*.parquet")}
+    missing = sorted(d.strftime("%Y%m%d") for d in dates if d.strftime("%Y%m%d") not in on_disk)
+    payload["requested_dates_missing"] = len(missing)
+    payload["requested_dates_missing_sample"] = missing[:10]
+    _atomic_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                 out_dir / "suspension_manifest.json")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if missing and fetched + empty == 0:
+        return EXIT_SUSPENSION_NOTHING_FETCHED
+    if missing:
+        return EXIT_SUSPENSION_PARTIAL
     return 0
 
 

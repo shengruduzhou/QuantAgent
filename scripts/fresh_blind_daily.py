@@ -177,11 +177,14 @@ def step_suspension_refresh(dry: bool) -> dict:
                            timeout=SUSPENSION_REFRESH_BUDGET_S + 120, cwd=REPO)
     except subprocess.TimeoutExpired:
         return {"status": "PARTIAL", "note": "halt snapshot refresh timed out; gaps stay unexplained"}
-    return {"status": "OK" if r.returncode == 0 else "FAILED", "returncode": r.returncode,
+    status = {0: "OK", 73: "SKIPPED_LOCKED", 75: "PARTIAL"}.get(r.returncode, "FAILED")
+    return {"status": status, "returncode": r.returncode,
             "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
 
 
 TOPUP_BUDGET_S = 1800
+#: Step statuses that make a daily run unhealthy (PARTIAL = incomplete evidence).
+FAILED_STATUSES = ("FAILED", "STALE", "INCOMPLETE", "PARTIAL")
 
 
 def step_update_data(dry: bool) -> dict:
@@ -387,8 +390,7 @@ def main() -> int:
         "order_generation_status": steps["weights"]["status"],
         "fill_status": steps["fills"]["status"],
         "risk_event_count": 0,
-        "failed_job_count": sum(1 for s in steps.values()
-                                if s["status"] in ("FAILED", "STALE", "INCOMPLETE")),
+        "failed_job_count": sum(1 for s in steps.values() if s["status"] in FAILED_STATUSES),
         "schema_hash": sha(PANEL.read_bytes()[:1 << 20])[:16],  # header slice fingerprint
         "runtime_s": round(time.time() - t0, 1),
         "ram_gib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2, 2),
