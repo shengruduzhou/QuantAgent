@@ -129,3 +129,20 @@ def test_sh_rows_before_dated_evidence_are_labelled_unknown_not_aborted(monkeypa
     import pytest
     with pytest.raises(SystemExit, match="no existing unknown-ST row"):
         mod.build_panel(panel.assign(is_st_provenance="dated_pit_st_evidence"), new, evidence)
+
+
+def test_output_refuses_live_panel_dir_and_existing(tmp_path) -> None:
+    import pytest
+
+    mod = _load()
+    live = tmp_path / "silver" / "market_panel" / "market_panel.parquet"
+    live.parent.mkdir(parents=True)
+    with pytest.raises(SystemExit, match="new version"):
+        mod.check_output_path(live, live)
+    with pytest.raises(SystemExit, match="live panel directory"):
+        mod.check_output_path(live.parent / "market_panel.v2.parquet", live)
+    existing = tmp_path / "out.parquet"
+    existing.write_bytes(b"x")
+    with pytest.raises(SystemExit, match="existing"):
+        mod.check_output_path(existing, live)
+    mod.check_output_path(tmp_path / "fresh" / "new.parquet", live)

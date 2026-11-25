@@ -248,6 +248,19 @@ def build_panel(panel: pd.DataFrame, new: pd.DataFrame, evidence) -> pd.DataFram
     return merged.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
 
+def check_output_path(output: Path, live_panel: Path) -> None:
+    """--output is a new version: never the live panel, its directory, or an existing file
+    (same guard as reflag_fresh_st_provenance); --apply is the only way in place."""
+    target = Path(output).resolve()
+    live_dir = Path(live_panel).parent.resolve()
+    if target == Path(live_panel).resolve():
+        raise SystemExit("--output must be a new version; use --apply for the live panel")
+    if target == live_dir or live_dir in target.parents:
+        raise SystemExit(f"refusing --output inside the live panel directory {live_dir}")
+    if target.exists():
+        raise SystemExit(f"refusing to overwrite existing {target}")
+
+
 def rebind_repo(root: Path) -> None:
     """Point every catch-up path at another checkout's runtime (read side)."""
     cu.PANEL = root / "runtime/data/v7/silver/market_panel/market_panel.parquet"
@@ -289,10 +302,8 @@ def main() -> int:
         args.staging = str(cu.PANEL.parent.parent / "_staging_backfill_trailing")
     if args.fetch and not args.allow_network:
         raise SystemExit("--fetch needs --allow-network")
-    if args.output and Path(args.output).resolve() == cu.PANEL.resolve():
-        raise SystemExit("--output must be a new version; use --apply for the live panel")
-    if args.output and Path(args.output).exists():
-        raise SystemExit(f"refusing to overwrite existing {args.output}")
+    if args.output:
+        check_output_path(Path(args.output), cu.PANEL)
 
     evidence = cu._load_required_st_evidence(args.historical_st_path)
     panel = pd.read_parquet(cu.PANEL)
