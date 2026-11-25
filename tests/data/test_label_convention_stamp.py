@@ -7,6 +7,8 @@ silently produced delay-0 and the dataset builder merged whatever it was given.
 
 from __future__ import annotations
 
+import re
+
 import json
 from pathlib import Path
 
@@ -20,6 +22,15 @@ from quantagent.data import label_contract as lc
 from quantagent.data.dataset_builder import V7TrainingDatasetConfig, build_v7_training_dataset_artifact
 from quantagent.data.v7_label_builder import build_forward_return_labels
 
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(text: str) -> str:
+    """Rich styles option names even under NO_COLOR when GITHUB_ACTIONS is set
+    (CI), splitting '--label-convention' with escape codes; compare plain text."""
+    return _ANSI.sub("", text)
 
 def _market_panel(days: int = 40) -> pd.DataFrame:
     dates = pd.date_range("2026-01-02", periods=days, freq="B")
@@ -101,7 +112,7 @@ def test_build_labels_v7_requires_an_explicit_convention(tmp_path: Path) -> None
               str(tmp_path / "labels.parquet"), "--horizons", "1"],
     )
     assert result.exit_code != 0
-    assert "--label-convention" in result.output
+    assert "--label-convention" in _plain(result.output)
     assert not (tmp_path / "labels.parquet").exists()
 
     bad = CliRunner().invoke(
@@ -291,7 +302,7 @@ def test_delay1_requires_a_session_calendar(tmp_path: Path) -> None:
               str(tmp_path / "labels.parquet"), "--horizons", "1", "--label-convention", "delay1"],
     )
     assert result.exit_code != 0
-    assert "--market-calendar" in result.output
+    assert "--market-calendar" in _plain(result.output)
     with pytest.raises(ValueError, match="market_sessions"):
         build_forward_return_labels(_market_panel(), horizons=(1,), entry_delay_sessions=1)
 
