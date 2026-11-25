@@ -47,6 +47,13 @@ KEY_PATH = ROOT / ".unblind_key"
 CERT = REPO / "runtime/reports/h028/forward_fidelity_certificate.json"
 PANEL = REPO / "runtime/data/v7/silver/market_panel/market_panel.parquet"
 ELIG = REPO / "runtime/reports/h028/fresh_first_read_eligibility.json"
+CALENDAR = REPO / "runtime/data/u0/pit/trading_calendar.parquet"
+DELISTINGS = REPO / "runtime/data/u0/pit/delisting_intervals.parquet"
+# Dated halt evidence: the U0 snapshot set (2019-09..2026-07) plus the FRESH
+# refresh written by step_suspension_refresh (u0_pit_intervals --out-dir).
+SUSPENSION_FRESH = REPO / "runtime/data/u0/pit/suspension_fresh"
+SUSPENSION_DIRS = [REPO / "runtime/data/u0/pit", SUSPENSION_FRESH]
+SUSPENSION_REFRESH_BUDGET_S = 900
 CANDIDATES = ["S1_production_2sleeve_rank_k10", "S2_L1_c3ema07_minhold10",
               "S3_L1_D1_regime_w05", "S4_RW1_4state"]
 
@@ -80,6 +87,52 @@ def ledger_append(record: dict) -> str:
     with open(LEDGER, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return record["record_hash"]
+
+
+def with_suspension_rows(bt_panel: pd.DataFrame, start: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
+    """Add explicit SUSPENDED rows for evidenced halts; report every other gap.
+
+    The silver panel omits halted sessions, and the strict simulator fails
+    closed on a held or targeted name without a bar. Only gaps inside a dated
+    halt snapshot become (untradeable, carried-close) rows; unexplained and
+    delisted gaps stay missing so the simulator still refuses them.
+    """
+    from quantagent.data.ashare.session_gaps import (
+        augment_with_suspended_rows, gap_summary, load_suspension_evidence)
+
+    cal = pd.read_parquet(CALENDAR)
+    sessions = pd.to_datetime(cal.loc[cal["is_open"].astype(bool), "trade_date"])
+    intervals, covered = load_suspension_evidence(SUSPENSION_DIRS)
+    delist = pd.read_parquet(DELISTINGS) if DELISTINGS.exists() else pd.DataFrame()
+    dated = (delist.dropna(subset=["effective_start"]).set_index("symbol")["effective_start"]
+             if len(delist) else None)
+    out, classified = augment_with_suspended_rows(
+        bt_panel, sessions=sessions, suspension_intervals=intervals,
+        snapshot_dates=covered, delisting_dates=dated, start=start)
+    report = gap_summary(classified)
+    report["halt_snapshot_sessions"] = [str(covered[0].date()), str(covered[-1].date())] \
+        if covered else None
+    report["unexplained"] = [
+        f"{r.symbol}@{r.trade_date.date()}" for r in
+        classified[classified["classification"] != "SUSPENDED"].itertuples()][:200]
+    return out, report
+
+
+def step_suspension_refresh(dry: bool) -> dict:
+    """Fetch recent dated halt snapshots into SUSPENSION_FRESH (resumable)."""
+    if dry:
+        return {"status": "SKIPPED_DRY_RUN"}
+    start = (pd.Timestamp(date.today()) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+    cmd = [sys.executable, str(REPO / "scripts/u0_pit_intervals.py"), "suspension",
+           "--allow-network", "--start", start, "--out-dir", str(SUSPENSION_FRESH),
+           "--max-minutes", str(SUSPENSION_REFRESH_BUDGET_S / 60)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=SUSPENSION_REFRESH_BUDGET_S + 120, cwd=REPO)
+    except subprocess.TimeoutExpired:
+        return {"status": "PARTIAL", "note": "halt snapshot refresh timed out; gaps stay unexplained"}
+    return {"status": "OK" if r.returncode == 0 else "FAILED", "returncode": r.returncode,
+            "tail": (r.stdout[-200:] + r.stderr[-150:]).strip()}
 
 
 TOPUP_BUDGET_S = 1800
@@ -183,6 +236,8 @@ def step_books_and_fills(today: str) -> dict:
                             filters=[("trade_date", ">=", fresh_start - pd.Timedelta(days=210))])
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     bt_panel = panel[panel["trade_date"] >= fresh_start - pd.Timedelta(days=10)].copy()
+    bt_panel, gap_report = with_suspension_rows(bt_panel, fresh_start - pd.Timedelta(days=10))
+    (ROOT / "risk_logs" / f"{today}_session_gaps.json").write_text(json.dumps(gap_report, indent=1))
     flags = bt_panel[["symbol", "trade_date", "is_suspended", "is_st", "is_limit_up", "is_limit_down"]]
     trade_dates = sorted(bt_panel["trade_date"].unique())
 
@@ -207,7 +262,8 @@ def step_books_and_fills(today: str) -> dict:
 
     key = get_key()
     fern = Fernet(key)
-    out = {"status": "OK", "books": {}, "s4": "PENDING_S4_LEARNER_PORT (regime_weight_meta daily port spec'd)"}
+    out = {"status": "OK", "books": {}, "s4": "PENDING_S4_LEARNER_PORT (regime_weight_meta daily port spec'd)",
+           "session_gaps": {k: v for k, v in gap_report.items() if k != "unexplained"}}
     sector = pd.read_parquet(REPO / bp.SECTOR)
     for cand, col, style in (("S1", "s1", "plain"), ("S2", "c3_ema", "minhold"), ("S3", "s3", "minhold")):
         score = m[["trade_date", "symbol"]].copy()
@@ -248,6 +304,7 @@ def main() -> int:
     today = datetime.now().strftime("%Y-%m-%d")
 
     steps = {"data": step_update_data(args.dry_run)}
+    steps["suspension_evidence"] = step_suspension_refresh(args.dry_run)
     steps["freshness"] = step_freshness()
     steps["scoring"] = step_score()
     ok_so_far = steps["freshness"]["status"] == "OK" and steps["scoring"]["status"].startswith(("OK", "READY"))

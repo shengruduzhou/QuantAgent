@@ -151,3 +151,30 @@ def test_load_evidence_counts_empty_snapshot_files_as_covered(tmp_path) -> None:
     intervals, covered = load_suspension_evidence([tmp_path / "pit", tmp_path / "missing"])
     assert covered == [pd.Timestamp("2025-09-04")]
     assert len(intervals) == 1
+
+
+def test_fresh_books_panel_gets_evidenced_suspension_rows(tmp_path, monkeypatch) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "fresh_blind_daily.py"
+    spec = importlib.util.spec_from_file_location("fresh_blind_daily_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calendar = tmp_path / "calendar.parquet"
+    pd.DataFrame({"trade_date": SESSIONS, "is_open": True}).to_parquet(calendar)
+    pit = tmp_path / "fresh"
+    (pit / "_suspension").mkdir(parents=True)
+    for day in SESSIONS:
+        pd.DataFrame(columns=["code", "snapshot_date"]).to_parquet(
+            pit / "_suspension" / f"{day:%Y%m%d}.parquet")
+    _halt(HELD, SESSIONS[3], SESSIONS[3]).to_parquet(pit / "suspension_intervals.parquet")
+    monkeypatch.setattr(module, "CALENDAR", calendar)
+    monkeypatch.setattr(module, "SUSPENSION_DIRS", [pit])
+    monkeypatch.setattr(module, "DELISTINGS", tmp_path / "absent.parquet")
+
+    out, report = module.with_suspension_rows(_panel(), SESSIONS[0])
+    assert len(out) == len(_panel()) + 1
+    assert report["by_classification"] == {"SUSPENDED": 1, "MISSING_UNEXPLAINED": 1}
+    assert report["unexplained"] == [f"{HELD}@{SESSIONS[4].date()}"]
