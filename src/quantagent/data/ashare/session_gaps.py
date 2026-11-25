@@ -188,6 +188,38 @@ def classify_session_gaps(
     return out
 
 
+def enforce_halt_chain(classified: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
+    """Demote SUSPENDED gaps whose carried mark would cross an unexplained session.
+
+    The carried close is the last traded bar's close. It is a defensible mark
+    only if *every* session between that bar and the gap is halt-covered; one
+    unexplained session in between means we do not know what happened to the
+    price, so the gap (and every later gap of the same run) is
+    MISSING_UNEXPLAINED with ``evidence = halt_chain_broken``. ``classified``
+    must contain all gaps since each symbol's prior bar (do not pre-filter by
+    window start).
+    """
+    out = classified.copy()
+    if out.empty:
+        return out
+    bars = panel[["symbol", "trade_date"]].copy()
+    bars["trade_date"] = pd.to_datetime(bars["trade_date"]).dt.normalize()
+    bars["prior_bar"] = bars["trade_date"]
+    left = out[["symbol", "trade_date"]].reset_index().sort_values("trade_date", kind="mergesort")
+    hit = pd.merge_asof(left, bars.sort_values("trade_date", kind="mergesort"),
+                        on="trade_date", by="symbol", direction="backward",
+                        allow_exact_matches=False).set_index("index").reindex(out.index)
+    out["_prior_bar"] = hit["prior_bar"]
+    out = out.sort_values(["symbol", "trade_date"], kind="mergesort")
+    not_halt = (out["classification"] != GAP_SUSPENDED).astype(int)
+    seen_before = (not_halt.groupby([out["symbol"], out["_prior_bar"]], dropna=False).cumsum()
+                   - not_halt)
+    broken = (out["classification"] == GAP_SUSPENDED) & (seen_before > 0)
+    out.loc[broken, "classification"] = GAP_UNEXPLAINED
+    out.loc[broken, "evidence"] = "halt_chain_broken"
+    return out.drop(columns=["_prior_bar"]).sort_index()
+
+
 def suspended_execution_rows(panel: pd.DataFrame, classified: pd.DataFrame) -> pd.DataFrame:
     """Explicit untradeable rows for SUSPENDED gaps, valued at the carried close.
 
@@ -283,6 +315,20 @@ def load_suspension_evidence(directories: Iterable[Any]) -> tuple[pd.DataFrame, 
     return combined, sorted(covered)
 
 
+def _classified_gaps(panel, sessions, suspension_intervals, snapshot_dates, delisting_dates,
+                     start) -> pd.DataFrame:
+    """Classify every gap since each symbol's first bar, enforce the halt chain,
+    then trim to ``start`` (trimming first would hide a broken chain)."""
+    gaps = find_session_gaps(panel, sessions)
+    classified = classify_session_gaps(
+        gaps, suspension_intervals=suspension_intervals,
+        snapshot_dates=snapshot_dates, delisting_dates=delisting_dates)
+    classified = enforce_halt_chain(classified, panel)
+    if start is not None and len(classified):
+        classified = classified[classified["trade_date"] >= pd.Timestamp(start).normalize()]
+    return classified.reset_index(drop=True)
+
+
 def augment_with_suspended_rows(
     panel: pd.DataFrame,
     *,
@@ -298,10 +344,8 @@ def augment_with_suspended_rows(
     or targeting such a name has no bar and must fail closed.
     """
     sessions = list(sessions)
-    gaps = find_session_gaps(panel, sessions, start=start)
-    classified = classify_session_gaps(
-        gaps, suspension_intervals=suspension_intervals,
-        snapshot_dates=snapshot_dates, delisting_dates=delisting_dates)
+    classified = _classified_gaps(panel, sessions, suspension_intervals, snapshot_dates,
+                                  delisting_dates, start)
     rows = suspended_execution_rows(panel, classified)
     if rows.empty:
         return panel.copy(), classified
@@ -339,10 +383,8 @@ def panel_integrity(
     frame = panel.copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
     start = pd.Timestamp(start).normalize()
-    gaps = find_session_gaps(frame, sessions, start=start)
-    classified = classify_session_gaps(
-        gaps, suspension_intervals=suspension_intervals,
-        snapshot_dates=snapshot_dates, delisting_dates=delisting_dates)
+    classified = _classified_gaps(frame, sessions, suspension_intervals, snapshot_dates,
+                                  delisting_dates, start)
     window = frame[frame["trade_date"] >= start]
     bars = window.groupby("trade_date").size()
     live_gaps = classified[classified["classification"] != GAP_DELISTED]

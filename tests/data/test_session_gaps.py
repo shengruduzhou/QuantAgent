@@ -204,3 +204,25 @@ def test_integrity_is_not_current_when_holes_or_unverified_st_exist() -> None:
         panel, suspension_intervals=_halt(HELD, SESSIONS[3], SESSIONS[4]), **kwargs)
     assert broadcast["status"] == "INCOMPLETE"
     assert broadcast["problems"][0].startswith("ST_PROVENANCE_UNVERIFIED 1 rows")
+
+
+def test_carried_mark_never_crosses_an_unexplained_session() -> None:
+    """Auditor F3: a halt after an unexplained gap must not carry the old close."""
+    panel = _panel(hole_days=(2, 3, 4, 5))   # only sessions 4..5 are halt-covered
+    halt = _halt(HELD, SESSIONS[4], SESSIONS[5])
+    out, classified = augment_with_suspended_rows(
+        panel, sessions=SESSIONS, suspension_intervals=halt, snapshot_dates=SESSIONS)
+    assert len(out) == len(panel)                       # nothing materialised
+    assert set(classified["classification"]) == {GAP_UNEXPLAINED}
+    assert set(classified.loc[classified["trade_date"] >= SESSIONS[4], "evidence"]) == {
+        "halt_chain_broken"}
+    # trimming to a later start must not hide the broken chain
+    _, trimmed = augment_with_suspended_rows(
+        panel, sessions=SESSIONS, suspension_intervals=halt, snapshot_dates=SESSIONS,
+        start=SESSIONS[4])
+    assert set(trimmed["classification"]) == {GAP_UNEXPLAINED}
+    # a run that is halt-covered right from the prior bar is still materialised
+    out2, _ = augment_with_suspended_rows(
+        panel, sessions=SESSIONS, suspension_intervals=_halt(HELD, SESSIONS[2], SESSIONS[5]),
+        snapshot_dates=SESSIONS)
+    assert len(out2) == len(panel) + 4
