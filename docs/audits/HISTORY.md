@@ -53,6 +53,10 @@
 - 结果：无证据停更 383→21，最低日覆盖 0.898→0.990，未核实 ST 行 198,940→70,217。
 - E1 R0 的二次方耗时根因是 `CanonicalBook.history_of` 每次全量扫描（OMS 生产路径同病）；索引版在前 20 个信号日
   NAV 逐位相同（sha 一致，6.6× 快），f4ff0b0 待审计后入 main；E1 绑定 DSR N=147（预注册偏离 D2，结果产生前提交）。
+- **CI 自 bd92b52 起连续 7 次红而本地全绿**：(1) 新测试依赖可选 extra（`cryptography` 属 `[data]`、`lightgbm` 属
+  `[training]`），CI 只装 `[test]`；(2) `GITHUB_ACTIONS` 下 Rich 即使 `NO_COLOR` 也给选项名加转义码，CLI 文案断言失败。
+  CI 日志需登录才能读 ⇒ 新增 failure() 步骤把失败测试写成公开可读的 annotation 后才定位到 (2)。31ec532 起 CI 绿。
+  qa-release 规则改为：每次推 main 前在按 ci-constraints 新建的 venv、`GITHUB_ACTIONS=true CI=true TZ=UTC` 下跑全量。
 
 ## Round 31 续 3（2026-11-25）— CI 自 2026-10-09 起持续失败：Polars 2.0 与依赖漂移
 
