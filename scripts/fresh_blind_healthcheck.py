@@ -98,7 +98,8 @@ def main() -> int:
         and "TIMEOUT" in json.dumps(rec)
     if problems and data_timeout and lag <= 6 and cert_ok and ok:
         log(f"AUTO_REMEDIATION: standalone catch-up (lag {lag}d) + runner retry")
-        r1 = subprocess.run([sys.executable, "scripts/update_market_panel_daily.py"],
+        # the guarded writer: calendar expiry + per-session window coverage
+        r1 = subprocess.run([sys.executable, "scripts/catchup_panel_chunked.py"],
                             capture_output=True, text=True, timeout=7200)
         r2 = subprocess.run([sys.executable, "scripts/fresh_blind_daily.py"],
                             capture_output=True, text=True, timeout=10800)

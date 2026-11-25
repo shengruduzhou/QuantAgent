@@ -50,3 +50,33 @@ def test_healthcheck_surfaces_integrity_problems(monkeypatch) -> None:
     fake.integrity_report = lambda: (_ for _ in ()).throw(OSError("unreadable"))
     problems, _ = health.panel_integrity_problems()
     assert problems and problems[0].startswith("PANEL_INTEGRITY_UNMEASURED")
+
+
+def test_update_market_panel_daily_refuses_past_calendar(tmp_path) -> None:
+    import pytest
+
+    mod = _load("update_market_panel_daily")
+    cal = tmp_path / "cal.parquet"
+    pd.DataFrame({"trade_date": pd.to_datetime(["2026-12-30", "2026-12-31"])}).to_parquet(cal)
+    mod.require_calendar_covers(cal, pd.Timestamp("2026-12-31"))
+    with pytest.raises(SystemExit, match="calendar ends 2026-12-31"):
+        mod.require_calendar_covers(cal, pd.Timestamp("2027-01-04"))
+    with pytest.raises(SystemExit, match="missing"):
+        mod.require_calendar_covers(tmp_path / "absent.parquet", pd.Timestamp("2026-12-31"))
+
+
+def test_healthcheck_remediation_uses_the_guarded_writer() -> None:
+    text = (SCRIPTS / "fresh_blind_healthcheck.py").read_text()
+    assert "scripts/update_market_panel_daily.py" not in text
+    assert "scripts/catchup_panel_chunked.py" in text
+
+
+def test_calendar_refresh_may_only_extend(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPTS.parent / "src"))
+    mod = _load("u0_pit_intervals")
+    old = pd.DataFrame({"trade_date": pd.to_datetime(["2026-12-30", "2026-12-31"])})
+    ext = pd.DataFrame({"trade_date": pd.to_datetime(["2026-12-30", "2026-12-31", "2027-01-04"])})
+    assert mod.calendar_regression(old, ext) is None
+    assert "new last date" in mod.calendar_regression(old, old.iloc[:1])
+    assert "disappear" in mod.calendar_regression(
+        old, pd.DataFrame({"trade_date": pd.to_datetime(["2026-12-31", "2027-01-04"])}))

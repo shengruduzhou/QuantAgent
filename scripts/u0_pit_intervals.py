@@ -62,6 +62,23 @@ def _load_master() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+def calendar_regression(existing: pd.DataFrame, new: pd.DataFrame) -> str | None:
+    """A refresh may extend the calendar, never shrink or rewrite its past."""
+    old = set(pd.to_datetime(existing["trade_date"]).dt.normalize())
+    fresh = set(pd.to_datetime(new["trade_date"]).dt.normalize())
+    if not fresh:
+        return "vendor returned no dates"
+    if max(fresh) < max(old):
+        return f"new last date {max(fresh).date()} < existing {max(old).date()}"
+    dropped = sorted(old - fresh)
+    if dropped:
+        return f"{len(dropped)} existing sessions would disappear, e.g. {dropped[0].date()}"
+    added_past = sorted(d for d in fresh - old if d <= max(old))
+    if added_past:
+        return f"{len(added_past)} sessions inserted into the existing range, e.g. {added_past[0].date()}"
+    return None
+
+
 def cmd_calendar(args: argparse.Namespace) -> int:
     import akshare as ak
 
@@ -74,6 +91,11 @@ def cmd_calendar(args: argparse.Namespace) -> int:
         "quality_status": "OK",
     }).sort_values("trade_date").reset_index(drop=True)
     OUT.mkdir(parents=True, exist_ok=True)
+    existing_path = OUT / "trading_calendar.parquet"
+    if existing_path.exists():
+        problem = calendar_regression(pd.read_parquet(existing_path), frame)
+        if problem:
+            raise SystemExit(f"refusing to overwrite the trading calendar: {problem}")
     frame.to_parquet(OUT / "trading_calendar.parquet", index=False)
     payload = {"rows": int(len(frame)), "first": str(frame["trade_date"].min().date()),
                "last": str(frame["trade_date"].max().date()),

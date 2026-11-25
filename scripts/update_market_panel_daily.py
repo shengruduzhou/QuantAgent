@@ -29,6 +29,23 @@ from quantagent.quant_math.ashare import board_price_limit_vector
 
 
 PANEL = Path("runtime/data/v7/silver/market_panel/market_panel.parquet")
+CALENDAR = Path("runtime/data/u0/pit/trading_calendar.parquet")
+
+
+def require_calendar_covers(calendar_path: Path, end: pd.Timestamp) -> None:
+    """Refuse a window past the offline PIT calendar (Cycle 32).
+
+    catchup_panel_chunked.window_sessions already refuses; this writer (used by
+    the healthcheck auto-remediation and run_forward_daily.sh) did not, so an
+    expired calendar could be bypassed through it."""
+    if not calendar_path.exists():
+        raise SystemExit(f"refusing append: trading calendar {calendar_path} missing")
+    cal = pd.read_parquet(calendar_path, columns=["trade_date"])
+    cal_max = pd.to_datetime(cal["trade_date"]).max()
+    if pd.Timestamp(end).normalize() > cal_max:
+        raise SystemExit(
+            f"refusing append: trading calendar ends {cal_max.date()} before window end "
+            f"{pd.Timestamp(end).date()}; refresh runtime/data/u0/pit/trading_calendar.parquet")
 
 
 def _tf_client():
@@ -79,6 +96,7 @@ def main() -> int:
     if end <= last:
         print(f"panel already at {last.date()} — nothing to do")
         return 0
+    require_calendar_covers(CALENDAR, end)
 
     recent = panel[panel["trade_date"] >= last - pd.Timedelta(days=args.active_window_days)]
     symbols = sorted(recent["symbol"].astype(str).unique())
