@@ -530,6 +530,19 @@ def main() -> int:
         raise SystemExit(
             f"refusing catch-up merge (staging preserved for resume): {exc}"
         ) from exc
+    # ...and against the FULL seed: a partial vendor publish (INC-P1: the day's
+    # bar out for only some names) or a flood of empty answers must not merge a
+    # thin session -- panel_max would advance and the hole become permanent.
+    # 93% of 3,643 tolerates <=255 vendor-empty names. Retry, panel unchanged.
+    try:
+        require_window_coverage(new, sessions, len(seed_symbols))
+    except WindowCoverageError as exc:
+        print(json.dumps({"appended": 0, "status": "SEED_COVERAGE_RETRY",
+                          "seed": len(seed_symbols), "returned_data": returned,
+                          "vendor_empty_no_evidence": len(vendor_empty),
+                          "detail": str(exc)[:400],
+                          "note": "panel not written; staging kept"}), flush=True)
+        return EXIT_RETRY
     try:
         new = attach_historical_st(new, evidence)
     except HistoricalSTCoverageError as exc:
