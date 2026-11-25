@@ -77,3 +77,26 @@ def test_holdings_in_effect_fails_closed() -> None:
 
 # The simulator side (signal T -> one execution at T+1) is pinned by
 # tests/backtest/test_baseline_protocol_execution_clock.py.
+
+
+def test_unshifted_book_first_executes_next_session(tmp_path) -> None:
+    """The runner's book (signal-dated, not pre-shifted) fills once at T+1."""
+    from quantagent.backtest.ashare_execution_simulator import AShareExecutionSimulationConfig
+    from quantagent.backtest.strict_v8 import run_strict_backtest_v8
+
+    sessions = pd.bdate_range("2026-11-02", periods=4)
+    market = pd.DataFrame([
+        {"trade_date": d, "symbol": "600000.SH", "close": 10.0 + i,
+         "volume": 1_000_000.0, "amount": 10_000_000.0, "is_suspended": False,
+         "is_st": False, "is_limit_up": False, "is_limit_down": False}
+        for i, d in enumerate(sessions)
+    ])
+    book = pd.DataFrame({"600000.SH": [1.0]}, index=pd.DatetimeIndex([sessions[0]]))
+    result = run_strict_backtest_v8(
+        book.sort_index(), market,
+        config=AShareExecutionSimulationConfig(
+            initial_cash=100_000.0, slippage_bps=0.0, audit_log_dir=str(tmp_path / "audit")),
+    )
+    assert not result.trades.empty
+    assert set(pd.to_datetime(result.trades["execution_date"])) == {sessions[1]}
+    assert pd.Timestamp(result.trades.iloc[0]["signal_date"]) == sessions[0]
