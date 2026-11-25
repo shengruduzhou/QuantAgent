@@ -31,6 +31,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.quant_math.performance import max_drawdown
 from quantagent.portfolio.sleeve import (
     DEFAULT_SLEEVE_CONFIGS,
     SleeveAllocationResult,
@@ -165,10 +166,7 @@ def _portfolio_score(
 def _max_drawdown(returns: pd.Series) -> float:
     if returns.empty:
         return 0.0
-    nav = (1.0 + returns.fillna(0.0)).cumprod()
-    rolling_max = nav.cummax()
-    drawdown = nav / rolling_max - 1.0
-    return float(abs(drawdown.min()))
+    return abs(max_drawdown((1.0 + returns.fillna(0.0)).cumprod()))
 
 
 def _normalise_panel(returns: pd.DataFrame, sleeves: Sequence[SleeveConfig]) -> pd.DataFrame:

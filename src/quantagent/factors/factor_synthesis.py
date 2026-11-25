@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors import expr as E
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+from quantagent.quant_math.performance import nonoverlapping_cohort_t_stat
 from quantagent.factors.expression_safety import post_decision_column_reasons
 from quantagent.factors.factor_loop_memory import (
     RAG_EASY,
@@ -774,21 +776,10 @@ def _daily_rank_ic(
     df = pd.DataFrame(data)
     if tradable_mask is not None:
         df = df[df["tradable"]].drop(columns="tradable")
-    df = df.dropna()
-    if df.empty:
-        return pd.Series(dtype=float)
-    grouped = df.groupby("trade_date")
-    rank_factor = grouped["factor"].rank(method="average")
-    rank_label = grouped["label"].rank(method="average")
-    df = df.assign(rank_factor=rank_factor.values, rank_label=rank_label.values)
-    daily = (
-        df.groupby("trade_date")[["rank_factor", "rank_label"]]
-        .corr()
-        .unstack()
-        .iloc[:, 1]
-        .dropna()
+    return cross_sectional_rank_ic(
+        df, "factor", "label", "trade_date",
+        min_names=1, inf_as_missing=False, drop_undefined=True, sort=True,
     )
-    return daily
 
 
 def _rank_ic(
@@ -938,21 +929,12 @@ def _nonoverlapping_ic_tstat(daily_ic: pd.Series, horizon: int) -> float:
     daily IC series is oversized. Each of the h offset cohorts (every h-th date)
     is free of overlap; their t-stats are averaged.
     """
-    # Cohorts are formed on the date sequence BEFORE dropping missing days, so
-    # a gap cannot shift dates into a neighbouring (overlapping) cohort.
-    values = pd.to_numeric(pd.Series(daily_ic), errors="coerce").to_numpy(dtype=float)
-    step = max(1, int(horizon))
-    stats: list[float] = []
-    for offset in range(step):
-        cohort = values[offset::step]
-        cohort = cohort[np.isfinite(cohort)]
-        if cohort.size < 3:
-            continue
-        std = float(cohort.std(ddof=1))
-        if std <= 1e-12:
-            continue
-        stats.append(float(cohort.mean()) / std * float(np.sqrt(cohort.size)))
-    return float(np.mean(stats)) if stats else 0.0
+    # NOTE: the caller passes ``_daily_rank_ic`` output, which has undefined
+    # dates already removed, so a gap shifts later dates into a neighbouring
+    # cohort. Kept as-is so the RD-Agent gate's numbers do not change; see
+    # ROADMAP P1-6 and nonoverlapping_cohort_t_stat for the calendar-aligned form.
+    value = nonoverlapping_cohort_t_stat(daily_ic, max(1, int(horizon)))
+    return value if np.isfinite(value) else 0.0
 
 
 def _label_horizon_sessions(label_column: str) -> int:

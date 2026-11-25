@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.factors import expr as E
+from quantagent.factors.evaluation import cross_sectional_rank_ic
 from quantagent.factors.factor_synthesis import _node_count, load_definitions
 
 PANEL = "runtime/data/v7/silver/market_panel/market_panel.parquet"
@@ -53,13 +54,10 @@ DEFAULT_REFERENCES = "alpha016,alpha015,alpha050,alpha044,alpha040,alpha161,alph
 
 
 def _daily_ic(values: pd.Series, labels: pd.Series, dates: pd.Series) -> pd.Series:
-    df = pd.DataFrame({"d": dates.values, "f": values.values, "y": labels.values}).dropna()
-    if df.empty:
-        return pd.Series(dtype=float)
-    g = df.groupby("d")
-    df = df.assign(rf=g["f"].rank(), ry=g["y"].rank())
-    daily = df.groupby("d")[["rf", "ry"]].corr().unstack().iloc[:, 1].dropna()
-    return daily
+    df = pd.DataFrame({"d": dates.values, "f": values.values, "y": labels.values})
+    return cross_sectional_rank_ic(
+        df, "f", "y", "d", min_names=1, inf_as_missing=False, drop_undefined=True, sort=True
+    )
 
 
 def _ic_stats(values, labels, dates) -> tuple[float, float, int]:

@@ -50,6 +50,8 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from quantagent.quant_math.performance import max_drawdown, sharpe_ratio
+
 
 @dataclass(frozen=True)
 class LossWeights:
@@ -175,16 +177,13 @@ def _sharpe(returns: pd.Series, periods: int = 252) -> float:
     std = float(returns.std(ddof=1))
     if std <= 1e-12:
         return 0.0
-    return float(returns.mean() / std * (periods ** 0.5))
+    return sharpe_ratio(returns, periods_per_year=periods)
 
 
 def _max_drawdown(returns: pd.Series) -> float:
     if returns.empty:
         return 0.0
-    nav = (1.0 + returns.fillna(0.0)).cumprod()
-    peak = nav.cummax()
-    dd = nav / peak - 1.0
-    return float(abs(dd.min()))
+    return abs(max_drawdown((1.0 + returns.fillna(0.0)).cumprod()))
 
 
 def _calmar(ann_return: float, max_dd: float) -> float:

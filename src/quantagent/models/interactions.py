@@ -59,6 +59,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+
 DATE_COLUMN = "trade_date"
 SYMBOL_COLUMN = "symbol"
 #: Separator for generated interaction column names. Chosen so a generated name
@@ -237,19 +239,11 @@ def _daily_rank_ic(
     min_names: int = 5,
 ) -> pd.Series:
     """Per-date Spearman rank IC. Dates with too few names produce no entry."""
-    frame = pd.DataFrame({"score": scores, "label": labels, "date": dates}).dropna()
-    if frame.empty:
-        return pd.Series(dtype=float)
-    values: dict[object, float] = {}
-    for date, group in frame.groupby("date", sort=True):
-        if len(group) < min_names:
-            continue
-        if group["score"].nunique() < 2 or group["label"].nunique() < 2:
-            continue
-        correlation = group["score"].rank().corr(group["label"].rank())
-        if pd.notna(correlation):
-            values[date] = float(correlation)
-    return pd.Series(values, dtype=float)
+    frame = pd.DataFrame({"score": scores, "label": labels, "date": dates})
+    return cross_sectional_rank_ic(
+        frame, "score", "label", "date",
+        min_names=min_names, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
 
 
 def select_interaction_pairs(

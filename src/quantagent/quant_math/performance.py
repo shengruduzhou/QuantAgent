@@ -7,11 +7,24 @@ from statistics import NormalDist
 from quantagent.quant_math.risk_metrics import drawdown
 
 
-def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:
+def sharpe_ratio(
+    returns: pd.Series,
+    risk_free_rate: float = 0.0,
+    periods_per_year: float = 252,
+    *,
+    ddof: int = 1,
+) -> float:
+    """Annualised Sharpe: ``sqrt(periods_per_year) * mean(excess) / std(excess)``.
+
+    ``periods_per_year`` may be fractional (an observed observation rate).
+    ``ddof=1`` is the sample standard deviation used by every governed number;
+    ``ddof=0`` exists only so the paper report keeps its historic population
+    convention explicitly rather than through a private copy.
+    """
     excess = returns.dropna() - risk_free_rate / periods_per_year
-    if excess.empty or excess.std(ddof=1) == 0:
+    if excess.empty or excess.std(ddof=ddof) == 0:
         return np.nan
-    return float(np.sqrt(periods_per_year) * excess.mean() / excess.std(ddof=1))
+    return float(np.sqrt(periods_per_year) * excess.mean() / excess.std(ddof=ddof))
 
 
 def probabilistic_sharpe_ratio(
@@ -214,6 +227,48 @@ def newey_west_t_stat(
         nw_var += 2.0 * weight * gamma
     nw_var = max(nw_var, 1e-12)
     return float(mean / np.sqrt(nw_var / n))
+
+
+def nonoverlapping_cohort_t_stat(series: pd.Series, horizon_days: int) -> float:
+    """t-stat of the mean of an h-day-label statistic from non-overlapping cohorts.
+
+    ``series`` is one value per consecutive session (e.g. the per-date IC of an
+    h-day forward-return label), in session order; an undefined session must
+    stay in the series as NaN so that it does not shift later sessions into a
+    neighbouring cohort.  Cohort ``k`` is every ``h``-th value starting at
+    offset ``k``; its labels do not overlap, so under the null its ordinary
+    t-stat is free of the MA(h-1) structure that the overlap induces.  The
+    statistic is the average of the ``h`` cohort t-stats (cohorts with < 3
+    finite values or zero spread are skipped; NaN if none qualifies).
+
+    Why the average: the overlapping-sample mean is (up to the edges) the mean
+    of the ``h`` non-overlapping subsample means (Richardson & Smith 1991,
+    RFS 4(2)), so every cohort t-stat has the same location under the
+    alternative while, under a null whose only dependence is the label
+    overlap, the average has variance <= 1 (mean of unit-variance
+    statistics) and so is not oversized -- unlike Bartlett-kernel HAC at lag
+    h-1, which over-rejects with overlapping long-horizon labels (Ang &
+    Bekaert 2007, RFS 20(3)).  Under a null with its own persistence (e.g.
+    autocorrelated IC from slow-moving factor *and* return structure) any
+    non-overlapping t is oversized too.  Do NOT treat it as N(0, 1) for
+    p-values or DSR; it is a screening statistic.  Measured in
+    ``tests/factors/test_nonoverlap_ic_tstat_calibration.py``.
+    """
+    h = int(horizon_days)
+    if h < 1:
+        raise ValueError(f"horizon_days must be >= 1, got {horizon_days}")
+    values = pd.to_numeric(pd.Series(series), errors="coerce").to_numpy(dtype=float)
+    stats: list[float] = []
+    for offset in range(h):
+        cohort = values[offset::h]
+        cohort = cohort[np.isfinite(cohort)]
+        if cohort.size < 3:
+            continue
+        std = float(cohort.std(ddof=1))
+        if std <= 1e-12:
+            continue
+        stats.append(float(cohort.mean()) / std * float(np.sqrt(cohort.size)))
+    return float(np.mean(stats)) if stats else np.nan
 
 
 def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float:

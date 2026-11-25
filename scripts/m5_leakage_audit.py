@@ -48,6 +48,7 @@ from quantagent.data.v7_dataset_builder import (  # noqa: E402
     merge_pit_features,
 )
 from quantagent.data.v7_label_builder import build_forward_return_labels  # noqa: E402
+from quantagent.factors.evaluation import cross_sectional_rank_ic  # noqa: E402
 from quantagent.data.v7_quality_gates import (  # noqa: E402
     V7ModelAcceptanceGateConfig,
     audit_pit,
@@ -104,13 +105,10 @@ def stale_stamp(dataset: pd.DataFrame) -> pd.DataFrame:
 
 
 def per_date_rank_ic(frame: pd.DataFrame, feature: str, label: str, min_names: int = 2) -> float | None:
-    valid = frame.dropna(subset=[feature, label])
-    if valid.empty:
-        return None
-    per_date = valid.groupby("trade_date").apply(
-        lambda f: f[feature].rank().corr(f[label].rank()) if len(f) >= min_names else np.nan,
-        include_groups=False,
-    ).dropna()
+    per_date = cross_sectional_rank_ic(
+        frame, feature, label, "trade_date",
+        min_names=min_names, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
     return None if per_date.empty else round(float(per_date.mean()), 6)
 
 

@@ -24,7 +24,8 @@ import pandas as pd
 
 from quantagent.backtest.execution_timing import EXECUTION_TIMING_SEMANTICS
 from quantagent.factors.coverage import usable_factor_coverage
-from quantagent.quant_math.performance import newey_west_t_stat
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+from quantagent.quant_math.performance import newey_west_t_stat, nonoverlapping_cohort_t_stat
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,9 @@ class FactorGateConfig:
     min_mean_rank_ic: float = 0.01
     min_ic_information_ratio: float = 0.20
     min_newey_west_rank_t_stat: float = 2.0
+    # GOVERNANCE R2 / ROADMAP P1-6: the screen uses the non-overlapping-cohort
+    # t-stat; the HAC t above is oversized for multi-day labels.
+    min_nonoverlap_rank_t_stat: float = 3.0
     min_positive_ic_ratio: float = 0.52
     max_losing_period_rate: float = 0.40
     max_recent_predictive_drift_z: float = 2.5
@@ -95,6 +99,7 @@ class FactorGovernanceReport:
     median_symbols_per_date: float
     label_semantics: str | None
     cumulative_trials: int | None
+    nonoverlap_rank_t_stat: float = float("nan")
     rejection_reasons: list[str] = field(default_factory=list)
     promotion_blockers: list[str] = field(default_factory=list)
 
@@ -113,6 +118,7 @@ class FactorGovernanceReport:
             "rank_icir": self.rank_icir,
             "ic_information_ratio": self.ic_information_ratio,
             "newey_west_rank_t_stat": self.newey_west_rank_t_stat,
+            "nonoverlap_rank_t_stat": self.nonoverlap_rank_t_stat,
             "positive_ic_ratio": self.positive_ic_ratio,
             "losing_period_rate": self.losing_period_rate,
             "recent_predictive_drift_z": self.recent_predictive_drift_z,
@@ -135,21 +141,9 @@ def _rank_ic_by_date(frame: pd.DataFrame, factor_col: str, return_col: str) -> p
     """Return a stable 1-D date-indexed RankIC series, including empty input."""
     if frame.empty:
         return pd.Series(dtype=float)
-
-    values: dict[pd.Timestamp, float] = {}
-    for date, group in frame.groupby("trade_date", sort=True):
-        valid = group[[factor_col, return_col]].replace([np.inf, -np.inf], np.nan).dropna()
-        if (
-            len(valid) < 3
-            or valid[factor_col].nunique() < 2
-            or valid[return_col].nunique() < 2
-        ):
-            values[pd.Timestamp(date)] = float("nan")
-        else:
-            values[pd.Timestamp(date)] = float(
-                valid[factor_col].corr(valid[return_col], method="spearman")
-            )
-    return pd.Series(values, dtype=float).dropna().sort_index()
+    return cross_sectional_rank_ic(
+        frame, factor_col, return_col, "trade_date", min_names=3, drop_undefined=True, sort=True
+    )
 
 
 def _ic_ir(ic: pd.Series) -> float:
@@ -296,6 +290,14 @@ def evaluate_factor_candidate(
     promotion_context: FactorPromotionContext | None = None,
     config: FactorGateConfig | None = None,
 ) -> FactorGovernanceReport:
+    """Evaluate one candidate against the pre-promotion gates.
+
+    The factor must be **pre-oriented** (higher value = expected higher
+    return). Like the mean-rank-IC gate, the HAC and non-overlap t gates are
+    one-sided on the signed statistic (``t >= min``); GOVERNANCE R2's
+    ``|t| >= 3`` is applied after orientation, so a strongly negative
+    un-oriented factor is rejected here rather than flipped.
+    """
     cfg = config or FactorGateConfig()
     required = {"trade_date", "symbol", factor_name, target_return_col}
     missing = required - set(frame.columns)
@@ -333,6 +335,15 @@ def evaluate_factor_candidate(
         if not ic.empty
         else float("nan")
     )
+    # Cohorts are formed on the session sequence of the input frame, with
+    # undefined/ineligible sessions kept as NaN so they cannot shift later
+    # sessions into a neighbouring (overlapping) cohort.
+    sessions = pd.DatetimeIndex(sorted(work["trade_date"].unique()))
+    nonoverlap_t = (
+        float(nonoverlapping_cohort_t_stat(ic.reindex(sessions), int(target_horizon_days)))
+        if not ic.empty
+        else float("nan")
+    )
     positive_ratio = float((ic > 0).mean()) if not ic.empty else float("nan")
     losing_rate = _period_losing_rate(ic)
     predictive_drift = _recent_predictive_drift_z(ic)
@@ -358,6 +369,10 @@ def evaluate_factor_candidate(
         reasons.append(f"rank_icir={icir:.4f} below {cfg.min_ic_information_ratio:.4f}")
     if not np.isfinite(rank_t_stat) or rank_t_stat < cfg.min_newey_west_rank_t_stat:
         reasons.append(f"newey_west_rank_t_stat={rank_t_stat:.4f} below {cfg.min_newey_west_rank_t_stat:.4f}")
+    if not np.isfinite(nonoverlap_t) or nonoverlap_t < cfg.min_nonoverlap_rank_t_stat:
+        reasons.append(
+            f"nonoverlap_rank_t_stat={nonoverlap_t:.4f} below {cfg.min_nonoverlap_rank_t_stat:.4f}"
+        )
     if not np.isfinite(positive_ratio) or positive_ratio < cfg.min_positive_ic_ratio:
         reasons.append(f"positive_ic_ratio={positive_ratio:.4f} below {cfg.min_positive_ic_ratio:.4f}")
     if losing_rate > cfg.max_losing_period_rate:
@@ -392,6 +407,7 @@ def evaluate_factor_candidate(
         mean_rank_ic=mean_ic,
         ic_information_ratio=icir,
         newey_west_rank_t_stat=rank_t_stat,
+        nonoverlap_rank_t_stat=nonoverlap_t,
         positive_ic_ratio=positive_ratio,
         losing_period_rate=losing_rate,
         recent_predictive_drift_z=predictive_drift,

@@ -72,6 +72,7 @@ import numpy as np
 import pandas as pd
 
 from quantagent.backtest.quarantine import clean_label_mask
+from quantagent.factors.evaluation import cross_sectional_rank_ic
 from quantagent.models.interactions import (
     InteractionPair,
     ModelClass,
@@ -344,17 +345,12 @@ def _gbm_fit_predict(
 
 
 def _daily_rank_ic(frame: pd.DataFrame, label_column: str, min_names: int) -> pd.Series:
-    values: dict[pd.Timestamp, float] = {}
-    for date, group in frame.groupby("trade_date", sort=True):
-        usable = group[["prediction", label_column]].dropna()
-        if len(usable) < min_names:
-            continue
-        if usable["prediction"].nunique() < 2 or usable[label_column].nunique() < 2:
-            continue
-        correlation = usable["prediction"].rank().corr(usable[label_column].rank())
-        if pd.notna(correlation):
-            values[pd.Timestamp(date)] = float(correlation)
-    return pd.Series(values, dtype=float).sort_index()
+    series = cross_sectional_rank_ic(
+        frame, "prediction", label_column, "trade_date",
+        min_names=min_names, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
+    series.index = pd.DatetimeIndex([pd.Timestamp(date) for date in series.index])
+    return series
 
 
 def _topk_daily_returns(

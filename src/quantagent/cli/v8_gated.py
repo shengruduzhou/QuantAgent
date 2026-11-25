@@ -370,6 +370,17 @@ def apply_decision_chain_v8(
     return output_dir
 
 
+def _mean_rank_ic(merged: pd.DataFrame, target_label: str) -> float:
+    """Mean of defined per-date rank ICs of ``composite_score`` (>= 20 names/date)."""
+    from quantagent.factors.evaluation import cross_sectional_rank_ic
+
+    ics = cross_sectional_rank_ic(
+        merged, "composite_score", target_label, "trade_date",
+        min_names=20, inf_as_missing=False, drop_undefined=True, sort=True,
+    ).tolist()
+    return float(sum(ics) / len(ics)) if ics else float("nan")
+
+
 @app.command("run-gated-backtest-v8")
 def run_gated_backtest_v8(
     deep_run_dir: Optional[Path] = typer.Option(
@@ -585,13 +596,7 @@ def run_gated_backtest_v8(
         cm = composite[["symbol", "trade_date", "composite_score"]].copy()
         cm["trade_date"] = pd.to_datetime(cm["trade_date"], errors="coerce")
         mj = cm.merge(gold, on=["symbol", "trade_date"], how="inner").dropna()
-        ics = []
-        for _, g in mj.groupby("trade_date"):
-            if len(g) >= 20:
-                c = g["composite_score"].rank().corr(g[target_label].rank())
-                if pd.notna(c):
-                    ics.append(c)
-        rank_ic = float(sum(ics) / len(ics)) if ics else float("nan")
+        rank_ic = _mean_rank_ic(mj, target_label)
     except Exception:  # noqa: BLE001
         pass
     excess = bt.metrics.annualized_return - bench.get("ann", float("nan"))

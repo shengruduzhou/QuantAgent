@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from quantagent.quant_math.performance import newey_west_t_stat
+from quantagent.quant_math.performance import newey_west_t_stat, nonoverlapping_cohort_t_stat
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,10 @@ class ICSummary:
     t_stat: float
     rank_t_stat: float
     positive_ratio: float
+    # Non-overlapping-cohort t-stats (ROADMAP P1-6, GOVERNANCE R2: screen on
+    # |t| >= 3).  NaN when the label horizon is unknown.
+    nonoverlap_t_stat: float = np.nan
+    rank_nonoverlap_t_stat: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,11 @@ def information_coefficient(
     t-stat is not inflated by the label's own construction.  When the horizon
     cannot be determined the estimator falls back to its sample-size bandwidth
     and a warning is emitted -- the t-stat is then NOT overlap-corrected.
+
+    ``summary.(rank_)nonoverlap_t_stat`` is the average of the ``h``
+    non-overlapping cohort t-stats (``nonoverlapping_cohort_t_stat``); screens
+    use it with |t| >= 3 (GOVERNANCE R2).  The HAC t is kept for continuity but
+    is oversized for h > 1 (measured: ~12% rejections at nominal 5% for h=20).
     """
     horizon = horizon_days if horizon_days is not None else infer_horizon_days(return_column)
     if horizon is None:
@@ -161,6 +170,8 @@ def information_coefficient(
         t_stat=newey_west_t_stat(ic, horizon_days=horizon),
         rank_t_stat=newey_west_t_stat(rank_ic, horizon_days=horizon),
         positive_ratio=float((rank_ic.dropna() > 0).mean()) if rank_ic.dropna().shape[0] else np.nan,
+        nonoverlap_t_stat=_nonoverlap_t(ic, horizon),
+        rank_nonoverlap_t_stat=_nonoverlap_t(rank_ic, horizon),
     )
     return ICResult(ic_by_date=ic, rank_ic_by_date=rank_ic, summary=summary)
 
@@ -357,21 +368,109 @@ def factor_group_metrics(
     )
 
 
+def cross_sectional_rank_ic(
+    frame: pd.DataFrame,
+    factor_column: str,
+    return_column: str,
+    date_column: str = "trade_date",
+    *,
+    method: Literal["spearman", "pearson"] = "spearman",
+    min_names: int = 3,
+    inf_as_missing: bool = True,
+    drop_undefined: bool = False,
+    sort: bool = False,
+) -> pd.Series:
+    """Per-date cross-sectional correlation of a factor with a return label.
+
+    This is the single implementation of the cross-sectional (rank-)IC; every
+    other module delegates here.  Semantics, in order:
+
+    1. ``inf_as_missing``: +/-inf is treated as missing (default).  With
+       ``False`` an infinite value takes the extreme rank instead (the historic
+       behaviour of several callers; the result differs whenever inf is present).
+    2. Rows missing the date, the factor or the label are dropped *before*
+       ranking, so ranks are always taken over complete pairs.
+    3. A date is undefined (NaN) when it has fewer than ``min_names`` complete
+       pairs or either side is constant on that date.
+    4. ``method="spearman"``: Pearson correlation of within-date average ranks
+       (ties share their mean rank), i.e. the Spearman coefficient.
+
+    The output is indexed by the raw date keys.  With ``drop_undefined=False``
+    every date that has at least one row in ``frame`` appears (undefined ones
+    as NaN); with ``True`` undefined dates are omitted.  ``sort`` orders dates
+    ascending; otherwise they follow first appearance in ``frame``.
+    """
+    if method not in ("spearman", "pearson"):
+        raise ValueError(f"unknown correlation method: {method!r}")
+    keys = frame[date_column]
+    all_keys = pd.Index(keys.dropna().unique())
+    if sort:
+        all_keys = all_keys.sort_values()
+    data = pd.DataFrame(
+        {
+            "_date": keys.to_numpy(),
+            "_x": pd.to_numeric(frame[factor_column], errors="coerce").to_numpy(dtype=float),
+            "_y": pd.to_numeric(frame[return_column], errors="coerce").to_numpy(dtype=float),
+        }
+    )
+    if inf_as_missing:
+        data[["_x", "_y"]] = data[["_x", "_y"]].replace([np.inf, -np.inf], np.nan)
+    data = data.dropna()
+    if data.empty:
+        values = pd.Series(np.nan, index=all_keys, dtype=float)
+        return values.iloc[0:0] if drop_undefined else values
+    grouped = data.groupby("_date", sort=sort)
+    if method == "spearman":
+        x = grouped["_x"].rank(method="average")
+        y = grouped["_y"].rank(method="average")
+    else:
+        x = data["_x"]
+        y = data["_y"]
+    dx = x - x.groupby(data["_date"], sort=sort).transform("mean")
+    dy = y - y.groupby(data["_date"], sort=sort).transform("mean")
+    sums = pd.DataFrame({"xy": dx * dy, "xx": dx * dx, "yy": dy * dy, "_date": data["_date"]}).groupby(
+        "_date", sort=sort
+    ).sum()
+    if method == "spearman":
+        # Average ranks of a constant cross-section are exactly (n+1)/2, so
+        # zero rank dispersion <=> a constant side (cheaper than nunique).
+        defined = (grouped.size() >= int(min_names)) & (sums["xx"] > 0) & (sums["yy"] > 0)
+    else:
+        # Raw values: a constant side can leave ~1e-17 of rounding dispersion.
+        stats = grouped.agg(n=("_x", "size"), ux=("_x", "nunique"), uy=("_y", "nunique"))
+        defined = (stats["n"] >= int(min_names)) & (stats["ux"] >= 2) & (stats["uy"] >= 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr = sums["xy"] / np.sqrt(sums["xx"] * sums["yy"])
+    corr = corr.clip(-1.0, 1.0).where(defined.reindex(corr.index, fill_value=False))
+    corr.name = None
+    corr.index.name = None
+    if drop_undefined:
+        return corr.dropna().astype(float)
+    return corr.reindex(all_keys).astype(float)
+
+
 def _corr_by_date(
     frame: pd.DataFrame,
     factor_column: str,
     return_column: str,
     date_column: str,
-    method: str,
+    method: Literal["spearman", "pearson"],
 ) -> pd.Series:
-    values: dict[pd.Timestamp, float] = {}
-    for date, group in frame.groupby(date_column, sort=False):
-        clean = group[[factor_column, return_column]].replace([np.inf, -np.inf], np.nan).dropna()
-        if len(clean) < 3 or clean[factor_column].nunique() <= 1 or clean[return_column].nunique() <= 1:
-            values[pd.Timestamp(date)] = np.nan
-        else:
-            values[pd.Timestamp(date)] = float(clean[factor_column].corr(clean[return_column], method=method))
-    return pd.Series(values, dtype=float)
+    series = cross_sectional_rank_ic(
+        frame, factor_column, return_column, date_column, method=method, min_names=3
+    )
+    return pd.Series(
+        series.to_numpy(dtype=float),
+        index=pd.Index([pd.Timestamp(key) for key in series.index]),
+        dtype=float,
+    )
+
+
+def _nonoverlap_t(series: pd.Series, horizon: int | None) -> float:
+    # Cohorts need the session order; undefined dates stay as NaN placeholders.
+    if horizon is None or series.empty:
+        return np.nan
+    return nonoverlapping_cohort_t_stat(series.sort_index(), horizon)
 
 
 def _safe_mean(series: pd.Series) -> float:

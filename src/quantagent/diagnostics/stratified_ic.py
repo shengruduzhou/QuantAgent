@@ -44,6 +44,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from quantagent.factors.evaluation import cross_sectional_rank_ic
+
 
 _BOARD_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("688",), "STAR_科创"),
@@ -131,15 +133,12 @@ class StratifiedICResult:
     summary: dict[str, object] = field(default_factory=dict)
 
 
-def _rank_ic(group: pd.DataFrame, label_col: str, min_n: int) -> float:
-    if len(group) < min_n:
-        return float("nan")
-    p = pd.to_numeric(group["prediction"], errors="coerce")
-    y = pd.to_numeric(group[label_col], errors="coerce")
-    mask = p.notna() & y.notna()
-    if mask.sum() < min_n:
-        return float("nan")
-    return float(p[mask].rank().corr(y[mask].rank()))
+def _per_date_rank_ic(frame: pd.DataFrame, label_col: str, min_n: int) -> pd.Series:
+    """Defined per-date rank ICs (dates with < ``min_n`` complete pairs omitted)."""
+    return cross_sectional_rank_ic(
+        frame, "prediction", label_col, "trade_date",
+        min_names=min_n, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
 
 
 def _topk_long_only_return(group: pd.DataFrame, label_col: str, top_k: int) -> float:
@@ -165,10 +164,7 @@ def _bucket_ic_table(
         if not isinstance(bucket, str) or not bucket:
             continue
         # per-date IC inside the bucket
-        per_date = grp.groupby("trade_date", group_keys=False).apply(
-            lambda g: _rank_ic(g, label_col, config.min_symbols_per_date)
-        )
-        per_date = per_date.dropna()
+        per_date = _per_date_rank_ic(grp, label_col, config.min_symbols_per_date)
         per_date_topk = grp.groupby("trade_date", group_keys=False).apply(
             lambda g: _topk_long_only_return(g, label_col, config.top_k_for_ann_return)
         ).dropna()

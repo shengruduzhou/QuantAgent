@@ -1084,6 +1084,16 @@ def audit_provenance(frame: pd.DataFrame | None) -> ProvenanceAuditReport:
     )
 
 
+def _adverse_dates_rank_ic(subset: pd.DataFrame, label_column: str) -> pd.Series:
+    """Defined per-date rank ICs of ``prediction`` (>= 2 names) on the given rows."""
+    from quantagent.factors.evaluation import cross_sectional_rank_ic
+
+    return cross_sectional_rank_ic(
+        subset, "prediction", label_column, "trade_date",
+        min_names=2, inf_as_missing=False, drop_undefined=True, sort=True,
+    )
+
+
 def evaluate_adverse_regime(
     predictions: pd.DataFrame | None,
     market_panel: pd.DataFrame | None = None,
@@ -1126,11 +1136,7 @@ def evaluate_adverse_regime(
         report["reason"] = "no_adverse_dates"
         return report
     subset = data[data["trade_date"].isin(adverse_dates)]
-    by_date_ic = subset.groupby("trade_date").apply(
-        lambda f: float(f["prediction"].rank().corr(f[label_column].rank()))
-        if len(f) >= 2 and f["prediction"].nunique() >= 2 and f[label_column].nunique() >= 2
-        else float("nan")
-    ).dropna()
+    by_date_ic = _adverse_dates_rank_ic(subset, label_column)
     rank_ic_mean = float(by_date_ic.mean()) if not by_date_ic.empty else 0.0
     report["adverse_dates_count"] = int(len(adverse_dates))
     report["adverse_rank_ic_mean"] = rank_ic_mean
