@@ -80,9 +80,10 @@ v7 银层面板 runtime/data/v7/silver/market_panel（qlib_rescaled + akshare qf
   `refused_feature_columns`，钉住的 schema 若要求此类列直接失败）；推理 schema 无原始前向标签。
 - 标签口径：认证数据与 `_exec_` 数据集为 **delay-1**（`close(t+1+h)/close(t+1)−1`）；delay-0 会使短周期
   IC 虚增（ROADMAP P1-2）。每个标签产物带口径戳（`data.label_contract`：parquet 元数据 `quantagent.label_convention`，
-  CSV 为绑定内容哈希的 `.label_convention.json` sidecar），id：`delay1_close_t1_to_close_t1_plus_h_v1`（gold /
-  `build-labels-v7 --label-convention delay1`）、`delay1_exact_global_session_t1_to_t1_plus_h_v1`（`_exec_`，全局交易日钟）、
-  `same_close_t_to_close_t_plus_h_v1`（delay0）。`build-labels-v7` 无默认值必须显式选择；数据集构建器等消费者拒绝无戳
+  CSV 为绑定内容哈希的 `.label_convention.json` sidecar），id：`delay1_close_t1_to_close_t1_plus_h_v1`（gold，按标的**下一行**入场，
+  出场跨度不受交易日约束）、`delay1_exact_global_session_t1_to_t1_plus_h_v1`（`_exec_` 与 `build-labels-v7 --label-convention delay1
+  --market-calendar <交易日历>`：入场必须恰为下一全局交易日、出场恰为其后 h 个交易日，否则 NaN，标签跨度 ≤ 1+h）、
+  `same_close_t_to_close_t_plus_h_v1`（delay0）。两种 delay-1 id 不同，不会被静默混用。`build-labels-v7` 无默认值必须显式选择；数据集构建器等消费者拒绝无戳
   （仅 `--allow-legacy-unstamped-labels` 放行并记 legacy）与混用。旧 `runtime/data/gold/full_universe/labels.parquet` 无戳
   （列推断为 delay-0），默认会被拒绝；r29 认证标签已带戳。
 

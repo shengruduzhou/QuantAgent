@@ -49,15 +49,24 @@ def _market_panel(days: int = 40) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _calendar(tmp_path: Path, days: int = 40) -> Path:
+    path = tmp_path / "calendar.parquet"
+    pd.DataFrame(
+        {"trade_date": pd.date_range("2026-01-02", periods=days, freq="B"), "is_open": True}
+    ).to_parquet(path, index=False)
+    return path
+
+
 def _build_labels(tmp_path: Path, choice: str, name: str = "labels.parquet") -> Path:
     market = tmp_path / "market.parquet"
     if not market.exists():
         _market_panel().to_parquet(market, index=False)
     out = tmp_path / name
+    extra = ["--market-calendar", str(_calendar(tmp_path))] if choice == "delay1" else []
     result = CliRunner().invoke(
         app,
         ["build-labels-v7", "--market-panel", str(market), "--output", str(out),
-         "--horizons", "1,5", "--label-convention", choice],
+         "--horizons", "1,5", "--label-convention", choice, *extra],
     )
     assert result.exit_code == 0, result.output
     return out
@@ -105,7 +114,7 @@ def test_build_labels_v7_requires_an_explicit_convention(tmp_path: Path) -> None
 def test_delay1_and_delay0_are_stamped_and_computed_on_their_own_clock(tmp_path: Path) -> None:
     delay1 = _build_labels(tmp_path, "delay1", "d1.parquet")
     delay0 = _build_labels(tmp_path, "delay0", "d0.parquet")
-    assert lc.read_label_convention(delay1) == (lc.GOLD_DELAY1, "metadata")
+    assert lc.read_label_convention(delay1) == (lc.EXEC_DELAY1_SESSION, "metadata")
     assert lc.read_label_convention(delay0) == (lc.V7_SAME_CLOSE, "metadata")
 
     market = _market_panel()
@@ -138,7 +147,7 @@ def test_delay0_library_output_is_unchanged_by_the_new_option() -> None:
 
 def test_csv_labels_get_a_sidecar_stamp_bound_to_their_content(tmp_path: Path) -> None:
     out = _build_labels(tmp_path, "delay1", "labels.csv")
-    assert lc.read_label_convention(out) == (lc.GOLD_DELAY1, "sidecar")
+    assert lc.read_label_convention(out) == (lc.EXEC_DELAY1_SESSION, "sidecar")
     with out.open("a", encoding="utf-8") as handle:  # edited after stamping
         handle.write("600519.SH,2099-01-01,0.5\n")
     assert lc.read_label_convention(out) == (None, "unknown")
@@ -176,11 +185,11 @@ def test_dataset_builder_refuses_unstamped_labels(tmp_path: Path) -> None:
 def test_dataset_builder_records_a_stamped_convention(tmp_path: Path) -> None:
     labels = _build_labels(tmp_path, "delay1")
     result = build_v7_training_dataset_artifact(_config(tmp_path, labels))
-    assert result.feature_schema["label_convention"] == lc.GOLD_DELAY1
+    assert result.feature_schema["label_convention"] == lc.EXEC_DELAY1_SESSION
     assert result.feature_schema["label_convention_basis"] == "metadata"
-    assert result.summary["label_convention"] == lc.GOLD_DELAY1
+    assert result.summary["label_convention"] == lc.EXEC_DELAY1_SESSION
     manifest = json.loads(Path(result.manifest_path).read_text())
-    assert manifest["extra"]["label_convention_id"] == lc.GOLD_DELAY1
+    assert manifest["extra"]["label_convention_id"] == lc.EXEC_DELAY1_SESSION
 
 
 def test_dataset_builder_refuses_mixing_with_a_pinned_schema_of_another_clock(tmp_path: Path) -> None:
@@ -272,3 +281,66 @@ def test_synthesize_factors_refuses_two_label_sources_and_unstamped_labels(tmp_p
     unstamped_panel = CliRunner().invoke(app, base)  # label rides on an unstamped panel
     assert unstamped_panel.exit_code != 0
     assert isinstance(unstamped_panel.exception, lc.LabelConventionError)
+
+
+def test_delay1_requires_a_session_calendar(tmp_path: Path) -> None:
+    market = tmp_path / "market.parquet"
+    _market_panel().to_parquet(market, index=False)
+    result = CliRunner().invoke(
+        app, ["build-labels-v7", "--market-panel", str(market), "--output",
+              str(tmp_path / "labels.parquet"), "--horizons", "1", "--label-convention", "delay1"],
+    )
+    assert result.exit_code != 0
+    assert "--market-calendar" in result.output
+    with pytest.raises(ValueError, match="market_sessions"):
+        build_forward_return_labels(_market_panel(), horizons=(1,), entry_delay_sessions=1)
+
+
+def test_delay1_is_on_the_global_session_clock_not_the_next_row() -> None:
+    """A symbol suspended for sessions 1-5 must not get an entry 6 sessions later.
+
+    Fails on the row-shift delay-1: its next ROW after session 0 is session 6,
+    so the "delay-1" label silently spanned 6+h sessions, past any h-session
+    purge/embargo.
+    """
+    market = _market_panel()
+    market["trade_date"] = pd.to_datetime(market["trade_date"])
+    sessions = pd.DatetimeIndex(sorted(market["trade_date"].unique()))
+    suspended = market["symbol"].eq("000858.SZ") & market["trade_date"].isin(sessions[1:6])
+    panel = market.loc[~suspended].reset_index(drop=True)
+
+    built = build_forward_return_labels(
+        panel, horizons=(1, 5), entry_delay_sessions=1, market_sessions=sessions
+    ).frame
+    built["trade_date"] = pd.to_datetime(built["trade_date"])
+    sym = built[built["symbol"] == "000858.SZ"].set_index("trade_date")
+    # Signal at session 0: entry session 1 is suspended => unavailable (the row
+    # carries no label at any horizon, so the builder drops it).
+    assert sessions[0] not in sym.index or sym.loc[sessions[0], ["forward_return_1d", "forward_return_5d"]].isna().all()
+    # The row-shift clock would have produced a value here: next row = session 6.
+    row_shift = build_forward_return_labels(panel, horizons=(1,)).frame  # delay-0 reference rows exist
+    assert sessions[0] in set(pd.to_datetime(row_shift[row_shift["symbol"] == "000858.SZ"]["trade_date"]))
+    # Every label window, available or not, is bounded by 1+h sessions.
+    position = {d: i for i, d in enumerate(sessions)}
+    for h in (1, 5):
+        ends = built[f"label_end_{h}d"].dropna()
+        spans = [position[pd.Timestamp(e)] - position[pd.Timestamp(t)]
+                 for t, e in zip(built.loc[ends.index, "trade_date"], ends)]
+        assert set(spans) == {1 + h}
+    # Exit inside the suspension is unavailable too: signal at session 0 with h=1
+    # exits at session 2 (suspended); a signal at session 6 is clean again.
+    assert not np.isnan(sym.loc[sessions[6], "forward_return_1d"])
+    one = market[market["symbol"] == "000858.SZ"].set_index("trade_date")["close"]
+    expected = one.loc[sessions[8]] / one.loc[sessions[7]] - 1.0
+    assert sym.loc[sessions[6], "forward_return_1d"] == pytest.approx(expected, rel=1e-12)
+    # Unsuspended symbols are untouched by the clock check.
+    other = built[built["symbol"] == "600519.SH"]["forward_return_5d"]
+    assert other.notna().sum() == len(sessions) - 6
+
+
+def test_delay0_is_byte_identical_with_or_without_a_calendar() -> None:
+    market = _market_panel()
+    sessions = pd.to_datetime(market["trade_date"]).drop_duplicates().sort_values()
+    plain = build_forward_return_labels(market, horizons=(1, 5)).frame
+    with_cal = build_forward_return_labels(market, horizons=(1, 5), market_sessions=sessions).frame
+    pd.testing.assert_frame_equal(plain, with_cal)

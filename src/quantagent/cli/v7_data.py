@@ -380,10 +380,16 @@ def build_labels_v7(
         ...,
         "--label-convention",
         help=(
-            "Required, no default. 'delay1' = close(t+1+h)/close(t+1)-1 (canonical: same clock as "
-            "the certified gold labels and _exec_ datasets); 'delay0' = close(t+h)/close(t)-1 "
+            "Required, no default. 'delay1' = close(S[t+1+h])/close(S[t+1])-1 on the exact global "
+            "session clock of --market-calendar (same clock as the _exec_ datasets; NaN when a "
+            "suspension moves entry or exit off-session); 'delay0' = close(t+h)/close(t)-1 "
             "(legacy v7; inflates short-horizon IC by up to 53%). The id is stamped into the file."
         ),
+    ),
+    market_calendar: Path | None = typer.Option(
+        None,
+        "--market-calendar",
+        help="Exchange-session calendar (e.g. runtime/data/u0/pit/trading_calendar.parquet). Required for delay1.",
     ),
 ) -> None:
     """Build future-return labels for training; labels must never be used for inference.
@@ -410,10 +416,22 @@ def build_labels_v7(
     symbol_tuple = merge_symbols(symbols, symbols_file)
     if symbol_tuple:
         frame = frame[frame["symbol"].astype(str).isin(set(symbol_tuple))].reset_index(drop=True)
+    sessions = None
+    if label_contract.ENTRY_DELAY_SESSIONS[convention]:
+        if market_calendar is None:
+            raise typer.BadParameter(
+                "--label-convention delay1 needs --market-calendar (an exchange-session calendar, "
+                "e.g. runtime/data/u0/pit/trading_calendar.parquet); the session clock is never "
+                "inferred from per-symbol bars"
+            )
+        from quantagent.factors.executable_labels import load_market_session_calendar
+
+        sessions, _ = load_market_session_calendar(market_calendar)
     result = build_forward_return_labels(
         frame,
         tuple(int(item) for item in parse_csv_tuple(horizons)),
         entry_delay_sessions=label_contract.ENTRY_DELAY_SESSIONS[convention],
+        market_sessions=sessions,
     )
     actual, _ = label_contract.write_labels_file(result.frame, resolved_output, convention=convention)
     typer.echo(json_dump({"status": "passed", "output": str(actual), "rows": len(result.frame),

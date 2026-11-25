@@ -37,7 +37,7 @@
 2. **统一标签口径为 delay-1。** `build-labels-v7` 的 delay-0 使短周期 IC 虚增最多 53%；
    给标签产物加口径戳并拒绝混用。**Cycle 32 工程部分已完成（待独立审计）**：所有标签产出者写口径戳
    （parquet schema metadata / CSV sidecar，`data.label_contract`）；`build-labels-v7` 必须显式
-   `--label-convention delay1|delay0`（**不改默认值**：原隐式 delay-0 若静默改为 delay-1，会改变重跑旧命令
+   `--label-convention delay1|delay0`（delay1 = 全局交易日钟，须 `--market-calendar`；**不改默认值**：原隐式 delay-0 若静默改为 delay-1，会改变重跑旧命令
    得到的数字，故改为拒绝猜测；工作台"重建 Labels"显式传 delay1）；数据集构建器、`synthesize-factors-v7`
    及两个评估脚本拒绝无戳标签（`--allow-legacy-unstamped-labels` 显式放行并记为 legacy）并拒绝混用
    （钉住 schema 的口径不同 / 行情面板自带标签列）。剩余：用 delay-1 重建尚在使用的 v7 delay-0 产物。

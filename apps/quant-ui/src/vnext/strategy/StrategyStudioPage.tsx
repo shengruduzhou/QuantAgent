@@ -478,9 +478,11 @@ export function StrategyStudioPage(): JSX.Element {
           market_panel_path: draft.marketPanelPath,
           output_path: draft.labelsPath,
           horizons: draft.horizons,
-          // Canonical delay-1 clock (same as the certified gold labels); the
-          // command refuses to guess a convention (ROADMAP P1-2).
+          // Canonical delay-1 on the exact global session clock (same as the
+          // _exec_ datasets); the command refuses to guess a convention or to
+          // infer the clock from per-symbol bars (ROADMAP P1-2).
           label_convention: "delay1",
+          market_calendar_path: "runtime/data/u0/pit/trading_calendar.parquet",
         },
       });
       setActiveJob(result.data);

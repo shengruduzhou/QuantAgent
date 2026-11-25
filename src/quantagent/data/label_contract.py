@@ -52,7 +52,10 @@ V7_SAME_CLOSE = "same_close_t_to_close_t_plus_h_v1"
 EXEC_DELAY1_SESSION = "delay1_exact_global_session_t1_to_t1_plus_h_v1"
 
 CONVENTION_TEXT: dict[str, str] = {
-    GOLD_DELAY1: "forward_return_{h}d = close(t+1+h) / close(t+1) - 1 (delay-1 executable)",
+    GOLD_DELAY1: (
+        "forward_return_{h}d = close(r+1+h) / close(r+1) - 1 where r+k is the symbol's k-th next "
+        "ROW (gold bridge; entry-infeasible rows dropped; exit span not session-bounded)"
+    ),
     V7_SAME_CLOSE: "forward_return_{h}d = close(t+h) / close(t) - 1 (same close, no entry delay)",
     EXEC_DELAY1_SESSION: (
         "forward_return_{h}d = close(S[T+1+h]) / close(S[T+1]) - 1 on the exact global "
@@ -63,9 +66,11 @@ CONVENTION_TEXT: dict[str, str] = {
 #: Sessions between the signal close and the entry price, per convention.
 ENTRY_DELAY_SESSIONS: dict[str, int] = {GOLD_DELAY1: 1, V7_SAME_CLOSE: 0, EXEC_DELAY1_SESSION: 1}
 
-#: ``build-labels-v7 --label-convention`` choices. ``delay1`` uses the gold
-#: bridge's formula (per-symbol next row as entry) so its id is the same.
-BUILDER_CONVENTIONS: dict[str, str] = {"delay1": GOLD_DELAY1, "delay0": V7_SAME_CLOSE}
+#: ``build-labels-v7 --label-convention`` choices. ``delay1`` is the exact
+#: global-session clock (same as ``_exec_``): entry must be the next session
+#: and exit exactly h sessions later, else NaN. It is deliberately NOT the gold
+#: bridge's per-symbol next-row id, so the two cannot be silently mixed.
+BUILDER_CONVENTIONS: dict[str, str] = {"delay1": EXEC_DELAY1_SESSION, "delay0": V7_SAME_CLOSE}
 
 #: ``DataFrame.attrs`` key carrying the convention of an in-memory label frame.
 LABEL_CONVENTION_ATTR = "label_convention"

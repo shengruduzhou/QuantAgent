@@ -342,8 +342,10 @@ def test_label_rebuild_and_horizon_blend_are_allowlisted_without_free_shell() ->
     assert labels["choices"]["label_convention"] == {"delay1", "delay0"}
     assert labels["option_aliases"] == {
         "market_panel_path": "market-panel",
+        "market_calendar_path": "market-calendar",
         "output_path": "output",
     }
+    assert "market_calendar_path" in labels["path_inputs"]
     strategy = COMMANDS["run-full-real-training-v7"]
     assert "horizon_blend_method" in strategy["allowed"]
     assert strategy["choices"]["horizon_blend_method"] == {

@@ -10,9 +10,12 @@ convention is regression-locked by tests/test_executable_label_convention.py.
 Label convention (ROADMAP P1-2): ``entry_delay_sessions`` selects the clock.
 ``0`` (the historical default, kept so existing callers' numbers do not move)
 is ``close(t+h)/close(t) - 1`` -- id ``same_close_t_to_close_t_plus_h_v1``;
-``1`` is ``close(t+1+h)/close(t+1) - 1`` -- id
-``delay1_close_t1_to_close_t1_plus_h_v1``, the same formula as the certified
-gold labels. The id is written to ``label_schema['label_convention']`` and
+``1`` is ``close(S[t+1+h])/close(S[t+1]) - 1`` on an explicit global session
+clock ``S`` (``market_sessions``, required): the label is NaN unless the
+symbol's next row IS session t+1 and its exit row IS session t+1+h, so a
+suspension can never stretch the label span past h sessions (the purge/embargo
+contract). Id ``delay1_exact_global_session_t1_to_t1_plus_h_v1``, the
+``_exec_`` clock. The id is written to ``label_schema['label_convention']`` and
 ``frame.attrs['label_convention']``; persist with
 ``label_contract.write_labels_file`` so the file carries it too.
 ``build-labels-v7`` requires the choice explicitly.
@@ -68,10 +71,11 @@ def build_forward_return_labels(
     include_tradable_labels: bool = True,
     benchmark_column: str | None = None,
     entry_delay_sessions: int = 0,
+    market_sessions: Iterable[object] | None = None,
 ) -> V7LabelBuildResult:
     from quantagent.data.label_contract import (
         CONVENTION_TEXT,
-        GOLD_DELAY1,
+        EXEC_DELAY1_SESSION,
         LABEL_CONVENTION_ATTR,
         V7_SAME_CLOSE,
     )
@@ -80,7 +84,12 @@ def build_forward_return_labels(
     delay = int(entry_delay_sessions)
     if delay not in (0, 1):
         raise ValueError("entry_delay_sessions must be 0 (same close) or 1 (delay-1 executable)")
-    convention = GOLD_DELAY1 if delay == 1 else V7_SAME_CLOSE
+    convention = EXEC_DELAY1_SESSION if delay == 1 else V7_SAME_CLOSE
+    sessions = None
+    if delay:
+        from quantagent.factors.executable_labels import canonical_market_sessions
+
+        sessions = canonical_market_sessions(market_sessions)
     if market_panel is None or market_panel.empty:
         empty = pd.DataFrame()
         empty.attrs[LABEL_CONVENTION_ATTR] = convention
@@ -106,12 +115,23 @@ def build_forward_return_labels(
 
     grouped = data.groupby("symbol", sort=False)
     entry_price = grouped[price_column].shift(-delay) if delay else data[price_column]
+    if delay:
+        session_of = _session_offsets(data["trade_date"], sessions)
+        entry_ok = grouped["trade_date"].shift(-delay).eq(session_of(delay))
     for horizon in horizons:
         label = f"forward_return_{horizon}d"
         end_col = f"label_end_{horizon}d"
         future_price = grouped[price_column].shift(-(delay + horizon))
         future_date = grouped["trade_date"].shift(-(delay + horizon))
         data[label] = future_price / entry_price - 1.0
+        if delay:
+            # Exact global-session clock: the symbol's next row must BE session
+            # t+1 and its (1+h)-th next row must BE session t+1+h; otherwise a
+            # suspension stretched the window and the label is unavailable.
+            expected_exit = session_of(delay + horizon)
+            exact = entry_ok & future_date.eq(expected_exit)
+            data[label] = data[label].where(exact)
+            future_date = expected_exit
         data[end_col] = future_date
         label_columns.append(label)
         end_columns.append(end_col)
@@ -159,10 +179,33 @@ def build_forward_return_labels(
         "label_convention": convention,
         "label_convention_text": CONVENTION_TEXT[convention],
         "entry_delay_sessions": delay,
+        "market_session_count": int(len(sessions)) if sessions is not None else None,
         "pit_note": "labels are future outcomes for training only and must not be joined into inference frames",
     }
     data.attrs[LABEL_CONVENTION_ATTR] = convention
     return V7LabelBuildResult(data, schema)
+
+
+def _session_offsets(trade_dates: pd.Series, sessions: pd.DatetimeIndex):
+    """``offset -> Series`` of the global session ``offset`` sessions after each row."""
+    position_of = {session: idx for idx, session in enumerate(sessions)}
+    positions = pd.to_datetime(trade_dates).dt.normalize().map(position_of)
+    if positions.isna().any():
+        bad = (
+            pd.to_datetime(trade_dates[positions.isna()]).dt.strftime("%Y-%m-%d").drop_duplicates().head(5).tolist()
+        )
+        raise ValueError(f"market panel has trade dates absent from market_sessions: {bad}")
+    base = positions.astype("int64").to_numpy()
+    values = sessions.to_numpy(dtype="datetime64[ns]")
+
+    def offset(k: int) -> pd.Series:
+        target = base + int(k)
+        out = np.full(len(target), np.datetime64("NaT"), dtype="datetime64[ns]")
+        inside = target < len(values)
+        out[inside] = values[target[inside]]
+        return pd.Series(out, index=trade_dates.index)
+
+    return offset
 
 
 def _unbuyable_at_entry(frame: pd.DataFrame, delay: int) -> pd.Series:
