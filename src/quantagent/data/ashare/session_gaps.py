@@ -178,6 +178,9 @@ def classify_session_gaps(
     if delisting_dates is not None:
         dated = pd.to_datetime(pd.Series(delisting_dates), errors="coerce").dropna()
         dated.index = dated.index.astype(str)
+        # the U0 table repeats some rows verbatim; on a genuine conflict the
+        # LATEST date wins (fewer gaps excused as delisted = fail closed)
+        dated = dated.groupby(level=0).max()
         when = out["symbol"].map(dated)
         delisted = when.notna() & (out["trade_date"] > when)
         out.loc[delisted, "classification"] = GAP_DELISTED

@@ -72,6 +72,11 @@ def test_classification_requires_interval_and_snapshot_coverage() -> None:
     delisted = classify_session_gaps(gaps, suspension_intervals=None, snapshot_dates=SESSIONS,
                                      delisting_dates={HELD: SESSIONS[2]})
     assert set(delisted["classification"]) == {GAP_DELISTED}
+    # the real U0 delisting table repeats rows: a duplicated index must not crash
+    dup = pd.Series([SESSIONS[2], SESSIONS[2], SESSIONS[0]], index=[HELD, HELD, OTHER])
+    again = classify_session_gaps(gaps, suspension_intervals=None, snapshot_dates=SESSIONS,
+                                  delisting_dates=dup)
+    assert set(again["classification"]) == {GAP_DELISTED}
 
 
 def test_open_ended_halt_is_closed_at_last_snapshot() -> None:
