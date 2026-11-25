@@ -35,11 +35,14 @@ Round 31 D-01）。它只能被视为**历史、未验证**的产物，在认证
 
 ## 3. 多重检验台账 / Trial count
 
-同族累计试验数是 DSR 的输入。截至 Round 31 的估算：H-001~H-027 约 117 次 + R29 E1 +
-治理化非线性对比 12 次 + Round 31 描述性复现 X1 5 次 ⇒ **非线性/融合族 ≥ 134**。
+同族累计试验数是 DSR 的输入。Cycle 32 逐项按产物复核（界值一律取上界）：H-001~H-027 全库累计 **117**
+（`HYPOTHESIS_REGISTRY.md:313`，H-027 按含条件 arm 的上限 15 计）+ R29 E1 **18**（6 arm a/s/b/c/d/e × run1 与确定性
+run2，外加涨停封板敏感性重评分 6，见 `git show 2c4e296:docs/audits/round29/roles/R3_factor_findings.md`）+ R29 治理化
+`audit-nonlinear-factors` run1 **6**（`runtime/reports/nonlinearity/round29_r29_panel/run1_20261003`）+ Round 31 描述性复现
+X1 **5**（`runtime/archives/audits/round31/audit/quant/notes.md`）⇒ **非线性/融合族 = 146**（旧估算 134 把 E1 只算了一次）。
 **台账（Cycle 32 起）**：唯一来源是 `quantagent.research.trial_ledger`
 （`$QUANTAGENT_HOME/state/trial_ledger.jsonl`）。`family_count(family)` = 声明的历史基线（附出处）+ 已入账试验；
-基线：`nonlinear_fusion` = 134（即上述估算），`rdagent_factor_synthesis` = 153（runtime/ 下 7 份
+基线：`nonlinear_fusion` = 146（即上述逐项计数），`rdagent_factor_synthesis` = 153（runtime/ 下 7 份
 `rd_agent_task_feedback.json` 的候选数之和，下界）。`audit-nonlinear-factors`、`search-factor-fusion`、
 `synthesize-factors-v7`（RD-Agent）每次运行把每个试验（含对照/失败/拒绝）写入台账，DSR 的 N =
 累计数（只能比单次运行的 N 大）；产物 `promotion_gate.json` / `trial_ledger.json` 记录所用 N 与台账头哈希。

@@ -86,13 +86,27 @@ class FamilyBaseline:
 #: reconstructed from documents and artifacts, not a census. Raising one is
 #: always safe; lowering one requires evidence that the old count was wrong.
 HISTORICAL_BASELINES: Mapping[str, FamilyBaseline] = {
+    # Every term is counted from an artifact; where a term is a bound, the upper
+    # bound is used (round up, never down):
+    #   117  H-001..H-027 whole-library cumulative (docs/research/ledgers/
+    #        HYPOTHESIS_REGISTRY.md:313 "全库累计 102 -> 117"; H-027 counted at its
+    #        max 15 incl. conditional arms; other families included => upper bound)
+    #    18  Round-29 E1: 6 arms (a,s,b,c,d,e) x run 1 + determinism run 2, plus the
+    #        6-arm sealed-limit-up sensitivity re-scoring (git show 2c4e296:
+    #        docs/audits/round29/roles/R3_factor_findings.md:22-34,128-135,194-195)
+    #     6  Round-29 governed audit-nonlinear-factors run1 (runtime/reports/
+    #        nonlinearity/round29_r29_panel/run1_20261003/model_comparison.json, nTrials 6)
+    #     5  Round-31 descriptive replication X1 (runtime/archives/audits/round31/
+    #        audit/quant/notes.md:15,21 "5 trials consumed")
+    #   ---
+    #   146  (the old RESEARCH.md figure 134 counted E1 once, not per executed run)
     FAMILY_NONLINEAR_FUSION: FamilyBaseline(
         family=FAMILY_NONLINEAR_FUSION,
-        count=134,
+        count=146,
         source=(
-            "docs/RESEARCH.md §3 (Round 31 estimate): H-001~H-027 ~117 + R29 E1 + "
-            "governed nonlinear comparison 12 + Round 31 descriptive replication X1 5 "
-            "=> nonlinear/fusion family >= 134"
+            "117 H-001..H-027 (HYPOTHESIS_REGISTRY.md:313) + 18 R29 E1 (6 arms x 2 runs + "
+            "6-arm sensitivity, R3_factor_findings.md @2c4e296) + 6 R29 governed run1 "
+            "(round29_r29_panel/run1_20261003) + 5 R31 X1 (round31 audit/quant/notes.md)"
         ),
     ),
     FAMILY_RDAGENT_FACTOR: FamilyBaseline(

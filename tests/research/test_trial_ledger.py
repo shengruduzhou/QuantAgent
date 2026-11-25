@@ -50,7 +50,7 @@ def _trial(index: int, family: str = FAMILY_NONLINEAR_FUSION) -> TrialRecord:
 def test_family_count_is_declared_baseline_plus_recorded(tmp_path: Path) -> None:
     ledger = TrialLedger(tmp_path / "ledger.jsonl")
     base = HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].count
-    assert base == 134  # RESEARCH.md §3 Round 31 estimate, seeded with its source
+    assert base == 146  # 117 + 18 + 6 + 5, each term cited in the module
     assert HISTORICAL_BASELINES[FAMILY_NONLINEAR_FUSION].source
     assert ledger.family_count(FAMILY_NONLINEAR_FUSION) == base
 
@@ -224,7 +224,7 @@ def _cheap_gbm(monkeypatch) -> None:
 
 
 def test_audit_nonlinear_factors_feeds_cumulative_family_n_to_dsr(tmp_path, monkeypatch) -> None:
-    """Fails on pre-ledger code: DSR used ``n_trials = len(arms)`` (~5), not 134 + arms."""
+    """Fails on pre-ledger code: DSR used ``n_trials = len(arms)`` (~5), not 146 + arms."""
     import quantagent.research.model_comparison as model_comparison
     import quantagent.research.nonlinear_promotion as nonlinear_promotion
     from quantagent.cli import app
