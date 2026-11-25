@@ -161,6 +161,7 @@ def test_ledger_record_carries_freshness_and_integrity(tmp_path, monkeypatch) ->
     monkeypatch.setattr(daily, "step_score", lambda: {"status": "OK"})
     monkeypatch.setattr(daily, "step_books_and_fills", lambda today: {"status": "OK", "books": {}})
     monkeypatch.setattr(sys, "argv", ["fresh_blind_daily.py"])
+    monkeypatch.chdir(tmp_path)  # main() chdirs to REPO; restore cwd at teardown
     assert daily.main() == 1
     record = json.loads((root / "ledger.jsonl").read_text().strip().splitlines()[-1])
     assert record["freshness_status"] == "INCOMPLETE"
@@ -204,6 +205,7 @@ def test_ledger_counts_a_locked_halt_refresh_explicitly(tmp_path, monkeypatch) -
     monkeypatch.setattr(daily, "step_score", lambda: {"status": "OK"})
     monkeypatch.setattr(daily, "step_books_and_fills", lambda today: {"status": "OK", "books": {}})
     monkeypatch.setattr(sys, "argv", ["fresh_blind_daily.py"])
+    monkeypatch.chdir(tmp_path)  # main() chdirs to REPO; restore cwd at teardown
     daily.main()
     record = json.loads((root / "l.jsonl").read_text().strip().splitlines()[-1])
     assert record["suspension_evidence_status"] == "SKIPPED_LOCKED"
