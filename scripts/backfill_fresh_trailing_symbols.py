@@ -176,7 +176,8 @@ def attach_st_or_unknown(panel: pd.DataFrame, new: pd.DataFrame, evidence) -> pd
     ``is_st`` = the symbol's value on its existing broadcast/unknown rows (the
     same current snapshot -- nothing new is invented), provenance
     ``current_snapshot_broadcast_unverified_no_dated_evidence`` (keeps the
-    builder's broadcast refusal), no evidence sha. A symbol with no such
+    v7 builder's broadcast refusal -- it does NOT protect FRESH, whose
+    eligibility, simulator and limit flags still read this value), no evidence sha. A symbol with no such
     existing row has no value to carry and is refused.
     """
     covered = coverage_mask(new, evidence.frame).to_numpy(dtype=bool)

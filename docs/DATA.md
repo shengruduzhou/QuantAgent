@@ -230,6 +230,21 @@ OHLC = 上一成交日原始收盘价，仅作估值标记、不可成交），�
 检查按 `panel_integrity` 报告逐日覆盖、未解释内部缺口、无证据停更的证券和非带日期证据
 的 ST 来源行。
 
+**FRESH 沪市 2026-05-19..07-24 的 ST 掩码是当前快照，标签不保护 FRESH。** 这段沪市
+行没有带日期的 ST 证据（沪/北的带日期证据从 2026-07-27 才开始）。重打标签
+（`reflag_fresh_st_provenance.py`）和补数（`backfill_fresh_trailing_symbols.py`）给这些
+行打上 `current_snapshot_broadcast_unverified_no_dated_evidence`，但 `is_st` 的取值仍是
+当前快照。这个标签**只**让 v7 训练集构建器拒绝把 `is_st` 当特征；FRESH 的决策与成交
+仍然读这个取值：选股资格 `eligible_rank_lists`（`scripts/analysis/exp011_book_churn.py`
+剔除 `is_st`）、严格模拟器 `_apply_st_policy`、以及 `tradability_flags` 按 ST 选
+±5%/±10% 涨跌停。后果：后来才被 ST 的股票在当时会被错误剔除，可能使该段收益**偏高**。
+这是 FRESH 的已知偏差，不是已修复项。
+
+**更正 c795571 的说法**："375 个 dark 名"是指 **2026-11-24 在面板上没有 bar** 的队列
+内证券，**不是**"供应商返回空"。补数抽查的 5 个里有 4 个拿回了完整历史，只有
+000016.SZ 有 52 个未解释交易日。真正被供应商空答的名单只以 catch-up 每次合并时写出的
+`vendor_empty_no_evidence.json` 为准。
+
 交易日历 `trading_calendar.parquet` 止于 2026-12-31。国务院 2027 年节假日安排已于
 2026-11-05 发布（国办发明电〔2026〕10号）；新浪日历（akshare）2026-11-25 实测仍无
 2027 行。**必须在 2027-01-04 16:00 CST 之前**用 `u0_pit_intervals.py calendar` 刷新

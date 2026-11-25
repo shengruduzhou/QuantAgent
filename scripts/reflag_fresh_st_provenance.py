@@ -13,7 +13,9 @@ Rows the evidence does not cover keep their ``is_st`` value but are relabelled
 unknown provenance. The label keeps the ``current_snapshot``/``broadcast``
 markers on purpose: the v7 dataset builder refuses ``is_st`` as a feature when
 any row carries them, and a reflag must never make a consumer *more* willing to
-trust these rows. No ST state is invented.
+trust these rows. No ST state is invented. The label protects ONLY the v7
+training builder: FRESH decisions and fills still read the (current-snapshot)
+``is_st`` value of these rows -- see docs/DATA.md §5.
 
 Default is a dry run (report only). ``--output PATH`` writes a NEW panel version
 plus ``PATH.manifest.json``; it refuses to write the live panel path. Swapping
