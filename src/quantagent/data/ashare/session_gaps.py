@@ -9,7 +9,12 @@ step may use the panel:
 ``SUSPENDED``
     the session falls inside a dated vendor halt interval
     (``akshare.stock_tfp_em`` / Eastmoney ``RPT_CUSTOM_SUSPEND_DATA_INTERFACE``)
-    **and** a halt snapshot for that session is on disk.
+    and a query file for that session is on disk. That second condition is
+    close to a no-op: the endpoint returns each symbol's *latest* halt as of
+    retrieval, not a per-date snapshot, so a query file for a date says little
+    about that date. Recall of earlier halts per symbol is incomplete and has
+    not been measured; 4/891 halt sessions with a bar is a consistency check
+    against the panel, not a precision estimate.
 ``DELISTED``
     the session is after a dated delisting.
 ``MISSING_UNEXPLAINED``

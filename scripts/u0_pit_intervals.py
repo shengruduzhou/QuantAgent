@@ -10,7 +10,7 @@ Sub-commands (all resumable, all writing provenance with every row):
                 machine-readable corporate-action identity.
 ``dividends``   dividend / bonus / rights records with announce, record and
                 ex-dates (Sina F10).
-``suspension``  Eastmoney halt records (NOTE Cycle 32: each query returns the LATEST halt per symbol as of retrieval, not a per-date snapshot; see docs/DATA.md §5) from the Eastmoney suspension
+``suspension``  Eastmoney halt records (Cycle 32: each query returns the LATEST halt per symbol as of retrieval, not a per-date snapshot, so per-date files barely gate anything and recall is unmeasured; see docs/DATA.md §5) from the Eastmoney suspension
                 report, folded into ``(symbol, start, end)`` intervals. Each
                 snapshot carries the halt's own start date, so intervals are
                 vendor-dated rather than inferred from bar gaps.
